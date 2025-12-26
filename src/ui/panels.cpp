@@ -639,7 +639,8 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id selected_ship, Id& sele
           shipyard_def = &it->second;
         }
 
-        const bool has_yard = colony->installations["shipyard"] > 0;
+        const auto it_yard = colony->installations.find("shipyard");
+        const bool has_yard = (it_yard != colony->installations.end() && it_yard->second > 0);
         if (!has_yard) {
           ImGui::TextDisabled("No shipyard present");
           ImGui::EndTabItem();

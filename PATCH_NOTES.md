@@ -4,25 +4,21 @@ This patch pack contains only the files that changed.
 
 ## Changes in this patch pack
 
-- **Multi-jump routing (quality-of-life)**
-  - Added `Simulation::issue_travel_to_system(...)` which finds a route through the jump network
-    and enqueues the required `TravelViaJump` steps.
-  - **UI**: In the Galaxy map, **right click** a system to route the selected ship there
-    (hold **Shift** to queue instead of replacing current orders).
-
-- **Scenario: 3-system mini-galaxy**
-  - Added **Barnard's Star** as a third system, connected to Alpha Centauri via a second jump point.
-
-- **CI: GitHub Actions build + test (now actually present)**
-  - Added `.github/workflows/ci.yml` to build and run tests on Linux/Windows/macOS.
-
-- **Tests: cleanup + new coverage**
-  - Refactored `tests/test_simulation.cpp` for readability and added coverage for multi-system routing.
+- **CI: GitHub Actions build + test**
+  - Added `.github/workflows/ci.yml` to configure, build, and run core tests on **Linux / Windows / macOS**.
 
 - **Repo hygiene**
   - Added a basic `.gitignore` for common build outputs and IDE files.
+  - Added `.clang-format` (referenced by `CONTRIBUTING.md`) so contributors can format consistently.
 
-...and everything already present in the repo (cargo, construction queues, contacts, fog-of-war, etc.).
+- **Shipyard QoL + bugfix**
+  - `Simulation::enqueue_build(...)` now requires the colony to have at least one shipyard (prevents “stuck forever” queues).
+  - Avoided accidental insertion of `"shipyard": 0` into a colony’s `installations` map during ticking/UI reads.
+  - Unlock initialization now ignores installations with non-positive counts.
+
+- **Tests**
+  - Added coverage to ensure a colony without a shipyard does **not** silently gain a zero-count `"shipyard"` entry,
+    and that enqueuing ship builds correctly fails without a shipyard.
 
 ## Apply locally
 

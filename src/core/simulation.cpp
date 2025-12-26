@@ -264,7 +264,10 @@ void Simulation::initialize_unlocks_for_faction(Faction& f) {
       push_unique(f.discovered_systems, body->system_id);
     }
 
-    for (const auto& [inst_id, _count] : col.installations) push_unique(f.unlocked_installations, inst_id);
+    for (const auto& [inst_id, count] : col.installations) {
+      if (count <= 0) continue;
+      push_unique(f.unlocked_installations, inst_id);
+    }
   }
 
   // Components present on existing ships belonging to this faction.
@@ -539,6 +542,8 @@ bool Simulation::issue_unload_mineral(Id ship_id, Id colony_id, const std::strin
 bool Simulation::enqueue_build(Id colony_id, const std::string& design_id) {
   auto* colony = find_ptr(state_.colonies, colony_id);
   if (!colony) return false;
+  const auto it_yard = colony->installations.find("shipyard");
+  if (it_yard == colony->installations.end() || it_yard->second <= 0) return false;
   const auto* d = find_design(design_id);
   if (!d) return false;
   if (!is_design_buildable_for_faction(colony->faction_id, design_id)) return false;
@@ -658,6 +663,7 @@ void Simulation::tick_contacts() {
 void Simulation::tick_colonies() {
   for (auto& [_, colony] : state_.colonies) {
     for (const auto& [inst_id, count] : colony.installations) {
+      if (count <= 0) continue;
       auto dit = content_.installations.find(inst_id);
       if (dit == content_.installations.end()) continue;
       for (const auto& [mineral, per_day] : dit->second.produces_per_day) {
@@ -674,6 +680,7 @@ void Simulation::tick_research() {
     if (!fac) continue;
 
     for (const auto& [inst_id, count] : colony.installations) {
+      if (count <= 0) continue;
       auto dit = content_.installations.find(inst_id);
       if (dit == content_.installations.end()) continue;
       const double rp = dit->second.research_points_per_day * static_cast<double>(count);
@@ -776,7 +783,8 @@ void Simulation::tick_shipyards() {
   };
 
   for (auto& [_, colony] : state_.colonies) {
-    const int yards = colony.installations["shipyard"];
+    const auto it_yard = colony.installations.find("shipyard");
+    const int yards = (it_yard != colony.installations.end()) ? it_yard->second : 0;
     if (yards <= 0) continue;
 
     double capacity_tons = base_rate * static_cast<double>(yards);

@@ -521,5 +521,49 @@ int test_simulation() {
     N4X_ASSERT(sim.is_system_discovered_by_faction(terrans, bar));
   }
 
+
+
+  // --- shipyard guard + no accidental installation insertion ---
+  // Colonies without a shipyard shouldn't grow a zero-count "shipyard" entry just by ticking,
+  // and enqueuing a ship build at such a colony should fail.
+  {
+    nebula4x::ContentDB content;
+
+    // Minimal installations to satisfy the scenario content references + shipyard ticking.
+    nebula4x::InstallationDef mine;
+    mine.id = "automated_mine";
+    mine.name = "Automated Mine";
+    mine.produces_per_day = {{"Duranium", 0.0}};
+    content.installations[mine.id] = mine;
+
+    nebula4x::InstallationDef yard;
+    yard.id = "shipyard";
+    yard.name = "Shipyard";
+    yard.build_rate_tons_per_day = 50;
+    content.installations[yard.id] = yard;
+
+    // Minimal design to allow calling enqueue_build.
+    nebula4x::ShipDesign d;
+    d.id = "freighter_alpha";
+    d.name = "Freighter Alpha";
+    d.mass_tons = 100;
+    d.speed_km_s = 0.0;
+    content.designs[d.id] = d;
+
+    nebula4x::Simulation sim(std::move(content), nebula4x::SimConfig{});
+
+    const auto mars_id = find_colony_id(sim.state(), "Mars Outpost");
+    N4X_ASSERT(mars_id != nebula4x::kInvalidId);
+
+    // Mars starts without a shipyard.
+    N4X_ASSERT(sim.state().colonies[mars_id].installations.count("shipyard") == 0);
+
+    // Ticking shouldn't insert a 0-count shipyard entry.
+    sim.advance_days(1);
+    N4X_ASSERT(sim.state().colonies[mars_id].installations.count("shipyard") == 0);
+
+    // And enqueuing a ship build should fail without a shipyard present.
+    N4X_ASSERT(!sim.enqueue_build(mars_id, "freighter_alpha"));
+  }
   return 0;
 }
