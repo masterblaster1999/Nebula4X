@@ -35,6 +35,10 @@ class App {
   double map_zoom_{1.0};
   Vec2 map_pan_{0.0, 0.0};
 
+  // Galaxy map view state
+  double galaxy_zoom_{1.0};
+  Vec2 galaxy_pan_{0.0, 0.0};
+
   // Shared UI toggles (fog-of-war etc.)
   UIState ui_{};
 };

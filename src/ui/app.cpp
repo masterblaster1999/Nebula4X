@@ -5,6 +5,7 @@
 #include "nebula4x/core/serialization.h"
 #include "nebula4x/util/file_io.h"
 #include "ui/panels.h"
+#include "ui/galaxy_map.h"
 #include "ui/system_map.h"
 
 namespace nebula4x::ui {
@@ -32,8 +33,18 @@ void App::frame() {
   ImGui::SetNextWindowPos(ImVec2(320, 30), ImGuiCond_Always);
   ImGui::SetNextWindowSize(ImVec2(ImGui::GetIO().DisplaySize.x - 640, ImGui::GetIO().DisplaySize.y - 40),
                            ImGuiCond_Always);
-  ImGui::Begin("System Map", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove);
-  draw_system_map(sim_, ui_, selected_ship_, map_zoom_, map_pan_);
+  ImGui::Begin("Map", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove);
+  if (ImGui::BeginTabBar("map_tabs")) {
+    if (ImGui::BeginTabItem("System")) {
+      draw_system_map(sim_, ui_, selected_ship_, map_zoom_, map_pan_);
+      ImGui::EndTabItem();
+    }
+    if (ImGui::BeginTabItem("Galaxy")) {
+      draw_galaxy_map(sim_, ui_, selected_ship_, galaxy_zoom_, galaxy_pan_);
+      ImGui::EndTabItem();
+    }
+    ImGui::EndTabBar();
+  }
   ImGui::End();
 
   ImGui::SetNextWindowPos(ImVec2(ImGui::GetIO().DisplaySize.x - 310, 30), ImGuiCond_Always);

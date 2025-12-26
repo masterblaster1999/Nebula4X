@@ -104,6 +104,7 @@ if(NEBULA4X_BUILD_UI)
     src/main.cpp
     src/ui/app.cpp
     src/ui/panels.cpp
+    src/ui/galaxy_map.cpp
     src/ui/system_map.cpp
   )
   target_include_directories(nebula4x PRIVATE

@@ -233,7 +233,17 @@ void draw_left_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sele
       if (!jp) continue;
       const auto* dest = find_ptr(sim.state().jump_points, jp->linked_jump_id);
       const auto* dest_sys = dest ? find_ptr(sim.state().systems, dest->system_id) : nullptr;
-      ImGui::BulletText("%s -> %s", jp->name.c_str(), dest_sys ? dest_sys->name.c_str() : "(unknown)");
+
+      const char* dest_label = "(unknown)";
+      if (dest_sys) {
+        // Fog-of-war: don't leak destination system names unless discovered.
+        if (!ui.fog_of_war || viewer_faction_id_for_fow == kInvalidId ||
+            sim.is_system_discovered_by_faction(viewer_faction_id_for_fow, dest_sys->id)) {
+          dest_label = dest_sys->name.c_str();
+        }
+      }
+
+      ImGui::BulletText("%s -> %s", jp->name.c_str(), dest_label);
     }
   }
 
@@ -336,7 +346,14 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id selected_ship, Id& sele
             const auto* dest_sys = dest ? find_ptr(s.systems, dest->system_id) : nullptr;
 
             std::string btn = "Travel via " + jp->name;
-            if (dest_sys) btn += " -> " + dest_sys->name;
+            if (dest_sys) {
+              // Fog-of-war: hide destination names until the system is discovered by this ship's faction.
+              if (!ui.fog_of_war || sim.is_system_discovered_by_faction(sh->faction_id, dest_sys->id)) {
+                btn += " -> " + dest_sys->name;
+              } else {
+                btn += " -> (unknown)";
+              }
+            }
 
             if (ImGui::Button((btn + "##" + std::to_string(jid)).c_str())) {
               sim.issue_travel_via_jump(selected_ship, jid);

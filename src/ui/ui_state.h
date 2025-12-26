@@ -16,6 +16,11 @@ struct UIState {
   bool show_contact_markers{true};
   bool show_contact_labels{false};
 
+  // Galaxy map view toggles.
+  bool show_galaxy_labels{true};
+  bool show_galaxy_jump_lines{true};
+  bool show_galaxy_unknown_exits{true};
+
   // Max age (in days) for showing contact markers on the map.
   int contact_max_age_days{30};
 };
