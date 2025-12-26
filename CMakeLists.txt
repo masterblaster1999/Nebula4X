@@ -136,6 +136,7 @@ if(NEBULA4X_BUILD_TESTS)
     tests/test_main.cpp
     tests/test_date.cpp
     tests/test_simulation.cpp
+    tests/test_serialization.cpp
   )
   target_link_libraries(nebula4x_tests PRIVATE nebula4x::core)
   nebula4x_set_project_warnings(nebula4x_tests ${NEBULA4X_WARNINGS_AS_ERRORS})

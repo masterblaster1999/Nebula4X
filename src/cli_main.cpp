@@ -9,6 +9,10 @@
 
 namespace {
 
+#ifndef NEBULA4X_VERSION
+#define NEBULA4X_VERSION "unknown"
+#endif
+
 int get_int_arg(int argc, char** argv, const std::string& key, int def) {
   for (int i = 1; i < argc - 1; ++i) {
     if (argv[i] == key) return std::stoi(argv[i + 1]);
@@ -30,10 +34,33 @@ bool has_flag(int argc, char** argv, const std::string& flag) {
   return false;
 }
 
+void print_usage(const char* exe) {
+  std::cout << "Nebula4X CLI v" << NEBULA4X_VERSION << "\n\n";
+  std::cout << "Usage: " << (exe ? exe : "nebula4x_cli") << " [options]\n\n";
+  std::cout << "Options:\n";
+  std::cout << "  --days N         Advance simulation by N days (default: 30)\n";
+  std::cout << "  --content PATH   Content blueprints JSON (default: data/blueprints/starting_blueprints.json)\n";
+  std::cout << "  --tech PATH      Tech tree JSON (default: data/tech/tech_tree.json)\n";
+  std::cout << "  --load PATH      Load a save JSON before advancing\n";
+  std::cout << "  --save PATH      Save state JSON after advancing\n";
+  std::cout << "  --dump           Print the resulting save JSON to stdout\n";
+  std::cout << "  -h, --help       Show this help\n";
+  std::cout << "  --version        Print version and exit\n";
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
   try {
+    if (has_flag(argc, argv, "--version")) {
+      std::cout << NEBULA4X_VERSION << "\n";
+      return 0;
+    }
+    if (has_flag(argc, argv, "--help") || has_flag(argc, argv, "-h")) {
+      print_usage(argv[0]);
+      return 0;
+    }
+
     const int days = get_int_arg(argc, argv, "--days", 30);
     const std::string content_path = get_str_arg(argc, argv, "--content", "data/blueprints/starting_blueprints.json");
     const std::string tech_path = get_str_arg(argc, argv, "--tech", "data/tech/tech_tree.json");

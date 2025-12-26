@@ -390,12 +390,15 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     c.minerals = map_string_double_from_json(o.at("minerals"));
     c.installations = map_string_int_from_json(o.at("installations"));
 
-    for (const auto& qv : o.at("shipyard_queue").array()) {
-      const auto& qo = qv.object();
-      BuildOrder bo;
-      bo.design_id = qo.at("design_id").string_value();
-      bo.tons_remaining = qo.at("tons_remaining").number_value();
-      c.shipyard_queue.push_back(bo);
+    // shipyard_queue was added after the earliest prototypes; treat it as optional.
+    if (auto itq = o.find("shipyard_queue"); itq != o.end()) {
+      for (const auto& qv : itq->second.array()) {
+        const auto& qo = qv.object();
+        BuildOrder bo;
+        bo.design_id = qo.at("design_id").string_value();
+        bo.tons_remaining = qo.at("tons_remaining").number_value();
+        c.shipyard_queue.push_back(bo);
+      }
     }
 
     s.colonies[c.id] = c;

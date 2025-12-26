@@ -1,12 +1,14 @@
 # Patch notes / how to apply
 
-This zip contains only the files that changed for the “next big slice” update:
+This zip contains only the files that changed for the latest patch pack:
 
-- ship design + component library (data-driven)
-- research UI + research progression
-- jump points + multi-system travel
-- basic combat (auto-fire + attack orders)
-- fix for `ImGui_ImplSDLRenderer2_RenderDrawData` signature mismatch
+- **Fix Windows UI link error**: `LNK2019 unresolved external symbol main` when building SDL2 UI
+  (SDL can rewrite `main` -> `SDL_main` on Windows). The UI now opts out via `SDL_MAIN_HANDLED` and
+  calls `SDL_SetMainReady()` before `SDL_Init()`.
+- Add `CMakePresets.json` for easier configure/build.
+- Add a GitHub Actions CI workflow to build + run tests on Windows/Linux/macOS.
+- Make save-game loading more backwards compatible by treating `shipyard_queue` as optional.
+- Add a serialization regression test.
 
 ## Apply locally
 

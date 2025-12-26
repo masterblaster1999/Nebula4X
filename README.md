@@ -71,6 +71,21 @@ cmake -S . -B build -DNEBULA4X_BUILD_UI=ON -DNEBULA4X_BUILD_TESTS=ON
 cmake --build build --config Release
 ```
 
+### CMake presets (optional)
+
+If you have a recent CMake, you can use the included `CMakePresets.json`:
+
+```bash
+# Core + tests (no UI)
+cmake --preset core
+cmake --build --preset core --config Release
+ctest --preset core -C Release
+
+# UI + core + tests
+cmake --preset ui
+cmake --build --preset ui --config Release
+```
+
 Run:
 
 ```bash
@@ -93,6 +108,10 @@ vcpkg install sdl2
 cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE=<path-to-vcpkg>/scripts/buildsystems/vcpkg.cmake
 cmake --build build --config Release
 ```
+
+If you ever see a linker error like `LNK2019: unresolved external symbol main` when building the UI,
+it's usually SDL redefining `main` to `SDL_main`. This repo opts out of that behavior and calls
+`SDL_SetMainReady()` before `SDL_Init()` so MSVC links cleanly.
 
 ## Project structure
 

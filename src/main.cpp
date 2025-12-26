@@ -1,4 +1,19 @@
+// On Windows, SDL can redefine `main` to `SDL_main` via a macro in SDL_main.h.
+// If we don't opt out, MSVC will look for a real `main` symbol and the link
+// step fails with LNK2019 (unresolved external symbol main).
+//
+// Defining SDL_MAIN_HANDLED prevents SDL from rewriting our entry point.
+// We then call SDL_SetMainReady() before SDL_Init() to satisfy SDL on
+// platforms where SDL expects its own entrypoint wrapper.
+#define SDL_MAIN_HANDLED
+
 #include <SDL.h>
+
+// If the build system forces `-Dmain=SDL_main` (some SDL2 build setups do),
+// make absolutely sure we still export a real `main` symbol.
+#ifdef main
+#undef main
+#endif
 
 #include <string>
 
@@ -21,6 +36,10 @@ int main(int /*argc*/, char** /*argv*/) {
 
     nebula4x::Simulation sim(std::move(content), nebula4x::SimConfig{});
     nebula4x::ui::App app(std::move(sim));
+
+    // When SDL doesn't wrap the entry point (SDL_MAIN_HANDLED), some platforms
+    // require this before SDL_Init(). It's harmless on platforms that don't.
+    SDL_SetMainReady();
 
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0) {
       nebula4x::log::error(std::string("SDL_Init failed: ") + SDL_GetError());

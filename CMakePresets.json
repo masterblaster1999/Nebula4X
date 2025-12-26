@@ -1,0 +1,56 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 21,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "core",
+      "displayName": "Nebula4X - Core + tests (no UI)",
+      "description": "Build the deterministic core library, CLI, and tests. UI is disabled.",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "cacheVariables": {
+        "NEBULA4X_BUILD_UI": "OFF",
+        "NEBULA4X_BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "ui",
+      "displayName": "Nebula4X - UI + core + tests",
+      "description": "Build the SDL2/ImGui UI executable along with the core + tests.",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "cacheVariables": {
+        "NEBULA4X_BUILD_UI": "ON",
+        "NEBULA4X_BUILD_TESTS": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "core",
+      "configurePreset": "core"
+    },
+    {
+      "name": "ui",
+      "configurePreset": "ui"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "core",
+      "configurePreset": "core",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "ui",
+      "configurePreset": "ui",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}
