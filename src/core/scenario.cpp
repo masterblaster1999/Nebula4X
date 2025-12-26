@@ -6,7 +6,7 @@ namespace nebula4x {
 
 GameState make_sol_scenario() {
   GameState s;
-  s.save_version = 6;
+  s.save_version = 7;
   s.date = Date::from_ymd(2200, 1, 1);
 
   // --- Factions ---
@@ -70,7 +70,7 @@ GameState make_sol_scenario() {
   // --- Sol bodies ---
   (void)add_body(sol, "Sun", BodyType::Star, 0.0, 1.0, 0.0);
   const Id earth = add_body(sol, "Earth", BodyType::Planet, 149.6, 365.25, 0.0);
-  (void)add_body(sol, "Mars", BodyType::Planet, 227.9, 686.98, 1.0);
+  const Id mars = add_body(sol, "Mars", BodyType::Planet, 227.9, 686.98, 1.0);
   (void)add_body(sol, "Jupiter", BodyType::GasGiant, 778.5, 4332.6, 2.0);
 
   // --- Alpha Centauri bodies ---
@@ -121,6 +121,26 @@ GameState make_sol_scenario() {
         {"shipyard", 1},
         {"research_lab", 20},
         {"sensor_station", 1},
+    };
+    s.colonies[c.id] = c;
+  }
+
+  const Id mars_colony = allocate_id(s);
+  {
+    Colony c;
+    c.id = mars_colony;
+    c.name = "Mars Outpost";
+    c.faction_id = terrans;
+    c.body_id = mars;
+    c.population_millions = 250.0;
+    c.minerals = {
+        {"Duranium", 200.0},
+        {"Neutronium", 20.0},
+    };
+    c.installations = {
+        {"automated_mine", 5},
+        {"construction_factory", 1},
+        {"research_lab", 2},
     };
     s.colonies[c.id] = c;
   }

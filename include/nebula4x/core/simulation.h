@@ -43,6 +43,13 @@ class Simulation {
   bool issue_travel_via_jump(Id ship_id, Id jump_point_id);
   bool issue_attack_ship(Id attacker_ship_id, Id target_ship_id);
 
+  // Cargo / logistics (prototype).
+  // Load/unload colony minerals into a ship's cargo hold.
+  // - mineral == "" means "all minerals".
+  // - tons <= 0 means "as much as possible".
+  bool issue_load_mineral(Id ship_id, Id colony_id, const std::string& mineral, double tons = 0.0);
+  bool issue_unload_mineral(Id ship_id, Id colony_id, const std::string& mineral, double tons = 0.0);
+
   bool enqueue_build(Id colony_id, const std::string& design_id);
 
   // Build installations at a colony using construction points + minerals.

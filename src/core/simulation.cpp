@@ -432,6 +432,38 @@ bool Simulation::issue_attack_ship(Id attacker_ship_id, Id target_ship_id) {
   return true;
 }
 
+bool Simulation::issue_load_mineral(Id ship_id, Id colony_id, const std::string& mineral, double tons) {
+  auto* ship = find_ptr(state_.ships, ship_id);
+  if (!ship) return false;
+  auto* colony = find_ptr(state_.colonies, colony_id);
+  if (!colony) return false;
+  if (colony->faction_id != ship->faction_id) return false;
+  const auto* body = find_ptr(state_.bodies, colony->body_id);
+  if (!body) return false;
+  if (body->system_id != ship->system_id) return false;
+  if (tons < 0.0) return false;
+
+  auto& orders = state_.ship_orders[ship_id];
+  orders.queue.push_back(LoadMineral{colony_id, mineral, tons});
+  return true;
+}
+
+bool Simulation::issue_unload_mineral(Id ship_id, Id colony_id, const std::string& mineral, double tons) {
+  auto* ship = find_ptr(state_.ships, ship_id);
+  if (!ship) return false;
+  auto* colony = find_ptr(state_.colonies, colony_id);
+  if (!colony) return false;
+  if (colony->faction_id != ship->faction_id) return false;
+  const auto* body = find_ptr(state_.bodies, colony->body_id);
+  if (!body) return false;
+  if (body->system_id != ship->system_id) return false;
+  if (tons < 0.0) return false;
+
+  auto& orders = state_.ship_orders[ship_id];
+  orders.queue.push_back(UnloadMineral{colony_id, mineral, tons});
+  return true;
+}
+
 bool Simulation::enqueue_build(Id colony_id, const std::string& design_id) {
   auto* colony = find_ptr(state_.colonies, colony_id);
   if (!colony) return false;
@@ -835,6 +867,12 @@ void Simulation::tick_construction() {
 }
 
 void Simulation::tick_ships() {
+  auto cargo_used_tons = [](const Ship& s) {
+    double used = 0.0;
+    for (const auto& [_, tons] : s.cargo) used += std::max(0.0, tons);
+    return used;
+  };
+
   for (auto& [ship_id, ship] : state_.ships) {
     auto it = state_.ship_orders.find(ship_id);
     if (it == state_.ship_orders.end()) continue;
@@ -845,6 +883,12 @@ void Simulation::tick_ships() {
     Vec2 target = ship.position_mkm;
     double desired_range = 0.0; // used for attack orders
     bool attack_has_contact = false;
+
+    bool is_cargo = false;
+    bool cargo_is_load = false;
+    Id cargo_colony_id = kInvalidId;
+    std::string cargo_mineral;
+    double cargo_tons = 0.0;
 
     if (std::holds_alternative<MoveToPoint>(q.front())) {
       target = std::get<MoveToPoint>(q.front()).target_mkm;
@@ -898,14 +942,158 @@ void Simulation::tick_ships() {
         target = ord.last_known_position_mkm;
         desired_range = 0.0;
       }
+    } else if (std::holds_alternative<LoadMineral>(q.front())) {
+      const auto& ord = std::get<LoadMineral>(q.front());
+      is_cargo = true;
+      cargo_is_load = true;
+      cargo_colony_id = ord.colony_id;
+      cargo_mineral = ord.mineral;
+      cargo_tons = ord.tons;
+
+      const auto* colony = find_ptr(state_.colonies, cargo_colony_id);
+      if (!colony || colony->faction_id != ship.faction_id) {
+        q.erase(q.begin());
+        continue;
+      }
+      const auto* body = find_ptr(state_.bodies, colony->body_id);
+      if (!body || body->system_id != ship.system_id) {
+        q.erase(q.begin());
+        continue;
+      }
+      target = body->position_mkm;
+    } else if (std::holds_alternative<UnloadMineral>(q.front())) {
+      const auto& ord = std::get<UnloadMineral>(q.front());
+      is_cargo = true;
+      cargo_is_load = false;
+      cargo_colony_id = ord.colony_id;
+      cargo_mineral = ord.mineral;
+      cargo_tons = ord.tons;
+
+      const auto* colony = find_ptr(state_.colonies, cargo_colony_id);
+      if (!colony || colony->faction_id != ship.faction_id) {
+        q.erase(q.begin());
+        continue;
+      }
+      const auto* body = find_ptr(state_.bodies, colony->body_id);
+      if (!body || body->system_id != ship.system_id) {
+        q.erase(q.begin());
+        continue;
+      }
+      target = body->position_mkm;
     }
 
     const Vec2 delta = target - ship.position_mkm;
     const double dist = delta.length();
 
-    // If this is a normal move order, reaching target completes it.
     const bool is_attack = std::holds_alternative<AttackShip>(q.front());
     const bool is_jump = std::holds_alternative<TravelViaJump>(q.front());
+
+    auto do_cargo_transfer = [&]() {
+      auto* colony = find_ptr(state_.colonies, cargo_colony_id);
+      if (!colony) return;
+      if (colony->faction_id != ship.faction_id) return;
+
+      // Capacity only matters for load.
+      const auto* d = find_design(ship.design_id);
+      const double cap = d ? d->cargo_tons : 0.0;
+      double used = cargo_used_tons(ship);
+      double free = std::max(0.0, cap - used);
+
+      const double kEps = 1e-9;
+
+      if (cargo_is_load) {
+        // Nothing to load if no free capacity.
+        if (free <= kEps) return;
+
+        double remaining = (cargo_tons > 0.0) ? cargo_tons : 1e300;
+        remaining = std::min(remaining, free);
+
+        auto load_one = [&](const std::string& mineral, double max_tons) {
+          if (max_tons <= kEps) return 0.0;
+          auto it = colony->minerals.find(mineral);
+          const double available = (it != colony->minerals.end()) ? std::max(0.0, it->second) : 0.0;
+          const double take = std::min(available, max_tons);
+          if (take > kEps) {
+            if (it != colony->minerals.end()) {
+              it->second = std::max(0.0, it->second - take);
+            } else {
+              colony->minerals[mineral] = 0.0;
+            }
+            ship.cargo[mineral] += take;
+          }
+          return take;
+        };
+
+        if (!cargo_mineral.empty()) {
+          load_one(cargo_mineral, remaining);
+          return;
+        }
+
+        // Load from all minerals in a stable order.
+        std::vector<std::string> keys;
+        keys.reserve(colony->minerals.size());
+        for (const auto& [k, v] : colony->minerals) {
+          if (v > kEps) keys.push_back(k);
+        }
+        std::sort(keys.begin(), keys.end());
+
+        for (const auto& k : keys) {
+          if (remaining <= kEps) break;
+          const double took = load_one(k, remaining);
+          remaining -= took;
+        }
+        return;
+      }
+
+      // Unload
+      double remaining = (cargo_tons > 0.0) ? cargo_tons : 1e300;
+
+      auto unload_one = [&](const std::string& mineral, double max_tons) {
+        if (max_tons <= kEps) return 0.0;
+        auto it = ship.cargo.find(mineral);
+        const double have = (it != ship.cargo.end()) ? std::max(0.0, it->second) : 0.0;
+        const double put = std::min(have, max_tons);
+        if (put > kEps) {
+          colony->minerals[mineral] += put;
+          if (it != ship.cargo.end()) {
+            it->second = std::max(0.0, it->second - put);
+            if (it->second <= kEps) ship.cargo.erase(it);
+          }
+        }
+        return put;
+      };
+
+      if (!cargo_mineral.empty()) {
+        unload_one(cargo_mineral, remaining);
+        return;
+      }
+
+      // Unload all cargo minerals in a stable order.
+      std::vector<std::string> keys;
+      keys.reserve(ship.cargo.size());
+      for (const auto& [k, v] : ship.cargo) {
+        if (v > kEps) keys.push_back(k);
+      }
+      std::sort(keys.begin(), keys.end());
+
+      for (const auto& k : keys) {
+        if (remaining <= kEps) break;
+        const double put = unload_one(k, remaining);
+        remaining -= put;
+      }
+    };
+
+    // Normal move orders complete when reaching target.
+    if (is_cargo && dist < 1e-6) {
+      do_cargo_transfer();
+      q.erase(q.begin());
+      continue;
+    }
+
+    if (!is_attack && !is_jump && !is_cargo && dist < 1e-6) {
+      q.erase(q.begin());
+      continue;
+    }
 
     auto transit_jump = [&]() {
       const Id jump_id = std::get<TravelViaJump>(q.front()).jump_point_id;
@@ -936,12 +1124,6 @@ void Simulation::tick_ships() {
       nebula4x::log::info("Ship " + ship.name + " transited jump point " + jp->name + " -> " +
                          (find_ptr(state_.systems, new_sys) ? find_ptr(state_.systems, new_sys)->name : std::string("(unknown)")));
     };
-
-    if (!is_attack && !is_jump && dist < 1e-6) {
-      // done
-      q.erase(q.begin());
-      continue;
-    }
 
     // Jump orders: being exactly at a jump point should still transit (even if speed is 0).
     if (is_jump && dist < 1e-6) {
@@ -979,14 +1161,13 @@ void Simulation::tick_ships() {
 
       if (is_jump) {
         transit_jump();
-
-        // Jump order completes.
         q.erase(q.begin());
       } else if (is_attack) {
         // Attack orders persist while we have contact. If we were moving to last-known and reached it, complete.
-        if (!attack_has_contact) {
-          q.erase(q.begin());
-        }
+        if (!attack_has_contact) q.erase(q.begin());
+      } else if (is_cargo) {
+        do_cargo_transfer();
+        q.erase(q.begin());
       } else {
         q.erase(q.begin());
       }
@@ -998,6 +1179,7 @@ void Simulation::tick_ships() {
     ship.position_mkm += dir * step;
   }
 }
+
 
 void Simulation::tick_combat() {
   // Simple day-based combat:

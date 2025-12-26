@@ -37,9 +37,27 @@ int test_simulation() {
 
   nebula4x::Simulation sim(std::move(content), nebula4x::SimConfig{});
 
-  auto before = sim.state().colonies.begin()->second.minerals["Duranium"];
+
+  auto find_colony_id = [](const nebula4x::GameState& st, const std::string& name) -> nebula4x::Id {
+    for (const auto& [cid, c] : st.colonies) {
+      if (c.name == name) return cid;
+    }
+    return nebula4x::kInvalidId;
+  };
+
+  auto find_ship_id = [](const nebula4x::GameState& st, const std::string& name) -> nebula4x::Id {
+    for (const auto& [sid, sh] : st.ships) {
+      if (sh.name == name) return sid;
+    }
+    return nebula4x::kInvalidId;
+  };
+
+    const auto earth_id = find_colony_id(sim.state(), "Earth");
+  N4X_ASSERT(earth_id != nebula4x::kInvalidId);
+
+  auto before = sim.state().colonies[earth_id].minerals["Duranium"];
   sim.advance_days(2);
-  auto after = sim.state().colonies.begin()->second.minerals["Duranium"];
+    auto after = sim.state().colonies[earth_id].minerals["Duranium"];
 
   N4X_ASSERT(after > before);
 
@@ -72,11 +90,12 @@ int test_simulation() {
 
   nebula4x::Simulation sim2(std::move(content2), nebula4x::SimConfig{});
 
-  const auto colony_id = sim2.state().colonies.begin()->first;
-  const double before_build = sim2.state().colonies.begin()->second.minerals["Duranium"];
-  N4X_ASSERT(sim2.enqueue_build(colony_id, "freighter_alpha"));
+    const auto earth2_id = find_colony_id(sim2.state(), "Earth");
+  N4X_ASSERT(earth2_id != nebula4x::kInvalidId);
+  const double before_build = sim2.state().colonies[earth2_id].minerals["Duranium"];
+  N4X_ASSERT(sim2.enqueue_build(earth2_id, "freighter_alpha"));
   sim2.advance_days(1);
-  const double after_build = sim2.state().colonies.begin()->second.minerals["Duranium"];
+    const double after_build = sim2.state().colonies[earth2_id].minerals["Duranium"];
   N4X_ASSERT(after_build < before_build);
 
   // --- colony construction queue sanity check ---
@@ -100,19 +119,93 @@ int test_simulation() {
 
   // Keep designs minimal; none are needed for this test.
   nebula4x::Simulation sim3(std::move(content3), nebula4x::SimConfig{});
-  const auto colony3_id = sim3.state().colonies.begin()->first;
-  auto& col3 = sim3.state().colonies.begin()->second;
+    const auto earth3_id = find_colony_id(sim3.state(), "Earth");
+  N4X_ASSERT(earth3_id != nebula4x::kInvalidId);
+  auto& col3 = sim3.state().colonies[earth3_id];
 
   const int mines_before = col3.installations["automated_mine"];
   const double dur_before = col3.minerals["Duranium"];
 
-  N4X_ASSERT(sim3.enqueue_installation_build(colony3_id, "automated_mine", 1));
+  N4X_ASSERT(sim3.enqueue_installation_build(earth3_id, "automated_mine", 1));
   sim3.advance_days(1);
 
-  const int mines_after = sim3.state().colonies.begin()->second.installations["automated_mine"];
-  const double dur_after = sim3.state().colonies.begin()->second.minerals["Duranium"];
+    const int mines_after = sim3.state().colonies[earth3_id].installations["automated_mine"];
+    const double dur_after = sim3.state().colonies[earth3_id].minerals["Duranium"];
 
   N4X_ASSERT(mines_after == mines_before + 1);
+  // --- cargo transfer sanity check ---
+  // Load minerals from Earth onto a freighter, then unload to Mars Outpost.
+  nebula4x::ContentDB content_cargo;
+
+  // Installations referenced by scenario.
+  nebula4x::InstallationDef mine_c;
+  mine_c.id = "automated_mine";
+  mine_c.name = "Automated Mine";
+  mine_c.produces_per_day = {{"Duranium", 0.0}}; // keep minerals stable for the check
+  content_cargo.installations[mine_c.id] = mine_c;
+
+  nebula4x::InstallationDef yard_c;
+  yard_c.id = "shipyard";
+  yard_c.name = "Shipyard";
+  yard_c.build_rate_tons_per_day = 0.0;
+  content_cargo.installations[yard_c.id] = yard_c;
+
+  // Designs used by scenario. Give the freighter cargo + high speed so it can reach Mars in a day.
+  nebula4x::ShipDesign freighter_d;
+  freighter_d.id = "freighter_alpha";
+  freighter_d.name = "Freighter Alpha";
+  freighter_d.max_hp = 10.0;
+  freighter_d.cargo_tons = 1000.0;
+  freighter_d.speed_km_s = 100000.0;
+  content_cargo.designs[freighter_d.id] = freighter_d;
+
+  // Minimal placeholders for other scenario designs (keep them stationary).
+  auto make_min_design = [](const std::string& id) {
+    nebula4x::ShipDesign d;
+    d.id = id;
+    d.name = id;
+    d.max_hp = 10.0;
+    d.speed_km_s = 0.0;
+    d.sensor_range_mkm = 0.0;
+    return d;
+  };
+
+  content_cargo.designs["surveyor_beta"] = make_min_design("surveyor_beta");
+  content_cargo.designs["escort_gamma"] = make_min_design("escort_gamma");
+  content_cargo.designs["pirate_raider"] = make_min_design("pirate_raider");
+
+  nebula4x::Simulation sim_cargo(std::move(content_cargo), nebula4x::SimConfig{});
+
+  const auto earth_c = find_colony_id(sim_cargo.state(), "Earth");
+  const auto mars_c = find_colony_id(sim_cargo.state(), "Mars Outpost");
+  N4X_ASSERT(earth_c != nebula4x::kInvalidId);
+  N4X_ASSERT(mars_c != nebula4x::kInvalidId);
+
+  const auto freighter_id = find_ship_id(sim_cargo.state(), "Freighter Alpha");
+  N4X_ASSERT(freighter_id != nebula4x::kInvalidId);
+
+  const double earth_dur_before = sim_cargo.state().colonies[earth_c].minerals["Duranium"];
+  const double mars_dur_before = sim_cargo.state().colonies[mars_c].minerals["Duranium"];
+
+  N4X_ASSERT(sim_cargo.issue_load_mineral(freighter_id, earth_c, "Duranium", 100.0));
+  N4X_ASSERT(sim_cargo.issue_unload_mineral(freighter_id, mars_c, "Duranium", 100.0));
+
+  sim_cargo.advance_days(2);
+
+  const double earth_dur_after = sim_cargo.state().colonies[earth_c].minerals["Duranium"];
+  const double mars_dur_after = sim_cargo.state().colonies[mars_c].minerals["Duranium"];
+
+  const auto* sh_after = nebula4x::find_ptr(sim_cargo.state().ships, freighter_id);
+  N4X_ASSERT(sh_after);
+
+  const double ship_cargo_after =
+      (sh_after->cargo.count("Duranium") == 0) ? 0.0 : sh_after->cargo.at("Duranium");
+
+  N4X_ASSERT(earth_dur_after < earth_dur_before);
+  N4X_ASSERT(mars_dur_after > mars_dur_before);
+  N4X_ASSERT(ship_cargo_after < 1.0); // should have unloaded most/all
+
+
   N4X_ASSERT(dur_after < dur_before);
 
 

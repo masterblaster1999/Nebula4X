@@ -22,6 +22,16 @@ std::string order_to_string(const Order& order) {
             ss << ", last=(" << o.last_known_position_mkm.x << ", " << o.last_known_position_mkm.y << ")";
           }
           ss << ")";
+        } else if constexpr (std::is_same_v<T, LoadMineral>) {
+          ss << "LoadMineral(colony_id=" << o.colony_id;
+          if (!o.mineral.empty()) ss << ", mineral=" << o.mineral;
+          if (o.tons > 0.0) ss << ", tons=" << o.tons;
+          ss << ")";
+        } else if constexpr (std::is_same_v<T, UnloadMineral>) {
+          ss << "UnloadMineral(colony_id=" << o.colony_id;
+          if (!o.mineral.empty()) ss << ", mineral=" << o.mineral;
+          if (o.tons > 0.0) ss << ", tons=" << o.tons;
+          ss << ")";
         }
         return ss.str();
       },

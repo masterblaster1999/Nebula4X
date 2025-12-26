@@ -1,5 +1,7 @@
 # Nebula4X (prototype)
 
+![CI](https://github.com/masterblaster1999/Nebula4X/actions/workflows/ci.yml/badge.svg)
+
 Nebula4X is an **open-source, turn-based space 4X** prototype in **C++20**, inspired by the *genre* of deep, logistics-heavy games (fleet ops, industry, colonies, research).
 
 > Not affiliated with Aurora 4X or its authors. This codebase is written from scratch; please don’t copy proprietary assets, data, or text from other games.
@@ -9,6 +11,7 @@ Nebula4X is an **open-source, turn-based space 4X** prototype in **C++20**, insp
 ### Core simulation (`nebula4x_core`)
 
 - Star systems, orbital bodies, ships, colonies, minerals, installations
+- **Cargo holds** on ships + mineral transfer orders (prototype logistics)
 - Day-based turn advancement
 - Shipyard construction (optionally) consumes minerals per ton built (see `data/blueprints/starting_blueprints.json`)
 - **Colony construction queue**: build installations using construction points + mineral build costs (also configured in JSON)
@@ -16,6 +19,7 @@ Nebula4X is an **open-source, turn-based space 4X** prototype in **C++20**, insp
   - move-to-point / move-to-body
   - **travel via jump point** (multi-system travel)
   - **attack ship** (simple targeting)
+  - **load/unload minerals** (prototype cargo logistics)
 - **Jump points + multi-system state**
 - **Sensors + intel**: in-system detection + last-known contact snapshots (saved)
 - **Exploration**: factions track discovered star systems; entering a new system reveals it
@@ -36,7 +40,7 @@ Nebula4X is an **open-source, turn-based space 4X** prototype in **C++20**, insp
 - **Fog-of-war** toggle (hides undetected hostiles and undiscovered systems)
 - **Contacts tab**: recently seen hostiles + quick actions
 - **Jump point markers on the system map**
-- **Ship tab**: quick orders (move, jump travel, attack)
+- **Ship tab**: quick orders (move, jump travel, attack) + cargo load/unload
 - **Colony tab**: manage shipyard queue + build installations via construction queue
 - **Research tab**: choose projects, queue, see progress
 - **Design tab**: build custom ship designs from unlocked components

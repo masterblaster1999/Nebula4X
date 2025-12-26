@@ -7,6 +7,7 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include <utility>
 
 #include "nebula4x/core/serialization.h"
 #include "nebula4x/util/file_io.h"
@@ -289,11 +290,14 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id selected_ship, Id& sele
         ImGui::Text("Pos: (%.2f, %.2f) mkm", sh->position_mkm.x, sh->position_mkm.y);
         ImGui::Text("Speed: %.1f km/s", sh->speed_km_s);
 
+        double cargo_used_tons = 0.0;
+        for (const auto& [_, t] : sh->cargo) cargo_used_tons += std::max(0.0, t);
+
         if (d) {
           ImGui::Text("Design: %s (%s)", d->name.c_str(), ship_role_label(d->role));
           ImGui::Text("Mass: %.0f t", d->mass_tons);
           ImGui::Text("HP: %.0f / %.0f", sh->hp, d->max_hp);
-          ImGui::Text("Cargo: %.0f t", d->cargo_tons);
+          ImGui::Text("Cargo: %.0f / %.0f t", cargo_used_tons, d->cargo_tons);
           ImGui::Text("Sensor: %.0f mkm", d->sensor_range_mkm);
           if (d->weapon_damage > 0.0) {
             ImGui::Text("Weapons: %.1f dmg/day  (Range %.1f mkm)", d->weapon_damage, d->weapon_range_mkm);
@@ -324,6 +328,86 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id selected_ship, Id& sele
         if (ImGui::SmallButton("Clear orders")) {
           sim.clear_orders(selected_ship);
         }
+
+        ImGui::Separator();
+        ImGui::Text("Cargo detail");
+        if (d) {
+          ImGui::Text("Used: %.0f / %.0f t", cargo_used_tons, d->cargo_tons);
+        } else {
+          ImGui::Text("Used: %.0f t", cargo_used_tons);
+        }
+
+        if (sh->cargo.empty()) {
+          ImGui::TextDisabled("(empty)");
+        } else {
+          // Show carried minerals (sorted for readability).
+          std::vector<std::pair<std::string, double>> cargo_list;
+          cargo_list.reserve(sh->cargo.size());
+          for (const auto& [k, v] : sh->cargo) cargo_list.emplace_back(k, v);
+          std::sort(cargo_list.begin(), cargo_list.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+
+          for (const auto& [k, v] : cargo_list) {
+            ImGui::BulletText("%s: %.1f t", k.c_str(), v);
+          }
+        }
+
+        ImGui::Spacing();
+        ImGui::Text("Transfer with selected colony");
+        ImGui::TextDisabled("Load/unload is an order: the ship will move to the colony body, then transfer in one day.");
+
+        const Colony* sel_col = (selected_colony != kInvalidId) ? find_ptr(s.colonies, selected_colony) : nullptr;
+        const Body* sel_col_body = sel_col ? find_ptr(s.bodies, sel_col->body_id) : nullptr;
+
+        if (!sel_col) {
+          ImGui::TextDisabled("No colony selected.");
+        } else if (!sel_col_body) {
+          ImGui::TextDisabled("Selected colony body missing.");
+        } else if (sel_col->faction_id != sh->faction_id) {
+          ImGui::TextDisabled("Selected colony is not friendly.");
+        } else if (sel_col_body->system_id != sh->system_id) {
+          ImGui::TextDisabled("Selected colony is in a different system.");
+        } else {
+          ImGui::Text("Colony: %s", sel_col->name.c_str());
+
+          // Build a stable mineral list (union of colony minerals + ship cargo).
+          std::vector<std::string> minerals;
+          minerals.reserve(sel_col->minerals.size() + sh->cargo.size());
+          for (const auto& [k, _] : sel_col->minerals) minerals.push_back(k);
+          for (const auto& [k, _] : sh->cargo) minerals.push_back(k);
+          std::sort(minerals.begin(), minerals.end());
+          minerals.erase(std::unique(minerals.begin(), minerals.end()), minerals.end());
+
+          static int mineral_idx = 0;
+          static double transfer_tons = 0.0;
+
+          // Clamp idx when list changes.
+          const int max_idx = static_cast<int>(minerals.size()); // + 1 for "All"
+          mineral_idx = std::max(0, std::min(mineral_idx, max_idx));
+
+          const std::string current_label = (mineral_idx == 0) ? std::string("All minerals") : minerals[mineral_idx - 1];
+
+          if (ImGui::BeginCombo("Mineral", current_label.c_str())) {
+            if (ImGui::Selectable("All minerals", mineral_idx == 0)) mineral_idx = 0;
+            for (int i = 0; i < static_cast<int>(minerals.size()); ++i) {
+              const bool selected = (mineral_idx == i + 1);
+              if (ImGui::Selectable(minerals[i].c_str(), selected)) mineral_idx = i + 1;
+            }
+            ImGui::EndCombo();
+          }
+
+          ImGui::InputDouble("Tons (0 = as much as possible)", &transfer_tons, 10.0, 100.0, "%.1f");
+
+          const std::string mineral_id = (mineral_idx == 0) ? std::string() : minerals[mineral_idx - 1];
+
+          if (ImGui::Button("Load##cargo")) {
+            sim.issue_load_mineral(selected_ship, selected_colony, mineral_id, transfer_tons);
+          }
+          ImGui::SameLine();
+          if (ImGui::Button("Unload##cargo")) {
+            sim.issue_unload_mineral(selected_ship, selected_colony, mineral_id, transfer_tons);
+          }
+        }
+
 
         ImGui::Separator();
         ImGui::Text("Quick orders");
@@ -773,7 +857,7 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id selected_ship, Id& sele
             ImGui::Text("Mass: %.0f t", d->mass_tons);
             ImGui::Text("Speed: %.1f km/s", d->speed_km_s);
             ImGui::Text("HP: %.0f", d->max_hp);
-            ImGui::Text("Cargo: %.0f t", d->cargo_tons);
+            ImGui::Text("Cargo: %.0f / %.0f t", cargo_used_tons, d->cargo_tons);
             ImGui::Text("Sensor: %.0f mkm", d->sensor_range_mkm);
             if (d->weapon_damage > 0.0) ImGui::Text("Weapons: %.1f (range %.1f)", d->weapon_damage, d->weapon_range_mkm);
           }

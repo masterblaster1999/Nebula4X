@@ -116,6 +116,10 @@ struct Ship {
   // Cached design stats for fast ticking.
   double speed_km_s{0.0};
 
+  // Cargo carried by this ship (prototype: mineral tons keyed by mineral name).
+  // This enables basic logistics between colonies.
+  std::unordered_map<std::string, double> cargo;
+
   // Combat state.
   double hp{0.0};
 };

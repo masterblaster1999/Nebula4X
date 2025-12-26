@@ -1,10 +1,12 @@
 #include "nebula4x/util/json.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
+#include <vector>
 
 namespace nebula4x::json {
 namespace {
@@ -226,13 +228,24 @@ void stringify_impl(const Value& v, std::ostringstream& out, int indent, int dep
     out << '{';
     if (!o.empty()) {
       if (indent > 0) out << '\n';
+
+      // Deterministic output: sort keys (Object is an unordered_map).
+      std::vector<std::string> keys;
+      keys.reserve(o.size());
+      for (const auto& [k, _] : o) keys.push_back(k);
+      std::sort(keys.begin(), keys.end());
+
       std::size_t n = 0;
-      for (const auto& [k, val] : o) {
+      for (const auto& k : keys) {
+        const auto it = o.find(k);
+        if (it == o.end()) continue;
+        const auto& val = it->second;
+
         if (indent > 0) pad(depth + 1);
         out << escape_string(k) << ':';
         if (indent > 0) out << ' ';
         stringify_impl(val, out, indent, depth + 1);
-        if (++n < o.size()) out << ',';
+        if (++n < keys.size()) out << ',';
         if (indent > 0) out << '\n';
       }
       if (indent > 0) pad(depth);

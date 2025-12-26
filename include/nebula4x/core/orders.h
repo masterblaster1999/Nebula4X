@@ -33,7 +33,26 @@ struct AttackShip {
   Vec2 last_known_position_mkm{0.0, 0.0};
 };
 
-using Order = std::variant<MoveToPoint, MoveToBody, TravelViaJump, AttackShip>;
+
+// Load minerals from a friendly colony into this ship's cargo.
+// If mineral is empty, load from all minerals (until capacity or requested tons).
+// If tons <= 0, load as much as possible.
+struct LoadMineral {
+  Id colony_id{kInvalidId};
+  std::string mineral;
+  double tons{0.0};
+};
+
+// Unload minerals from this ship's cargo into a friendly colony.
+// If mineral is empty, unload all cargo minerals (up to requested tons).
+// If tons <= 0, unload as much as possible.
+struct UnloadMineral {
+  Id colony_id{kInvalidId};
+  std::string mineral;
+  double tons{0.0};
+};
+
+using Order = std::variant<MoveToPoint, MoveToBody, TravelViaJump, AttackShip, LoadMineral, UnloadMineral>;
 
 struct ShipOrders {
   std::vector<Order> queue;

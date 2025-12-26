@@ -82,6 +82,16 @@ Value order_to_json(const Order& order) {
             obj["has_last_known"] = true;
             obj["last_known_position_mkm"] = vec2_to_json(o.last_known_position_mkm);
           }
+        } else if constexpr (std::is_same_v<T, LoadMineral>) {
+          obj["type"] = std::string("load_mineral");
+          obj["colony_id"] = static_cast<double>(o.colony_id);
+          if (!o.mineral.empty()) obj["mineral"] = o.mineral;
+          obj["tons"] = o.tons;
+        } else if constexpr (std::is_same_v<T, UnloadMineral>) {
+          obj["type"] = std::string("unload_mineral");
+          obj["colony_id"] = static_cast<double>(o.colony_id);
+          if (!o.mineral.empty()) obj["mineral"] = o.mineral;
+          obj["tons"] = o.tons;
         }
         return obj;
       },
@@ -120,6 +130,20 @@ Order order_from_json(const Value& v) {
     }
 
     return a;
+  }
+  if (type == "load_mineral") {
+    LoadMineral l;
+    l.colony_id = static_cast<Id>(o.at("colony_id").int_value(kInvalidId));
+    if (auto it = o.find("mineral"); it != o.end()) l.mineral = it->second.string_value();
+    if (auto it = o.find("tons"); it != o.end()) l.tons = it->second.number_value(0.0);
+    return l;
+  }
+  if (type == "unload_mineral") {
+    UnloadMineral u;
+    u.colony_id = static_cast<Id>(o.at("colony_id").int_value(kInvalidId));
+    if (auto it = o.find("mineral"); it != o.end()) u.mineral = it->second.string_value();
+    if (auto it = o.find("tons"); it != o.end()) u.tons = it->second.number_value(0.0);
+    return u;
   }
   throw std::runtime_error("Unknown order type: " + type);
 }
@@ -238,6 +262,7 @@ std::string serialize_game_to_json(const GameState& s) {
     o["design_id"] = sh.design_id;
     o["speed_km_s"] = sh.speed_km_s;
     o["hp"] = sh.hp;
+    o["cargo"] = map_string_double_to_json(sh.cargo);
     ships.push_back(o);
   }
   root["ships"] = ships;
@@ -422,6 +447,7 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     sh.design_id = o.at("design_id").string_value();
     sh.speed_km_s = o.at("speed_km_s").number_value(0.0);
     sh.hp = o.at("hp").number_value(0.0);
+    if (auto it = o.find("cargo"); it != o.end()) sh.cargo = map_string_double_from_json(it->second);
     s.ships[sh.id] = sh;
   }
 
