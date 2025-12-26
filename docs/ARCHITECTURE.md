@@ -41,6 +41,8 @@
 - Factions track which star systems they have discovered in `Faction::discovered_systems`.
 - Discovery is seeded from starting ships/colonies and updated when ships transit jump points.
 - The UI can optionally hide undiscovered systems when fog-of-war is enabled.
+- The simulation exposes a small convenience helper, `Simulation::issue_travel_to_system`,
+  that pathfinds through the known jump network and enqueues the required `TravelViaJump` steps.
 
 ## Save/load
 

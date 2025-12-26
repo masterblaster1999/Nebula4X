@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <queue>
 #include <stdexcept>
 #include <unordered_map>
 
@@ -390,6 +391,77 @@ bool Simulation::issue_travel_via_jump(Id ship_id, Id jump_point_id) {
   if (!find_ptr(state_.jump_points, jump_point_id)) return false;
   auto& orders = state_.ship_orders[ship_id];
   orders.queue.push_back(TravelViaJump{jump_point_id});
+  return true;
+}
+
+bool Simulation::issue_travel_to_system(Id ship_id, Id target_system_id, bool restrict_to_discovered) {
+  auto* ship = find_ptr(state_.ships, ship_id);
+  if (!ship) return false;
+  if (!find_ptr(state_.systems, target_system_id)) return false;
+
+  if (ship->system_id == target_system_id) return true; // no-op
+
+  // Breadth-first search over the system graph, tracking the jump id used to traverse each edge.
+  const Id start = ship->system_id;
+
+  auto allow_system = [&](Id sys_id) {
+    if (!restrict_to_discovered) return true;
+    return is_system_discovered_by_faction(ship->faction_id, sys_id);
+  };
+
+  // If the caller wants discovery-restricted routing, the destination must also be discovered.
+  if (restrict_to_discovered && !allow_system(target_system_id)) return false;
+
+  std::queue<Id> q;
+  std::unordered_map<Id, Id> prev_system;
+  std::unordered_map<Id, Id> prev_jump;
+
+  q.push(start);
+  prev_system[start] = kInvalidId;
+
+  while (!q.empty()) {
+    const Id cur = q.front();
+    q.pop();
+    if (cur == target_system_id) break;
+
+    const auto* sys = find_ptr(state_.systems, cur);
+    if (!sys) continue;
+
+    for (Id jid : sys->jump_points) {
+      const auto* jp = find_ptr(state_.jump_points, jid);
+      if (!jp) continue;
+      if (jp->linked_jump_id == kInvalidId) continue;
+
+      const auto* dest_jp = find_ptr(state_.jump_points, jp->linked_jump_id);
+      if (!dest_jp) continue;
+
+      const Id next_sys = dest_jp->system_id;
+      if (next_sys == kInvalidId) continue;
+      if (!find_ptr(state_.systems, next_sys)) continue;
+      if (restrict_to_discovered && !allow_system(next_sys)) continue;
+      if (prev_system.find(next_sys) != prev_system.end()) continue; // visited
+
+      prev_system[next_sys] = cur;
+      prev_jump[next_sys] = jid;
+      q.push(next_sys);
+    }
+  }
+
+  if (prev_system.find(target_system_id) == prev_system.end()) return false;
+
+  std::vector<Id> jumps;
+  for (Id cur = target_system_id; cur != start;) {
+    auto it_sys = prev_system.find(cur);
+    auto it_jump = prev_jump.find(cur);
+    if (it_sys == prev_system.end() || it_jump == prev_jump.end()) return false;
+    jumps.push_back(it_jump->second);
+    cur = it_sys->second;
+  }
+  std::reverse(jumps.begin(), jumps.end());
+  if (jumps.empty()) return false;
+
+  auto& orders = state_.ship_orders[ship_id];
+  for (Id jid : jumps) orders.queue.push_back(TravelViaJump{jid});
   return true;
 }
 

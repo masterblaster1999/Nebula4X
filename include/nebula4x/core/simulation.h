@@ -41,6 +41,13 @@ class Simulation {
   bool issue_move_to_point(Id ship_id, Vec2 target_mkm);
   bool issue_move_to_body(Id ship_id, Id body_id);
   bool issue_travel_via_jump(Id ship_id, Id jump_point_id);
+  // Pathfind through the jump network and enqueue TravelViaJump steps to reach a target system.
+  //
+  // When restrict_to_discovered is true, pathfinding will only traverse systems the ship's
+  // faction has already discovered (useful for fog-of-war UI).
+  //
+  // Returns false if no route is known/available.
+  bool issue_travel_to_system(Id ship_id, Id target_system_id, bool restrict_to_discovered = false);
   bool issue_attack_ship(Id attacker_ship_id, Id target_ship_id);
 
   // Cargo / logistics (prototype).

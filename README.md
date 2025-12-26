@@ -35,6 +35,8 @@ Nebula4X is an **open-source, turn-based space 4X** prototype in **C++20**, insp
 
 ### Desktop UI (`nebula4x`) — SDL2 + Dear ImGui
 
+- Galaxy map (multi-system view)
+- **Right click a system in the galaxy map** to auto-route the selected ship via jump points (**Shift queues**)
 - System map (pan/zoom)
 - Ship list + selection (shows HP, faction)
 - **Fog-of-war** toggle (hides undetected hostiles and undiscovered systems)
@@ -135,7 +137,7 @@ it's usually SDL redefining `main` to `SDL_main`. This repo opts out of that beh
 ## Next steps (suggested)
 
 - More granular ship components (power, fuel, heat, maintenance)
-- Better galaxy view + exploration mechanics
+- Better galaxy view + exploration mechanics (surveying, unknown exits, exploration orders)
 - More combat depth (initiative, tracking, missiles, armor layers)
 - Multi-faction diplomacy and intel
 - Data-driven mod support (hot reload, content packs)

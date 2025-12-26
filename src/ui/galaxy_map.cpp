@@ -8,6 +8,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "nebula4x/util/log.h"
+
 namespace nebula4x::ui {
 namespace {
 
@@ -196,7 +198,9 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
     }
   }
 
-  // Click interaction: select system.
+  // Click interaction:
+  // - Left click selects a system.
+  // - Right click issues a multi-jump travel route for the selected ship (Shift queues).
   if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
     if (mouse.x >= origin.x && mouse.x <= origin.x + avail.x && mouse.y >= origin.y && mouse.y <= origin.y + avail.y) {
       if (hovered_system != kInvalidId) {
@@ -206,6 +210,27 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
         if (selected_ship != kInvalidId) {
           const auto* sh = find_ptr(s.ships, selected_ship);
           if (!sh || sh->system_id != hovered_system) selected_ship = kInvalidId;
+        }
+      }
+    }
+  }
+
+  if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+    if (mouse.x >= origin.x && mouse.x <= origin.x + avail.x && mouse.y >= origin.y && mouse.y <= origin.y + avail.y) {
+      if (hovered_system != kInvalidId) {
+        // If a ship is selected, route it to the target system.
+        if (selected_ship != kInvalidId) {
+          const bool queue_orders = ImGui::GetIO().KeyShift;
+          if (!queue_orders) sim.clear_orders(selected_ship);
+
+          // In fog-of-war mode, only allow routing through systems the faction already knows.
+          const bool restrict = ui.fog_of_war;
+          if (!sim.issue_travel_to_system(selected_ship, hovered_system, restrict)) {
+            nebula4x::log::warn("No known jump route to that system.");
+          }
+        } else {
+          // No ship selected: treat right-click as a select.
+          s.selected_system = hovered_system;
         }
       }
     }
@@ -257,6 +282,7 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   ImGui::BulletText("Wheel: zoom");
   ImGui::BulletText("Middle drag: pan");
   ImGui::BulletText("Left click: select system");
+  ImGui::BulletText("Right click: route selected ship (Shift queues)");
   ImGui::Separator();
   ImGui::Checkbox("Fog of war", &ui.fog_of_war);
   ImGui::Checkbox("Labels", &ui.show_galaxy_labels);

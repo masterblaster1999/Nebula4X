@@ -49,6 +49,16 @@ GameState make_sol_scenario() {
     s.systems[centauri] = system;
   }
 
+  // A third system to make the early exploration loop more interesting.
+  const Id barnard = allocate_id(s);
+  {
+    StarSystem system;
+    system.id = barnard;
+    system.name = "Barnard's Star";
+    system.galaxy_pos = {6.0, -1.4};
+    s.systems[barnard] = system;
+  }
+
   s.selected_system = sol;
 
   auto add_body = [&](Id system_id, const std::string& name, BodyType type, double radius_mkm, double period_days,
@@ -78,6 +88,10 @@ GameState make_sol_scenario() {
   const Id centauri_prime = add_body(centauri, "Centauri Prime", BodyType::Planet, 110.0, 320.0, 0.4);
   (void)centauri_prime;
 
+  // --- Barnard's Star bodies ---
+  (void)add_body(barnard, "Barnard's Star", BodyType::Star, 0.0, 1.0, 0.0);
+  (void)add_body(barnard, "Barnard b", BodyType::Planet, 60.0, 233.0, 0.2);
+
   // --- Jump points (Sol <-> Alpha Centauri) ---
   const Id jp_sol = allocate_id(s);
   const Id jp_cen = allocate_id(s);
@@ -100,6 +114,30 @@ GameState make_sol_scenario() {
     b.linked_jump_id = jp_sol;
     s.jump_points[b.id] = b;
     s.systems[centauri].jump_points.push_back(b.id);
+  }
+
+  // --- Jump points (Alpha Centauri <-> Barnard's Star) ---
+  const Id jp_cen2 = allocate_id(s);
+  const Id jp_bar = allocate_id(s);
+  {
+    JumpPoint a;
+    a.id = jp_cen2;
+    a.name = "Centauri Outer Jump";
+    a.system_id = centauri;
+    a.position_mkm = {140.0, -35.0};
+    a.linked_jump_id = jp_bar;
+    s.jump_points[a.id] = a;
+    s.systems[centauri].jump_points.push_back(a.id);
+  }
+  {
+    JumpPoint b;
+    b.id = jp_bar;
+    b.name = "Barnard Jump Point";
+    b.system_id = barnard;
+    b.position_mkm = {55.0, 10.0};
+    b.linked_jump_id = jp_cen2;
+    s.jump_points[b.id] = b;
+    s.systems[barnard].jump_points.push_back(b.id);
   }
 
   // --- Colony ---
