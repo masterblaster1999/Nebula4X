@@ -1,0 +1,59 @@
+{
+  "version": 1,
+  "components": {
+    "engine_chem_mk1": {
+      "name": "Chemical Engine Mk.I",
+      "type": "engine",
+      "mass_tons": 50,
+      "speed_km_s": 20
+    },
+    "engine_ion_mk1": {
+      "name": "Ion Engine Mk.I",
+      "type": "engine",
+      "mass_tons": 35,
+      "speed_km_s": 35
+    },
+    "cargo_mk1": {
+      "name": "Cargo Hold",
+      "type": "cargo",
+      "mass_tons": 20,
+      "cargo_tons": 500
+    },
+    "sensor_mk1": {
+      "name": "Active Sensor",
+      "type": "sensor",
+      "mass_tons": 10,
+      "range_mkm": 400
+    },
+    "reactor_mk1": {
+      "name": "Fission Reactor",
+      "type": "reactor",
+      "mass_tons": 25,
+      "power": 10
+    }
+  },
+  "designs": [
+    {
+      "id": "freighter_alpha",
+      "name": "Freighter Alpha",
+      "role": "freighter",
+      "components": ["engine_chem_mk1", "cargo_mk1", "cargo_mk1"]
+    },
+    {
+      "id": "surveyor_beta",
+      "name": "Surveyor Beta",
+      "role": "surveyor",
+      "components": ["engine_chem_mk1", "sensor_mk1"]
+    }
+  ],
+  "installations": {
+    "automated_mine": {
+      "name": "Automated Mine",
+      "produces": {"Duranium": 1.5, "Neutronium": 0.2}
+    },
+    "shipyard": {
+      "name": "Commercial Shipyard",
+      "build_rate_tons_per_day": 50
+    }
+  }
+}
