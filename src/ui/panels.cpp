@@ -317,14 +317,8 @@ void draw_right_sidebar(Simulation& sim, Id selected_ship, Id& selected_colony) 
 
         // Combat: list hostiles in this system
         if (sh_sys) {
-          std::vector<Id> hostiles;
-          for (Id sid : sh_sys->ships) {
-            if (sid == sh->id) continue;
-            const auto* other = find_ptr(s.ships, sid);
-            if (!other) continue;
-            if (other->faction_id == sh->faction_id) continue;
-            hostiles.push_back(sid);
-          }
+          std::vector<Id> hostiles =
+              sim.detected_hostile_ships_in_system(sh->faction_id, sh->system_id);
 
           ImGui::Spacing();
           ImGui::Text("Combat");
@@ -380,7 +374,13 @@ void draw_right_sidebar(Simulation& sim, Id selected_ship, Id& selected_colony) 
         ImGui::Separator();
         ImGui::Text("Installations");
         for (const auto& [k, v] : colony->installations) {
-          ImGui::BulletText("%s: %d", k.c_str(), v);
+          const auto it = sim.content().installations.find(k);
+          const std::string nm = (it == sim.content().installations.end()) ? k : it->second.name;
+          if (it != sim.content().installations.end() && it->second.sensor_range_mkm > 0.0) {
+            ImGui::BulletText("%s: %d  (Sensor %.0f mkm)", nm.c_str(), v, it->second.sensor_range_mkm);
+          } else {
+            ImGui::BulletText("%s: %d", nm.c_str(), v);
+          }
         }
 
         ImGui::Separator();

@@ -20,8 +20,13 @@
   3. Generate research points + apply research progress
   4. Process shipyard build queues (consumes minerals per ton when configured)
   5. Process colony construction queues (installations: consumes minerals + construction points)
-  6. Move ships (orders)
-  7. Resolve simple combat (auto-fire + attack orders)
+  6. Move ships (orders; `AttackShip` will chase a *last known* position if contact is lost)
+  7. Resolve simple combat (auto-fire + attack orders; targets must be *detected* by faction sensors)
+
+## Sensors
+
+- Ships provide sensors via `ShipDesign::sensor_range_mkm`.
+- Colonies can provide sensors via installations with `InstallationDef::sensor_range_mkm` (e.g. `sensor_station`).
 
 ## Save/load
 

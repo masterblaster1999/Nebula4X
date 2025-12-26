@@ -45,6 +45,18 @@ void draw_system_map(Simulation& sim, Id& selected_ship, double& zoom, Vec2& pan
     return;
   }
 
+  // View filters
+  static bool fog_of_war = false;
+  static bool show_selected_sensor_range = true;
+
+  const Ship* viewer_ship = (selected_ship != kInvalidId) ? find_ptr(s.ships, selected_ship) : nullptr;
+  const Id viewer_faction_id = viewer_ship ? viewer_ship->faction_id : kInvalidId;
+
+  std::vector<Id> detected_hostiles;
+  if (fog_of_war && viewer_faction_id != kInvalidId) {
+    detected_hostiles = sim.detected_hostile_ships_in_system(viewer_faction_id, sys->id);
+  }
+
   const ImVec2 avail = ImGui::GetContentRegionAvail();
   const ImVec2 origin = ImGui::GetCursorScreenPos();
   const ImVec2 center = ImVec2(origin.x + avail.x * 0.5f, origin.y + avail.y * 0.5f);
@@ -125,7 +137,23 @@ void draw_system_map(Simulation& sim, Id& selected_ship, double& zoom, Vec2& pan
     const auto* sh = find_ptr(s.ships, sid);
     if (!sh) continue;
 
+    // Fog-of-war: show friendly ships and detected hostiles (view faction is the selected ship's faction).
+    if (fog_of_war && viewer_faction_id != kInvalidId) {
+      if (sh->faction_id != viewer_faction_id) {
+        if (std::find(detected_hostiles.begin(), detected_hostiles.end(), sid) == detected_hostiles.end()) continue;
+      }
+    }
+
     const ImVec2 p = to_screen(sh->position_mkm, center, scale, zoom, pan);
+
+    // Selected ship sensor range overlay
+    if (show_selected_sensor_range && selected_ship == sid) {
+      const auto* d = sim.find_design(sh->design_id);
+      if (d && d->sensor_range_mkm > 0.0) {
+        draw->AddCircle(p, static_cast<float>(d->sensor_range_mkm * scale * zoom), IM_COL32(0, 170, 255, 80), 0, 1.0f);
+      }
+    }
+
     const float r = (selected_ship == sid) ? 5.0f : 4.0f;
     draw->AddCircleFilled(p, r, color_ship());
     if (selected_ship == sid) {
@@ -145,12 +173,22 @@ void draw_system_map(Simulation& sim, Id& selected_ship, double& zoom, Vec2& pan
 
   // Legend / help
   ImGui::SetCursorScreenPos(ImVec2(origin.x + 10, origin.y + 10));
-  ImGui::BeginChild("legend", ImVec2(260, 115), true);
+  ImGui::BeginChild("legend", ImVec2(280, 190), true);
   ImGui::Text("Controls");
   ImGui::BulletText("Mouse wheel: zoom");
   ImGui::BulletText("Middle drag: pan");
   ImGui::BulletText("Left click: move order");
   ImGui::BulletText("Jump points are purple rings");
+  ImGui::Separator();
+  ImGui::Checkbox("Fog of war", &fog_of_war);
+  ImGui::Checkbox("Show sensor range", &show_selected_sensor_range);
+  if (fog_of_war) {
+    if (viewer_faction_id == kInvalidId) {
+      ImGui::TextDisabled("Select a ship to define view faction");
+    } else {
+      ImGui::TextDisabled("Detected hostiles: %d", (int)detected_hostiles.size());
+    }
+  }
   ImGui::EndChild();
 }
 

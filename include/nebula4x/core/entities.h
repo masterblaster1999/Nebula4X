@@ -94,6 +94,9 @@ struct InstallationDef {
   // If empty, shipbuilding is free (prototype/back-compat default).
   std::unordered_map<std::string, double> build_costs_per_ton;
 
+  // Optional: in-system sensor range (used by sensor stations / ground radar).
+  double sensor_range_mkm{0.0};
+
   // Only used by research labs.
   double research_points_per_day{0.0};
 };

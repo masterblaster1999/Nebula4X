@@ -17,7 +17,11 @@ std::string order_to_string(const Order& order) {
         } else if constexpr (std::is_same_v<T, TravelViaJump>) {
           ss << "TravelViaJump(jump_id=" << o.jump_point_id << ")";
         } else if constexpr (std::is_same_v<T, AttackShip>) {
-          ss << "AttackShip(target_id=" << o.target_ship_id << ")";
+          ss << "AttackShip(target_id=" << o.target_ship_id;
+          if (o.has_last_known) {
+            ss << ", last=(" << o.last_known_position_mkm.x << ", " << o.last_known_position_mkm.y << ")";
+          }
+          ss << ")";
         }
         return ss.str();
       },

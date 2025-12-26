@@ -114,5 +114,94 @@ int test_simulation() {
   N4X_ASSERT(mines_after == mines_before + 1);
   N4X_ASSERT(dur_after < dur_before);
 
+
+  // --- sensor detection sanity check ---
+  // Hostile ships should only be detected when within sensor range of some friendly sensor source.
+  nebula4x::ContentDB content4;
+
+  // Minimal installations to satisfy scenario content references.
+  nebula4x::InstallationDef mine4;
+  mine4.id = "automated_mine";
+  mine4.name = "Automated Mine";
+  mine4.produces_per_day = { {"Duranium", 0.0} };
+  content4.installations[mine4.id] = mine4;
+
+  nebula4x::InstallationDef yard4;
+  yard4.id = "shipyard";
+  yard4.name = "Shipyard";
+  yard4.build_rate_tons_per_day = 0.0;
+  content4.installations[yard4.id] = yard4;
+
+  // Designs used by the default Sol scenario.
+  auto make_design = [](const std::string& id, double sensor_range_mkm) {
+    nebula4x::ShipDesign d;
+    d.id = id;
+    d.name = id;
+    d.max_hp = 10.0;
+    d.speed_km_s = 0.0;
+    d.sensor_range_mkm = sensor_range_mkm;
+    return d;
+  };
+
+  content4.designs["freighter_alpha"] = make_design("freighter_alpha", 0.0);
+  content4.designs["surveyor_beta"]  = make_design("surveyor_beta", 100.0);
+  content4.designs["escort_gamma"]   = make_design("escort_gamma", 100.0);
+  content4.designs["pirate_raider"]  = make_design("pirate_raider", 0.0);
+
+  nebula4x::Simulation sim4(std::move(content4), nebula4x::SimConfig{});
+
+  nebula4x::Id terrans_id = nebula4x::kInvalidId;
+  nebula4x::Id pirates_id = nebula4x::kInvalidId;
+  for (const auto& [fid, f] : sim4.state().factions) {
+    if (f.name == "Terran Union") terrans_id = fid;
+    if (f.name == "Pirate Raiders") pirates_id = fid;
+  }
+  N4X_ASSERT(terrans_id != nebula4x::kInvalidId);
+  N4X_ASSERT(pirates_id != nebula4x::kInvalidId);
+
+  nebula4x::Id sol_id = nebula4x::kInvalidId;
+  for (const auto& [sid, sys] : sim4.state().systems) {
+    if (sys.name == "Sol") sol_id = sid;
+  }
+  N4X_ASSERT(sol_id != nebula4x::kInvalidId);
+
+  const auto* sol = nebula4x::find_ptr(sim4.state().systems, sol_id);
+  N4X_ASSERT(sol);
+
+  // Use the first Terran ship as a reference point.
+  nebula4x::Vec2 terran_pos{0.0, 0.0};
+  bool found_terran_ship = false;
+  for (nebula4x::Id sid : sol->ships) {
+    const auto* sh = nebula4x::find_ptr(sim4.state().ships, sid);
+    if (sh && sh->faction_id == terrans_id) {
+      terran_pos = sh->position_mkm;
+      found_terran_ship = true;
+      break;
+    }
+  }
+  N4X_ASSERT(found_terran_ship);
+
+  // Spawn a pirate ship within 100 mkm (detected), then move it out of range (not detected).
+  const nebula4x::Id pirate_ship_id = nebula4x::allocate_id(sim4.state());
+  {
+    nebula4x::Ship p;
+    p.id = pirate_ship_id;
+    p.name = "Test Raider";
+    p.faction_id = pirates_id;
+    p.system_id = sol_id;
+    p.design_id = "pirate_raider";
+    p.position_mkm = terran_pos + nebula4x::Vec2{0.0, 50.0};
+    p.hp = 10.0;
+
+    sim4.state().ships[p.id] = p;
+    sim4.state().ship_orders[p.id] = nebula4x::ShipOrders{};
+    sim4.state().systems[sol_id].ships.push_back(p.id);
+  }
+
+  N4X_ASSERT(sim4.is_ship_detected_by_faction(terrans_id, pirate_ship_id));
+
+  sim4.state().ships[pirate_ship_id].position_mkm = terran_pos + nebula4x::Vec2{0.0, 500.0};
+  N4X_ASSERT(!sim4.is_ship_detected_by_faction(terrans_id, pirate_ship_id));
+
   return 0;
 }

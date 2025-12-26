@@ -115,6 +115,15 @@ ContentDB load_content_db_from_file(const std::string& path) {
         }
       }
 
+      // Optional: in-system sensor range for sensor installations.
+      if (const auto* sr_v = find_key(vo, "sensor_range_mkm")) {
+        def.sensor_range_mkm = sr_v->number_value(0.0);
+      }
+      if (const auto* sr2_v = find_key(vo, "range_mkm")) {
+        if (def.sensor_range_mkm <= 0.0) def.sensor_range_mkm = sr2_v->number_value(0.0);
+      }
+
+
       if (const auto* rp_v = find_key(vo, "research_points_per_day")) {
         def.research_points_per_day = rp_v->number_value(0.0);
       }

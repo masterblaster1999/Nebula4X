@@ -31,6 +31,57 @@ bool faction_has_tech(const Faction& f, const std::string& tech_id) {
   return std::find(f.known_techs.begin(), f.known_techs.end(), tech_id) != f.known_techs.end();
 }
 
+struct SensorSource {
+  Vec2 pos_mkm{0.0, 0.0};
+  double range_mkm{0.0};
+};
+
+std::vector<SensorSource> gather_sensor_sources(const Simulation& sim, Id faction_id, Id system_id) {
+  std::vector<SensorSource> sources;
+  const auto& s = sim.state();
+  const auto* sys = find_ptr(s.systems, system_id);
+  if (!sys) return sources;
+
+  // Friendly ship sensors in this system.
+  for (Id sid : sys->ships) {
+    const auto* sh = find_ptr(s.ships, sid);
+    if (!sh) continue;
+    if (sh->faction_id != faction_id) continue;
+    const auto* d = sim.find_design(sh->design_id);
+    const double range = d ? d->sensor_range_mkm : 0.0;
+    if (range <= 0.0) continue;
+    sources.push_back(SensorSource{sh->position_mkm, range});
+  }
+
+  // Friendly colony-based sensors in this system.
+  for (const auto& [_, c] : s.colonies) {
+    if (c.faction_id != faction_id) continue;
+    const auto* body = find_ptr(s.bodies, c.body_id);
+    if (!body || body->system_id != system_id) continue;
+
+    double best = 0.0;
+    for (const auto& [inst_id, count] : c.installations) {
+      if (count <= 0) continue;
+      const auto it = sim.content().installations.find(inst_id);
+      if (it == sim.content().installations.end()) continue;
+      best = std::max(best, it->second.sensor_range_mkm);
+    }
+
+    if (best > 0.0) sources.push_back(SensorSource{body->position_mkm, best});
+  }
+
+  return sources;
+}
+
+bool any_source_detects(const std::vector<SensorSource>& sources, const Vec2& target_pos) {
+  for (const auto& src : sources) {
+    if (src.range_mkm <= 0.0) continue;
+    const double dist = (target_pos - src.pos_mkm).length();
+    if (dist <= src.range_mkm + 1e-9) return true;
+  }
+  return false;
+}
+
 } // namespace
 
 Simulation::Simulation(ContentDB content, SimConfig cfg) : content_(std::move(content)), cfg_(cfg) {
@@ -80,6 +131,34 @@ double Simulation::construction_points_per_day(const Colony& colony) const {
   }
 
   return total;
+}
+
+bool Simulation::is_ship_detected_by_faction(Id viewer_faction_id, Id target_ship_id) const {
+  const auto* tgt = find_ptr(state_.ships, target_ship_id);
+  if (!tgt) return false;
+  if (tgt->faction_id == viewer_faction_id) return true;
+
+  const auto sources = gather_sensor_sources(*this, viewer_faction_id, tgt->system_id);
+  if (sources.empty()) return false;
+  return any_source_detects(sources, tgt->position_mkm);
+}
+
+std::vector<Id> Simulation::detected_hostile_ships_in_system(Id viewer_faction_id, Id system_id) const {
+  std::vector<Id> out;
+  const auto* sys = find_ptr(state_.systems, system_id);
+  if (!sys) return out;
+
+  const auto sources = gather_sensor_sources(*this, viewer_faction_id, system_id);
+  if (sources.empty()) return out;
+
+  for (Id sid : sys->ships) {
+    const auto* sh = find_ptr(state_.ships, sid);
+    if (!sh) continue;
+    if (sh->faction_id == viewer_faction_id) continue;
+    if (any_source_detects(sources, sh->position_mkm)) out.push_back(sid);
+  }
+
+  return out;
 }
 
 void Simulation::apply_design_stats_to_ship(Ship& ship) {
@@ -254,9 +333,20 @@ bool Simulation::issue_attack_ship(Id attacker_ship_id, Id target_ship_id) {
   if (attacker_ship_id == target_ship_id) return false;
   auto* attacker = find_ptr(state_.ships, attacker_ship_id);
   if (!attacker) return false;
-  if (!find_ptr(state_.ships, target_ship_id)) return false;
+  const auto* target = find_ptr(state_.ships, target_ship_id);
+  if (!target) return false;
+  if (target->faction_id == attacker->faction_id) return false;
+
+  // Simple sensor gating: you can only issue an attack order if the target is currently detected.
+  if (!is_ship_detected_by_faction(attacker->faction_id, target_ship_id)) return false;
+
+  AttackShip ord;
+  ord.target_ship_id = target_ship_id;
+  ord.has_last_known = true;
+  ord.last_known_position_mkm = target->position_mkm;
+
   auto& orders = state_.ship_orders[attacker_ship_id];
-  orders.queue.push_back(AttackShip{target_ship_id});
+  orders.queue.push_back(ord);
   return true;
 }
 
@@ -604,6 +694,7 @@ void Simulation::tick_ships() {
     // Determine target.
     Vec2 target = ship.position_mkm;
     double desired_range = 0.0; // used for attack orders
+    bool attack_has_contact = false;
 
     if (std::holds_alternative<MoveToPoint>(q.front())) {
       target = std::get<MoveToPoint>(q.front()).target_mkm;
@@ -629,16 +720,34 @@ void Simulation::tick_ships() {
       }
       target = jp->position_mkm;
     } else if (std::holds_alternative<AttackShip>(q.front())) {
-      const Id target_id = std::get<AttackShip>(q.front()).target_ship_id;
+      auto& ord = std::get<AttackShip>(q.front());
+      const Id target_id = ord.target_ship_id;
       const auto* tgt = find_ptr(state_.ships, target_id);
       if (!tgt || tgt->system_id != ship.system_id) {
         q.erase(q.begin());
         continue;
       }
-      target = tgt->position_mkm;
-      const auto* d = find_design(ship.design_id);
-      const double w_range = d ? d->weapon_range_mkm : 0.0;
-      desired_range = (w_range > 0.0) ? (w_range * 0.9) : 0.1;
+
+      // Only chase the true target position while we have contact; otherwise move to last-known.
+      attack_has_contact = is_ship_detected_by_faction(ship.faction_id, target_id);
+
+      if (attack_has_contact) {
+        target = tgt->position_mkm;
+        ord.last_known_position_mkm = target;
+        ord.has_last_known = true;
+
+        const auto* d = find_design(ship.design_id);
+        const double w_range = d ? d->weapon_range_mkm : 0.0;
+        desired_range = (w_range > 0.0) ? (w_range * 0.9) : 0.1;
+      } else {
+        if (!ord.has_last_known) {
+          // Nothing to do; drop the order.
+          q.erase(q.begin());
+          continue;
+        }
+        target = ord.last_known_position_mkm;
+        desired_range = 0.0;
+      }
     }
 
     const Vec2 delta = target - ship.position_mkm;
@@ -654,9 +763,19 @@ void Simulation::tick_ships() {
       continue;
     }
 
-    // For attack orders: stop when within desired range.
-    if (is_attack && dist <= desired_range) {
-      continue;
+    if (is_attack) {
+      if (attack_has_contact) {
+        // With contact: stop when within desired range.
+        if (dist <= desired_range) {
+          continue;
+        }
+      } else {
+        // No contact: reaching last-known completes the order.
+        if (dist < 1e-6) {
+          q.erase(q.begin());
+          continue;
+        }
+      }
     }
 
     const double max_step = mkm_per_day_from_speed(ship.speed_km_s, cfg_.seconds_per_day);
@@ -700,7 +819,12 @@ void Simulation::tick_ships() {
 
         // Jump order completes.
         q.erase(q.begin());
-      } else if (!is_attack) {
+      } else if (is_attack) {
+        // Attack orders persist while we have contact. If we were moving to last-known and reached it, complete.
+        if (!attack_has_contact) {
+          q.erase(q.begin());
+        }
+      } else {
         q.erase(q.begin());
       }
 
@@ -737,7 +861,8 @@ void Simulation::tick_combat() {
         std::holds_alternative<AttackShip>(oit->second.queue.front())) {
       const Id tid = std::get<AttackShip>(oit->second.queue.front()).target_ship_id;
       const auto* tgt = find_ptr(state_.ships, tid);
-      if (tgt && tgt->system_id == attacker.system_id && is_hostile(attacker, *tgt)) {
+      if (tgt && tgt->system_id == attacker.system_id && is_hostile(attacker, *tgt) &&
+          is_ship_detected_by_faction(attacker.faction_id, tid)) {
         const double dist = (tgt->position_mkm - attacker.position_mkm).length();
         if (dist <= ad->weapon_range_mkm) {
           chosen = tid;
@@ -752,6 +877,7 @@ void Simulation::tick_combat() {
         if (bid == aid) continue;
         if (target.system_id != attacker.system_id) continue;
         if (!is_hostile(attacker, target)) continue;
+        if (!is_ship_detected_by_faction(attacker.faction_id, bid)) continue;
 
         const double dist = (target.position_mkm - attacker.position_mkm).length();
         if (dist > ad->weapon_range_mkm) continue;

@@ -46,6 +46,11 @@ class Simulation {
   bool is_installation_buildable_for_faction(Id faction_id, const std::string& installation_id) const;
   double construction_points_per_day(const Colony& colony) const;
 
+  // Sensor / intel helpers (simple in-system detection).
+  // A ship is detected if it is within sensor range of any friendly ship or colony sensor in the same system.
+  bool is_ship_detected_by_faction(Id viewer_faction_id, Id target_ship_id) const;
+  std::vector<Id> detected_hostile_ships_in_system(Id viewer_faction_id, Id system_id) const;
+
   // Player design creation. Designs are stored in GameState::custom_designs and are saved.
   bool upsert_custom_design(ShipDesign design, std::string* error = nullptr);
 

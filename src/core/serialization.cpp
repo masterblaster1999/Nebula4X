@@ -78,6 +78,10 @@ Value order_to_json(const Order& order) {
         } else if constexpr (std::is_same_v<T, AttackShip>) {
           obj["type"] = std::string("attack_ship");
           obj["target_ship_id"] = static_cast<double>(o.target_ship_id);
+          if (o.has_last_known) {
+            obj["has_last_known"] = true;
+            obj["last_known_position_mkm"] = vec2_to_json(o.last_known_position_mkm);
+          }
         }
         return obj;
       },
@@ -105,6 +109,16 @@ Order order_from_json(const Value& v) {
   if (type == "attack_ship") {
     AttackShip a;
     a.target_ship_id = static_cast<Id>(o.at("target_ship_id").int_value());
+
+    // Back-compat: older saves won't have last-known tracking.
+    if (auto it = o.find("last_known_position_mkm"); it != o.end()) {
+      a.last_known_position_mkm = vec2_from_json(it->second);
+      a.has_last_known = true;
+    }
+    if (auto it = o.find("has_last_known"); it != o.end()) {
+      a.has_last_known = it->second.bool_value(a.has_last_known);
+    }
+
     return a;
   }
   throw std::runtime_error("Unknown order type: " + type);

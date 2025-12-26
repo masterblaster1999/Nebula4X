@@ -1,5 +1,5 @@
 {
-  "version": 3,
+  "version": 4,
   "components": {
     "engine_chem_mk1": {
       "name": "Chemical Engine Mk.I",
@@ -50,44 +50,74 @@
       "id": "freighter_alpha",
       "name": "Freighter Alpha",
       "role": "freighter",
-      "components": ["engine_chem_mk1", "cargo_mk1", "cargo_mk1"]
+      "components": [
+        "engine_chem_mk1",
+        "cargo_mk1",
+        "cargo_mk1"
+      ]
     },
     {
       "id": "surveyor_beta",
       "name": "Surveyor Beta",
       "role": "surveyor",
-      "components": ["engine_chem_mk1", "sensor_mk1"]
+      "components": [
+        "engine_chem_mk1",
+        "sensor_mk1"
+      ]
     },
     {
       "id": "escort_gamma",
       "name": "Escort Gamma",
       "role": "combatant",
-      "components": ["engine_chem_mk1", "sensor_mk1", "laser_mk1", "armor_mk1"]
+      "components": [
+        "engine_chem_mk1",
+        "sensor_mk1",
+        "laser_mk1",
+        "armor_mk1"
+      ]
     },
     {
       "id": "pirate_raider",
       "name": "Pirate Raider",
       "role": "combatant",
-      "components": ["engine_chem_mk1", "sensor_mk1", "laser_mk1", "laser_mk1", "armor_mk1"]
+      "components": [
+        "engine_chem_mk1",
+        "sensor_mk1",
+        "laser_mk1",
+        "laser_mk1",
+        "armor_mk1"
+      ]
     }
   ],
   "installations": {
     "automated_mine": {
       "name": "Automated Mine",
-      "produces": {"Duranium": 1.5, "Neutronium": 0.2},
+      "produces": {
+        "Duranium": 1.5,
+        "Neutronium": 0.2
+      },
       "construction_cost": 200,
-      "build_costs": {"Duranium": 300, "Neutronium": 30}
+      "build_costs": {
+        "Duranium": 300,
+        "Neutronium": 30
+      }
     },
     "construction_factory": {
       "name": "Construction Factory",
       "construction_points_per_day": 50,
       "construction_cost": 500,
-      "build_costs": {"Duranium": 1000, "Neutronium": 100}
+      "build_costs": {
+        "Duranium": 1000,
+        "Neutronium": 100
+      }
     },
     "shipyard": {
       "name": "Commercial Shipyard",
       "construction_cost": 1000,
-      "build_costs": {"Duranium": 5000, "Neutronium": 500},
+      "build_costs": {
+        "Duranium": 5000,
+        "Neutronium": 500
+      },
       "build_rate_tons_per_day": 50,
       "build_costs_per_ton": {
         "Duranium": 1.0,
@@ -98,7 +128,19 @@
       "name": "Research Lab",
       "research_points_per_day": 5,
       "construction_cost": 150,
-      "build_costs": {"Duranium": 500, "Neutronium": 50}
+      "build_costs": {
+        "Duranium": 500,
+        "Neutronium": 50
+      }
+    },
+    "sensor_station": {
+      "name": "Sensor Station",
+      "sensor_range_mkm": 600,
+      "construction_cost": 400,
+      "build_costs": {
+        "Duranium": 1200,
+        "Neutronium": 120
+      }
     }
   }
 }
