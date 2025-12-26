@@ -191,13 +191,67 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
     }
   }
 
-  // Interaction: left click sets a move-to-point order for the selected ship.
+  // Interaction: left click issues an order for the selected ship.
+  // - Click near a body: MoveToBody
+  // - Click near a jump point: TravelViaJump
+  // - Otherwise: MoveToPoint
+  // Holding Shift will *queue* the order; otherwise it replaces the current queue.
   if (hovered && selected_ship != kInvalidId && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-    const ImVec2 mp = ImGui::GetIO().MousePos;
-    // Avoid clicking in the menu bar area by requiring click inside our rect.
-    if (mp.x >= origin.x && mp.x <= origin.x + avail.x && mp.y >= origin.y && mp.y <= origin.y + avail.y) {
-      const Vec2 world = to_world(mp, center, scale, zoom, pan);
-      sim.issue_move_to_point(selected_ship, world);
+    // Don't issue orders when clicking UI controls (legend, etc.).
+    if (!ImGui::IsAnyItemHovered()) {
+      const ImVec2 mp = ImGui::GetIO().MousePos;
+
+      // Require click inside our rect.
+      if (mp.x >= origin.x && mp.x <= origin.x + avail.x && mp.y >= origin.y && mp.y <= origin.y + avail.y) {
+        const bool queue = ImGui::GetIO().KeyShift;
+        if (!queue) {
+          sim.clear_orders(selected_ship);
+        }
+
+        constexpr float kPickRadiusPx = 12.0f;
+        const float pick_d2 = kPickRadiusPx * kPickRadiusPx;
+
+        // Find the closest clickable target.
+        Id picked_jump = kInvalidId;
+        float best_jump_d2 = pick_d2;
+        for (Id jid : sys->jump_points) {
+          const auto* jp = find_ptr(s.jump_points, jid);
+          if (!jp) continue;
+          const ImVec2 p = to_screen(jp->position_mkm, center, scale, zoom, pan);
+          const float dx = mp.x - p.x;
+          const float dy = mp.y - p.y;
+          const float d2 = dx * dx + dy * dy;
+          if (d2 <= best_jump_d2) {
+            best_jump_d2 = d2;
+            picked_jump = jid;
+          }
+        }
+
+        Id picked_body = kInvalidId;
+        float best_body_d2 = pick_d2;
+        for (Id bid : sys->bodies) {
+          const auto* b = find_ptr(s.bodies, bid);
+          if (!b) continue;
+          const ImVec2 p = to_screen(b->position_mkm, center, scale, zoom, pan);
+          const float dx = mp.x - p.x;
+          const float dy = mp.y - p.y;
+          const float d2 = dx * dx + dy * dy;
+          if (d2 <= best_body_d2) {
+            best_body_d2 = d2;
+            picked_body = bid;
+          }
+        }
+
+        // Prefer the closest of (jump, body) if both were in range.
+        if (picked_jump != kInvalidId && best_jump_d2 <= best_body_d2) {
+          sim.issue_travel_via_jump(selected_ship, picked_jump);
+        } else if (picked_body != kInvalidId) {
+          sim.issue_move_to_body(selected_ship, picked_body);
+        } else {
+          const Vec2 world = to_world(mp, center, scale, zoom, pan);
+          sim.issue_move_to_point(selected_ship, world);
+        }
+      }
     }
   }
 
@@ -207,7 +261,9 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   ImGui::Text("Controls");
   ImGui::BulletText("Mouse wheel: zoom");
   ImGui::BulletText("Middle drag: pan");
-  ImGui::BulletText("Left click: move order");
+  ImGui::BulletText("Left click: issue order (Shift queues)");
+  ImGui::BulletText("Click body: move-to-body");
+  ImGui::BulletText("Click jump point: travel via jump");
   ImGui::BulletText("Jump points are purple rings");
   ImGui::Separator();
   ImGui::Checkbox("Fog of war", &ui.fog_of_war);

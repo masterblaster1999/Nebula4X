@@ -28,6 +28,15 @@ class Simulation {
   // Advance simulation by N days.
   void advance_days(int days);
 
+  // --- Order helpers ---
+  // Clear all queued orders for a ship.
+  // Returns false if the ship does not exist.
+  bool clear_orders(Id ship_id);
+
+  // Cancel only the current (front) order.
+  // Returns false if the ship does not exist or has no queued orders.
+  bool cancel_current_order(Id ship_id);
+
   // Gameplay actions
   bool issue_move_to_point(Id ship_id, Vec2 target_mkm);
   bool issue_move_to_body(Id ship_id, Id body_id);

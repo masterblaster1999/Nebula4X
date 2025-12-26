@@ -1,3 +1,4 @@
+#include <cmath>
 #include <iostream>
 
 #include "nebula4x/core/simulation.h"
@@ -238,18 +239,21 @@ int test_simulation() {
   const auto* sol_sys = nebula4x::find_ptr(sim5.state().systems, sol5);
   N4X_ASSERT(sol_sys);
 
-  // Find a Terran ship position.
+  // Find a Terran ship (we'll use it as an attacker for later intercept checks).
+  nebula4x::Id terran_ship5 = nebula4x::kInvalidId;
   nebula4x::Vec2 terran_pos5{0.0, 0.0};
   bool found_terran_ship5 = false;
   for (nebula4x::Id sid : sol_sys->ships) {
     const auto* sh = nebula4x::find_ptr(sim5.state().ships, sid);
     if (sh && sh->faction_id == terrans5) {
       terran_pos5 = sh->position_mkm;
+      terran_ship5 = sid;
       found_terran_ship5 = true;
       break;
     }
   }
   N4X_ASSERT(found_terran_ship5);
+  N4X_ASSERT(terran_ship5 != nebula4x::kInvalidId);
 
   // Spawn a pirate ship within detection range.
   const nebula4x::Id pirate_contact_id = nebula4x::allocate_id(sim5.state());
@@ -280,6 +284,24 @@ int test_simulation() {
 
   const auto recent = sim5.recent_contacts_in_system(terrans5, sol5, 30);
   N4X_ASSERT(!recent.empty());
+
+  // --- contact-based intercept / attack order sanity check ---
+  // A faction should be able to issue an AttackShip order against a target that is
+  // not currently detected, as long as it has a stored contact snapshot in the same system.
+  {
+    const auto& contact = sim5.state().factions[terrans5].ship_contacts.at(pirate_contact_id);
+    N4X_ASSERT(!sim5.is_ship_detected_by_faction(terrans5, pirate_contact_id));
+    N4X_ASSERT(sim5.issue_attack_ship(terran_ship5, pirate_contact_id));
+
+    const auto& q = sim5.state().ship_orders.at(terran_ship5).queue;
+    N4X_ASSERT(!q.empty());
+    N4X_ASSERT(std::holds_alternative<nebula4x::AttackShip>(q.back()));
+    const auto& ord = std::get<nebula4x::AttackShip>(q.back());
+    N4X_ASSERT(ord.target_ship_id == pirate_contact_id);
+    N4X_ASSERT(ord.has_last_known);
+    N4X_ASSERT(std::abs(ord.last_known_position_mkm.x - contact.last_seen_position_mkm.x) < 1e-6);
+    N4X_ASSERT(std::abs(ord.last_known_position_mkm.y - contact.last_seen_position_mkm.y) < 1e-6);
+  }
 
 
   // --- exploration discovery sanity check ---

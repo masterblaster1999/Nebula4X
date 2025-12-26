@@ -4,17 +4,22 @@ This patch pack contains only the files that changed.
 
 ## Changes in this patch pack
 
-- **Exploration: discovered star systems**
-  - Factions now track discovered systems via `Faction::discovered_systems`.
-  - Discovery is seeded from starting ships/colonies and updated when ships transit jump points.
-  - Saves now persist discovered systems; save version bumped to **6**.
-- **Jump travel quality-of-life + bugfix**
-  - `TravelViaJump` now transits even if the ship is already sitting on the jump point (including the edge case of 0 speed).
-  - Destination system is automatically discovered for the traveling ship's faction.
-- **UI: consistent view-faction for FoW/exploration**
-  - Added `UIState::viewer_faction_id` (the Research tab selection becomes the default viewer faction).
-  - Left sidebar + system map will hide undiscovered systems when Fog-of-war is enabled.
-  - Selecting a ship still overrides the viewer faction for detection (as before).
+- **CI: GitHub Actions build + test**
+  - Added a cross-platform CI workflow that configures, builds, and runs the **core + tests** (UI disabled) on **Windows, Linux, and macOS**.
+
+- **Orders: quality-of-life helpers**
+  - Added `Simulation::cancel_current_order()` and `Simulation::clear_orders()`.
+  - The Ship tab now exposes **Cancel current** and **Clear orders** buttons.
+  - The System map click interaction now defaults to **replace** the current order queue; hold **Shift** to **queue** additional orders.
+
+- **System map: click-to-command improvements**
+  - Clicking **near a body** issues `MoveToBody`.
+  - Clicking **near a jump point** issues `TravelViaJump`.
+  - Clicking empty space still issues `MoveToPoint`.
+
+- **Contacts / intel: intercept using last-known**
+  - You can now issue an `AttackShip` order even when a hostile is **not currently detected**, as long as the viewer faction has a stored **contact snapshot** in the same system.
+  - The Contacts tab button now shows **Intercept** when the target is not currently detected.
 
 ## Apply locally
 

@@ -353,6 +353,20 @@ void Simulation::advance_days(int days) {
   for (int i = 0; i < days; ++i) tick_one_day();
 }
 
+bool Simulation::clear_orders(Id ship_id) {
+  if (!find_ptr(state_.ships, ship_id)) return false;
+  state_.ship_orders[ship_id].queue.clear();
+  return true;
+}
+
+bool Simulation::cancel_current_order(Id ship_id) {
+  if (!find_ptr(state_.ships, ship_id)) return false;
+  auto it = state_.ship_orders.find(ship_id);
+  if (it == state_.ship_orders.end() || it->second.queue.empty()) return false;
+  it->second.queue.erase(it->second.queue.begin());
+  return true;
+}
+
 bool Simulation::issue_move_to_point(Id ship_id, Vec2 target_mkm) {
   auto* ship = find_ptr(state_.ships, ship_id);
   if (!ship) return false;
@@ -387,13 +401,31 @@ bool Simulation::issue_attack_ship(Id attacker_ship_id, Id target_ship_id) {
   if (!target) return false;
   if (target->faction_id == attacker->faction_id) return false;
 
-  // Simple sensor gating: you can only issue an attack order if the target is currently detected.
-  if (!is_ship_detected_by_faction(attacker->faction_id, target_ship_id)) return false;
+  // Simple sensor gating / intel-based targeting:
+  // - If the target is currently detected, record its true current position.
+  // - Otherwise, allow issuing an intercept if we have a recent contact snapshot.
+  //
+  // NOTE: Detection is currently in-system, and we don't have cross-system pathing.
+  // We still allow the order to be issued, but it will be dropped during ticking
+  // if the target is not in the same system.
+  const bool detected = is_ship_detected_by_faction(attacker->faction_id, target_ship_id);
 
   AttackShip ord;
   ord.target_ship_id = target_ship_id;
-  ord.has_last_known = true;
-  ord.last_known_position_mkm = target->position_mkm;
+
+  if (detected) {
+    ord.has_last_known = true;
+    ord.last_known_position_mkm = target->position_mkm;
+  } else {
+    const auto* fac = find_ptr(state_.factions, attacker->faction_id);
+    if (!fac) return false;
+    const auto it = fac->ship_contacts.find(target_ship_id);
+    if (it == fac->ship_contacts.end()) return false;
+    // Must be a contact in the same system as the attacker (no cross-system pathing yet).
+    if (it->second.system_id != attacker->system_id) return false;
+    ord.has_last_known = true;
+    ord.last_known_position_mkm = it->second.last_seen_position_mkm;
+  }
 
   auto& orders = state_.ship_orders[attacker_ship_id];
   orders.queue.push_back(ord);

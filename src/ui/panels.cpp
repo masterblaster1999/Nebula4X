@@ -316,6 +316,15 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id selected_ship, Id& sele
           }
         }
 
+        ImGui::Spacing();
+        if (ImGui::SmallButton("Cancel current")) {
+          sim.cancel_current_order(selected_ship);
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Clear orders")) {
+          sim.clear_orders(selected_ship);
+        }
+
         ImGui::Separator();
         ImGui::Text("Quick orders");
         if (ImGui::Button("Move to (0,0)")) {
@@ -983,14 +992,10 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id selected_ship, Id& sele
                   }
 
                   ImGui::SameLine();
-                  if (!detected_now) {
-                    ImGui::BeginDisabled();
-                  }
-                  if (ImGui::SmallButton(("Attack##" + std::to_string(r.c.ship_id)).c_str())) {
+                  const char* btn = detected_now ? "Attack" : "Intercept";
+                  if (ImGui::SmallButton((std::string(btn) + "##" + std::to_string(r.c.ship_id)).c_str())) {
+                    // If not currently detected, this will issue an intercept based on the stored contact snapshot.
                     sim.issue_attack_ship(selected_ship, r.c.ship_id);
-                  }
-                  if (!detected_now) {
-                    ImGui::EndDisabled();
                   }
                 }
               }
