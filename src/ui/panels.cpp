@@ -46,6 +46,15 @@ std::vector<std::string> sorted_all_design_ids(const Simulation& sim) {
   return ids;
 }
 
+std::vector<std::string> sorted_buildable_design_ids(const Simulation& sim, Id faction_id) {
+  auto ids = sorted_all_design_ids(sim);
+  ids.erase(std::remove_if(ids.begin(), ids.end(), [&](const std::string& id) {
+              return !sim.is_design_buildable_for_faction(faction_id, id);
+            }),
+            ids.end());
+  return ids;
+}
+
 std::vector<std::pair<Id, std::string>> sorted_factions(const GameState& s) {
   std::vector<std::pair<Id, std::string>> out;
   out.reserve(s.factions.size());
@@ -375,6 +384,115 @@ void draw_right_sidebar(Simulation& sim, Id selected_ship, Id& selected_colony) 
         }
 
         ImGui::Separator();
+        ImGui::Text("Construction");
+        const double cp_per_day = sim.construction_points_per_day(*colony);
+        ImGui::Text("Construction Points/day: %.1f", cp_per_day);
+
+        if (colony->construction_queue.empty()) {
+          ImGui::TextDisabled("Queue empty");
+        } else {
+          for (const auto& ord : colony->construction_queue) {
+            const auto it = sim.content().installations.find(ord.installation_id);
+            const InstallationDef* def = (it == sim.content().installations.end()) ? nullptr : &it->second;
+            const std::string nm = def ? def->name : ord.installation_id;
+
+            ImGui::BulletText("%s x%d", nm.c_str(), ord.quantity_remaining);
+
+            // Status line / progress bar
+            if (ord.minerals_paid && def && def->construction_cost > 0.0) {
+              const double done = def->construction_cost - ord.cp_remaining;
+              const float frac = static_cast<float>(std::clamp(done / def->construction_cost, 0.0, 1.0));
+              ImGui::Indent();
+              ImGui::ProgressBar(frac, ImVec2(-1, 0),
+                                 (std::to_string(static_cast<int>(done)) + " / " +
+                                  std::to_string(static_cast<int>(def->construction_cost)) + " CP")
+                                     .c_str());
+              ImGui::Unindent();
+            } else if (!ord.minerals_paid && def && !def->build_costs.empty()) {
+              // Hint if we can't currently start due to minerals.
+              std::string missing;
+              for (const auto& [mineral, cost] : def->build_costs) {
+                if (cost <= 0.0) continue;
+                const auto it2 = colony->minerals.find(mineral);
+                const double have = (it2 == colony->minerals.end()) ? 0.0 : it2->second;
+                if (have + 1e-9 < cost) {
+                  missing = mineral;
+                  break;
+                }
+              }
+              if (!missing.empty()) {
+                ImGui::Indent();
+                ImGui::TextDisabled("Status: STALLED (need %s)", missing.c_str());
+                ImGui::Unindent();
+              }
+            }
+          }
+        }
+
+        // Enqueue new construction
+        const auto* fac_for_colony = find_ptr(s.factions, colony->faction_id);
+        static int inst_sel = 0;
+        static int inst_qty = 1;
+        static std::string inst_status;
+
+        std::vector<std::string> buildable_installations;
+        if (fac_for_colony) {
+          for (const auto& id : fac_for_colony->unlocked_installations) {
+            if (!sim.is_installation_buildable_for_faction(fac_for_colony->id, id)) continue;
+            buildable_installations.push_back(id);
+          }
+        } else {
+          for (const auto& [id, _] : sim.content().installations) buildable_installations.push_back(id);
+        }
+        std::sort(buildable_installations.begin(), buildable_installations.end());
+
+        if (buildable_installations.empty()) {
+          ImGui::TextDisabled("No buildable installations unlocked");
+        } else {
+          inst_sel = std::clamp(inst_sel, 0, static_cast<int>(buildable_installations.size()) - 1);
+
+          // Build labels
+          std::vector<std::string> label_storage;
+          std::vector<const char*> labels;
+          label_storage.reserve(buildable_installations.size());
+          labels.reserve(buildable_installations.size());
+
+          for (const auto& id : buildable_installations) {
+            const auto it = sim.content().installations.find(id);
+            const std::string nm = (it == sim.content().installations.end()) ? id : it->second.name;
+            label_storage.push_back(nm + "##" + id);
+          }
+          for (const auto& s2 : label_storage) labels.push_back(s2.c_str());
+
+          ImGui::Combo("Installation", &inst_sel, labels.data(), static_cast<int>(labels.size()));
+          ImGui::InputInt("Qty", &inst_qty);
+          inst_qty = std::clamp(inst_qty, 1, 100);
+
+          const std::string chosen_id = buildable_installations[inst_sel];
+          if (const auto it = sim.content().installations.find(chosen_id); it != sim.content().installations.end()) {
+            const InstallationDef& def = it->second;
+            ImGui::Text("Cost: %.0f CP", def.construction_cost);
+            if (!def.build_costs.empty()) {
+              ImGui::Text("Mineral costs:");
+              for (const auto& [mineral, cost] : def.build_costs) {
+                ImGui::BulletText("%s: %.0f", mineral.c_str(), cost);
+              }
+            }
+          }
+
+          if (ImGui::Button("Enqueue construction")) {
+            if (sim.enqueue_installation_build(colony->id, chosen_id, inst_qty)) {
+              inst_status = "Enqueued: " + chosen_id + " x" + std::to_string(inst_qty);
+            } else {
+              inst_status = "Failed to enqueue (locked or invalid)";
+            }
+          }
+          if (!inst_status.empty()) {
+            ImGui::TextDisabled("%s", inst_status.c_str());
+          }
+        }
+
+        ImGui::Separator();
         ImGui::Text("Shipyard");
 
         const InstallationDef* shipyard_def = nullptr;
@@ -442,7 +560,7 @@ void draw_right_sidebar(Simulation& sim, Id selected_ship, Id& selected_colony) 
           }
 
           static int selected_design_idx = 0;
-          const auto ids = sorted_all_design_ids(sim);
+          const auto ids = sorted_buildable_design_ids(sim, colony->faction_id);
           if (!ids.empty()) {
             selected_design_idx = std::clamp(selected_design_idx, 0, static_cast<int>(ids.size()) - 1);
             std::vector<const char*> labels;

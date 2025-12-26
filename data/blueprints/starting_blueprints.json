@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "components": {
     "engine_chem_mk1": {
       "name": "Chemical Engine Mk.I",
@@ -74,10 +74,20 @@
   "installations": {
     "automated_mine": {
       "name": "Automated Mine",
-      "produces": {"Duranium": 1.5, "Neutronium": 0.2}
+      "produces": {"Duranium": 1.5, "Neutronium": 0.2},
+      "construction_cost": 200,
+      "build_costs": {"Duranium": 300, "Neutronium": 30}
+    },
+    "construction_factory": {
+      "name": "Construction Factory",
+      "construction_points_per_day": 50,
+      "construction_cost": 500,
+      "build_costs": {"Duranium": 1000, "Neutronium": 100}
     },
     "shipyard": {
       "name": "Commercial Shipyard",
+      "construction_cost": 1000,
+      "build_costs": {"Duranium": 5000, "Neutronium": 500},
       "build_rate_tons_per_day": 50,
       "build_costs_per_ton": {
         "Duranium": 1.0,
@@ -86,7 +96,9 @@
     },
     "research_lab": {
       "name": "Research Lab",
-      "research_points_per_day": 5
+      "research_points_per_day": 5,
+      "construction_cost": 150,
+      "build_costs": {"Duranium": 500, "Neutronium": 50}
     }
   }
 }

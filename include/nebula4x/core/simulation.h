@@ -36,6 +36,16 @@ class Simulation {
 
   bool enqueue_build(Id colony_id, const std::string& design_id);
 
+  // Build installations at a colony using construction points + minerals.
+  // Returns false if the colony/installation is invalid, quantity <= 0, or the
+  // installation is not unlocked for that colony's faction.
+  bool enqueue_installation_build(Id colony_id, const std::string& installation_id, int quantity = 1);
+
+  // UI helpers (pure queries)
+  bool is_design_buildable_for_faction(Id faction_id, const std::string& design_id) const;
+  bool is_installation_buildable_for_faction(Id faction_id, const std::string& installation_id) const;
+  double construction_points_per_day(const Colony& colony) const;
+
   // Player design creation. Designs are stored in GameState::custom_designs and are saved.
   bool upsert_custom_design(ShipDesign design, std::string* error = nullptr);
 
@@ -48,6 +58,7 @@ class Simulation {
   void tick_colonies();
   void tick_research();
   void tick_shipyards();
+  void tick_construction();
   void tick_ships();
   void tick_combat();
 

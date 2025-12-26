@@ -6,7 +6,7 @@ namespace nebula4x {
 
 GameState make_sol_scenario() {
   GameState s;
-  s.save_version = 2;
+  s.save_version = 3;
   s.date = Date::from_ymd(2200, 1, 1);
 
   // --- Factions ---
@@ -117,6 +117,7 @@ GameState make_sol_scenario() {
     };
     c.installations = {
         {"automated_mine", 50},
+        {"construction_factory", 5},
         {"shipyard", 1},
         {"research_lab", 20},
     };

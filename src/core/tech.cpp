@@ -90,6 +90,20 @@ ContentDB load_content_db_from_file(const std::string& path) {
         }
       }
 
+      if (const auto* cp_v = find_key(vo, "construction_points_per_day")) {
+        def.construction_points_per_day = cp_v->number_value(0.0);
+      }
+
+      if (const auto* cc_v = find_key(vo, "construction_cost")) {
+        def.construction_cost = cc_v->number_value(0.0);
+      }
+
+      if (const auto* bc_v = find_key(vo, "build_costs")) {
+        for (const auto& [mineral, amount_v] : bc_v->object()) {
+          def.build_costs[mineral] = amount_v.number_value(0.0);
+        }
+      }
+
       if (const auto* rate_v = find_key(vo, "build_rate_tons_per_day")) {
         def.build_rate_tons_per_day = rate_v->number_value(0.0);
       }

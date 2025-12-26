@@ -78,5 +78,41 @@ int test_simulation() {
   const double after_build = sim2.state().colonies.begin()->second.minerals["Duranium"];
   N4X_ASSERT(after_build < before_build);
 
+  // --- colony construction queue sanity check ---
+  // Enqueuing an installation build should consume minerals and increase
+  // installation count once enough construction points are available.
+  nebula4x::ContentDB content3;
+
+  nebula4x::InstallationDef mine3;
+  mine3.id = "automated_mine";
+  mine3.name = "Automated Mine";
+  mine3.produces_per_day = {{"Duranium", 0.0}}; // avoid production influencing the check
+  mine3.construction_cost = 50.0;
+  mine3.build_costs = {{"Duranium", 100.0}};
+  content3.installations[mine3.id] = mine3;
+
+  nebula4x::InstallationDef yard3;
+  yard3.id = "shipyard";
+  yard3.name = "Shipyard";
+  yard3.build_rate_tons_per_day = 0.0;
+  content3.installations[yard3.id] = yard3;
+
+  // Keep designs minimal; none are needed for this test.
+  nebula4x::Simulation sim3(std::move(content3), nebula4x::SimConfig{});
+  const auto colony3_id = sim3.state().colonies.begin()->first;
+  auto& col3 = sim3.state().colonies.begin()->second;
+
+  const int mines_before = col3.installations["automated_mine"];
+  const double dur_before = col3.minerals["Duranium"];
+
+  N4X_ASSERT(sim3.enqueue_installation_build(colony3_id, "automated_mine", 1));
+  sim3.advance_days(1);
+
+  const int mines_after = sim3.state().colonies.begin()->second.installations["automated_mine"];
+  const double dur_after = sim3.state().colonies.begin()->second.minerals["Duranium"];
+
+  N4X_ASSERT(mines_after == mines_before + 1);
+  N4X_ASSERT(dur_after < dur_before);
+
   return 0;
 }

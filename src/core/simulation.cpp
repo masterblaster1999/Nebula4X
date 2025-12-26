@@ -23,6 +23,10 @@ void push_unique(std::vector<T>& v, const T& x) {
   if (std::find(v.begin(), v.end(), x) == v.end()) v.push_back(x);
 }
 
+bool vec_contains(const std::vector<std::string>& v, const std::string& x) {
+  return std::find(v.begin(), v.end(), x) != v.end();
+}
+
 bool faction_has_tech(const Faction& f, const std::string& tech_id) {
   return std::find(f.known_techs.begin(), f.known_techs.end(), tech_id) != f.known_techs.end();
 }
@@ -37,6 +41,45 @@ const ShipDesign* Simulation::find_design(const std::string& design_id) const {
   if (auto it = state_.custom_designs.find(design_id); it != state_.custom_designs.end()) return &it->second;
   if (auto it = content_.designs.find(design_id); it != content_.designs.end()) return &it->second;
   return nullptr;
+}
+
+bool Simulation::is_design_buildable_for_faction(Id faction_id, const std::string& design_id) const {
+  const auto* d = find_design(design_id);
+  if (!d) return false;
+
+  const auto* fac = find_ptr(state_.factions, faction_id);
+  if (!fac) return true; // Debug-friendly fallback.
+
+  for (const auto& cid : d->components) {
+    if (!vec_contains(fac->unlocked_components, cid)) return false;
+  }
+  return true;
+}
+
+bool Simulation::is_installation_buildable_for_faction(Id faction_id, const std::string& installation_id) const {
+  if (content_.installations.find(installation_id) == content_.installations.end()) return false;
+
+  const auto* fac = find_ptr(state_.factions, faction_id);
+  if (!fac) return true; // Debug-friendly fallback.
+
+  return vec_contains(fac->unlocked_installations, installation_id);
+}
+
+double Simulation::construction_points_per_day(const Colony& colony) const {
+  // Baseline: population drives a tiny amount of "free" construction.
+  // This keeps the early prototype playable even before dedicated industry is modeled.
+  double total = std::max(0.0, colony.population_millions * 0.01);
+
+  for (const auto& [inst_id, count] : colony.installations) {
+    if (count <= 0) continue;
+    const auto it = content_.installations.find(inst_id);
+    if (it == content_.installations.end()) continue;
+    const double per_day = it->second.construction_points_per_day;
+    if (per_day <= 0.0) continue;
+    total += per_day * static_cast<double>(count);
+  }
+
+  return total;
 }
 
 void Simulation::apply_design_stats_to_ship(Ship& ship) {
@@ -222,10 +265,25 @@ bool Simulation::enqueue_build(Id colony_id, const std::string& design_id) {
   if (!colony) return false;
   const auto* d = find_design(design_id);
   if (!d) return false;
+  if (!is_design_buildable_for_faction(colony->faction_id, design_id)) return false;
   BuildOrder bo;
   bo.design_id = design_id;
   bo.tons_remaining = std::max(1.0, d->mass_tons);
   colony->shipyard_queue.push_back(bo);
+  return true;
+}
+
+bool Simulation::enqueue_installation_build(Id colony_id, const std::string& installation_id, int quantity) {
+  auto* colony = find_ptr(state_.colonies, colony_id);
+  if (!colony) return false;
+  if (quantity <= 0) return false;
+  if (content_.installations.find(installation_id) == content_.installations.end()) return false;
+  if (!is_installation_buildable_for_faction(colony->faction_id, installation_id)) return false;
+
+  InstallationBuildOrder o;
+  o.installation_id = installation_id;
+  o.quantity_remaining = quantity;
+  colony->construction_queue.push_back(o);
   return true;
 }
 
@@ -248,6 +306,7 @@ void Simulation::tick_one_day() {
   tick_colonies();
   tick_research();
   tick_shipyards();
+  tick_construction();
   tick_ships();
   tick_combat();
 }
@@ -440,6 +499,97 @@ void Simulation::tick_shipyards() {
       }
 
       colony.shipyard_queue.erase(colony.shipyard_queue.begin());
+    }
+  }
+}
+
+void Simulation::tick_construction() {
+  for (auto& [_, colony] : state_.colonies) {
+    // Cache CP/day at the start of the tick so newly completed factories don't
+    // immediately grant extra CP within the same day.
+    double cp_available = construction_points_per_day(colony);
+    if (cp_available <= 1e-9) continue;
+
+    auto can_pay_minerals = [&](const InstallationDef& def) {
+      for (const auto& [mineral, cost] : def.build_costs) {
+        if (cost <= 0.0) continue;
+        const auto it = colony.minerals.find(mineral);
+        const double have = (it == colony.minerals.end()) ? 0.0 : it->second;
+        if (have + 1e-9 < cost) return false;
+      }
+      return true;
+    };
+
+    auto pay_minerals = [&](const InstallationDef& def) {
+      for (const auto& [mineral, cost] : def.build_costs) {
+        if (cost <= 0.0) continue;
+        colony.minerals[mineral] = std::max(0.0, colony.minerals[mineral] - cost);
+      }
+    };
+
+    while (cp_available > 1e-9 && !colony.construction_queue.empty()) {
+      auto& ord = colony.construction_queue.front();
+
+      if (ord.quantity_remaining <= 0) {
+        colony.construction_queue.erase(colony.construction_queue.begin());
+        continue;
+      }
+
+      auto it_def = content_.installations.find(ord.installation_id);
+      if (it_def == content_.installations.end()) {
+        nebula4x::log::warn("Unknown installation in construction queue: " + ord.installation_id);
+        colony.construction_queue.erase(colony.construction_queue.begin());
+        continue;
+      }
+      const InstallationDef& def = it_def->second;
+
+      // If we haven't started the current unit yet, attempt to pay minerals.
+      if (!ord.minerals_paid) {
+        if (!can_pay_minerals(def)) {
+          // Stalled due to missing minerals.
+          break;
+        }
+        pay_minerals(def);
+        ord.minerals_paid = true;
+        ord.cp_remaining = std::max(0.0, def.construction_cost);
+
+        // Instant-build installations (cost 0 CP) complete immediately.
+        if (ord.cp_remaining <= 1e-9) {
+          colony.installations[def.id] += 1;
+          ord.quantity_remaining -= 1;
+          ord.minerals_paid = false;
+          ord.cp_remaining = 0.0;
+
+          nebula4x::log::info("Constructed " + def.name + " at " + colony.name);
+
+          if (ord.quantity_remaining <= 0) {
+            colony.construction_queue.erase(colony.construction_queue.begin());
+          }
+          continue;
+        }
+      }
+
+      // Spend construction points.
+      const double spend = std::min(cp_available, ord.cp_remaining);
+      ord.cp_remaining -= spend;
+      cp_available -= spend;
+
+      if (ord.cp_remaining <= 1e-9) {
+        colony.installations[def.id] += 1;
+        ord.quantity_remaining -= 1;
+        ord.minerals_paid = false;
+        ord.cp_remaining = 0.0;
+
+        nebula4x::log::info("Constructed " + def.name + " at " + colony.name);
+
+        if (ord.quantity_remaining <= 0) {
+          colony.construction_queue.erase(colony.construction_queue.begin());
+        }
+        continue;
+      }
+
+      // Not complete; no more CP remains (spend used the remaining CP).
+      break;
     }
   }
 }

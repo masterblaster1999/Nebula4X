@@ -250,6 +250,17 @@ std::string serialize_game_to_json(const GameState& s) {
     }
     o["shipyard_queue"] = q;
 
+    Array cq;
+    for (const auto& ord : c.construction_queue) {
+      Object qo;
+      qo["installation_id"] = ord.installation_id;
+      qo["quantity_remaining"] = static_cast<double>(ord.quantity_remaining);
+      qo["minerals_paid"] = ord.minerals_paid;
+      qo["cp_remaining"] = ord.cp_remaining;
+      cq.push_back(qo);
+    }
+    o["construction_queue"] = cq;
+
     colonies.push_back(o);
   }
   root["colonies"] = colonies;
@@ -398,6 +409,19 @@ GameState deserialize_game_from_json(const std::string& json_text) {
         bo.design_id = qo.at("design_id").string_value();
         bo.tons_remaining = qo.at("tons_remaining").number_value();
         c.shipyard_queue.push_back(bo);
+      }
+    }
+
+    // construction_queue is optional (older saves won't have it).
+    if (auto itq = o.find("construction_queue"); itq != o.end()) {
+      for (const auto& qv : itq->second.array()) {
+        const auto& qo = qv.object();
+        InstallationBuildOrder ord;
+        ord.installation_id = qo.at("installation_id").string_value();
+        ord.quantity_remaining = static_cast<int>(qo.at("quantity_remaining").int_value(0));
+        if (auto it = qo.find("minerals_paid"); it != qo.end()) ord.minerals_paid = it->second.bool_value(false);
+        if (auto it = qo.find("cp_remaining"); it != qo.end()) ord.cp_remaining = it->second.number_value(0.0);
+        c.construction_queue.push_back(ord);
       }
     }
 

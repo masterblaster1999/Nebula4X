@@ -74,6 +74,18 @@ struct InstallationDef {
   // Simple mineral production.
   std::unordered_map<std::string, double> produces_per_day;
 
+  // Colony construction points produced per day (used for building installations).
+  // If 0, this installation does not contribute.
+  double construction_points_per_day{0.0};
+
+  // Construction points required to build one unit of this installation.
+  // If 0, construction completes instantly after paying mineral build costs.
+  double construction_cost{0.0};
+
+  // Mineral costs paid up-front to start building one unit of this installation.
+  // If empty, no minerals are required.
+  std::unordered_map<std::string, double> build_costs;
+
   // Only used by shipyard.
   double build_rate_tons_per_day{0.0};
 
@@ -110,6 +122,16 @@ struct BuildOrder {
   double tons_remaining{0.0};
 };
 
+// Installation construction order for a colony.
+struct InstallationBuildOrder {
+  std::string installation_id;
+  int quantity_remaining{0};
+
+  // Progress state for the current unit being built.
+  bool minerals_paid{false};
+  double cp_remaining{0.0};
+};
+
 struct Colony {
   Id id{kInvalidId};
   std::string name;
@@ -126,6 +148,9 @@ struct Colony {
 
   // Shipyard queue (very simplified)
   std::vector<BuildOrder> shipyard_queue;
+
+  // Colony construction queue (for building installations)
+  std::vector<InstallationBuildOrder> construction_queue;
 };
 
 struct Faction {
