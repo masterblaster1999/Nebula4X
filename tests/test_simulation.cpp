@@ -227,6 +227,101 @@ int test_simulation() {
     N4X_ASSERT(ship_cargo_after < 1.0); // should have unloaded most/all
   }
 
+  // --- cargo waiting + docking tolerance sanity check ---
+  // A ship that is "in orbit" should be able to keep transferring cargo even though
+  // the planet position updates day-to-day (i.e. no requirement to match a body's
+  // exact coordinates every tick).
+  {
+    nebula4x::ContentDB content;
+
+    // Scenario installs 5 automated mines on Mars. Produce Neutronium so we can
+    // validate a multi-day load order.
+    nebula4x::InstallationDef mine;
+    mine.id = "automated_mine";
+    mine.name = "Automated Mine";
+    mine.produces_per_day = {{"Neutronium", 1.0}}; // 5 mines -> 5 / day
+    content.installations[mine.id] = mine;
+
+    nebula4x::InstallationDef yard;
+    yard.id = "shipyard";
+    yard.name = "Shipyard";
+    yard.build_rate_tons_per_day = 0.0;
+    content.installations[yard.id] = yard;
+
+    // Minimal designs to satisfy scenario ships.
+    auto make_min_design = [](const std::string& id) {
+      nebula4x::ShipDesign d;
+      d.id = id;
+      d.name = id;
+      d.max_hp = 10.0;
+      d.speed_km_s = 0.0;
+      d.sensor_range_mkm = 0.0;
+      return d;
+    };
+
+    nebula4x::ShipDesign freighter;
+    freighter.id = "freighter_alpha";
+    freighter.name = "Freighter Alpha";
+    freighter.max_hp = 10.0;
+    freighter.cargo_tons = 1000.0;
+    freighter.speed_km_s = 0.0; // intentionally 0: must rely on docking tolerance
+    content.designs[freighter.id] = freighter;
+
+    content.designs["surveyor_beta"] = make_min_design("surveyor_beta");
+    content.designs["escort_gamma"] = make_min_design("escort_gamma");
+    content.designs["pirate_raider"] = make_min_design("pirate_raider");
+
+    nebula4x::Simulation sim(std::move(content), nebula4x::SimConfig{});
+
+    const auto mars_id = find_colony_id(sim.state(), "Mars Outpost");
+    N4X_ASSERT(mars_id != nebula4x::kInvalidId);
+
+    const auto freighter_id = find_ship_id(sim.state(), "Freighter Alpha");
+    N4X_ASSERT(freighter_id != nebula4x::kInvalidId);
+
+    // Start "docked" at Mars so we can test multi-day transfers.
+    auto& st = sim.state();
+    auto& mars = st.colonies[mars_id];
+    mars.minerals["Neutronium"] = 0.0;
+
+    auto* sh = nebula4x::find_ptr(st.ships, freighter_id);
+    N4X_ASSERT(sh);
+    sh->cargo.clear();
+
+    const auto* body = nebula4x::find_ptr(st.bodies, mars.body_id);
+    N4X_ASSERT(body);
+    sh->position_mkm = body->position_mkm;
+
+    N4X_ASSERT(sim.issue_load_mineral(freighter_id, mars_id, "Neutronium", 10.0));
+
+    sim.advance_days(1);
+
+    sh = nebula4x::find_ptr(sim.state().ships, freighter_id);
+    N4X_ASSERT(sh);
+    const double cargo_day1 = sh->cargo.count("Neutronium") ? sh->cargo.at("Neutronium") : 0.0;
+    N4X_ASSERT(std::fabs(cargo_day1 - 5.0) < 1e-6);
+
+    // Order should still be present with 5 tons remaining.
+    auto oit = sim.state().ship_orders.find(freighter_id);
+    N4X_ASSERT(oit != sim.state().ship_orders.end());
+    N4X_ASSERT(!oit->second.queue.empty());
+    N4X_ASSERT(std::holds_alternative<nebula4x::LoadMineral>(oit->second.queue.front()));
+    const auto& ord = std::get<nebula4x::LoadMineral>(oit->second.queue.front());
+    N4X_ASSERT(std::fabs(ord.tons - 5.0) < 1e-6);
+
+    sim.advance_days(1);
+
+    sh = nebula4x::find_ptr(sim.state().ships, freighter_id);
+    N4X_ASSERT(sh);
+    const double cargo_day2 = sh->cargo.count("Neutronium") ? sh->cargo.at("Neutronium") : 0.0;
+    N4X_ASSERT(std::fabs(cargo_day2 - 10.0) < 1e-6);
+
+    // Order should be complete.
+    oit = sim.state().ship_orders.find(freighter_id);
+    N4X_ASSERT(oit != sim.state().ship_orders.end());
+    N4X_ASSERT(oit->second.queue.empty());
+  }
+
   // --- sensor detection sanity check ---
   {
     nebula4x::ContentDB content;

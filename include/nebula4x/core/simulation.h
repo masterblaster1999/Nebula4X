@@ -8,6 +8,16 @@ namespace nebula4x {
 
 struct SimConfig {
   double seconds_per_day{86400.0};
+
+  // When interacting with moving orbital bodies (colonies), ships need a tolerance
+  // for being considered "in orbit / docked".
+  //
+  // If you set this too low, slower ships may endlessly chase a planet's updated
+  // position and never reach an exact point for cargo transfers.
+  double docking_range_mkm{3.0};
+
+  // Generic "arrived" epsilon used for fixed targets (move-to-point).
+  double arrival_epsilon_mkm{1e-6};
 };
 
 class Simulation {

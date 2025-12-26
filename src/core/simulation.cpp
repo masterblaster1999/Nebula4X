@@ -970,6 +970,9 @@ void Simulation::tick_ships() {
     std::string cargo_mineral;
     double cargo_tons = 0.0;
 
+    LoadMineral* load_ord = nullptr;
+    UnloadMineral* unload_ord = nullptr;
+
     if (std::holds_alternative<MoveToPoint>(q.front())) {
       target = std::get<MoveToPoint>(q.front()).target_mkm;
     } else if (std::holds_alternative<MoveToBody>(q.front())) {
@@ -1023,9 +1026,10 @@ void Simulation::tick_ships() {
         desired_range = 0.0;
       }
     } else if (std::holds_alternative<LoadMineral>(q.front())) {
-      const auto& ord = std::get<LoadMineral>(q.front());
+      auto& ord = std::get<LoadMineral>(q.front());
       is_cargo = true;
       cargo_is_load = true;
+      load_ord = &ord;
       cargo_colony_id = ord.colony_id;
       cargo_mineral = ord.mineral;
       cargo_tons = ord.tons;
@@ -1042,9 +1046,10 @@ void Simulation::tick_ships() {
       }
       target = body->position_mkm;
     } else if (std::holds_alternative<UnloadMineral>(q.front())) {
-      const auto& ord = std::get<UnloadMineral>(q.front());
+      auto& ord = std::get<UnloadMineral>(q.front());
       is_cargo = true;
       cargo_is_load = false;
+      unload_ord = &ord;
       cargo_colony_id = ord.colony_id;
       cargo_mineral = ord.mineral;
       cargo_tons = ord.tons;
@@ -1067,11 +1072,15 @@ void Simulation::tick_ships() {
 
     const bool is_attack = std::holds_alternative<AttackShip>(q.front());
     const bool is_jump = std::holds_alternative<TravelViaJump>(q.front());
+    const bool is_body = std::holds_alternative<MoveToBody>(q.front());
 
-    auto do_cargo_transfer = [&]() {
+    const double arrive_eps = std::max(0.0, cfg_.arrival_epsilon_mkm);
+    const double dock_range = std::max(arrive_eps, cfg_.docking_range_mkm);
+
+    auto do_cargo_transfer = [&]() -> double {
       auto* colony = find_ptr(state_.colonies, cargo_colony_id);
-      if (!colony) return;
-      if (colony->faction_id != ship.faction_id) return;
+      if (!colony) return 0.0;
+      if (colony->faction_id != ship.faction_id) return 0.0;
 
       // Capacity only matters for load.
       const auto* d = find_design(ship.design_id);
@@ -1081,9 +1090,11 @@ void Simulation::tick_ships() {
 
       const double kEps = 1e-9;
 
+      double moved_total = 0.0;
+
       if (cargo_is_load) {
         // Nothing to load if no free capacity.
-        if (free <= kEps) return;
+        if (free <= kEps) return 0.0;
 
         double remaining = (cargo_tons > 0.0) ? cargo_tons : 1e300;
         remaining = std::min(remaining, free);
@@ -1101,12 +1112,13 @@ void Simulation::tick_ships() {
             }
             ship.cargo[mineral] += take;
           }
+          moved_total += take;
           return take;
         };
 
         if (!cargo_mineral.empty()) {
           load_one(cargo_mineral, remaining);
-          return;
+          return moved_total;
         }
 
         // Load from all minerals in a stable order.
@@ -1122,7 +1134,7 @@ void Simulation::tick_ships() {
           const double took = load_one(k, remaining);
           remaining -= took;
         }
-        return;
+        return moved_total;
       }
 
       // Unload
@@ -1139,13 +1151,14 @@ void Simulation::tick_ships() {
             it->second = std::max(0.0, it->second - put);
             if (it->second <= kEps) ship.cargo.erase(it);
           }
+          moved_total += put;
         }
         return put;
       };
 
       if (!cargo_mineral.empty()) {
         unload_one(cargo_mineral, remaining);
-        return;
+        return moved_total;
       }
 
       // Unload all cargo minerals in a stable order.
@@ -1161,16 +1174,66 @@ void Simulation::tick_ships() {
         const double put = unload_one(k, remaining);
         remaining -= put;
       }
+
+      return moved_total;
     };
 
-    // Normal move orders complete when reaching target.
-    if (is_cargo && dist < 1e-6) {
-      do_cargo_transfer();
+    auto cargo_order_complete = [&](double moved_this_tick) {
+      // tons <= 0 => "as much as possible" in one go.
+      if (cargo_tons <= 0.0) return true;
+
+      // Reduce remaining tons.
+      if (cargo_is_load && load_ord) {
+        load_ord->tons = std::max(0.0, load_ord->tons - moved_this_tick);
+        cargo_tons = load_ord->tons;
+      }
+      if (!cargo_is_load && unload_ord) {
+        unload_ord->tons = std::max(0.0, unload_ord->tons - moved_this_tick);
+        cargo_tons = unload_ord->tons;
+      }
+
+      if (cargo_tons <= 1e-9) return true;
+
+      // If we couldn't move anything, decide whether to keep waiting.
+      if (moved_this_tick <= 1e-9) {
+        const auto* d = find_design(ship.design_id);
+        const double cap = d ? d->cargo_tons : 0.0;
+        const double free = std::max(0.0, cap - cargo_used_tons(ship));
+
+        if (cargo_is_load) {
+          // Ship is full; can't load more.
+          if (free <= 1e-9) return true;
+        } else {
+          // Ship has nothing relevant to unload.
+          if (!cargo_mineral.empty()) {
+            auto it = ship.cargo.find(cargo_mineral);
+            const double have = (it != ship.cargo.end()) ? it->second : 0.0;
+            if (have <= 1e-9) return true;
+          } else {
+            if (ship.cargo.empty()) return true;
+          }
+        }
+      }
+
+      // Otherwise, keep the order at the front and try again next day.
+      return false;
+    };
+
+    // Docked / arrived checks. Use a docking tolerance for moving body targets.
+    if (is_cargo && dist <= dock_range) {
+      ship.position_mkm = target;
+      const double moved = do_cargo_transfer();
+      if (cargo_order_complete(moved)) q.erase(q.begin());
+      continue;
+    }
+
+    if (is_body && dist <= dock_range) {
+      ship.position_mkm = target;
       q.erase(q.begin());
       continue;
     }
 
-    if (!is_attack && !is_jump && !is_cargo && dist < 1e-6) {
+    if (!is_attack && !is_jump && !is_cargo && !is_body && dist <= arrive_eps) {
       q.erase(q.begin());
       continue;
     }
@@ -1205,8 +1268,9 @@ void Simulation::tick_ships() {
                          (find_ptr(state_.systems, new_sys) ? find_ptr(state_.systems, new_sys)->name : std::string("(unknown)")));
     };
 
-    // Jump orders: being exactly at a jump point should still transit (even if speed is 0).
-    if (is_jump && dist < 1e-6) {
+    // Jump orders: within dock range should still transit (even if speed is 0).
+    if (is_jump && dist <= dock_range) {
+      ship.position_mkm = target;
       transit_jump();
       q.erase(q.begin());
       continue;
@@ -1220,7 +1284,7 @@ void Simulation::tick_ships() {
         }
       } else {
         // No contact: reaching last-known completes the order.
-        if (dist < 1e-6) {
+        if (dist <= arrive_eps) {
           q.erase(q.begin());
           continue;
         }
@@ -1246,8 +1310,8 @@ void Simulation::tick_ships() {
         // Attack orders persist while we have contact. If we were moving to last-known and reached it, complete.
         if (!attack_has_contact) q.erase(q.begin());
       } else if (is_cargo) {
-        do_cargo_transfer();
-        q.erase(q.begin());
+        const double moved = do_cargo_transfer();
+        if (cargo_order_complete(moved)) q.erase(q.begin());
       } else {
         q.erase(q.begin());
       }

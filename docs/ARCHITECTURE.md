@@ -24,6 +24,22 @@
   7. Update intel / contacts (sensor-based snapshots)
   8. Resolve simple combat (auto-fire + attack orders; targets must be *detected* by faction sensors)
 
+## Docking tolerance (moving targets)
+
+Orbital body positions update each day. For interactions with colonies/jump points, ships use a **docking range**
+(see `SimConfig::docking_range_mkm`) so that a ship can remain effectively "in orbit" even when the body's
+exact position changes from day to day.
+
+This keeps prototype logistics sane (otherwise slower ships can get stuck forever chasing a planet's updated
+coordinates and never transfer cargo).
+
+## Cargo orders (prototype logistics)
+
+- `LoadMineral` / `UnloadMineral` are **instant** when within docking range of the colony's body.
+- If `tons <= 0`: perform a one-time "as much as possible" transfer and complete.
+- If `tons > 0`: treat `tons` as **remaining**. Each day, transfer what you can and decrement the remaining
+  amount until it reaches zero (or the ship can't make further progress due to full/empty cargo).
+
 ## Sensors
 
 - Ships provide sensors via `ShipDesign::sensor_range_mkm`.

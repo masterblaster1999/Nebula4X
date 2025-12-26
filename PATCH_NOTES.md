@@ -4,21 +4,25 @@ This patch pack contains only the files that changed.
 
 ## Changes in this patch pack
 
-- **CI: GitHub Actions build + test**
-  - Added `.github/workflows/ci.yml` to configure, build, and run core tests on **Linux / Windows / macOS**.
+### Gameplay / sim
 
-- **Repo hygiene**
-  - Added a basic `.gitignore` for common build outputs and IDE files.
-  - Added `.clang-format` (referenced by `CONTRIBUTING.md`) so contributors can format consistently.
+- **Docking tolerance for moving bodies**
+  - Added `SimConfig::docking_range_mkm` and `SimConfig::arrival_epsilon_mkm`.
+  - Move-to-body, jump travel, and colony cargo interactions treat a ship as "arrived" when within docking range,
+    preventing ships from getting stuck forever chasing a planet's day-to-day updated position.
 
-- **Shipyard QoL + bugfix**
-  - `Simulation::enqueue_build(...)` now requires the colony to have at least one shipyard (prevents “stuck forever” queues).
-  - Avoided accidental insertion of `"shipyard": 0` into a colony’s `installations` map during ticking/UI reads.
-  - Unlock initialization now ignores installations with non-positive counts.
+- **Cargo orders can span multiple days**
+  - `LoadMineral` / `UnloadMineral` with `tons > 0` now treat `tons` as **remaining**, decrementing as cargo moves.
+  - If `tons <= 0`, the order still behaves as "as much as possible" and completes in one go.
 
-- **Tests**
-  - Added coverage to ensure a colony without a shipyard does **not** silently gain a zero-count `"shipyard"` entry,
-    and that enqueuing ship builds correctly fails without a shipyard.
+### Tests
+
+- Added a regression test that a **0-speed** ship can still complete a **multi-day load order** while docked to a moving body.
+
+### Tooling / repo hygiene
+
+- Added GitHub Actions CI: `.github/workflows/ci.yml` (core build + tests on Linux / macOS / Windows)
+- Added `.gitignore`, `.clang-format`, and `.editorconfig`
 
 ## Apply locally
 
