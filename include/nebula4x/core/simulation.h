@@ -27,7 +27,7 @@ class Simulation {
   ContentDB& content() { return content_; }
   const ContentDB& content() const { return content_; }
 
-  SimConfig cfg() const { return cfg_; }
+  const SimConfig& cfg() const { return cfg_; }
 
   GameState& state() { return state_; }
   const GameState& state() const { return state_; }
@@ -43,13 +43,42 @@ class Simulation {
   // Returns false if the ship does not exist.
   bool clear_orders(Id ship_id);
 
+  // Enable repeating the ship's current order queue.
+  //
+  // When enabled, once the queue becomes empty it will be refilled from a saved
+  // template (captured at enable time or via update).
+  //
+  // Returns false if the ship does not exist or has no queued orders.
+  bool enable_order_repeat(Id ship_id);
+
+  // Replace the saved repeat template with the ship's current queue.
+  // Repeat remains enabled.
+  //
+  // Returns false if the ship does not exist or has no queued orders.
+  bool update_order_repeat_template(Id ship_id);
+
+  // Disable repeating and clear the saved template.
+  // Returns false if the ship does not exist.
+  bool disable_order_repeat(Id ship_id);
+
   // Cancel only the current (front) order.
   // Returns false if the ship does not exist or has no queued orders.
   bool cancel_current_order(Id ship_id);
 
   // Gameplay actions
+  // Insert a delay into the ship's order queue.
+  //
+  // The ship will do nothing for the requested number of simulation days.
+  // Returns false if ship does not exist or days <= 0.
+  bool issue_wait_days(Id ship_id, int days);
   bool issue_move_to_point(Id ship_id, Vec2 target_mkm);
-  bool issue_move_to_body(Id ship_id, Id body_id);
+  // Move to a body. If the body is in another system, the simulation will
+  // automatically enqueue TravelViaJump steps (using the jump network) and
+  // then complete the move in the destination system.
+  //
+  // When restrict_to_discovered is true, jump routing will only traverse
+  // systems discovered by the ship's faction.
+  bool issue_move_to_body(Id ship_id, Id body_id, bool restrict_to_discovered = false);
   bool issue_travel_via_jump(Id ship_id, Id jump_point_id);
   // Pathfind through the jump network and enqueue TravelViaJump steps to reach a target system.
   //
@@ -58,14 +87,30 @@ class Simulation {
   //
   // Returns false if no route is known/available.
   bool issue_travel_to_system(Id ship_id, Id target_system_id, bool restrict_to_discovered = false);
-  bool issue_attack_ship(Id attacker_ship_id, Id target_ship_id);
+  // Attack a hostile ship.
+  //
+  // If the target is in another system, the simulation will auto-enqueue TravelViaJump steps
+  // to reach the target's current (if detected) or last-known (from contact memory) system,
+  // then pursue it once in-system.
+  //
+  // When restrict_to_discovered is true, jump routing will only traverse systems discovered
+  // by the attacker's faction.
+  bool issue_attack_ship(Id attacker_ship_id, Id target_ship_id, bool restrict_to_discovered = false);
 
   // Cargo / logistics (prototype).
   // Load/unload colony minerals into a ship's cargo hold.
   // - mineral == "" means "all minerals".
   // - tons <= 0 means "as much as possible".
-  bool issue_load_mineral(Id ship_id, Id colony_id, const std::string& mineral, double tons = 0.0);
-  bool issue_unload_mineral(Id ship_id, Id colony_id, const std::string& mineral, double tons = 0.0);
+  //
+  // If the colony is in another system, the simulation will automatically
+  // enqueue TravelViaJump steps before the load/unload order.
+  //
+  // When restrict_to_discovered is true, jump routing will only traverse
+  // systems discovered by the ship's faction.
+  bool issue_load_mineral(Id ship_id, Id colony_id, const std::string& mineral, double tons = 0.0,
+                          bool restrict_to_discovered = false);
+  bool issue_unload_mineral(Id ship_id, Id colony_id, const std::string& mineral, double tons = 0.0,
+                            bool restrict_to_discovered = false);
 
   bool enqueue_build(Id colony_id, const std::string& design_id);
 

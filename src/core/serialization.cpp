@@ -13,6 +13,15 @@ using json::Array;
 using json::Object;
 using json::Value;
 
+template <typename Map>
+std::vector<typename Map::key_type> sorted_keys(const Map& m) {
+  std::vector<typename Map::key_type> keys;
+  keys.reserve(m.size());
+  for (const auto& [k, _] : m) keys.push_back(k);
+  std::sort(keys.begin(), keys.end());
+  return keys;
+}
+
 Value vec2_to_json(const Vec2& v) {
   Object o;
   o["x"] = v.x;
@@ -82,6 +91,9 @@ Value order_to_json(const Order& order) {
             obj["has_last_known"] = true;
             obj["last_known_position_mkm"] = vec2_to_json(o.last_known_position_mkm);
           }
+        } else if constexpr (std::is_same_v<T, WaitDays>) {
+          obj["type"] = std::string("wait_days");
+          obj["days_remaining"] = static_cast<double>(o.days_remaining);
         } else if constexpr (std::is_same_v<T, LoadMineral>) {
           obj["type"] = std::string("load_mineral");
           obj["colony_id"] = static_cast<double>(o.colony_id);
@@ -130,6 +142,16 @@ Order order_from_json(const Value& v) {
     }
 
     return a;
+  }
+  if (type == "wait_days") {
+    WaitDays w;
+    if (auto it = o.find("days_remaining"); it != o.end()) {
+      w.days_remaining = static_cast<int>(it->second.int_value(0));
+    } else if (auto it = o.find("days"); it != o.end()) {
+      // Friendly alias for manual edits.
+      w.days_remaining = static_cast<int>(it->second.int_value(0));
+    }
+    return w;
   }
   if (type == "load_mineral") {
     LoadMineral l;
@@ -197,7 +219,8 @@ std::string serialize_game_to_json(const GameState& s) {
   // Systems
   Array systems;
   systems.reserve(s.systems.size());
-  for (const auto& [id, sys] : s.systems) {
+  for (Id id : sorted_keys(s.systems)) {
+    const auto& sys = s.systems.at(id);
     Object o;
     o["id"] = static_cast<double>(id);
     o["name"] = sys.name;
@@ -222,7 +245,8 @@ std::string serialize_game_to_json(const GameState& s) {
   // Bodies
   Array bodies;
   bodies.reserve(s.bodies.size());
-  for (const auto& [id, b] : s.bodies) {
+  for (Id id : sorted_keys(s.bodies)) {
+    const auto& b = s.bodies.at(id);
     Object o;
     o["id"] = static_cast<double>(id);
     o["name"] = b.name;
@@ -238,7 +262,8 @@ std::string serialize_game_to_json(const GameState& s) {
   // Jump points
   Array jump_points;
   jump_points.reserve(s.jump_points.size());
-  for (const auto& [id, jp] : s.jump_points) {
+  for (Id id : sorted_keys(s.jump_points)) {
+    const auto& jp = s.jump_points.at(id);
     Object o;
     o["id"] = static_cast<double>(id);
     o["name"] = jp.name;
@@ -252,7 +277,8 @@ std::string serialize_game_to_json(const GameState& s) {
   // Ships
   Array ships;
   ships.reserve(s.ships.size());
-  for (const auto& [id, sh] : s.ships) {
+  for (Id id : sorted_keys(s.ships)) {
+    const auto& sh = s.ships.at(id);
     Object o;
     o["id"] = static_cast<double>(id);
     o["name"] = sh.name;
@@ -270,7 +296,8 @@ std::string serialize_game_to_json(const GameState& s) {
   // Colonies
   Array colonies;
   colonies.reserve(s.colonies.size());
-  for (const auto& [id, c] : s.colonies) {
+  for (Id id : sorted_keys(s.colonies)) {
+    const auto& c = s.colonies.at(id);
     Object o;
     o["id"] = static_cast<double>(id);
     o["name"] = c.name;
@@ -307,7 +334,8 @@ std::string serialize_game_to_json(const GameState& s) {
   // Factions
   Array factions;
   factions.reserve(s.factions.size());
-  for (const auto& [id, f] : s.factions) {
+  for (Id id : sorted_keys(s.factions)) {
+    const auto& f = s.factions.at(id);
     Object o;
     o["id"] = static_cast<double>(id);
     o["name"] = f.name;
@@ -328,7 +356,8 @@ std::string serialize_game_to_json(const GameState& s) {
     // Optional contact memory (prototype intel).
     Array contacts;
     contacts.reserve(f.ship_contacts.size());
-    for (const auto& [_, c] : f.ship_contacts) {
+    for (Id sid : sorted_keys(f.ship_contacts)) {
+      const auto& c = f.ship_contacts.at(sid);
       Object co;
       co["ship_id"] = static_cast<double>(c.ship_id);
       co["system_id"] = static_cast<double>(c.system_id);
@@ -347,7 +376,8 @@ std::string serialize_game_to_json(const GameState& s) {
   // Custom designs
   Array designs;
   designs.reserve(s.custom_designs.size());
-  for (const auto& [id, d] : s.custom_designs) {
+  for (const auto& id : sorted_keys(s.custom_designs)) {
+    const auto& d = s.custom_designs.at(id);
     Object o;
     o["id"] = d.id;
     o["name"] = d.name;
@@ -367,12 +397,21 @@ std::string serialize_game_to_json(const GameState& s) {
   // Orders
   Array ship_orders;
   ship_orders.reserve(s.ship_orders.size());
-  for (const auto& [ship_id, orders] : s.ship_orders) {
+  for (Id ship_id : sorted_keys(s.ship_orders)) {
+    const auto& orders = s.ship_orders.at(ship_id);
     Object o;
     o["ship_id"] = static_cast<double>(ship_id);
     Array q;
     for (const auto& ord : orders.queue) q.push_back(order_to_json(ord));
     o["queue"] = q;
+
+    // Optional: order repeating (trade routes / patrol loops).
+    o["repeat"] = orders.repeat;
+    Array tmpl;
+    tmpl.reserve(orders.repeat_template.size());
+    for (const auto& ord : orders.repeat_template) tmpl.push_back(order_to_json(ord));
+    o["repeat_template"] = tmpl;
+
     ship_orders.push_back(o);
   }
   root["ship_orders"] = ship_orders;
@@ -559,6 +598,14 @@ GameState deserialize_game_from_json(const std::string& json_text) {
       const Id ship_id = static_cast<Id>(o.at("ship_id").int_value());
       ShipOrders so;
       for (const auto& qv : o.at("queue").array()) so.queue.push_back(order_from_json(qv));
+
+      if (auto itrep = o.find("repeat"); itrep != o.end()) {
+        so.repeat = itrep->second.bool_value(false);
+      }
+      if (auto ittmpl = o.find("repeat_template"); ittmpl != o.end()) {
+        for (const auto& tv : ittmpl->second.array()) so.repeat_template.push_back(order_from_json(tv));
+      }
+
       s.ship_orders[ship_id] = so;
     }
   }

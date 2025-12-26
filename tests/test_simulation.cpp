@@ -1,8 +1,12 @@
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <string>
+#include <utility>
+#include <variant>
 
 #include "nebula4x/core/simulation.h"
+#include "nebula4x/core/serialization.h"
 
 #define N4X_ASSERT(expr)                                                                            \
   do {                                                                                              \
@@ -320,6 +324,100 @@ int test_simulation() {
     oit = sim.state().ship_orders.find(freighter_id);
     N4X_ASSERT(oit != sim.state().ship_orders.end());
     N4X_ASSERT(oit->second.queue.empty());
+  }
+
+  // --- WaitDays order sanity check ---
+  // WaitDays should delay subsequent orders by the requested number of days.
+  {
+    nebula4x::ContentDB content;
+
+    // Minimal installations referenced by the default scenario.
+    nebula4x::InstallationDef mine;
+    mine.id = "automated_mine";
+    mine.name = "Automated Mine";
+    mine.produces_per_day = {{"Duranium", 0.0}};
+    content.installations[mine.id] = mine;
+
+    nebula4x::InstallationDef yard;
+    yard.id = "shipyard";
+    yard.name = "Shipyard";
+    yard.build_rate_tons_per_day = 0.0;
+    content.installations[yard.id] = yard;
+
+    // Designs used by the scenario.
+    auto make_min_design = [](const std::string& id, double speed_km_s) {
+      nebula4x::ShipDesign d;
+      d.id = id;
+      d.name = id;
+      d.max_hp = 10.0;
+      d.speed_km_s = speed_km_s;
+      d.sensor_range_mkm = 0.0;
+      return d;
+    };
+
+    // Fast freighter so a move order can complete in a single day.
+    content.designs["freighter_alpha"] = make_min_design("freighter_alpha", 100000.0);
+    content.designs["surveyor_beta"] = make_min_design("surveyor_beta", 0.0);
+    content.designs["escort_gamma"] = make_min_design("escort_gamma", 0.0);
+    content.designs["pirate_raider"] = make_min_design("pirate_raider", 0.0);
+
+    nebula4x::Simulation sim(std::move(content), nebula4x::SimConfig{});
+
+    const auto freighter_id = find_ship_id(sim.state(), "Freighter Alpha");
+    N4X_ASSERT(freighter_id != nebula4x::kInvalidId);
+
+    const auto* sh0 = nebula4x::find_ptr(sim.state().ships, freighter_id);
+    N4X_ASSERT(sh0);
+    const nebula4x::Vec2 start_pos = sh0->position_mkm;
+
+    N4X_ASSERT(sim.clear_orders(freighter_id));
+    N4X_ASSERT(sim.issue_wait_days(freighter_id, 2));
+    N4X_ASSERT(sim.issue_move_to_point(freighter_id, {0.0, 0.0}));
+
+    // After 1 day: still waiting, no movement.
+    sim.advance_days(1);
+    const auto* sh1 = nebula4x::find_ptr(sim.state().ships, freighter_id);
+    N4X_ASSERT(sh1);
+    N4X_ASSERT(std::fabs(sh1->position_mkm.x - start_pos.x) < 1e-6);
+    N4X_ASSERT(std::fabs(sh1->position_mkm.y - start_pos.y) < 1e-6);
+    {
+      const auto& q = sim.state().ship_orders.at(freighter_id).queue;
+      N4X_ASSERT(!q.empty());
+      N4X_ASSERT(std::holds_alternative<nebula4x::WaitDays>(q.front()));
+      const auto& w = std::get<nebula4x::WaitDays>(q.front());
+      N4X_ASSERT(w.days_remaining == 1);
+    }
+
+    // After 2 days: wait completes, move order is now at the front (but won't execute until next day).
+    sim.advance_days(1);
+    const auto* sh2 = nebula4x::find_ptr(sim.state().ships, freighter_id);
+    N4X_ASSERT(sh2);
+    N4X_ASSERT(std::fabs(sh2->position_mkm.x - start_pos.x) < 1e-6);
+    N4X_ASSERT(std::fabs(sh2->position_mkm.y - start_pos.y) < 1e-6);
+    {
+      const auto& q = sim.state().ship_orders.at(freighter_id).queue;
+      N4X_ASSERT(q.size() == 1);
+      N4X_ASSERT(std::holds_alternative<nebula4x::MoveToPoint>(q.front()));
+    }
+
+    // After 3 days: move order should execute and complete.
+    sim.advance_days(1);
+    const auto* sh3 = nebula4x::find_ptr(sim.state().ships, freighter_id);
+    N4X_ASSERT(sh3);
+    N4X_ASSERT(std::fabs(sh3->position_mkm.x - 0.0) < 1e-6);
+    N4X_ASSERT(std::fabs(sh3->position_mkm.y - 0.0) < 1e-6);
+    N4X_ASSERT(sim.state().ship_orders.at(freighter_id).queue.empty());
+
+    // Serialization round-trip for the order type.
+    N4X_ASSERT(sim.issue_wait_days(freighter_id, 3));
+    const std::string saved = nebula4x::serialize_game_to_json(sim.state());
+    const auto loaded = nebula4x::deserialize_game_from_json(saved);
+    const auto oit = loaded.ship_orders.find(freighter_id);
+    N4X_ASSERT(oit != loaded.ship_orders.end());
+    N4X_ASSERT(!oit->second.queue.empty());
+    N4X_ASSERT(std::holds_alternative<nebula4x::WaitDays>(oit->second.queue.front()));
+    const auto& w2 = std::get<nebula4x::WaitDays>(oit->second.queue.front());
+    N4X_ASSERT(w2.days_remaining == 3);
   }
 
   // --- sensor detection sanity check ---
@@ -660,5 +758,154 @@ int test_simulation() {
     // And enqueuing a ship build should fail without a shipyard present.
     N4X_ASSERT(!sim.enqueue_build(mars_id, "freighter_alpha"));
   }
+
+  // --- research queue prereq enforcement + planning sanity check ---
+  // A faction should be able to queue techs out of prereq order; the sim will
+  // automatically pick the first available tech whose prereqs are met.
+  {
+    nebula4x::ContentDB content;
+
+    // Minimal installations: avoid generating extra RP from the default scenario colonies.
+    nebula4x::InstallationDef lab;
+    lab.id = "research_lab";
+    lab.name = "Research Lab";
+    lab.research_points_per_day = 0.0;
+    content.installations[lab.id] = lab;
+
+    // Minimal designs for scenario ships.
+    auto make_min_design = [](const std::string& id) {
+      nebula4x::ShipDesign d;
+      d.id = id;
+      d.name = id;
+      d.max_hp = 10.0;
+      d.speed_km_s = 0.0;
+      d.sensor_range_mkm = 0.0;
+      return d;
+    };
+    content.designs["freighter_alpha"] = make_min_design("freighter_alpha");
+    content.designs["surveyor_beta"] = make_min_design("surveyor_beta");
+    content.designs["escort_gamma"] = make_min_design("escort_gamma");
+    content.designs["pirate_raider"] = make_min_design("pirate_raider");
+
+    // Tech A (no prereqs), Tech B (requires A).
+    nebula4x::TechDef tech_a;
+    tech_a.id = "tech_a";
+    tech_a.name = "Tech A";
+    tech_a.cost = 10.0;
+
+    nebula4x::TechDef tech_b;
+    tech_b.id = "tech_b";
+    tech_b.name = "Tech B";
+    tech_b.cost = 10.0;
+    tech_b.prereqs = {"tech_a"};
+
+    content.techs[tech_a.id] = tech_a;
+    content.techs[tech_b.id] = tech_b;
+
+    nebula4x::Simulation sim(std::move(content), nebula4x::SimConfig{});
+
+    const auto terrans_id = find_faction_id(sim.state(), "Terran Union");
+    N4X_ASSERT(terrans_id != nebula4x::kInvalidId);
+
+    auto& fac = sim.state().factions[terrans_id];
+    fac.known_techs.clear();
+    fac.unlocked_components.clear();
+    fac.unlocked_installations.clear();
+    fac.active_research_id.clear();
+    fac.active_research_progress = 0.0;
+
+    // Intentionally queue out of prereq order: B depends on A.
+    fac.research_queue = {"tech_b", "tech_a"};
+
+    // Enough RP to complete both in one tick.
+    fac.research_points = 25.0;
+
+    sim.advance_days(1);
+
+    auto has = [&](const std::string& id) {
+      for (const auto& x : fac.known_techs) {
+        if (x == id) return true;
+      }
+      return false;
+    };
+
+    N4X_ASSERT(has("tech_a"));
+    N4X_ASSERT(has("tech_b"));
+    N4X_ASSERT(fac.active_research_id.empty());
+    N4X_ASSERT(fac.research_queue.empty());
+  }
+
+  // Active research blocked by prereqs should not deadlock the system.
+  {
+    nebula4x::ContentDB content;
+
+    nebula4x::InstallationDef lab;
+    lab.id = "research_lab";
+    lab.name = "Research Lab";
+    lab.research_points_per_day = 0.0;
+    content.installations[lab.id] = lab;
+
+    auto make_min_design = [](const std::string& id) {
+      nebula4x::ShipDesign d;
+      d.id = id;
+      d.name = id;
+      d.max_hp = 10.0;
+      d.speed_km_s = 0.0;
+      d.sensor_range_mkm = 0.0;
+      return d;
+    };
+    content.designs["freighter_alpha"] = make_min_design("freighter_alpha");
+    content.designs["surveyor_beta"] = make_min_design("surveyor_beta");
+    content.designs["escort_gamma"] = make_min_design("escort_gamma");
+    content.designs["pirate_raider"] = make_min_design("pirate_raider");
+
+    nebula4x::TechDef tech_a;
+    tech_a.id = "tech_a";
+    tech_a.name = "Tech A";
+    tech_a.cost = 10.0;
+
+    nebula4x::TechDef tech_b;
+    tech_b.id = "tech_b";
+    tech_b.name = "Tech B";
+    tech_b.cost = 10.0;
+    tech_b.prereqs = {"tech_a"};
+
+    content.techs[tech_a.id] = tech_a;
+    content.techs[tech_b.id] = tech_b;
+
+    nebula4x::Simulation sim(std::move(content), nebula4x::SimConfig{});
+
+    const auto terrans_id = find_faction_id(sim.state(), "Terran Union");
+    N4X_ASSERT(terrans_id != nebula4x::kInvalidId);
+
+    auto& fac = sim.state().factions[terrans_id];
+    fac.known_techs.clear();
+    fac.unlocked_components.clear();
+    fac.unlocked_installations.clear();
+
+    // Force an invalid active selection (blocked by prereqs). The sim should
+    // requeue it and progress A instead.
+    fac.active_research_id = "tech_b";
+    fac.active_research_progress = 0.0;
+    fac.research_queue = {"tech_a"};
+    fac.research_points = 15.0;
+
+    sim.advance_days(1);
+
+    auto has = [&](const std::string& id) {
+      for (const auto& x : fac.known_techs) {
+        if (x == id) return true;
+      }
+      return false;
+    };
+
+    // Should have completed A, then started B with remaining RP.
+    N4X_ASSERT(has("tech_a"));
+    N4X_ASSERT(!has("tech_b"));
+    N4X_ASSERT(fac.active_research_id == "tech_b");
+    N4X_ASSERT(std::fabs(fac.active_research_progress - 5.0) < 1e-6);
+    N4X_ASSERT(fac.research_queue.empty());
+  }
+
   return 0;
 }

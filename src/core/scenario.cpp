@@ -6,7 +6,10 @@ namespace nebula4x {
 
 GameState make_sol_scenario() {
   GameState s;
-  s.save_version = 7;
+  // Bump when the save schema changes.
+  // v8: adds WaitDays order type.
+  // v9: adds ShipOrders repeat fields (repeat + repeat_template).
+  s.save_version = 9;
   s.date = Date::from_ymd(2200, 1, 1);
 
   // --- Factions ---

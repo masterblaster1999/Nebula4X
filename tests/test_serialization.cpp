@@ -1,4 +1,6 @@
 #include <iostream>
+#include <string>
+#include <utility>
 
 #include "nebula4x/core/serialization.h"
 #include "nebula4x/core/simulation.h"

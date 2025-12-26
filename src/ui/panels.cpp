@@ -320,6 +320,33 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id selected_ship, Id& sele
           }
         }
 
+        const bool repeat_on = (oit != s.ship_orders.end()) ? oit->second.repeat : false;
+        const int repeat_len = (oit != s.ship_orders.end()) ? static_cast<int>(oit->second.repeat_template.size()) : 0;
+        if (repeat_on) {
+          ImGui::Text("Repeat: ON  (template %d orders)", repeat_len);
+        } else {
+          ImGui::Text("Repeat: OFF");
+        }
+
+        ImGui::Spacing();
+        if (!repeat_on) {
+          if (ImGui::SmallButton("Enable repeat")) {
+            if (!sim.enable_order_repeat(selected_ship)) {
+              nebula4x::log::warn("Couldn't enable repeat (queue empty?).");
+            }
+          }
+        } else {
+          if (ImGui::SmallButton("Update repeat template")) {
+            if (!sim.update_order_repeat_template(selected_ship)) {
+              nebula4x::log::warn("Couldn't update repeat template (queue empty?).");
+            }
+          }
+          ImGui::SameLine();
+          if (ImGui::SmallButton("Disable repeat")) {
+            sim.disable_order_repeat(selected_ship);
+          }
+        }
+
         ImGui::Spacing();
         if (ImGui::SmallButton("Cancel current")) {
           sim.cancel_current_order(selected_ship);
@@ -364,10 +391,18 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id selected_ship, Id& sele
           ImGui::TextDisabled("Selected colony body missing.");
         } else if (sel_col->faction_id != sh->faction_id) {
           ImGui::TextDisabled("Selected colony is not friendly.");
-        } else if (sel_col_body->system_id != sh->system_id) {
-          ImGui::TextDisabled("Selected colony is in a different system.");
         } else {
           ImGui::Text("Colony: %s", sel_col->name.c_str());
+
+          if (sel_col_body->system_id != sh->system_id) {
+            std::string dest_label = "(unknown)";
+            const auto* dest_sys = find_ptr(s.systems, sel_col_body->system_id);
+            if (dest_sys && (!ui.fog_of_war || sim.is_system_discovered_by_faction(sh->faction_id, dest_sys->id))) {
+              dest_label = dest_sys->name;
+            }
+            ImGui::TextDisabled("Colony is in a different system %s. Order will auto-route via jump points.",
+                                dest_label.c_str());
+          }
 
           // Build a stable mineral list (union of colony minerals + ship cargo).
           std::vector<std::string> minerals;
@@ -400,17 +435,30 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id selected_ship, Id& sele
           const std::string mineral_id = (mineral_idx == 0) ? std::string() : minerals[mineral_idx - 1];
 
           if (ImGui::Button("Load##cargo")) {
-            sim.issue_load_mineral(selected_ship, selected_colony, mineral_id, transfer_tons);
+            if (!sim.issue_load_mineral(selected_ship, selected_colony, mineral_id, transfer_tons, ui.fog_of_war)) {
+              nebula4x::log::warn("Couldn't queue load order (no known route?).");
+            }
           }
           ImGui::SameLine();
           if (ImGui::Button("Unload##cargo")) {
-            sim.issue_unload_mineral(selected_ship, selected_colony, mineral_id, transfer_tons);
+            if (!sim.issue_unload_mineral(selected_ship, selected_colony, mineral_id, transfer_tons, ui.fog_of_war)) {
+              nebula4x::log::warn("Couldn't queue unload order (no known route?).");
+            }
           }
         }
 
 
         ImGui::Separator();
         ImGui::Text("Quick orders");
+
+        // Simple scheduling primitive.
+        static int wait_days = 1;
+        wait_days = std::clamp(wait_days, 1, 365000); // ~1000 years, just a safety cap.
+        ImGui::InputInt("Wait (days)", &wait_days);
+        if (ImGui::Button("Queue wait")) {
+          sim.issue_wait_days(selected_ship, wait_days);
+        }
+
         if (ImGui::Button("Move to (0,0)")) {
           sim.issue_move_to_point(selected_ship, {0.0, 0.0});
         }
@@ -420,7 +468,9 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id selected_ship, Id& sele
             for (Id bid : sys2->bodies) {
               const auto* b = find_ptr(s.bodies, bid);
               if (b && b->name == "Earth") {
-                sim.issue_move_to_body(selected_ship, b->id);
+                if (!sim.issue_move_to_body(selected_ship, b->id, ui.fog_of_war)) {
+                  nebula4x::log::warn("Couldn't issue move-to-body order.");
+                }
                 break;
               }
             }
@@ -480,7 +530,7 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id selected_ship, Id& sele
               if (range > 0.0) {
                 ImGui::SameLine();
                 if (ImGui::SmallButton(("Attack##" + std::to_string(hid)).c_str())) {
-                  sim.issue_attack_ship(sh->id, hid);
+                  sim.issue_attack_ship(sh->id, hid, ui.fog_of_war);
                 }
               }
             }
@@ -1080,7 +1130,7 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id selected_ship, Id& sele
                   const char* btn = detected_now ? "Attack" : "Intercept";
                   if (ImGui::SmallButton((std::string(btn) + "##" + std::to_string(r.c.ship_id)).c_str())) {
                     // If not currently detected, this will issue an intercept based on the stored contact snapshot.
-                    sim.issue_attack_ship(selected_ship, r.c.ship_id);
+                    sim.issue_attack_ship(selected_ship, r.c.ship_id, ui.fog_of_war);
                   }
                 }
               }

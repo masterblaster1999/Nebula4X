@@ -40,6 +40,22 @@ coordinates and never transfer cargo).
 - If `tons > 0`: treat `tons` as **remaining**. Each day, transfer what you can and decrement the remaining
   amount until it reaches zero (or the ship can't make further progress due to full/empty cargo).
 
+## Repeating order queues (prototype automation)
+
+Ships can optionally **repeat** their order queue once it becomes empty.
+
+- When enabled, the current queue is copied into a `repeat_template`.
+- Each day, if the ship's queue is empty, the simulation refills it from the template.
+
+This enables simple trade routes like:
+
+1. Load minerals at Colony A
+2. Travel to Colony B
+3. Unload minerals at Colony B
+4. Travel back to Colony A
+
+...and then automatically loop forever.
+
 ## Sensors
 
 - Ships provide sensors via `ShipDesign::sensor_range_mkm`.
