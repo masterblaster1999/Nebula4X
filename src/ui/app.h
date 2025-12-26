@@ -6,6 +6,8 @@
 
 #include "nebula4x/core/simulation.h"
 
+#include "ui/ui_state.h"
+
 namespace nebula4x::ui {
 
 class App {
@@ -32,6 +34,9 @@ class App {
   // Map view state
   double map_zoom_{1.0};
   Vec2 map_pan_{0.0, 0.0};
+
+  // Shared UI toggles (fog-of-war etc.)
+  UIState ui_{};
 };
 
 } // namespace nebula4x::ui

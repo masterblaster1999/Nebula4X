@@ -156,6 +156,25 @@ struct Colony {
   std::vector<InstallationBuildOrder> construction_queue;
 };
 
+// A simple intel record for a detected ship.
+//
+// Prototype design goals:
+// - no global omniscience: you can only act on ships you've detected
+// - memory: when contact is lost, keep a last-known snapshot for UI / orders
+struct Contact {
+  Id ship_id{kInvalidId};
+  Id system_id{kInvalidId};
+
+  // Last day (Date::days_since_epoch) this ship was detected.
+  int last_seen_day{0};
+
+  // Snapshot at last detection.
+  Vec2 last_seen_position_mkm{0.0, 0.0};
+  std::string last_seen_name;
+  std::string last_seen_design_id;
+  Id last_seen_faction_id{kInvalidId};
+};
+
 struct Faction {
   Id id{kInvalidId};
   std::string name;
@@ -174,6 +193,10 @@ struct Faction {
   // Unlock lists (primarily for UI filtering / validation).
   std::vector<std::string> unlocked_components;
   std::vector<std::string> unlocked_installations;
+
+  // Simple per-faction ship contact memory.
+  // Key: ship id.
+  std::unordered_map<Id, Contact> ship_contacts;
 };
 
 // Jump points connect star systems.

@@ -293,6 +293,22 @@ std::string serialize_game_to_json(const GameState& s) {
     o["known_techs"] = string_vector_to_json(f.known_techs);
     o["unlocked_components"] = string_vector_to_json(f.unlocked_components);
     o["unlocked_installations"] = string_vector_to_json(f.unlocked_installations);
+
+    // Optional contact memory (prototype intel).
+    Array contacts;
+    contacts.reserve(f.ship_contacts.size());
+    for (const auto& [_, c] : f.ship_contacts) {
+      Object co;
+      co["ship_id"] = static_cast<double>(c.ship_id);
+      co["system_id"] = static_cast<double>(c.system_id);
+      co["last_seen_day"] = static_cast<double>(c.last_seen_day);
+      co["last_seen_position_mkm"] = vec2_to_json(c.last_seen_position_mkm);
+      co["last_seen_name"] = c.last_seen_name;
+      co["last_seen_design_id"] = c.last_seen_design_id;
+      co["last_seen_faction_id"] = static_cast<double>(c.last_seen_faction_id);
+      contacts.push_back(co);
+    }
+    o["ship_contacts"] = contacts;
     factions.push_back(o);
   }
   root["factions"] = factions;
@@ -458,6 +474,22 @@ GameState deserialize_game_from_json(const std::string& json_text) {
 
     if (auto it = o.find("unlocked_components"); it != o.end()) f.unlocked_components = string_vector_from_json(it->second);
     if (auto it = o.find("unlocked_installations"); it != o.end()) f.unlocked_installations = string_vector_from_json(it->second);
+
+    // Optional contact memory.
+    if (auto it = o.find("ship_contacts"); it != o.end()) {
+      for (const auto& cv : it->second.array()) {
+        const auto& co = cv.object();
+        Contact c;
+        c.ship_id = static_cast<Id>(co.at("ship_id").int_value());
+        c.system_id = static_cast<Id>(co.at("system_id").int_value(kInvalidId));
+        c.last_seen_day = static_cast<int>(co.at("last_seen_day").int_value(0));
+        if (auto itp = co.find("last_seen_position_mkm"); itp != co.end()) c.last_seen_position_mkm = vec2_from_json(itp->second);
+        if (auto itn = co.find("last_seen_name"); itn != co.end()) c.last_seen_name = itn->second.string_value();
+        if (auto itd = co.find("last_seen_design_id"); itd != co.end()) c.last_seen_design_id = itd->second.string_value();
+        if (auto itf = co.find("last_seen_faction_id"); itf != co.end()) c.last_seen_faction_id = static_cast<Id>(itf->second.int_value(kInvalidId));
+        if (c.ship_id != kInvalidId) f.ship_contacts[c.ship_id] = std::move(c);
+      }
+    }
 
     s.factions[f.id] = f;
   }

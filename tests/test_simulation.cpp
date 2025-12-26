@@ -203,5 +203,83 @@ int test_simulation() {
   sim4.state().ships[pirate_ship_id].position_mkm = terran_pos + nebula4x::Vec2{0.0, 500.0};
   N4X_ASSERT(!sim4.is_ship_detected_by_faction(terrans_id, pirate_ship_id));
 
+  // --- contact memory sanity check ---
+  // If a hostile ship is detected, the viewer faction should store a contact snapshot
+  // that remains for some time even after contact is lost.
+  nebula4x::ContentDB content5;
+
+  // Minimal installations (the scenario references these ids).
+  content5.installations[mine4.id] = mine4;
+  content5.installations[yard4.id] = yard4;
+
+  // Designs with Terran ship sensors.
+  content5.designs["freighter_alpha"] = make_design("freighter_alpha", 0.0);
+  content5.designs["surveyor_beta"]  = make_design("surveyor_beta", 100.0);
+  content5.designs["escort_gamma"]   = make_design("escort_gamma", 100.0);
+  content5.designs["pirate_raider"]  = make_design("pirate_raider", 0.0);
+
+  nebula4x::Simulation sim5(std::move(content5), nebula4x::SimConfig{});
+
+  nebula4x::Id terrans5 = nebula4x::kInvalidId;
+  nebula4x::Id pirates5 = nebula4x::kInvalidId;
+  for (const auto& [fid, f] : sim5.state().factions) {
+    if (f.name == "Terran Union") terrans5 = fid;
+    if (f.name == "Pirate Raiders") pirates5 = fid;
+  }
+  N4X_ASSERT(terrans5 != nebula4x::kInvalidId);
+  N4X_ASSERT(pirates5 != nebula4x::kInvalidId);
+
+  nebula4x::Id sol5 = nebula4x::kInvalidId;
+  for (const auto& [sid, sys] : sim5.state().systems) {
+    if (sys.name == "Sol") sol5 = sid;
+  }
+  N4X_ASSERT(sol5 != nebula4x::kInvalidId);
+
+  const auto* sol_sys = nebula4x::find_ptr(sim5.state().systems, sol5);
+  N4X_ASSERT(sol_sys);
+
+  // Find a Terran ship position.
+  nebula4x::Vec2 terran_pos5{0.0, 0.0};
+  bool found_terran_ship5 = false;
+  for (nebula4x::Id sid : sol_sys->ships) {
+    const auto* sh = nebula4x::find_ptr(sim5.state().ships, sid);
+    if (sh && sh->faction_id == terrans5) {
+      terran_pos5 = sh->position_mkm;
+      found_terran_ship5 = true;
+      break;
+    }
+  }
+  N4X_ASSERT(found_terran_ship5);
+
+  // Spawn a pirate ship within detection range.
+  const nebula4x::Id pirate_contact_id = nebula4x::allocate_id(sim5.state());
+  {
+    nebula4x::Ship p;
+    p.id = pirate_contact_id;
+    p.name = "Contact Raider";
+    p.faction_id = pirates5;
+    p.system_id = sol5;
+    p.design_id = "pirate_raider";
+    p.position_mkm = terran_pos5 + nebula4x::Vec2{0.0, 50.0};
+    p.hp = 10.0;
+    sim5.state().ships[p.id] = p;
+    sim5.state().ship_orders[p.id] = nebula4x::ShipOrders{};
+    sim5.state().systems[sol5].ships.push_back(p.id);
+  }
+
+  // Advance one day so contacts tick.
+  sim5.advance_days(1);
+  N4X_ASSERT(sim5.is_ship_detected_by_faction(terrans5, pirate_contact_id));
+  N4X_ASSERT(sim5.state().factions[terrans5].ship_contacts.count(pirate_contact_id) == 1);
+
+  // Move out of range and advance; contact should remain but detection should be false.
+  sim5.state().ships[pirate_contact_id].position_mkm = terran_pos5 + nebula4x::Vec2{0.0, 500.0};
+  sim5.advance_days(1);
+  N4X_ASSERT(!sim5.is_ship_detected_by_faction(terrans5, pirate_contact_id));
+  N4X_ASSERT(sim5.state().factions[terrans5].ship_contacts.count(pirate_contact_id) == 1);
+
+  const auto recent = sim5.recent_contacts_in_system(terrans5, sol5, 30);
+  N4X_ASSERT(!recent.empty());
+
   return 0;
 }

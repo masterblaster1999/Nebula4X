@@ -6,7 +6,7 @@ namespace nebula4x {
 
 GameState make_sol_scenario() {
   GameState s;
-  s.save_version = 4;
+  s.save_version = 5;
   s.date = Date::from_ymd(2200, 1, 1);
 
   // --- Factions ---

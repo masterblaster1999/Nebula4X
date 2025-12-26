@@ -4,22 +4,21 @@ This patch pack contains only the files that changed.
 
 ## Changes in this patch pack
 
-- **Shipyard builds now consume minerals** (optional, data-driven):
-  - New `build_costs_per_ton` field on the **shipyard** installation definition.
-  - `tick_shipyards()` will consume the configured minerals as it builds tons each day.
-  - If costs aren't configured, shipbuilding remains **free** (backwards compatible).
-- **More accurate shipyard throughput**: build capacity now carries over across multiple queued ships in the same day
-  (no more "overbuilding" past 0 tons remaining).
-- **UI shipyard improvements**: the Colony tab now shows:
-  - shipyard per-ton costs (when configured)
-  - remaining mineral cost per queued ship
-  - a simple "STALLED" hint when a required mineral is at 0
-- **CI added**: GitHub Actions workflow builds the core + runs tests on Windows/Linux/macOS.
-- **Repo hygiene**: add `.gitignore` for common build outputs and IDE files.
+- **Persistent contacts / intel memory**
+  - Factions now maintain a small `ship_contacts` map (last-seen ship snapshots).
+  - Contacts are updated automatically as part of the daily tick (based on sensor detection).
+  - Saves now persist contacts; save version bumped to **5**.
+- **Fog-of-war is now consistent across UI**
+  - A shared UI state was introduced so the **ship list**, **system map**, and **contacts tab** all respect the same FoW toggles.
+  - The left sidebar no longer shows undetected hostiles when FoW is enabled.
+- **System map contact overlay**
+  - Shows last-known contact markers (with optional labels), configurable by max age (days).
+- **New "Contacts" tab**
+  - Lists known contacts, their age, last known position, and quick actions (view system / investigate / attack when detected).
 
 ## Apply locally
 
-1. Unzip `nebula4x_patch_pack.zip`.
+1. Unzip the patch pack zip.
 2. Copy the extracted folders/files into your repository root (overwrite when prompted).
 3. Configure and build.
 
@@ -27,7 +26,7 @@ This patch pack contains only the files that changed.
 
 GitHub will **not** auto-extract a zip you upload.
 
-1. Unzip `nebula4x_patch_pack.zip` on your machine.
+1. Unzip the patch pack zip on your machine.
 2. In your repo on GitHub: **Add file → Upload files**.
 3. Drag & drop the extracted folders/files into the upload area (keep the same folder structure).
 4. Commit.

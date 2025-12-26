@@ -150,7 +150,7 @@ void draw_main_menu(Simulation& sim, char* save_path, char* load_path) {
   }
 }
 
-void draw_left_sidebar(Simulation& sim, Id& selected_ship, Id& selected_colony) {
+void draw_left_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& selected_colony) {
   ImGui::Text("Turns");
   if (ImGui::Button("+1 day")) sim.advance_days(1);
   ImGui::SameLine();
@@ -181,9 +181,19 @@ void draw_left_sidebar(Simulation& sim, Id& selected_ship, Id& selected_colony) 
     return;
   }
 
+  const Ship* viewer_ship = (selected_ship != kInvalidId) ? find_ptr(sim.state().ships, selected_ship) : nullptr;
+  const Id viewer_faction_id = viewer_ship ? viewer_ship->faction_id : kInvalidId;
+
   for (Id sid : sys->ships) {
     const auto* sh = find_ptr(sim.state().ships, sid);
     if (!sh) continue;
+
+    // Fog-of-war: only show friendly ships and detected hostiles, based on the selected ship's faction.
+    if (ui.fog_of_war && viewer_faction_id != kInvalidId) {
+      if (sh->faction_id != viewer_faction_id && !sim.is_ship_detected_by_faction(viewer_faction_id, sid)) {
+        continue;
+      }
+    }
 
     const auto* fac = find_ptr(sim.state().factions, sh->faction_id);
     const std::string fac_name = fac ? fac->name : std::string("Faction ") + std::to_string(sh->faction_id);
@@ -221,7 +231,7 @@ void draw_left_sidebar(Simulation& sim, Id& selected_ship, Id& selected_colony) 
   }
 }
 
-void draw_right_sidebar(Simulation& sim, Id selected_ship, Id& selected_colony) {
+void draw_right_sidebar(Simulation& sim, UIState& ui, Id selected_ship, Id& selected_colony) {
   auto& s = sim.state();
 
   static int faction_combo_idx = 0;
@@ -840,6 +850,118 @@ void draw_right_sidebar(Simulation& sim, Id selected_ship, Id& selected_colony) 
         if (!status.empty()) {
           ImGui::Spacing();
           ImGui::TextWrapped("%s", status.c_str());
+        }
+
+        ImGui::EndTabItem();
+      }
+    }
+
+    // --- Contacts / intel tab ---
+    if (ImGui::BeginTabItem("Contacts")) {
+      // Default viewer faction: use selected ship's faction if available, otherwise use the faction combo.
+      Id viewer_faction_id = selected_faction_id;
+      if (selected_ship != kInvalidId) {
+        if (const auto* sh = find_ptr(s.ships, selected_ship)) viewer_faction_id = sh->faction_id;
+      }
+
+      Faction* viewer = (viewer_faction_id == kInvalidId) ? nullptr : find_ptr(s.factions, viewer_faction_id);
+
+      if (!viewer) {
+        ImGui::TextDisabled("Select a faction (Research tab) or select a ship to view contacts");
+        ImGui::EndTabItem();
+      } else {
+        const auto* sys = find_ptr(s.systems, s.selected_system);
+        const char* sys_name = sys ? sys->name.c_str() : "(none)";
+
+        ImGui::Text("Viewer: %s", viewer->name.c_str());
+        ImGui::TextDisabled("Contacts are last-known snapshots from sensors; they may be stale.");
+
+        ImGui::Separator();
+        ImGui::Checkbox("Fog of war", &ui.fog_of_war);
+        ImGui::SameLine();
+        ImGui::Checkbox("Show contact markers", &ui.show_contact_markers);
+
+        ImGui::InputInt("Show <= days old", &ui.contact_max_age_days);
+        ui.contact_max_age_days = std::clamp(ui.contact_max_age_days, 1, 365);
+
+        static bool only_current_system = true;
+        ImGui::Checkbox("Only selected system", &only_current_system);
+        ImGui::SameLine();
+        ImGui::TextDisabled("(%s)", sys_name);
+
+        const int now = static_cast<int>(s.date.days_since_epoch());
+
+        struct Row {
+          Contact c;
+          int age{0};
+        };
+        std::vector<Row> rows;
+        rows.reserve(viewer->ship_contacts.size());
+
+        for (const auto& [_, c] : viewer->ship_contacts) {
+          if (only_current_system && c.system_id != s.selected_system) continue;
+          const int age = now - c.last_seen_day;
+          if (age < 0) continue;
+          if (age > ui.contact_max_age_days) continue;
+          rows.push_back(Row{c, age});
+        }
+
+        std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) {
+          if (a.age != b.age) return a.age < b.age; // younger first
+          return a.c.ship_id < b.c.ship_id;
+        });
+
+        ImGui::Separator();
+        ImGui::Text("Contacts: %d", (int)rows.size());
+
+        if (rows.empty()) {
+          ImGui::TextDisabled("(none)");
+        } else {
+          for (const auto& r : rows) {
+            const auto* sys2 = find_ptr(s.systems, r.c.system_id);
+            const char* sys2_name = sys2 ? sys2->name.c_str() : "(unknown system)";
+
+            std::string title = r.c.last_seen_name.empty() ? ("Contact #" + std::to_string(r.c.ship_id)) : r.c.last_seen_name;
+            title += "##contact_" + std::to_string(r.c.ship_id);
+
+            if (ImGui::TreeNode(title.c_str())) {
+              ImGui::Text("System: %s", sys2_name);
+              ImGui::Text("Age: %d day(s)", r.age);
+              ImGui::Text("Last known pos: (%.2f, %.2f) mkm", r.c.last_seen_position_mkm.x, r.c.last_seen_position_mkm.y);
+              if (!r.c.last_seen_design_id.empty()) ImGui::Text("Last seen design: %s", r.c.last_seen_design_id.c_str());
+
+              const bool detected_now = sim.is_ship_detected_by_faction(viewer->id, r.c.ship_id);
+              ImGui::Text("Currently detected: %s", detected_now ? "yes" : "no");
+
+              if (ImGui::SmallButton(("View system##" + std::to_string(r.c.ship_id)).c_str())) {
+                s.selected_system = r.c.system_id;
+              }
+
+              // If the player has a ship selected in the same system, offer quick actions.
+              if (selected_ship != kInvalidId) {
+                const auto* my_ship = find_ptr(s.ships, selected_ship);
+                if (my_ship && my_ship->faction_id == viewer->id && my_ship->system_id == r.c.system_id) {
+                  ImGui::SameLine();
+                  if (ImGui::SmallButton(("Investigate##" + std::to_string(r.c.ship_id)).c_str())) {
+                    sim.issue_move_to_point(selected_ship, r.c.last_seen_position_mkm);
+                  }
+
+                  ImGui::SameLine();
+                  if (!detected_now) {
+                    ImGui::BeginDisabled();
+                  }
+                  if (ImGui::SmallButton(("Attack##" + std::to_string(r.c.ship_id)).c_str())) {
+                    sim.issue_attack_ship(selected_ship, r.c.ship_id);
+                  }
+                  if (!detected_now) {
+                    ImGui::EndDisabled();
+                  }
+                }
+              }
+
+              ImGui::TreePop();
+            }
+          }
         }
 
         ImGui::EndTabItem();

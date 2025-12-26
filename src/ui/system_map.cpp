@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <string>
 
 namespace nebula4x::ui {
 namespace {
@@ -37,7 +38,7 @@ Vec2 to_world(const ImVec2& screen_px, const ImVec2& center_px, double scale_px_
 
 } // namespace
 
-void draw_system_map(Simulation& sim, Id& selected_ship, double& zoom, Vec2& pan) {
+void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zoom, Vec2& pan) {
   const auto& s = sim.state();
   const auto* sys = find_ptr(s.systems, s.selected_system);
   if (!sys) {
@@ -45,15 +46,11 @@ void draw_system_map(Simulation& sim, Id& selected_ship, double& zoom, Vec2& pan
     return;
   }
 
-  // View filters
-  static bool fog_of_war = false;
-  static bool show_selected_sensor_range = true;
-
   const Ship* viewer_ship = (selected_ship != kInvalidId) ? find_ptr(s.ships, selected_ship) : nullptr;
   const Id viewer_faction_id = viewer_ship ? viewer_ship->faction_id : kInvalidId;
 
   std::vector<Id> detected_hostiles;
-  if (fog_of_war && viewer_faction_id != kInvalidId) {
+  if (ui.fog_of_war && viewer_faction_id != kInvalidId) {
     detected_hostiles = sim.detected_hostile_ships_in_system(viewer_faction_id, sys->id);
   }
 
@@ -138,7 +135,7 @@ void draw_system_map(Simulation& sim, Id& selected_ship, double& zoom, Vec2& pan
     if (!sh) continue;
 
     // Fog-of-war: show friendly ships and detected hostiles (view faction is the selected ship's faction).
-    if (fog_of_war && viewer_faction_id != kInvalidId) {
+    if (ui.fog_of_war && viewer_faction_id != kInvalidId) {
       if (sh->faction_id != viewer_faction_id) {
         if (std::find(detected_hostiles.begin(), detected_hostiles.end(), sid) == detected_hostiles.end()) continue;
       }
@@ -147,7 +144,7 @@ void draw_system_map(Simulation& sim, Id& selected_ship, double& zoom, Vec2& pan
     const ImVec2 p = to_screen(sh->position_mkm, center, scale, zoom, pan);
 
     // Selected ship sensor range overlay
-    if (show_selected_sensor_range && selected_ship == sid) {
+    if (ui.show_selected_sensor_range && selected_ship == sid) {
       const auto* d = sim.find_design(sh->design_id);
       if (d && d->sensor_range_mkm > 0.0) {
         draw->AddCircle(p, static_cast<float>(d->sensor_range_mkm * scale * zoom), IM_COL32(0, 170, 255, 80), 0, 1.0f);
@@ -158,6 +155,31 @@ void draw_system_map(Simulation& sim, Id& selected_ship, double& zoom, Vec2& pan
     draw->AddCircleFilled(p, r, color_ship());
     if (selected_ship == sid) {
       draw->AddCircle(p, 10.0f, IM_COL32(0, 255, 140, 255), 0, 1.5f);
+    }
+  }
+
+  // Contact markers (last known positions)
+  if (ui.fog_of_war && ui.show_contact_markers && viewer_faction_id != kInvalidId) {
+    const auto contacts = sim.recent_contacts_in_system(viewer_faction_id, sys->id, ui.contact_max_age_days);
+    const int now = static_cast<int>(s.date.days_since_epoch());
+
+    for (const auto& c : contacts) {
+      // Don't draw a contact marker if the ship is currently detected (we already draw the ship itself).
+      if (c.ship_id != kInvalidId && sim.is_ship_detected_by_faction(viewer_faction_id, c.ship_id)) continue;
+
+      const int age = std::max(0, now - c.last_seen_day);
+      const ImVec2 p = to_screen(c.last_seen_position_mkm, center, scale, zoom, pan);
+      const ImU32 col = IM_COL32(255, 180, 0, 200);
+
+      draw->AddCircle(p, 6.0f, col, 0, 2.0f);
+      draw->AddLine(ImVec2(p.x - 5, p.y - 5), ImVec2(p.x + 5, p.y + 5), col, 2.0f);
+      draw->AddLine(ImVec2(p.x - 5, p.y + 5), ImVec2(p.x + 5, p.y - 5), col, 2.0f);
+
+      if (ui.show_contact_labels) {
+        std::string lbl = c.last_seen_name.empty() ? std::string("Unknown") : c.last_seen_name;
+        lbl += "  (" + std::to_string(age) + "d)";
+        draw->AddText(ImVec2(p.x + 8, p.y + 8), IM_COL32(240, 220, 180, 220), lbl.c_str());
+      }
     }
   }
 
@@ -180,13 +202,19 @@ void draw_system_map(Simulation& sim, Id& selected_ship, double& zoom, Vec2& pan
   ImGui::BulletText("Left click: move order");
   ImGui::BulletText("Jump points are purple rings");
   ImGui::Separator();
-  ImGui::Checkbox("Fog of war", &fog_of_war);
-  ImGui::Checkbox("Show sensor range", &show_selected_sensor_range);
-  if (fog_of_war) {
+  ImGui::Checkbox("Fog of war", &ui.fog_of_war);
+  ImGui::Checkbox("Show sensor range", &ui.show_selected_sensor_range);
+  ImGui::Checkbox("Show contacts", &ui.show_contact_markers);
+  ImGui::SameLine();
+  ImGui::Checkbox("Labels", &ui.show_contact_labels);
+
+  if (ui.fog_of_war) {
     if (viewer_faction_id == kInvalidId) {
       ImGui::TextDisabled("Select a ship to define view faction");
     } else {
       ImGui::TextDisabled("Detected hostiles: %d", (int)detected_hostiles.size());
+      ImGui::TextDisabled("Contacts shown (<= %dd): %d", ui.contact_max_age_days,
+                          (int)sim.recent_contacts_in_system(viewer_faction_id, sys->id, ui.contact_max_age_days).size());
     }
   }
   ImGui::EndChild();

@@ -161,6 +161,26 @@ std::vector<Id> Simulation::detected_hostile_ships_in_system(Id viewer_faction_i
   return out;
 }
 
+std::vector<Contact> Simulation::recent_contacts_in_system(Id viewer_faction_id, Id system_id, int max_age_days) const {
+  std::vector<Contact> out;
+  const auto* fac = find_ptr(state_.factions, viewer_faction_id);
+  if (!fac) return out;
+
+  const int now = static_cast<int>(state_.date.days_since_epoch());
+  for (const auto& [_, c] : fac->ship_contacts) {
+    if (c.system_id != system_id) continue;
+    const int age = now - c.last_seen_day;
+    if (age < 0) continue;
+    if (age > max_age_days) continue;
+    out.push_back(c);
+  }
+
+  std::sort(out.begin(), out.end(), [](const Contact& a, const Contact& b) {
+    return a.last_seen_day > b.last_seen_day;
+  });
+  return out;
+}
+
 void Simulation::apply_design_stats_to_ship(Ship& ship) {
   const ShipDesign* d = find_design(ship.design_id);
   if (!d) {
@@ -264,6 +284,9 @@ void Simulation::new_game() {
   for (auto& [_, f] : state_.factions) initialize_unlocks_for_faction(f);
 
   recompute_body_positions();
+
+  // Initialize contact memory for the starting situation.
+  tick_contacts();
 }
 
 void Simulation::load_game(GameState loaded) {
@@ -296,6 +319,9 @@ void Simulation::load_game(GameState loaded) {
   }
 
   recompute_body_positions();
+
+  // Rebuild contact memory for the loaded state (helps older saves).
+  tick_contacts();
 }
 
 void Simulation::advance_days(int days) {
@@ -398,7 +424,75 @@ void Simulation::tick_one_day() {
   tick_shipyards();
   tick_construction();
   tick_ships();
+  tick_contacts();
   tick_combat();
+}
+
+void Simulation::tick_contacts() {
+  // Very simple intel model:
+  // - If a hostile ship is detected, store a snapshot as a Contact.
+  // - Contacts are retained for a while even after losing contact.
+
+  const int now = static_cast<int>(state_.date.days_since_epoch());
+  constexpr int kMaxContactAgeDays = 180;
+
+  // Prune obviously invalid / very old contacts.
+  for (auto& [_, fac] : state_.factions) {
+    for (auto it = fac.ship_contacts.begin(); it != fac.ship_contacts.end();) {
+      const Contact& c = it->second;
+      const bool dead = (state_.ships.find(c.ship_id) == state_.ships.end());
+      const int age = now - c.last_seen_day;
+      if (dead || age > kMaxContactAgeDays) {
+        it = fac.ship_contacts.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+
+  // Cache sensor sources per (faction, system) to avoid re-scanning colonies repeatedly.
+  struct Key {
+    Id faction_id{kInvalidId};
+    Id system_id{kInvalidId};
+    bool operator==(const Key& o) const { return faction_id == o.faction_id && system_id == o.system_id; }
+  };
+  struct KeyHash {
+    size_t operator()(const Key& k) const {
+      // Cheap mixing; ids are small in the prototype.
+      return std::hash<long long>()((static_cast<long long>(k.faction_id) << 32) ^ static_cast<long long>(k.system_id));
+    }
+  };
+
+  std::unordered_map<Key, std::vector<SensorSource>, KeyHash> cache;
+
+  auto sources_for = [&](Id faction_id, Id system_id) -> const std::vector<SensorSource>& {
+    const Key key{faction_id, system_id};
+    auto it = cache.find(key);
+    if (it != cache.end()) return it->second;
+    auto sources = gather_sensor_sources(*this, faction_id, system_id);
+    auto [ins, _ok] = cache.emplace(key, std::move(sources));
+    return ins->second;
+  };
+
+  for (const auto& [ship_id, sh] : state_.ships) {
+    for (auto& [_, fac] : state_.factions) {
+      if (fac.id == sh.faction_id) continue;
+
+      const auto& sources = sources_for(fac.id, sh.system_id);
+      if (sources.empty()) continue;
+      if (!any_source_detects(sources, sh.position_mkm)) continue;
+
+      Contact c;
+      c.ship_id = ship_id;
+      c.system_id = sh.system_id;
+      c.last_seen_day = now;
+      c.last_seen_position_mkm = sh.position_mkm;
+      c.last_seen_name = sh.name;
+      c.last_seen_design_id = sh.design_id;
+      c.last_seen_faction_id = sh.faction_id;
+      fac.ship_contacts[ship_id] = std::move(c);
+    }
+  }
 }
 
 void Simulation::tick_colonies() {
@@ -919,6 +1013,11 @@ void Simulation::tick_combat() {
 
     state_.ship_orders.erase(dead_id);
     state_.ships.erase(dead_id);
+
+    // Clear any remembered contacts for this ship.
+    for (auto& [_, fac] : state_.factions) {
+      fac.ship_contacts.erase(dead_id);
+    }
 
     nebula4x::log::warn("Ship destroyed: " + name);
   }

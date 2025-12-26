@@ -51,6 +51,11 @@ class Simulation {
   bool is_ship_detected_by_faction(Id viewer_faction_id, Id target_ship_id) const;
   std::vector<Id> detected_hostile_ships_in_system(Id viewer_faction_id, Id system_id) const;
 
+  // Contact memory helpers.
+  // Returns recently seen (last known) hostile ship contacts in the given system.
+  // Contacts are updated automatically during simulation ticks.
+  std::vector<Contact> recent_contacts_in_system(Id viewer_faction_id, Id system_id, int max_age_days = 30) const;
+
   // Player design creation. Designs are stored in GameState::custom_designs and are saved.
   bool upsert_custom_design(ShipDesign design, std::string* error = nullptr);
 
@@ -65,6 +70,7 @@ class Simulation {
   void tick_shipyards();
   void tick_construction();
   void tick_ships();
+  void tick_contacts();
   void tick_combat();
 
   void apply_design_stats_to_ship(Ship& ship);
