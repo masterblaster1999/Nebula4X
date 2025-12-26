@@ -294,6 +294,12 @@ std::string serialize_game_to_json(const GameState& s) {
     o["unlocked_components"] = string_vector_to_json(f.unlocked_components);
     o["unlocked_installations"] = string_vector_to_json(f.unlocked_installations);
 
+    // Exploration / map knowledge.
+    Array discovered_systems;
+    discovered_systems.reserve(f.discovered_systems.size());
+    for (Id sid : f.discovered_systems) discovered_systems.push_back(static_cast<double>(sid));
+    o["discovered_systems"] = discovered_systems;
+
     // Optional contact memory (prototype intel).
     Array contacts;
     contacts.reserve(f.ship_contacts.size());
@@ -474,6 +480,12 @@ GameState deserialize_game_from_json(const std::string& json_text) {
 
     if (auto it = o.find("unlocked_components"); it != o.end()) f.unlocked_components = string_vector_from_json(it->second);
     if (auto it = o.find("unlocked_installations"); it != o.end()) f.unlocked_installations = string_vector_from_json(it->second);
+
+    if (auto it = o.find("discovered_systems"); it != o.end()) {
+      for (const auto& sv : it->second.array()) {
+        f.discovered_systems.push_back(static_cast<Id>(sv.int_value(kInvalidId)));
+      }
+    }
 
     // Optional contact memory.
     if (auto it = o.find("ship_contacts"); it != o.end()) {

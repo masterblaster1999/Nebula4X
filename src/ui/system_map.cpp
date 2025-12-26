@@ -47,7 +47,15 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   }
 
   const Ship* viewer_ship = (selected_ship != kInvalidId) ? find_ptr(s.ships, selected_ship) : nullptr;
-  const Id viewer_faction_id = viewer_ship ? viewer_ship->faction_id : kInvalidId;
+  const Id viewer_faction_id = viewer_ship ? viewer_ship->faction_id : ui.viewer_faction_id;
+
+  if (ui.fog_of_war && viewer_faction_id != kInvalidId) {
+    if (!sim.is_system_discovered_by_faction(viewer_faction_id, sys->id)) {
+      ImGui::TextDisabled("System not discovered by viewer faction");
+      ImGui::TextDisabled("(Select a ship or faction in the Research tab to change view)");
+      return;
+    }
+  }
 
   std::vector<Id> detected_hostiles;
   if (ui.fog_of_war && viewer_faction_id != kInvalidId) {

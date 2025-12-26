@@ -56,6 +56,10 @@ class Simulation {
   // Contacts are updated automatically during simulation ticks.
   std::vector<Contact> recent_contacts_in_system(Id viewer_faction_id, Id system_id, int max_age_days = 30) const;
 
+  // Exploration / map knowledge helpers.
+  bool is_system_discovered_by_faction(Id viewer_faction_id, Id system_id) const;
+
+
   // Player design creation. Designs are stored in GameState::custom_designs and are saved.
   bool upsert_custom_design(ShipDesign design, std::string* error = nullptr);
 
@@ -72,6 +76,8 @@ class Simulation {
   void tick_ships();
   void tick_contacts();
   void tick_combat();
+
+  void discover_system_for_faction(Id faction_id, Id system_id);
 
   void apply_design_stats_to_ship(Ship& ship);
   void initialize_unlocks_for_faction(Faction& f);

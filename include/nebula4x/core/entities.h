@@ -194,6 +194,11 @@ struct Faction {
   std::vector<std::string> unlocked_components;
   std::vector<std::string> unlocked_installations;
 
+  // Exploration / map knowledge.
+  // Systems this faction has discovered. Seeded from starting ships/colonies and
+  // updated when ships transit jump points into new systems.
+  std::vector<Id> discovered_systems;
+
   // Simple per-faction ship contact memory.
   // Key: ship id.
   std::unordered_map<Id, Contact> ship_contacts;

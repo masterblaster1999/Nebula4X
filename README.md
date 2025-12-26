@@ -17,6 +17,8 @@ Nebula4X is an **open-source, turn-based space 4X** prototype in **C++20**, insp
   - **travel via jump point** (multi-system travel)
   - **attack ship** (simple targeting)
 - **Jump points + multi-system state**
+- **Sensors + intel**: in-system detection + last-known contact snapshots (saved)
+- **Exploration**: factions track discovered star systems; entering a new system reveals it
 - **Research system**:
   - tech definitions (JSON)
   - research points generation (via `research_lab` installations)
@@ -31,6 +33,8 @@ Nebula4X is an **open-source, turn-based space 4X** prototype in **C++20**, insp
 
 - System map (pan/zoom)
 - Ship list + selection (shows HP, faction)
+- **Fog-of-war** toggle (hides undetected hostiles and undiscovered systems)
+- **Contacts tab**: recently seen hostiles + quick actions
 - **Jump point markers on the system map**
 - **Ship tab**: quick orders (move, jump travel, attack)
 - **Colony tab**: manage shipyard queue + build installations via construction queue

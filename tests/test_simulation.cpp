@@ -281,5 +281,77 @@ int test_simulation() {
   const auto recent = sim5.recent_contacts_in_system(terrans5, sol5, 30);
   N4X_ASSERT(!recent.empty());
 
+
+  // --- exploration discovery sanity check ---
+  // Factions track which star systems they have discovered.
+  // Starting discovery is seeded from existing colonies/ships, and traveling
+  // via a jump point should discover the destination system.
+  nebula4x::ContentDB content6;
+
+  // Minimal installations (the scenario references these ids).
+  content6.installations[mine4.id] = mine4;
+  content6.installations[yard4.id] = yard4;
+
+  // Designs used by the default Sol scenario. Speed is irrelevant for the
+  // "already at jump point" transit check.
+  content6.designs["freighter_alpha"] = make_design("freighter_alpha", 0.0);
+  content6.designs["surveyor_beta"]  = make_design("surveyor_beta", 0.0);
+  content6.designs["escort_gamma"]   = make_design("escort_gamma", 0.0);
+  content6.designs["pirate_raider"]  = make_design("pirate_raider", 0.0);
+
+  nebula4x::Simulation sim6(std::move(content6), nebula4x::SimConfig{});
+
+  nebula4x::Id terrans6 = nebula4x::kInvalidId;
+  nebula4x::Id pirates6 = nebula4x::kInvalidId;
+  for (const auto& [fid, f] : sim6.state().factions) {
+    if (f.name == "Terran Union") terrans6 = fid;
+    if (f.name == "Pirate Raiders") pirates6 = fid;
+  }
+  N4X_ASSERT(terrans6 != nebula4x::kInvalidId);
+  N4X_ASSERT(pirates6 != nebula4x::kInvalidId);
+
+  nebula4x::Id sol6 = nebula4x::kInvalidId;
+  nebula4x::Id cen6 = nebula4x::kInvalidId;
+  for (const auto& [sid, sys] : sim6.state().systems) {
+    if (sys.name == "Sol") sol6 = sid;
+    if (sys.name == "Alpha Centauri") cen6 = sid;
+  }
+  N4X_ASSERT(sol6 != nebula4x::kInvalidId);
+  N4X_ASSERT(cen6 != nebula4x::kInvalidId);
+
+  // Starting discovery should include the system where each faction has assets.
+  N4X_ASSERT(sim6.is_system_discovered_by_faction(terrans6, sol6));
+  N4X_ASSERT(!sim6.is_system_discovered_by_faction(terrans6, cen6));
+  N4X_ASSERT(sim6.is_system_discovered_by_faction(pirates6, cen6));
+
+  // Find a Terran ship in Sol.
+  nebula4x::Id terran_ship6 = nebula4x::kInvalidId;
+  for (const auto& [sid, sh] : sim6.state().ships) {
+    if (sh.faction_id == terrans6 && sh.system_id == sol6) {
+      terran_ship6 = sid;
+      break;
+    }
+  }
+  N4X_ASSERT(terran_ship6 != nebula4x::kInvalidId);
+
+  // Find the Sol-side jump point.
+  nebula4x::Id sol_jump6 = nebula4x::kInvalidId;
+  for (const auto& [jid, jp] : sim6.state().jump_points) {
+    if (jp.system_id == sol6) {
+      sol_jump6 = jid;
+      break;
+    }
+  }
+  N4X_ASSERT(sol_jump6 != nebula4x::kInvalidId);
+
+  // Put the ship exactly at the jump point, issue travel, and advance one day.
+  // This checks the "transit even if already at jump point" behavior.
+  sim6.state().ships[terran_ship6].position_mkm = sim6.state().jump_points[sol_jump6].position_mkm;
+  N4X_ASSERT(sim6.issue_travel_via_jump(terran_ship6, sol_jump6));
+  sim6.advance_days(1);
+
+  N4X_ASSERT(sim6.state().ships[terran_ship6].system_id == cen6);
+  N4X_ASSERT(sim6.is_system_discovered_by_faction(terrans6, cen6));
+
   return 0;
 }

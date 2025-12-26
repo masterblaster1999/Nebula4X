@@ -133,6 +133,13 @@ double Simulation::construction_points_per_day(const Colony& colony) const {
   return total;
 }
 
+bool Simulation::is_system_discovered_by_faction(Id viewer_faction_id, Id system_id) const {
+  const auto* fac = find_ptr(state_.factions, viewer_faction_id);
+  if (!fac) return true; // Debug-friendly fallback.
+  return std::find(fac->discovered_systems.begin(), fac->discovered_systems.end(), system_id) !=
+         fac->discovered_systems.end();
+}
+
 bool Simulation::is_ship_detected_by_faction(Id viewer_faction_id, Id target_ship_id) const {
   const auto* tgt = find_ptr(state_.ships, target_ship_id);
   if (!tgt) return false;
@@ -250,12 +257,22 @@ void Simulation::initialize_unlocks_for_faction(Faction& f) {
   // Installations present on colonies belonging to this faction.
   for (const auto& [_, col] : state_.colonies) {
     if (col.faction_id != f.id) continue;
+
+    // Exploration: discovering any system where we have a colony.
+    if (const auto* body = find_ptr(state_.bodies, col.body_id)) {
+      push_unique(f.discovered_systems, body->system_id);
+    }
+
     for (const auto& [inst_id, _count] : col.installations) push_unique(f.unlocked_installations, inst_id);
   }
 
   // Components present on existing ships belonging to this faction.
   for (const auto& [_, ship] : state_.ships) {
     if (ship.faction_id != f.id) continue;
+
+    // Exploration: discovering any system where we have a ship.
+    push_unique(f.discovered_systems, ship.system_id);
+
     if (const auto* d = find_design(ship.design_id)) {
       for (const auto& cid : d->components) push_unique(f.unlocked_components, cid);
     }
@@ -270,6 +287,13 @@ void Simulation::initialize_unlocks_for_faction(Faction& f) {
       if (eff.type == "unlock_installation") push_unique(f.unlocked_installations, eff.value);
     }
   }
+}
+
+void Simulation::discover_system_for_faction(Id faction_id, Id system_id) {
+  if (system_id == kInvalidId) return;
+  auto* fac = find_ptr(state_.factions, faction_id);
+  if (!fac) return;
+  push_unique(fac->discovered_systems, system_id);
 }
 
 void Simulation::new_game() {
@@ -851,8 +875,45 @@ void Simulation::tick_ships() {
     const bool is_attack = std::holds_alternative<AttackShip>(q.front());
     const bool is_jump = std::holds_alternative<TravelViaJump>(q.front());
 
-    if (!is_attack && dist < 1e-6) {
+    auto transit_jump = [&]() {
+      const Id jump_id = std::get<TravelViaJump>(q.front()).jump_point_id;
+      const auto* jp = find_ptr(state_.jump_points, jump_id);
+      if (!jp || jp->system_id != ship.system_id || jp->linked_jump_id == kInvalidId) return;
+
+      const auto* dest = find_ptr(state_.jump_points, jp->linked_jump_id);
+      if (!dest) return;
+
+      const Id old_sys = ship.system_id;
+      const Id new_sys = dest->system_id;
+
+      // Remove ship from old system list.
+      if (auto* sys_old = find_ptr(state_.systems, old_sys)) {
+        sys_old->ships.erase(std::remove(sys_old->ships.begin(), sys_old->ships.end(), ship_id), sys_old->ships.end());
+      }
+
+      ship.system_id = new_sys;
+      ship.position_mkm = dest->position_mkm;
+
+      if (auto* sys_new = find_ptr(state_.systems, new_sys)) {
+        sys_new->ships.push_back(ship_id);
+      }
+
+      // Exploration: entering a new system reveals it to the ship's faction.
+      discover_system_for_faction(ship.faction_id, new_sys);
+
+      nebula4x::log::info("Ship " + ship.name + " transited jump point " + jp->name + " -> " +
+                         (find_ptr(state_.systems, new_sys) ? find_ptr(state_.systems, new_sys)->name : std::string("(unknown)")));
+    };
+
+    if (!is_attack && !is_jump && dist < 1e-6) {
       // done
+      q.erase(q.begin());
+      continue;
+    }
+
+    // Jump orders: being exactly at a jump point should still transit (even if speed is 0).
+    if (is_jump && dist < 1e-6) {
+      transit_jump();
       q.erase(q.begin());
       continue;
     }
@@ -885,31 +946,7 @@ void Simulation::tick_ships() {
       ship.position_mkm = target;
 
       if (is_jump) {
-        // Transit the jump point.
-        const Id jump_id = std::get<TravelViaJump>(q.front()).jump_point_id;
-        const auto* jp = find_ptr(state_.jump_points, jump_id);
-        if (jp && jp->system_id == ship.system_id && jp->linked_jump_id != kInvalidId) {
-          const auto* dest = find_ptr(state_.jump_points, jp->linked_jump_id);
-          if (dest) {
-            const Id old_sys = ship.system_id;
-            const Id new_sys = dest->system_id;
-
-            // Remove ship from old system list.
-            if (auto* sys_old = find_ptr(state_.systems, old_sys)) {
-              sys_old->ships.erase(std::remove(sys_old->ships.begin(), sys_old->ships.end(), ship_id), sys_old->ships.end());
-            }
-
-            ship.system_id = new_sys;
-            ship.position_mkm = dest->position_mkm;
-
-            if (auto* sys_new = find_ptr(state_.systems, new_sys)) {
-              sys_new->ships.push_back(ship_id);
-            }
-
-            nebula4x::log::info("Ship " + ship.name + " transited jump point " + jp->name + " -> " +
-                               (find_ptr(state_.systems, new_sys) ? find_ptr(state_.systems, new_sys)->name : std::string("(unknown)")));
-          }
-        }
+        transit_jump();
 
         // Jump order completes.
         q.erase(q.begin());

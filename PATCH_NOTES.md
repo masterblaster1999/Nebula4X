@@ -4,17 +4,17 @@ This patch pack contains only the files that changed.
 
 ## Changes in this patch pack
 
-- **Persistent contacts / intel memory**
-  - Factions now maintain a small `ship_contacts` map (last-seen ship snapshots).
-  - Contacts are updated automatically as part of the daily tick (based on sensor detection).
-  - Saves now persist contacts; save version bumped to **5**.
-- **Fog-of-war is now consistent across UI**
-  - A shared UI state was introduced so the **ship list**, **system map**, and **contacts tab** all respect the same FoW toggles.
-  - The left sidebar no longer shows undetected hostiles when FoW is enabled.
-- **System map contact overlay**
-  - Shows last-known contact markers (with optional labels), configurable by max age (days).
-- **New "Contacts" tab**
-  - Lists known contacts, their age, last known position, and quick actions (view system / investigate / attack when detected).
+- **Exploration: discovered star systems**
+  - Factions now track discovered systems via `Faction::discovered_systems`.
+  - Discovery is seeded from starting ships/colonies and updated when ships transit jump points.
+  - Saves now persist discovered systems; save version bumped to **6**.
+- **Jump travel quality-of-life + bugfix**
+  - `TravelViaJump` now transits even if the ship is already sitting on the jump point (including the edge case of 0 speed).
+  - Destination system is automatically discovered for the traveling ship's faction.
+- **UI: consistent view-faction for FoW/exploration**
+  - Added `UIState::viewer_faction_id` (the Research tab selection becomes the default viewer faction).
+  - Left sidebar + system map will hide undiscovered systems when Fog-of-war is enabled.
+  - Selecting a ship still overrides the viewer faction for detection (as before).
 
 ## Apply locally
 

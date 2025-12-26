@@ -160,7 +160,15 @@ void draw_left_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sele
 
   ImGui::Separator();
   ImGui::Text("Systems");
+  const Ship* viewer_ship_for_fow = (selected_ship != kInvalidId) ? find_ptr(sim.state().ships, selected_ship) : nullptr;
+  const Id viewer_faction_id_for_fow = viewer_ship_for_fow ? viewer_ship_for_fow->faction_id : ui.viewer_faction_id;
+
   for (const auto& [id, sys] : sim.state().systems) {
+    if (ui.fog_of_war && viewer_faction_id_for_fow != kInvalidId) {
+      if (!sim.is_system_discovered_by_faction(viewer_faction_id_for_fow, id)) {
+        continue;
+      }
+    }
     const bool sel = (sim.state().selected_system == id);
     if (ImGui::Selectable(sys.name.c_str(), sel)) {
       sim.state().selected_system = id;
@@ -182,7 +190,15 @@ void draw_left_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sele
   }
 
   const Ship* viewer_ship = (selected_ship != kInvalidId) ? find_ptr(sim.state().ships, selected_ship) : nullptr;
-  const Id viewer_faction_id = viewer_ship ? viewer_ship->faction_id : kInvalidId;
+  const Id viewer_faction_id = viewer_ship ? viewer_ship->faction_id : ui.viewer_faction_id;
+
+  if (ui.fog_of_war && viewer_faction_id != kInvalidId) {
+    if (!sim.is_system_discovered_by_faction(viewer_faction_id, sim.state().selected_system)) {
+      ImGui::TextDisabled("System not discovered by viewer faction");
+      ImGui::TextDisabled("(Select a ship or faction in the Research tab to change view)");
+      return;
+    }
+  }
 
   for (Id sid : sys->ships) {
     const auto* sh = find_ptr(sim.state().ships, sid);
@@ -241,6 +257,9 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id selected_ship, Id& sele
   }
   const Id selected_faction_id = factions.empty() ? kInvalidId : factions[faction_combo_idx].first;
   Faction* selected_faction = factions.empty() ? nullptr : find_ptr(s.factions, selected_faction_id);
+
+  // Share the currently selected faction with other panels for fog-of-war/exploration view.
+  ui.viewer_faction_id = selected_faction_id;
 
   if (ImGui::BeginTabBar("details_tabs")) {
     // --- Ship tab ---
