@@ -45,6 +45,22 @@ BodyType body_type_from_string(const std::string& s) {
   return BodyType::Planet;
 }
 
+std::string ship_role_to_string(ShipRole r) {
+  switch (r) {
+    case ShipRole::Freighter: return "freighter";
+    case ShipRole::Surveyor: return "surveyor";
+    case ShipRole::Combatant: return "combatant";
+    default: return "unknown";
+  }
+}
+
+ShipRole ship_role_from_string(const std::string& s) {
+  if (s == "freighter") return ShipRole::Freighter;
+  if (s == "surveyor") return ShipRole::Surveyor;
+  if (s == "combatant") return ShipRole::Combatant;
+  return ShipRole::Unknown;
+}
+
 Value order_to_json(const Order& order) {
   return std::visit(
       [](const auto& o) -> Value {
@@ -56,6 +72,12 @@ Value order_to_json(const Order& order) {
         } else if constexpr (std::is_same_v<T, MoveToBody>) {
           obj["type"] = std::string("move_to_body");
           obj["body_id"] = static_cast<double>(o.body_id);
+        } else if constexpr (std::is_same_v<T, TravelViaJump>) {
+          obj["type"] = std::string("travel_via_jump");
+          obj["jump_point_id"] = static_cast<double>(o.jump_point_id);
+        } else if constexpr (std::is_same_v<T, AttackShip>) {
+          obj["type"] = std::string("attack_ship");
+          obj["target_ship_id"] = static_cast<double>(o.target_ship_id);
         }
         return obj;
       },
@@ -74,6 +96,16 @@ Order order_from_json(const Value& v) {
     MoveToBody m;
     m.body_id = static_cast<Id>(o.at("body_id").int_value());
     return m;
+  }
+  if (type == "travel_via_jump") {
+    TravelViaJump t;
+    t.jump_point_id = static_cast<Id>(o.at("jump_point_id").int_value());
+    return t;
+  }
+  if (type == "attack_ship") {
+    AttackShip a;
+    a.target_ship_id = static_cast<Id>(o.at("target_ship_id").int_value());
+    return a;
   }
   throw std::runtime_error("Unknown order type: " + type);
 }
@@ -102,6 +134,19 @@ std::unordered_map<std::string, int> map_string_int_from_json(const Value& v) {
   return m;
 }
 
+Array string_vector_to_json(const std::vector<std::string>& v) {
+  Array a;
+  a.reserve(v.size());
+  for (const auto& s : v) a.push_back(s);
+  return a;
+}
+
+std::vector<std::string> string_vector_from_json(const Value& v) {
+  std::vector<std::string> out;
+  for (const auto& x : v.array()) out.push_back(x.string_value());
+  return out;
+}
+
 } // namespace
 
 std::string serialize_game_to_json(const GameState& s) {
@@ -128,6 +173,10 @@ std::string serialize_game_to_json(const GameState& s) {
     for (Id sid : sys.ships) ships.push_back(static_cast<double>(sid));
     o["ships"] = ships;
 
+    Array jps;
+    for (Id jid : sys.jump_points) jps.push_back(static_cast<double>(jid));
+    o["jump_points"] = jps;
+
     systems.push_back(o);
   }
   root["systems"] = systems;
@@ -148,6 +197,20 @@ std::string serialize_game_to_json(const GameState& s) {
   }
   root["bodies"] = bodies;
 
+  // Jump points
+  Array jump_points;
+  jump_points.reserve(s.jump_points.size());
+  for (const auto& [id, jp] : s.jump_points) {
+    Object o;
+    o["id"] = static_cast<double>(id);
+    o["name"] = jp.name;
+    o["system_id"] = static_cast<double>(jp.system_id);
+    o["position_mkm"] = vec2_to_json(jp.position_mkm);
+    o["linked_jump_id"] = static_cast<double>(jp.linked_jump_id);
+    jump_points.push_back(o);
+  }
+  root["jump_points"] = jump_points;
+
   // Ships
   Array ships;
   ships.reserve(s.ships.size());
@@ -160,6 +223,7 @@ std::string serialize_game_to_json(const GameState& s) {
     o["position_mkm"] = vec2_to_json(sh.position_mkm);
     o["design_id"] = sh.design_id;
     o["speed_km_s"] = sh.speed_km_s;
+    o["hp"] = sh.hp;
     ships.push_back(o);
   }
   root["ships"] = ships;
@@ -198,14 +262,35 @@ std::string serialize_game_to_json(const GameState& s) {
     o["id"] = static_cast<double>(id);
     o["name"] = f.name;
     o["research_points"] = f.research_points;
-
-    Array techs;
-    for (const auto& t : f.known_techs) techs.push_back(t);
-    o["known_techs"] = techs;
-
+    o["active_research_id"] = f.active_research_id;
+    o["active_research_progress"] = f.active_research_progress;
+    o["research_queue"] = string_vector_to_json(f.research_queue);
+    o["known_techs"] = string_vector_to_json(f.known_techs);
+    o["unlocked_components"] = string_vector_to_json(f.unlocked_components);
+    o["unlocked_installations"] = string_vector_to_json(f.unlocked_installations);
     factions.push_back(o);
   }
   root["factions"] = factions;
+
+  // Custom designs
+  Array designs;
+  designs.reserve(s.custom_designs.size());
+  for (const auto& [id, d] : s.custom_designs) {
+    Object o;
+    o["id"] = d.id;
+    o["name"] = d.name;
+    o["role"] = ship_role_to_string(d.role);
+    o["components"] = string_vector_to_json(d.components);
+    o["mass_tons"] = d.mass_tons;
+    o["speed_km_s"] = d.speed_km_s;
+    o["cargo_tons"] = d.cargo_tons;
+    o["sensor_range_mkm"] = d.sensor_range_mkm;
+    o["max_hp"] = d.max_hp;
+    o["weapon_damage"] = d.weapon_damage;
+    o["weapon_range_mkm"] = d.weapon_range_mkm;
+    designs.push_back(o);
+  }
+  root["custom_designs"] = designs;
 
   // Orders
   Array ship_orders;
@@ -243,6 +328,10 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     for (const auto& bid : o.at("bodies").array()) sys.bodies.push_back(static_cast<Id>(bid.int_value()));
     for (const auto& sid : o.at("ships").array()) sys.ships.push_back(static_cast<Id>(sid.int_value()));
 
+    if (auto it = o.find("jump_points"); it != o.end()) {
+      for (const auto& jid : it->second.array()) sys.jump_points.push_back(static_cast<Id>(jid.int_value()));
+    }
+
     s.systems[sys.id] = sys;
   }
 
@@ -260,6 +349,20 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     s.bodies[b.id] = b;
   }
 
+  // Jump points
+  if (auto it = root.find("jump_points"); it != root.end()) {
+    for (const auto& jv : it->second.array()) {
+      const auto& o = jv.object();
+      JumpPoint jp;
+      jp.id = static_cast<Id>(o.at("id").int_value());
+      jp.name = o.at("name").string_value();
+      jp.system_id = static_cast<Id>(o.at("system_id").int_value());
+      jp.position_mkm = vec2_from_json(o.at("position_mkm"));
+      jp.linked_jump_id = static_cast<Id>(o.at("linked_jump_id").int_value(kInvalidId));
+      s.jump_points[jp.id] = jp;
+    }
+  }
+
   // Ships
   for (const auto& shv : root.at("ships").array()) {
     const auto& o = shv.object();
@@ -271,6 +374,7 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     sh.position_mkm = vec2_from_json(o.at("position_mkm"));
     sh.design_id = o.at("design_id").string_value();
     sh.speed_km_s = o.at("speed_km_s").number_value(0.0);
+    sh.hp = o.at("hp").number_value(0.0);
     s.ships[sh.id] = sh;
   }
 
@@ -304,17 +408,48 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     f.id = static_cast<Id>(o.at("id").int_value());
     f.name = o.at("name").string_value();
     f.research_points = o.at("research_points").number_value(0.0);
-    for (const auto& tv : o.at("known_techs").array()) f.known_techs.push_back(tv.string_value());
+
+    if (auto it = o.find("active_research_id"); it != o.end()) f.active_research_id = it->second.string_value();
+    if (auto it = o.find("active_research_progress"); it != o.end()) f.active_research_progress = it->second.number_value(0.0);
+
+    if (auto it = o.find("research_queue"); it != o.end()) f.research_queue = string_vector_from_json(it->second);
+    if (auto it = o.find("known_techs"); it != o.end()) f.known_techs = string_vector_from_json(it->second);
+
+    if (auto it = o.find("unlocked_components"); it != o.end()) f.unlocked_components = string_vector_from_json(it->second);
+    if (auto it = o.find("unlocked_installations"); it != o.end()) f.unlocked_installations = string_vector_from_json(it->second);
+
     s.factions[f.id] = f;
   }
 
+  // Custom designs
+  if (auto it = root.find("custom_designs"); it != root.end()) {
+    for (const auto& dv : it->second.array()) {
+      const auto& o = dv.object();
+      ShipDesign d;
+      d.id = o.at("id").string_value();
+      d.name = o.at("name").string_value();
+      d.role = ship_role_from_string(o.at("role").string_value("unknown"));
+      if (auto itc = o.find("components"); itc != o.end()) d.components = string_vector_from_json(itc->second);
+      d.mass_tons = o.at("mass_tons").number_value(0.0);
+      d.speed_km_s = o.at("speed_km_s").number_value(0.0);
+      d.cargo_tons = o.at("cargo_tons").number_value(0.0);
+      d.sensor_range_mkm = o.at("sensor_range_mkm").number_value(0.0);
+      d.max_hp = o.at("max_hp").number_value(0.0);
+      d.weapon_damage = o.at("weapon_damage").number_value(0.0);
+      d.weapon_range_mkm = o.at("weapon_range_mkm").number_value(0.0);
+      s.custom_designs[d.id] = d;
+    }
+  }
+
   // Orders
-  for (const auto& ov : root.at("ship_orders").array()) {
-    const auto& o = ov.object();
-    const Id ship_id = static_cast<Id>(o.at("ship_id").int_value());
-    ShipOrders so;
-    for (const auto& qv : o.at("queue").array()) so.queue.push_back(order_from_json(qv));
-    s.ship_orders[ship_id] = so;
+  if (auto it = root.find("ship_orders"); it != root.end()) {
+    for (const auto& ov : it->second.array()) {
+      const auto& o = ov.object();
+      const Id ship_id = static_cast<Id>(o.at("ship_id").int_value());
+      ShipOrders so;
+      for (const auto& qv : o.at("queue").array()) so.queue.push_back(order_from_json(qv));
+      s.ship_orders[ship_id] = so;
+    }
   }
 
   // Ensure next_id is sane.
@@ -322,6 +457,7 @@ GameState deserialize_game_from_json(const std::string& json_text) {
   auto bump = [&](Id id) { max_id = std::max(max_id, id); };
   for (auto& [id, _] : s.systems) bump(id);
   for (auto& [id, _] : s.bodies) bump(id);
+  for (auto& [id, _] : s.jump_points) bump(id);
   for (auto& [id, _] : s.ships) bump(id);
   for (auto& [id, _] : s.colonies) bump(id);
   for (auto& [id, _] : s.factions) bump(id);

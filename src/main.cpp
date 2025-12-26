@@ -17,6 +17,8 @@ int main(int /*argc*/, char** /*argv*/) {
     nebula4x::log::set_level(nebula4x::log::Level::Info);
 
     auto content = nebula4x::load_content_db_from_file("data/blueprints/starting_blueprints.json");
+    content.techs = nebula4x::load_tech_db_from_file("data/tech/tech_tree.json");
+
     nebula4x::Simulation sim(std::move(content), nebula4x::SimConfig{});
     nebula4x::ui::App app(std::move(sim));
 
@@ -54,7 +56,8 @@ int main(int /*argc*/, char** /*argv*/) {
       while (SDL_PollEvent(&e)) {
         ImGui_ImplSDL2_ProcessEvent(&e);
         if (e.type == SDL_QUIT) running = false;
-        if (e.type == SDL_WINDOWEVENT && e.window.event == SDL_WINDOWEVENT_CLOSE && e.window.windowID == SDL_GetWindowID(window))
+        if (e.type == SDL_WINDOWEVENT && e.window.event == SDL_WINDOWEVENT_CLOSE &&
+            e.window.windowID == SDL_GetWindowID(window))
           running = false;
         app.on_event(e);
       }
@@ -68,7 +71,8 @@ int main(int /*argc*/, char** /*argv*/) {
       ImGui::Render();
       SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
       SDL_RenderClear(renderer);
-      ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData());
+      // Dear ImGui's SDL_Renderer2 backend requires the renderer parameter (v1.91+).
+      ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), renderer);
       SDL_RenderPresent(renderer);
     }
 

@@ -17,7 +17,17 @@ struct MoveToBody {
   Id body_id{kInvalidId};
 };
 
-using Order = std::variant<MoveToPoint, MoveToBody>;
+// Move to a jump point and transit to the linked system when reached.
+struct TravelViaJump {
+  Id jump_point_id{kInvalidId};
+};
+
+// Close and engage a target ship (combat will also happen opportunistically).
+struct AttackShip {
+  Id target_ship_id{kInvalidId};
+};
+
+using Order = std::variant<MoveToPoint, MoveToBody, TravelViaJump, AttackShip>;
 
 struct ShipOrders {
   std::vector<Order> queue;

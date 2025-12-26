@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "components": {
     "engine_chem_mk1": {
       "name": "Chemical Engine Mk.I",
@@ -30,6 +30,19 @@
       "type": "reactor",
       "mass_tons": 25,
       "power": 10
+    },
+    "laser_mk1": {
+      "name": "Laser Battery Mk.I",
+      "type": "weapon",
+      "mass_tons": 30,
+      "damage": 8,
+      "weapon_range_mkm": 6
+    },
+    "armor_mk1": {
+      "name": "Armor Plating",
+      "type": "armor",
+      "mass_tons": 25,
+      "hp_bonus": 40
     }
   },
   "designs": [
@@ -44,6 +57,18 @@
       "name": "Surveyor Beta",
       "role": "surveyor",
       "components": ["engine_chem_mk1", "sensor_mk1"]
+    },
+    {
+      "id": "escort_gamma",
+      "name": "Escort Gamma",
+      "role": "combatant",
+      "components": ["engine_chem_mk1", "sensor_mk1", "laser_mk1", "armor_mk1"]
+    },
+    {
+      "id": "pirate_raider",
+      "name": "Pirate Raider",
+      "role": "combatant",
+      "components": ["engine_chem_mk1", "sensor_mk1", "laser_mk1", "laser_mk1", "armor_mk1"]
     }
   ],
   "installations": {
@@ -54,6 +79,10 @@
     "shipyard": {
       "name": "Commercial Shipyard",
       "build_rate_tons_per_day": 50
+    },
+    "research_lab": {
+      "name": "Research Lab",
+      "research_points_per_day": 5
     }
   }
 }

@@ -36,10 +36,13 @@ int main(int argc, char** argv) {
   try {
     const int days = get_int_arg(argc, argv, "--days", 30);
     const std::string content_path = get_str_arg(argc, argv, "--content", "data/blueprints/starting_blueprints.json");
+    const std::string tech_path = get_str_arg(argc, argv, "--tech", "data/tech/tech_tree.json");
     const std::string load_path = get_str_arg(argc, argv, "--load", "");
     const std::string save_path = get_str_arg(argc, argv, "--save", "");
 
     auto content = nebula4x::load_content_db_from_file(content_path);
+    content.techs = nebula4x::load_tech_db_from_file(tech_path);
+
     nebula4x::Simulation sim(std::move(content), nebula4x::SimConfig{});
 
     if (!load_path.empty()) {
@@ -50,8 +53,8 @@ int main(int argc, char** argv) {
 
     const auto& s = sim.state();
     std::cout << "Date: " << s.date.to_string() << "\n";
-    std::cout << "Systems: " << s.systems.size() << ", Bodies: " << s.bodies.size() << ", Ships: " << s.ships.size()
-              << ", Colonies: " << s.colonies.size() << "\n";
+    std::cout << "Systems: " << s.systems.size() << ", Bodies: " << s.bodies.size() << ", Jump Points: "
+              << s.jump_points.size() << ", Ships: " << s.ships.size() << ", Colonies: " << s.colonies.size() << "\n";
 
     for (const auto& [_, c] : s.colonies) {
       std::cout << "\nColony " << c.name << " minerals:\n";

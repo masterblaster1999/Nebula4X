@@ -3,6 +3,9 @@
 #include <imgui.h>
 
 #include <algorithm>
+#include <cstdio>
+#include <cstring>
+#include <string>
 #include <vector>
 
 #include "nebula4x/core/serialization.h"
@@ -21,12 +24,79 @@ const char* ship_role_label(ShipRole r) {
   }
 }
 
-std::vector<std::string> sorted_design_ids(const ContentDB& c) {
+const char* component_type_label(ComponentType t) {
+  switch (t) {
+    case ComponentType::Engine: return "Engine";
+    case ComponentType::Cargo: return "Cargo";
+    case ComponentType::Sensor: return "Sensor";
+    case ComponentType::Reactor: return "Reactor";
+    case ComponentType::Weapon: return "Weapon";
+    case ComponentType::Armor: return "Armor";
+    default: return "Unknown";
+  }
+}
+
+std::vector<std::string> sorted_all_design_ids(const Simulation& sim) {
   std::vector<std::string> ids;
-  ids.reserve(c.designs.size());
-  for (const auto& [id, _] : c.designs) ids.push_back(id);
+  ids.reserve(sim.content().designs.size() + sim.state().custom_designs.size());
+  for (const auto& [id, _] : sim.content().designs) ids.push_back(id);
+  for (const auto& [id, _] : sim.state().custom_designs) ids.push_back(id);
   std::sort(ids.begin(), ids.end());
+  ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
   return ids;
+}
+
+std::vector<std::pair<Id, std::string>> sorted_factions(const GameState& s) {
+  std::vector<std::pair<Id, std::string>> out;
+  out.reserve(s.factions.size());
+  for (const auto& [id, f] : s.factions) out.push_back({id, f.name});
+  std::sort(out.begin(), out.end(), [](auto& a, auto& b) { return a.second < b.second; });
+  return out;
+}
+
+bool vec_contains(const std::vector<std::string>& v, const std::string& x) {
+  return std::find(v.begin(), v.end(), x) != v.end();
+}
+
+bool prereqs_met(const Faction& f, const TechDef& t) {
+  for (const auto& p : t.prereqs) {
+    if (!vec_contains(f.known_techs, p)) return false;
+  }
+  return true;
+}
+
+ShipDesign derive_preview_design(const ContentDB& c, ShipDesign d) {
+  double mass = 0.0;
+  double speed = 0.0;
+  double cargo = 0.0;
+  double sensor = 0.0;
+  double weapon_damage = 0.0;
+  double weapon_range = 0.0;
+  double hp_bonus = 0.0;
+
+  for (const auto& cid : d.components) {
+    auto it = c.components.find(cid);
+    if (it == c.components.end()) continue;
+    const auto& comp = it->second;
+    mass += comp.mass_tons;
+    speed = std::max(speed, comp.speed_km_s);
+    cargo += comp.cargo_tons;
+    sensor = std::max(sensor, comp.sensor_range_mkm);
+    if (comp.type == ComponentType::Weapon) {
+      weapon_damage += comp.weapon_damage;
+      weapon_range = std::max(weapon_range, comp.weapon_range_mkm);
+    }
+    hp_bonus += comp.hp_bonus;
+  }
+
+  d.mass_tons = mass;
+  d.speed_km_s = speed;
+  d.cargo_tons = cargo;
+  d.sensor_range_mkm = sensor;
+  d.weapon_damage = weapon_damage;
+  d.weapon_range_mkm = weapon_range;
+  d.max_hp = std::max(1.0, mass * 2.0 + hp_bonus);
+  return d;
 }
 
 } // namespace
@@ -85,11 +155,16 @@ void draw_left_sidebar(Simulation& sim, Id& selected_ship, Id& selected_colony) 
     const bool sel = (sim.state().selected_system == id);
     if (ImGui::Selectable(sys.name.c_str(), sel)) {
       sim.state().selected_system = id;
+      // If we have a selected ship that isn't in this system, deselect it.
+      if (selected_ship != kInvalidId) {
+        const auto* sh = find_ptr(sim.state().ships, selected_ship);
+        if (!sh || sh->system_id != id) selected_ship = kInvalidId;
+      }
     }
   }
 
   ImGui::Separator();
-  ImGui::Text("Ships");
+  ImGui::Text("Ships (in system)");
 
   const auto* sys = find_ptr(sim.state().systems, sim.state().selected_system);
   if (!sys) {
@@ -100,9 +175,30 @@ void draw_left_sidebar(Simulation& sim, Id& selected_ship, Id& selected_colony) 
   for (Id sid : sys->ships) {
     const auto* sh = find_ptr(sim.state().ships, sid);
     if (!sh) continue;
-    std::string label = sh->name + "##" + std::to_string(sh->id);
-    if (ImGui::Selectable(label.c_str(), selected_ship == sid)) {
+
+    const auto* fac = find_ptr(sim.state().factions, sh->faction_id);
+    const std::string fac_name = fac ? fac->name : std::string("Faction ") + std::to_string(sh->faction_id);
+
+    char label[256];
+    std::snprintf(label, sizeof(label), "%s  (HP %.0f)  [%s]##%llu", sh->name.c_str(), sh->hp, fac_name.c_str(),
+                  static_cast<unsigned long long>(sh->id));
+
+    if (ImGui::Selectable(label, selected_ship == sid)) {
       selected_ship = sid;
+    }
+  }
+
+  ImGui::Separator();
+  ImGui::Text("Jump Points");
+  if (sys->jump_points.empty()) {
+    ImGui::TextDisabled("(none)");
+  } else {
+    for (Id jid : sys->jump_points) {
+      const auto* jp = find_ptr(sim.state().jump_points, jid);
+      if (!jp) continue;
+      const auto* dest = find_ptr(sim.state().jump_points, jp->linked_jump_id);
+      const auto* dest_sys = dest ? find_ptr(sim.state().systems, dest->system_id) : nullptr;
+      ImGui::BulletText("%s -> %s", jp->name.c_str(), dest_sys ? dest_sys->name.c_str() : "(unknown)");
     }
   }
 
@@ -117,110 +213,471 @@ void draw_left_sidebar(Simulation& sim, Id& selected_ship, Id& selected_colony) 
 }
 
 void draw_right_sidebar(Simulation& sim, Id selected_ship, Id& selected_colony) {
-  const auto& s = sim.state();
+  auto& s = sim.state();
 
-  if (selected_ship != kInvalidId) {
-    if (const auto* sh = find_ptr(s.ships, selected_ship)) {
-      ImGui::Text("Ship");
-      ImGui::Separator();
-      ImGui::Text("%s", sh->name.c_str());
-      ImGui::Text("Speed: %.1f km/s", sh->speed_km_s);
-      ImGui::Text("Pos: (%.1f, %.1f) mkm", sh->position_mkm.x, sh->position_mkm.y);
+  static int faction_combo_idx = 0;
+  const auto factions = sorted_factions(s);
+  if (!factions.empty()) {
+    faction_combo_idx = std::clamp(faction_combo_idx, 0, static_cast<int>(factions.size()) - 1);
+  }
+  const Id selected_faction_id = factions.empty() ? kInvalidId : factions[faction_combo_idx].first;
+  Faction* selected_faction = factions.empty() ? nullptr : find_ptr(s.factions, selected_faction_id);
 
-      if (const auto it = sim.content().designs.find(sh->design_id); it != sim.content().designs.end()) {
-        const auto& d = it->second;
-        ImGui::Text("Design: %s", d.name.c_str());
-        ImGui::Text("Role: %s", ship_role_label(d.role));
-        ImGui::Text("Cargo: %.0f t", d.cargo_tons);
-        ImGui::Text("Sensor: %.0f mkm", d.sensor_range_mkm);
-      }
+  if (ImGui::BeginTabBar("details_tabs")) {
+    // --- Ship tab ---
+    if (ImGui::BeginTabItem("Ship")) {
+      if (selected_ship == kInvalidId) {
+        ImGui::TextDisabled("No ship selected");
+        ImGui::EndTabItem();
+      } else if (auto* sh = find_ptr(s.ships, selected_ship)) {
+        const auto* sys = find_ptr(s.systems, sh->system_id);
+        const auto* fac = find_ptr(s.factions, sh->faction_id);
+        const auto* d = sim.find_design(sh->design_id);
 
-      ImGui::Separator();
-      ImGui::Text("Orders");
-      auto oit = s.ship_orders.find(selected_ship);
-      if (oit == s.ship_orders.end() || oit->second.queue.empty()) {
-        ImGui::TextDisabled("(none)");
-      } else {
-        int idx = 0;
-        for (const auto& o : oit->second.queue) {
-          ImGui::BulletText("%d) %s", idx++, order_to_string(o).c_str());
+        ImGui::Text("%s", sh->name.c_str());
+        ImGui::Separator();
+        ImGui::Text("Faction: %s", fac ? fac->name.c_str() : "(unknown)");
+        ImGui::Text("System: %s", sys ? sys->name.c_str() : "(unknown)");
+        ImGui::Text("Pos: (%.2f, %.2f) mkm", sh->position_mkm.x, sh->position_mkm.y);
+        ImGui::Text("Speed: %.1f km/s", sh->speed_km_s);
+
+        if (d) {
+          ImGui::Text("Design: %s (%s)", d->name.c_str(), ship_role_label(d->role));
+          ImGui::Text("Mass: %.0f t", d->mass_tons);
+          ImGui::Text("HP: %.0f / %.0f", sh->hp, d->max_hp);
+          ImGui::Text("Cargo: %.0f t", d->cargo_tons);
+          ImGui::Text("Sensor: %.0f mkm", d->sensor_range_mkm);
+          if (d->weapon_damage > 0.0) {
+            ImGui::Text("Weapons: %.1f dmg/day  (Range %.1f mkm)", d->weapon_damage, d->weapon_range_mkm);
+          } else {
+            ImGui::TextDisabled("Weapons: (none)");
+          }
+        } else {
+          ImGui::TextDisabled("Design definition missing: %s", sh->design_id.c_str());
         }
-      }
 
-      ImGui::Separator();
-      ImGui::Text("Quick orders");
-      if (ImGui::Button("Move to (0,0)")) {
-        sim.issue_move_to_point(selected_ship, {0.0, 0.0});
-      }
-      if (ImGui::Button("Move to Earth")) {
-        // Find Earth in the selected system.
-        const auto* sys = find_ptr(s.systems, s.selected_system);
-        if (sys) {
-          for (Id bid : sys->bodies) {
-            const auto* b = find_ptr(s.bodies, bid);
-            if (b && b->name == "Earth") {
-              sim.issue_move_to_body(selected_ship, b->id);
-              break;
+        ImGui::Separator();
+        ImGui::Text("Orders");
+        auto oit = s.ship_orders.find(selected_ship);
+        if (oit == s.ship_orders.end() || oit->second.queue.empty()) {
+          ImGui::TextDisabled("(none)");
+        } else {
+          int idx = 0;
+          for (const auto& o : oit->second.queue) {
+            ImGui::BulletText("%d) %s", idx++, order_to_string(o).c_str());
+          }
+        }
+
+        ImGui::Separator();
+        ImGui::Text("Quick orders");
+        if (ImGui::Button("Move to (0,0)")) {
+          sim.issue_move_to_point(selected_ship, {0.0, 0.0});
+        }
+        if (ImGui::Button("Move to Earth")) {
+          const auto* sys2 = find_ptr(s.systems, sh->system_id);
+          if (sys2) {
+            for (Id bid : sys2->bodies) {
+              const auto* b = find_ptr(s.bodies, bid);
+              if (b && b->name == "Earth") {
+                sim.issue_move_to_body(selected_ship, b->id);
+                break;
+              }
             }
           }
         }
-      }
-      ImGui::TextDisabled("Tip: click on the map to set a move-to-point order.");
-    }
-  }
 
-  ImGui::Spacing();
-  ImGui::Spacing();
+        // Jump point travel
+        const auto* sh_sys = find_ptr(s.systems, sh->system_id);
+        if (sh_sys && !sh_sys->jump_points.empty()) {
+          ImGui::Spacing();
+          ImGui::Text("Jump travel");
+          for (Id jid : sh_sys->jump_points) {
+            const auto* jp = find_ptr(s.jump_points, jid);
+            if (!jp) continue;
+            const auto* dest = find_ptr(s.jump_points, jp->linked_jump_id);
+            const auto* dest_sys = dest ? find_ptr(s.systems, dest->system_id) : nullptr;
 
-  if (selected_colony != kInvalidId) {
-    if (auto* colony = find_ptr(sim.state().colonies, selected_colony)) {
-      ImGui::Text("Colony");
-      ImGui::Separator();
-      ImGui::Text("%s", colony->name.c_str());
-      ImGui::Text("Population: %.0f M", colony->population_millions);
+            std::string btn = "Travel via " + jp->name;
+            if (dest_sys) btn += " -> " + dest_sys->name;
 
-      ImGui::Separator();
-      ImGui::Text("Minerals");
-      for (const auto& [k, v] : colony->minerals) {
-        ImGui::BulletText("%s: %.1f", k.c_str(), v);
-      }
+            if (ImGui::Button((btn + "##" + std::to_string(jid)).c_str())) {
+              sim.issue_travel_via_jump(selected_ship, jid);
+            }
+          }
+        }
 
-      ImGui::Separator();
-      ImGui::Text("Installations");
-      for (const auto& [k, v] : colony->installations) {
-        ImGui::BulletText("%s: %d", k.c_str(), v);
-      }
+        // Combat: list hostiles in this system
+        if (sh_sys) {
+          std::vector<Id> hostiles;
+          for (Id sid : sh_sys->ships) {
+            if (sid == sh->id) continue;
+            const auto* other = find_ptr(s.ships, sid);
+            if (!other) continue;
+            if (other->faction_id == sh->faction_id) continue;
+            hostiles.push_back(sid);
+          }
 
-      ImGui::Separator();
-      ImGui::Text("Shipyard");
+          ImGui::Spacing();
+          ImGui::Text("Combat");
+          if (hostiles.empty()) {
+            ImGui::TextDisabled("No detected hostiles in system");
+          } else {
+            ImGui::TextDisabled("Ships with weapons auto-fire once/day if in range.");
+            for (Id hid : hostiles) {
+              const auto* other = find_ptr(s.ships, hid);
+              if (!other) continue;
+              const auto* od = sim.find_design(other->design_id);
+              const double range = d ? d->weapon_range_mkm : 0.0;
+              const double dist = (other->position_mkm - sh->position_mkm).length();
 
-      const bool has_yard = colony->installations["shipyard"] > 0;
-      if (!has_yard) {
-        ImGui::TextDisabled("No shipyard present");
-        return;
-      }
+              std::string label = other->name;
+              label += " (HP " + std::to_string(static_cast<int>(other->hp)) + ")";
+              if (od && od->weapon_damage > 0.0) label += " [armed]";
 
-      if (colony->shipyard_queue.empty()) {
-        ImGui::TextDisabled("Queue empty");
+              ImGui::BulletText("%s  dist %.2f mkm", label.c_str(), dist);
+              if (range > 0.0) {
+                ImGui::SameLine();
+                if (ImGui::SmallButton(("Attack##" + std::to_string(hid)).c_str())) {
+                  sim.issue_attack_ship(sh->id, hid);
+                }
+              }
+            }
+          }
+        }
+
+        ImGui::EndTabItem();
       } else {
-        for (const auto& bo : colony->shipyard_queue) {
-          ImGui::BulletText("%s (%.1f tons remaining)", bo.design_id.c_str(), bo.tons_remaining);
-        }
-      }
-
-      static int selected_design_idx = 0;
-      const auto ids = sorted_design_ids(sim.content());
-      if (!ids.empty()) {
-        std::vector<const char*> labels;
-        labels.reserve(ids.size());
-        for (const auto& id : ids) labels.push_back(id.c_str());
-        ImGui::Combo("Design", &selected_design_idx, labels.data(), static_cast<int>(labels.size()));
-        if (ImGui::Button("Enqueue build")) {
-          selected_design_idx = std::clamp(selected_design_idx, 0, static_cast<int>(ids.size()) - 1);
-          sim.enqueue_build(colony->id, ids[selected_design_idx]);
-        }
+        ImGui::TextDisabled("Selected ship no longer exists");
+        ImGui::EndTabItem();
       }
     }
+
+    // --- Colony tab ---
+    if (ImGui::BeginTabItem("Colony")) {
+      if (selected_colony == kInvalidId) {
+        ImGui::TextDisabled("No colony selected");
+        ImGui::EndTabItem();
+      } else if (auto* colony = find_ptr(s.colonies, selected_colony)) {
+        ImGui::Text("%s", colony->name.c_str());
+        ImGui::Separator();
+        ImGui::Text("Population: %.0f M", colony->population_millions);
+
+        ImGui::Separator();
+        ImGui::Text("Minerals");
+        for (const auto& [k, v] : colony->minerals) {
+          ImGui::BulletText("%s: %.1f", k.c_str(), v);
+        }
+
+        ImGui::Separator();
+        ImGui::Text("Installations");
+        for (const auto& [k, v] : colony->installations) {
+          ImGui::BulletText("%s: %d", k.c_str(), v);
+        }
+
+        ImGui::Separator();
+        ImGui::Text("Shipyard");
+
+        const bool has_yard = colony->installations["shipyard"] > 0;
+        if (!has_yard) {
+          ImGui::TextDisabled("No shipyard present");
+          ImGui::EndTabItem();
+        } else {
+          if (colony->shipyard_queue.empty()) {
+            ImGui::TextDisabled("Queue empty");
+          } else {
+            for (const auto& bo : colony->shipyard_queue) {
+              ImGui::BulletText("%s (%.1f tons remaining)", bo.design_id.c_str(), bo.tons_remaining);
+            }
+          }
+
+          static int selected_design_idx = 0;
+          const auto ids = sorted_all_design_ids(sim);
+          if (!ids.empty()) {
+            selected_design_idx = std::clamp(selected_design_idx, 0, static_cast<int>(ids.size()) - 1);
+            std::vector<const char*> labels;
+            labels.reserve(ids.size());
+            for (const auto& id : ids) labels.push_back(id.c_str());
+            ImGui::Combo("Design", &selected_design_idx, labels.data(), static_cast<int>(labels.size()));
+            if (ImGui::Button("Enqueue build")) {
+              sim.enqueue_build(colony->id, ids[selected_design_idx]);
+            }
+          }
+
+          ImGui::EndTabItem();
+        }
+      } else {
+        ImGui::TextDisabled("Selected colony no longer exists");
+        ImGui::EndTabItem();
+      }
+    }
+
+    // --- Research tab ---
+    if (ImGui::BeginTabItem("Research")) {
+      if (factions.empty() || !selected_faction) {
+        ImGui::TextDisabled("No factions available");
+        ImGui::EndTabItem();
+      } else {
+        ImGui::Text("Faction");
+        std::vector<const char*> fac_labels;
+        fac_labels.reserve(factions.size());
+        for (const auto& p : factions) fac_labels.push_back(p.second.c_str());
+        ImGui::Combo("##faction", &faction_combo_idx, fac_labels.data(), static_cast<int>(fac_labels.size()));
+
+        ImGui::Separator();
+        ImGui::Text("Research Points (bank): %.1f", selected_faction->research_points);
+
+        // Active
+        if (!selected_faction->active_research_id.empty()) {
+          const auto it = sim.content().techs.find(selected_faction->active_research_id);
+          const TechDef* tech = (it == sim.content().techs.end()) ? nullptr : &it->second;
+          const double cost = tech ? tech->cost : 0.0;
+          ImGui::Text("Active: %s", tech ? tech->name.c_str() : selected_faction->active_research_id.c_str());
+          if (cost > 0.0) {
+            const float frac = static_cast<float>(std::clamp(selected_faction->active_research_progress / cost, 0.0, 1.0));
+            ImGui::ProgressBar(frac, ImVec2(-1, 0), (std::to_string(static_cast<int>(selected_faction->active_research_progress)) +
+                                                    " / " + std::to_string(static_cast<int>(cost)))
+                                                       .c_str());
+          }
+        } else {
+          ImGui::TextDisabled("Active: (none)");
+        }
+
+        ImGui::Separator();
+        ImGui::Text("Queue");
+        if (selected_faction->research_queue.empty()) {
+          ImGui::TextDisabled("(empty)");
+        } else {
+          for (size_t i = 0; i < selected_faction->research_queue.size(); ++i) {
+            const auto& id = selected_faction->research_queue[i];
+            const auto it = sim.content().techs.find(id);
+            const char* nm = (it == sim.content().techs.end()) ? id.c_str() : it->second.name.c_str();
+            ImGui::BulletText("%s", nm);
+          }
+        }
+
+        ImGui::Separator();
+        ImGui::Text("Available techs");
+
+        // Compute available list.
+        std::vector<std::string> available;
+        for (const auto& [tid, tech] : sim.content().techs) {
+          if (vec_contains(selected_faction->known_techs, tid)) continue;
+          if (!prereqs_met(*selected_faction, tech)) continue;
+          available.push_back(tid);
+        }
+        std::sort(available.begin(), available.end());
+
+        static int tech_sel = 0;
+        if (!available.empty()) tech_sel = std::clamp(tech_sel, 0, static_cast<int>(available.size()) - 1);
+
+        if (available.empty()) {
+          ImGui::TextDisabled("(none)");
+        } else {
+          // List box
+          if (ImGui::BeginListBox("##techs", ImVec2(-1, 180))) {
+            for (int i = 0; i < static_cast<int>(available.size()); ++i) {
+              const bool sel = (tech_sel == i);
+              const auto it = sim.content().techs.find(available[i]);
+              const std::string label = (it == sim.content().techs.end()) ? available[i] : (it->second.name + "##" + available[i]);
+              if (ImGui::Selectable(label.c_str(), sel)) tech_sel = i;
+            }
+            ImGui::EndListBox();
+          }
+
+          const std::string chosen_id = available[tech_sel];
+          const auto it = sim.content().techs.find(chosen_id);
+          const TechDef* chosen = (it == sim.content().techs.end()) ? nullptr : &it->second;
+
+          if (chosen) {
+            ImGui::Text("Cost: %.0f", chosen->cost);
+            if (!chosen->effects.empty()) {
+              ImGui::Text("Effects:");
+              for (const auto& eff : chosen->effects) {
+                ImGui::BulletText("%s: %s", eff.type.c_str(), eff.value.c_str());
+              }
+            }
+          }
+
+          if (ImGui::Button("Set Active")) {
+            selected_faction->active_research_id = chosen_id;
+            selected_faction->active_research_progress = 0.0;
+          }
+          ImGui::SameLine();
+          if (ImGui::Button("Add to Queue")) {
+            selected_faction->research_queue.push_back(chosen_id);
+          }
+        }
+
+        ImGui::EndTabItem();
+      }
+    }
+
+    // --- Ship design tab ---
+    if (ImGui::BeginTabItem("Design")) {
+      if (factions.empty() || !selected_faction) {
+        ImGui::TextDisabled("No factions available");
+        ImGui::EndTabItem();
+      } else {
+        ImGui::Text("Design for faction");
+        std::vector<const char*> fac_labels;
+        fac_labels.reserve(factions.size());
+        for (const auto& p : factions) fac_labels.push_back(p.second.c_str());
+        ImGui::Combo("##faction_design", &faction_combo_idx, fac_labels.data(), static_cast<int>(fac_labels.size()));
+
+        ImGui::Separator();
+        ImGui::Text("Existing designs");
+        const auto all_ids = sorted_all_design_ids(sim);
+
+        static int design_sel = 0;
+        if (!all_ids.empty()) design_sel = std::clamp(design_sel, 0, static_cast<int>(all_ids.size()) - 1);
+
+        if (ImGui::BeginListBox("##designs", ImVec2(-1, 160))) {
+          for (int i = 0; i < static_cast<int>(all_ids.size()); ++i) {
+            const bool sel = (design_sel == i);
+            const auto* d = sim.find_design(all_ids[i]);
+            const std::string label = d ? (d->name + "##" + all_ids[i]) : all_ids[i];
+            if (ImGui::Selectable(label.c_str(), sel)) design_sel = i;
+          }
+          ImGui::EndListBox();
+        }
+
+        if (!all_ids.empty()) {
+          const auto* d = sim.find_design(all_ids[design_sel]);
+          if (d) {
+            ImGui::Text("ID: %s", d->id.c_str());
+            ImGui::Text("Role: %s", ship_role_label(d->role));
+            ImGui::Text("Mass: %.0f t", d->mass_tons);
+            ImGui::Text("Speed: %.1f km/s", d->speed_km_s);
+            ImGui::Text("HP: %.0f", d->max_hp);
+            ImGui::Text("Cargo: %.0f t", d->cargo_tons);
+            ImGui::Text("Sensor: %.0f mkm", d->sensor_range_mkm);
+            if (d->weapon_damage > 0.0) ImGui::Text("Weapons: %.1f (range %.1f)", d->weapon_damage, d->weapon_range_mkm);
+          }
+        }
+
+        ImGui::Separator();
+        ImGui::Text("Create / edit custom design");
+
+        static char new_id[64] = "";
+        static char new_name[64] = "";
+        static int role_idx = 0;
+        static std::vector<std::string> comp_list;
+        static std::string status;
+
+        const char* roles[] = {"Freighter", "Surveyor", "Combatant"};
+        role_idx = std::clamp(role_idx, 0, 2);
+
+        ImGui::InputText("Design ID", new_id, sizeof(new_id));
+        ImGui::InputText("Name", new_name, sizeof(new_name));
+        ImGui::Combo("Role", &role_idx, roles, IM_ARRAYSIZE(roles));
+
+        ImGui::Spacing();
+        ImGui::Text("Components");
+
+        // Show current components with remove buttons.
+        for (size_t i = 0; i < comp_list.size(); ++i) {
+          const auto& cid = comp_list[i];
+          const auto it = sim.content().components.find(cid);
+          const char* cname = (it == sim.content().components.end()) ? cid.c_str() : it->second.name.c_str();
+          ImGui::BulletText("%s", cname);
+          ImGui::SameLine();
+          if (ImGui::SmallButton(("Remove##" + std::to_string(i)).c_str())) {
+            comp_list.erase(comp_list.begin() + static_cast<long>(i));
+            --i;
+            continue;
+          }
+        }
+
+        // Available components (unlocked)
+        ImGui::Spacing();
+        ImGui::Text("Add component");
+
+        static int comp_filter = 0; // 0=All
+        const char* filters[] = {"All", "Engine", "Cargo", "Sensor", "Reactor", "Weapon", "Armor"};
+        ImGui::Combo("Filter", &comp_filter, filters, IM_ARRAYSIZE(filters));
+
+        std::vector<std::string> avail_components;
+        for (const auto& [cid, cdef] : sim.content().components) {
+          // Only show unlocked for this faction (unless it's already in the design).
+          const bool unlocked = vec_contains(selected_faction->unlocked_components, cid);
+          if (!unlocked) continue;
+
+          if (comp_filter != 0) {
+            const ComponentType desired =
+                (comp_filter == 1) ? ComponentType::Engine
+                : (comp_filter == 2) ? ComponentType::Cargo
+                : (comp_filter == 3) ? ComponentType::Sensor
+                : (comp_filter == 4) ? ComponentType::Reactor
+                : (comp_filter == 5) ? ComponentType::Weapon
+                : (comp_filter == 6) ? ComponentType::Armor
+                                    : ComponentType::Unknown;
+            if (cdef.type != desired) continue;
+          }
+          avail_components.push_back(cid);
+        }
+        std::sort(avail_components.begin(), avail_components.end());
+
+        static int add_comp_idx = 0;
+        if (!avail_components.empty()) add_comp_idx = std::clamp(add_comp_idx, 0, static_cast<int>(avail_components.size()) - 1);
+
+        if (avail_components.empty()) {
+          ImGui::TextDisabled("No unlocked components match filter");
+        } else {
+          std::vector<const char*> comp_labels;
+          comp_labels.reserve(avail_components.size());
+          std::vector<std::string> comp_label_storage;
+          comp_label_storage.reserve(avail_components.size());
+
+          for (const auto& cid : avail_components) {
+            const auto it = sim.content().components.find(cid);
+            const auto& cdef = it->second;
+            std::string lbl = cdef.name + " (" + component_type_label(cdef.type) + ")##" + cid;
+            comp_label_storage.push_back(std::move(lbl));
+          }
+          for (const auto& s2 : comp_label_storage) comp_labels.push_back(s2.c_str());
+
+          ImGui::Combo("Component", &add_comp_idx, comp_labels.data(), static_cast<int>(comp_labels.size()));
+
+          if (ImGui::Button("Add")) {
+            comp_list.push_back(avail_components[add_comp_idx]);
+          }
+        }
+
+        // Preview stats
+        ShipDesign preview;
+        preview.id = new_id;
+        preview.name = new_name;
+        preview.role = (role_idx == 0) ? ShipRole::Freighter : (role_idx == 1) ? ShipRole::Surveyor : ShipRole::Combatant;
+        preview.components = comp_list;
+        preview = derive_preview_design(sim.content(), preview);
+
+        ImGui::Separator();
+        ImGui::Text("Preview");
+        ImGui::Text("Mass: %.0f t", preview.mass_tons);
+        ImGui::Text("Speed: %.1f km/s", preview.speed_km_s);
+        ImGui::Text("HP: %.0f", preview.max_hp);
+        ImGui::Text("Cargo: %.0f t", preview.cargo_tons);
+        ImGui::Text("Sensor: %.0f mkm", preview.sensor_range_mkm);
+        if (preview.weapon_damage > 0.0) ImGui::Text("Weapons: %.1f (range %.1f)", preview.weapon_damage, preview.weapon_range_mkm);
+
+        if (ImGui::Button("Save custom design")) {
+          std::string err;
+          if (sim.upsert_custom_design(preview, &err)) {
+            status = "Saved custom design: " + preview.id;
+          } else {
+            status = "Error: " + err;
+          }
+        }
+        if (!status.empty()) {
+          ImGui::Spacing();
+          ImGui::TextWrapped("%s", status.c_str());
+        }
+
+        ImGui::EndTabItem();
+      }
+    }
+
+    ImGui::EndTabBar();
   }
 }
 

@@ -1,29 +1,47 @@
 # Nebula4X (prototype)
 
-Nebula4X is an **open-source, turn-based space 4X** prototype inspired by the *genre* of deep, logistics-heavy games (fleet ops, industry, colonies, research), built in **C++20**.
+Nebula4X is an **open-source, turn-based space 4X** prototype in **C++20**, inspired by the *genre* of deep, logistics-heavy games (fleet ops, industry, colonies, research).
 
 > Not affiliated with Aurora 4X or its authors. This codebase is written from scratch; please don’t copy proprietary assets, data, or text from other games.
 
-## What’s in this first iteration
+## What’s in this iteration
 
-- **Core simulation library** (`nebula4x_core`) with:
-  - Star systems, orbital bodies, ships, colonies, minerals, installations
-  - Orders (move-to-point / move-to-body)
-  - Day-based turn advancement
-  - JSON save/load
-- **Desktop UI** (`nebula4x`) using **SDL2 + Dear ImGui**:
-  - System map (pan/zoom)
-  - Colony panel (mineral production)
-  - Ship list + orders
-  - Turn controls (advance 1/5/30 days)
-- **CLI** (`nebula4x_cli`) for headless simulation runs
-- **Tests** (tiny built-in runner) for deterministic core logic
+### Core simulation (`nebula4x_core`)
 
-This is a foundation you can grow into something much bigger: ship design, research trees, sensors/ECM, missiles, jump points, task groups, economics, AI, etc.
+- Star systems, orbital bodies, ships, colonies, minerals, installations
+- Day-based turn advancement
+- Orders:
+  - move-to-point / move-to-body
+  - **travel via jump point** (multi-system travel)
+  - **attack ship** (simple targeting)
+- **Jump points + multi-system state**
+- **Research system**:
+  - tech definitions (JSON)
+  - research points generation (via `research_lab` installations)
+  - active research + queue
+  - effects (unlock component / unlock installation)
+- **Basic combat prototype**:
+  - armed ships auto-fire once/day at hostiles within weapon range
+  - damage + ship destruction
+- JSON save/load (versioned)
 
-## Screenshots
+### Desktop UI (`nebula4x`) — SDL2 + Dear ImGui
 
-The UI is intentionally minimal and uses primitive shapes (no copyrighted art).
+- System map (pan/zoom)
+- Ship list + selection (shows HP, faction)
+- **Jump point markers on the system map**
+- **Ship tab**: quick orders (move, jump travel, attack)
+- **Research tab**: choose projects, queue, see progress
+- **Design tab**: build custom ship designs from unlocked components
+
+### CLI (`nebula4x_cli`)
+
+- Headless simulation runs
+- Optional save/load
+
+### Tests
+
+- Tiny built-in runner for deterministic core logic
 
 ## Build
 
@@ -43,7 +61,13 @@ The core uses small in-repo utilities for JSON (save/load + content files) and l
 ```bash
 git clone <your repo>
 cd nebula4x
-cmake -S . -B build -DNEBULA4X_BUILD_TESTS=ON
+
+# Core + tests only
+cmake -S . -B build -DNEBULA4X_BUILD_UI=OFF -DNEBULA4X_BUILD_TESTS=ON
+cmake --build build --config Release
+
+# Or build UI too (requires SDL2)
+cmake -S . -B build -DNEBULA4X_BUILD_UI=ON -DNEBULA4X_BUILD_TESTS=ON
 cmake --build build --config Release
 ```
 
@@ -75,16 +99,16 @@ cmake --build build --config Release
 - `include/nebula4x/` public headers
 - `src/core/` simulation implementation
 - `src/ui/` UI implementation
-- `data/` JSON content (tech + blueprints + settings)
+- `data/` JSON content (tech + blueprints)
 - `docs/` design notes
 
-## Roadmap (suggested)
+## Next steps (suggested)
 
-- Tech tree UI + research points
-- Component-based ship design (engines, reactors, sensors, cargo)
-- Combat prototype (time-step, hit resolution, damage control)
-- Multiple factions + diplomacy
-- Serialization versioning and modding support
+- More granular ship components (power, fuel, heat, maintenance)
+- Better galaxy view + exploration mechanics
+- More combat depth (initiative, tracking, missiles, armor layers)
+- Multi-faction diplomacy and intel
+- Data-driven mod support (hot reload, content packs)
 
 ## License
 

@@ -14,6 +14,10 @@ std::string order_to_string(const Order& order) {
           ss << "MoveToPoint(" << o.target_mkm.x << ", " << o.target_mkm.y << ")";
         } else if constexpr (std::is_same_v<T, MoveToBody>) {
           ss << "MoveToBody(id=" << o.body_id << ")";
+        } else if constexpr (std::is_same_v<T, TravelViaJump>) {
+          ss << "TravelViaJump(jump_id=" << o.jump_point_id << ")";
+        } else if constexpr (std::is_same_v<T, AttackShip>) {
+          ss << "AttackShip(target_id=" << o.target_ship_id << ")";
         }
         return ss.str();
       },

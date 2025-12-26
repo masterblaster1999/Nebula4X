@@ -19,6 +19,7 @@ ImU32 color_body(BodyType t) {
 }
 
 ImU32 color_ship() { return IM_COL32(255, 255, 255, 255); }
+ImU32 color_jump() { return IM_COL32(200, 120, 255, 255); }
 
 ImVec2 to_screen(const Vec2& world_mkm, const ImVec2& center_px, double scale_px_per_mkm, double zoom,
                  const Vec2& pan_mkm) {
@@ -55,6 +56,13 @@ void draw_system_map(Simulation& sim, Id& selected_ship, double& zoom, Vec2& pan
     if (!b) continue;
     max_r = std::max(max_r, b->orbit_radius_mkm);
   }
+  // Make sure jump points beyond the outermost orbit are still visible.
+  for (Id jid : sys->jump_points) {
+    const auto* jp = find_ptr(s.jump_points, jid);
+    if (!jp) continue;
+    max_r = std::max(max_r, jp->position_mkm.length());
+  }
+
   const double fit = std::min(avail.x, avail.y) * 0.45;
   const double scale = fit / max_r;
 
@@ -101,6 +109,17 @@ void draw_system_map(Simulation& sim, Id& selected_ship, double& zoom, Vec2& pan
     draw->AddText(ImVec2(p.x + 6, p.y + 6), IM_COL32(200, 200, 200, 255), b->name.c_str());
   }
 
+  // Jump points
+  for (Id jid : sys->jump_points) {
+    const auto* jp = find_ptr(s.jump_points, jid);
+    if (!jp) continue;
+
+    const ImVec2 p = to_screen(jp->position_mkm, center, scale, zoom, pan);
+    const float r = 6.0f;
+    draw->AddCircle(p, r, color_jump(), 0, 2.0f);
+    draw->AddText(ImVec2(p.x + 6, p.y - 6), IM_COL32(200, 200, 200, 255), jp->name.c_str());
+  }
+
   // Ships
   for (Id sid : sys->ships) {
     const auto* sh = find_ptr(s.ships, sid);
@@ -126,11 +145,12 @@ void draw_system_map(Simulation& sim, Id& selected_ship, double& zoom, Vec2& pan
 
   // Legend / help
   ImGui::SetCursorScreenPos(ImVec2(origin.x + 10, origin.y + 10));
-  ImGui::BeginChild("legend", ImVec2(250, 90), true);
+  ImGui::BeginChild("legend", ImVec2(260, 115), true);
   ImGui::Text("Controls");
   ImGui::BulletText("Mouse wheel: zoom");
   ImGui::BulletText("Middle drag: pan");
   ImGui::BulletText("Left click: move order");
+  ImGui::BulletText("Jump points are purple rings");
   ImGui::EndChild();
 }
 
