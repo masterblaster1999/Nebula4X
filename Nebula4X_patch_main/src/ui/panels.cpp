@@ -320,6 +320,33 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id selected_ship, Id& sele
           }
         }
 
+        const bool repeat_on = (oit != s.ship_orders.end()) ? oit->second.repeat : false;
+        const int repeat_len = (oit != s.ship_orders.end()) ? static_cast<int>(oit->second.repeat_template.size()) : 0;
+        if (repeat_on) {
+          ImGui::Text("Repeat: ON  (template %d orders)", repeat_len);
+        } else {
+          ImGui::Text("Repeat: OFF");
+        }
+
+        ImGui::Spacing();
+        if (!repeat_on) {
+          if (ImGui::SmallButton("Enable repeat")) {
+            if (!sim.enable_order_repeat(selected_ship)) {
+              nebula4x::log::warn("Couldn't enable repeat (queue empty?).");
+            }
+          }
+        } else {
+          if (ImGui::SmallButton("Update repeat template")) {
+            if (!sim.update_order_repeat_template(selected_ship)) {
+              nebula4x::log::warn("Couldn't update repeat template (queue empty?).");
+            }
+          }
+          ImGui::SameLine();
+          if (ImGui::SmallButton("Disable repeat")) {
+            sim.disable_order_repeat(selected_ship);
+          }
+        }
+
         ImGui::Spacing();
         if (ImGui::SmallButton("Cancel current")) {
           sim.cancel_current_order(selected_ship);
@@ -423,6 +450,15 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id selected_ship, Id& sele
 
         ImGui::Separator();
         ImGui::Text("Quick orders");
+
+        // Simple scheduling primitive.
+        static int wait_days = 1;
+        wait_days = std::clamp(wait_days, 1, 365000); // ~1000 years, just a safety cap.
+        ImGui::InputInt("Wait (days)", &wait_days);
+        if (ImGui::Button("Queue wait")) {
+          sim.issue_wait_days(selected_ship, wait_days);
+        }
+
         if (ImGui::Button("Move to (0,0)")) {
           sim.issue_move_to_point(selected_ship, {0.0, 0.0});
         }

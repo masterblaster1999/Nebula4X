@@ -19,7 +19,9 @@ Nebula4X is an **open-source, turn-based space 4X** prototype in **C++20**, insp
   - move-to-point / move-to-body
   - **travel via jump point** (multi-system travel)
   - **attack ship** (simple targeting)
+  - **wait days** (simple scheduling)
   - **load/unload minerals** (prototype cargo logistics)
+  - **repeat orders** (optional looping of a ship's queue for trade routes/patrols)
 - **Jump points + multi-system state**
 - **Sensors + intel**: in-system detection + last-known contact snapshots (saved)
 - **Exploration**: factions track discovered star systems; entering a new system reveals it
@@ -40,9 +42,10 @@ Nebula4X is an **open-source, turn-based space 4X** prototype in **C++20**, insp
 - System map (pan/zoom)
 - Ship list + selection (shows HP, faction)
 - **Fog-of-war** toggle (hides undetected hostiles and undiscovered systems)
-- **Contacts tab**: recently seen hostiles + quick actions (Investigate / Intercept; intercept auto-routes via jump points)
+- **Contacts tab**: recently seen hostiles + quick actions
 - **Jump point markers on the system map**
 - **Ship tab**: quick orders (move, jump travel, attack) + cargo load/unload
+  - toggle **repeat orders** for simple looping routes
 - **Colony tab**: manage shipyard queue + build installations via construction queue
 - **Research tab**: choose projects, queue, see progress
 - **Design tab**: build custom ship designs from unlocked components
@@ -51,9 +54,6 @@ Nebula4X is an **open-source, turn-based space 4X** prototype in **C++20**, insp
 
 - Headless simulation runs
 - Optional save/load
-- Validate content (and optionally a save) via `--validate`
-- Canonicalize / pretty-print saves via `--format-save` (diff-friendly)
-- Start a seeded procedural scenario via `--scenario random` (optionally `--seed` / `--systems`)
 
 ### Tests
 
@@ -110,9 +110,6 @@ Run:
 
 # CLI
 ./build/nebula4x_cli --days 30
-
-# CLI (random seeded scenario)
-./build/nebula4x_cli --scenario random --seed 123 --systems 20 --days 30 --save random_save.json
 
 # tests
 ctest --test-dir build

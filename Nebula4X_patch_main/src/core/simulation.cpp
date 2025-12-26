@@ -359,7 +359,36 @@ void Simulation::advance_days(int days) {
 
 bool Simulation::clear_orders(Id ship_id) {
   if (!find_ptr(state_.ships, ship_id)) return false;
-  state_.ship_orders[ship_id].queue.clear();
+  auto& so = state_.ship_orders[ship_id];
+  so.queue.clear();
+  so.repeat = false;
+  so.repeat_template.clear();
+  return true;
+}
+
+bool Simulation::enable_order_repeat(Id ship_id) {
+  if (!find_ptr(state_.ships, ship_id)) return false;
+  auto& so = state_.ship_orders[ship_id];
+  if (so.queue.empty()) return false;
+  so.repeat = true;
+  so.repeat_template = so.queue;
+  return true;
+}
+
+bool Simulation::update_order_repeat_template(Id ship_id) {
+  if (!find_ptr(state_.ships, ship_id)) return false;
+  auto& so = state_.ship_orders[ship_id];
+  if (so.queue.empty()) return false;
+  so.repeat = true;
+  so.repeat_template = so.queue;
+  return true;
+}
+
+bool Simulation::disable_order_repeat(Id ship_id) {
+  if (!find_ptr(state_.ships, ship_id)) return false;
+  auto& so = state_.ship_orders[ship_id];
+  so.repeat = false;
+  so.repeat_template.clear();
   return true;
 }
 
@@ -368,6 +397,14 @@ bool Simulation::cancel_current_order(Id ship_id) {
   auto it = state_.ship_orders.find(ship_id);
   if (it == state_.ship_orders.end() || it->second.queue.empty()) return false;
   it->second.queue.erase(it->second.queue.begin());
+  return true;
+}
+
+bool Simulation::issue_wait_days(Id ship_id, int days) {
+  if (days <= 0) return false;
+  if (!find_ptr(state_.ships, ship_id)) return false;
+  auto& orders = state_.ship_orders[ship_id];
+  orders.queue.push_back(WaitDays{days});
   return true;
 }
 
@@ -721,83 +758,164 @@ void Simulation::tick_colonies() {
 
 void Simulation::tick_research() {
   // Generate RP from colonies.
-  for (const auto& [_, colony] : state_.colonies) {
-    auto* fac = find_ptr(state_.factions, colony.faction_id);
-    if (!fac) continue;
-
-    for (const auto& [inst_id, count] : colony.installations) {
-      if (count <= 0) continue;
-      auto dit = content_.installations.find(inst_id);
+  for (auto& [_, col] : state_.colonies) {
+    // Look for research labs.
+    double rp_per_day = 0.0;
+    for (const auto& [inst_id, count] : col.installations) {
+      const auto dit = content_.installations.find(inst_id);
       if (dit == content_.installations.end()) continue;
-      const double rp = dit->second.research_points_per_day * static_cast<double>(count);
-      if (rp > 0.0) fac->research_points += rp;
+      rp_per_day += dit->second.research_points_per_day * static_cast<double>(count);
     }
+    if (rp_per_day <= 0.0) continue;
+    auto fit = state_.factions.find(col.faction_id);
+    if (fit == state_.factions.end()) continue;
+    fit->second.research_points += rp_per_day;
   }
 
-  // Spend RP into active research projects.
+  auto prereqs_met = [&](const Faction& f, const TechDef& t) {
+    for (const auto& p : t.prereqs) {
+      if (!faction_has_tech(f, p)) return false;
+    }
+    return true;
+  };
+
+  // Spend RP in each faction.
   for (auto& [_, fac] : state_.factions) {
-    // Ensure active project if we have a queue.
-    auto select_next = [&]() {
-      while (!fac.research_queue.empty()) {
-        fac.active_research_id = fac.research_queue.front();
-        fac.research_queue.erase(fac.research_queue.begin());
+    auto enqueue_unique = [&](const std::string& tech_id) {
+      if (tech_id.empty()) return;
+      if (faction_has_tech(fac, tech_id)) return;
+      if (std::find(fac.research_queue.begin(), fac.research_queue.end(), tech_id) != fac.research_queue.end()) return;
+      fac.research_queue.push_back(tech_id);
+    };
+
+    // Remove invalid or already-known tech IDs from the queue.
+    auto clean_queue = [&]() {
+      auto keep = [&](const std::string& id) {
+        if (id.empty()) return false;
+        if (faction_has_tech(fac, id)) return false;
+        const bool ok = (content_.techs.find(id) != content_.techs.end());
+        if (!ok && !content_.techs.empty()) {
+          log::warn("Unknown tech in research queue: " + id);
+        }
+        return ok;
+      };
+      fac.research_queue.erase(std::remove_if(fac.research_queue.begin(), fac.research_queue.end(),
+                                             [&](const std::string& id) { return !keep(id); }),
+                               fac.research_queue.end());
+    };
+
+    // Pick the next research item whose prereqs are satisfied (scan the full queue).
+    auto select_next_available = [&]() {
+      clean_queue();
+      fac.active_research_id.clear();
+      fac.active_research_progress = 0.0;
+
+      for (std::size_t i = 0; i < fac.research_queue.size(); ++i) {
+        const std::string& id = fac.research_queue[i];
+        const auto it = content_.techs.find(id);
+        if (it == content_.techs.end()) continue;
+        if (!prereqs_met(fac, it->second)) continue;
+
+        fac.active_research_id = id;
         fac.active_research_progress = 0.0;
-        // Skip if already known.
-        if (!faction_has_tech(fac, fac.active_research_id)) break;
-        fac.active_research_id.clear();
+        fac.research_queue.erase(fac.research_queue.begin() + static_cast<std::ptrdiff_t>(i));
+        return;
       }
     };
 
-    if (fac.active_research_id.empty()) select_next();
-
-    while (fac.research_points > 0.0) {
-      if (fac.active_research_id.empty()) break;
+    // Validate active research (can be set via UI or loaded saves).
+    if (!fac.active_research_id.empty()) {
       if (faction_has_tech(fac, fac.active_research_id)) {
+        // Already researched; clear.
         fac.active_research_id.clear();
         fac.active_research_progress = 0.0;
-        select_next();
-        continue;
-      }
-
-      auto tit = content_.techs.find(fac.active_research_id);
-      if (tit == content_.techs.end()) {
-        // Unknown tech id in queue.
-        fac.active_research_id.clear();
-        fac.active_research_progress = 0.0;
-        select_next();
-        continue;
-      }
-
-      const auto& tech = tit->second;
-      const double remaining = std::max(0.0, tech.cost - fac.active_research_progress);
-      if (remaining <= 0.0) {
-        // Complete.
-        fac.known_techs.push_back(tech.id);
-        for (const auto& eff : tech.effects) {
-          if (eff.type == "unlock_component") push_unique(fac.unlocked_components, eff.value);
-          if (eff.type == "unlock_installation") push_unique(fac.unlocked_installations, eff.value);
+      } else {
+        const auto it = content_.techs.find(fac.active_research_id);
+        if (it == content_.techs.end()) {
+          if (!content_.techs.empty()) {
+            log::warn("Unknown active research tech: " + fac.active_research_id);
+          }
+          fac.active_research_id.clear();
+          fac.active_research_progress = 0.0;
+        } else if (!prereqs_met(fac, it->second)) {
+          // Don't deadlock the research system: if active research is blocked by prereqs,
+          // move it back into the queue and pick something else.
+          enqueue_unique(fac.active_research_id);
+          fac.active_research_id.clear();
+          fac.active_research_progress = 0.0;
         }
-        nebula4x::log::info("Research complete: " + tech.name + " (" + tech.id + ")");
+      }
+    }
+
+    if (fac.active_research_id.empty()) select_next_available();
+
+    // Keep consuming RP and completing projects in this faction until we either
+    // run out of RP or have nothing available to research.
+    for (;;) {
+      if (fac.active_research_id.empty()) break;
+
+      const auto it2 = content_.techs.find(fac.active_research_id);
+      if (it2 == content_.techs.end()) {
+        // Shouldn't happen due to validation/cleaning, but keep it robust.
         fac.active_research_id.clear();
         fac.active_research_progress = 0.0;
-        select_next();
+        select_next_available();
         continue;
       }
 
+      const TechDef& tech = it2->second;
+
+      if (faction_has_tech(fac, tech.id)) {
+        // Already known (possible after loading a save with duplicates). Skip.
+        fac.active_research_id.clear();
+        fac.active_research_progress = 0.0;
+        select_next_available();
+        continue;
+      }
+
+      if (!prereqs_met(fac, tech)) {
+        // Prereqs missing: requeue and try something else.
+        enqueue_unique(tech.id);
+        fac.active_research_id.clear();
+        fac.active_research_progress = 0.0;
+        select_next_available();
+        continue;
+      }
+
+      const double remaining = std::max(0.0, tech.cost - fac.active_research_progress);
+
+      // Complete (even if no RP remains this tick).
+      if (remaining <= 0.0) {
+        fac.known_techs.push_back(tech.id);
+
+        // Apply effects (unlock lists).
+        for (const auto& eff : tech.effects) {
+          if (eff.type == "unlock_component") {
+            push_unique(fac.unlocked_components, eff.value);
+          } else if (eff.type == "unlock_installation") {
+            push_unique(fac.unlocked_installations, eff.value);
+          }
+        }
+
+        log::info("Research complete for " + fac.name + ": " + tech.name);
+
+        fac.active_research_id.clear();
+        fac.active_research_progress = 0.0;
+        select_next_available();
+        continue;
+      }
+
+      // No RP left to apply today.
+      if (fac.research_points <= 0.0) break;
+
+      // Spend.
       const double spend = std::min(fac.research_points, remaining);
       fac.research_points -= spend;
       fac.active_research_progress += spend;
-
-      // Check completion.
-      if (fac.active_research_progress + 1e-9 >= tech.cost && tech.cost > 0.0) {
-        // Loop will complete next iteration.
-        continue;
-      }
-
-      continue; // keep spending until bank is empty (same-day research batching).
     }
   }
 }
+
 
 void Simulation::tick_shipyards() {
   const auto it_def = content_.installations.find("shipyard");
@@ -1002,8 +1120,29 @@ void Simulation::tick_ships() {
   for (auto& [ship_id, ship] : state_.ships) {
     auto it = state_.ship_orders.find(ship_id);
     if (it == state_.ship_orders.end()) continue;
-    auto& q = it->second.queue;
+    auto& so = it->second;
+
+    // Optional: auto-refill queue for simple repeating trade routes / patrol loops.
+    // The queue is only refilled at the start of a tick so that the ship still
+    // executes at most one order per day.
+    if (so.queue.empty() && so.repeat && !so.repeat_template.empty()) {
+      so.queue = so.repeat_template;
+    }
+
+    auto& q = so.queue;
     if (q.empty()) continue;
+
+    // Wait order: consumes a simulation day without moving.
+    if (std::holds_alternative<WaitDays>(q.front())) {
+      auto& ord = std::get<WaitDays>(q.front());
+      if (ord.days_remaining <= 0) {
+        q.erase(q.begin());
+        continue;
+      }
+      ord.days_remaining -= 1;
+      if (ord.days_remaining <= 0) q.erase(q.begin());
+      continue;
+    }
 
     // Determine target.
     Vec2 target = ship.position_mkm;

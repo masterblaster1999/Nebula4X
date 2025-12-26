@@ -43,11 +43,34 @@ class Simulation {
   // Returns false if the ship does not exist.
   bool clear_orders(Id ship_id);
 
+  // Enable repeating the ship's current order queue.
+  //
+  // When enabled, once the queue becomes empty it will be refilled from a saved
+  // template (captured at enable time or via update).
+  //
+  // Returns false if the ship does not exist or has no queued orders.
+  bool enable_order_repeat(Id ship_id);
+
+  // Replace the saved repeat template with the ship's current queue.
+  // Repeat remains enabled.
+  //
+  // Returns false if the ship does not exist or has no queued orders.
+  bool update_order_repeat_template(Id ship_id);
+
+  // Disable repeating and clear the saved template.
+  // Returns false if the ship does not exist.
+  bool disable_order_repeat(Id ship_id);
+
   // Cancel only the current (front) order.
   // Returns false if the ship does not exist or has no queued orders.
   bool cancel_current_order(Id ship_id);
 
   // Gameplay actions
+  // Insert a delay into the ship's order queue.
+  //
+  // The ship will do nothing for the requested number of simulation days.
+  // Returns false if ship does not exist or days <= 0.
+  bool issue_wait_days(Id ship_id, int days);
   bool issue_move_to_point(Id ship_id, Vec2 target_mkm);
   // Move to a body. If the body is in another system, the simulation will
   // automatically enqueue TravelViaJump steps (using the jump network) and

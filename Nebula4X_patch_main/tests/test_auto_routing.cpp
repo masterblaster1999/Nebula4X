@@ -2,6 +2,7 @@
 #include <string>
 #include <variant>
 #include <algorithm>
+#include <utility>
 
 #include "nebula4x/core/simulation.h"
 
