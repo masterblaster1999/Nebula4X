@@ -1,20 +1,27 @@
 # Patch notes / how to apply
 
-This zip contains only the files that changed for the latest patch pack:
+This patch pack contains only the files that changed.
 
-- **Fix Windows UI link error**: `LNK2019 unresolved external symbol main` when building SDL2 UI
-  (SDL can rewrite `main` -> `SDL_main` on Windows). The UI now opts out via `SDL_MAIN_HANDLED` and
-  calls `SDL_SetMainReady()` before `SDL_Init()`.
-- Add `CMakePresets.json` for easier configure/build.
-- Add a GitHub Actions CI workflow to build + run tests on Windows/Linux/macOS.
-- Make save-game loading more backwards compatible by treating `shipyard_queue` as optional.
-- Add a serialization regression test.
+## Changes in this patch pack
+
+- **Shipyard builds now consume minerals** (optional, data-driven):
+  - New `build_costs_per_ton` field on the **shipyard** installation definition.
+  - `tick_shipyards()` will consume the configured minerals as it builds tons each day.
+  - If costs aren't configured, shipbuilding remains **free** (backwards compatible).
+- **More accurate shipyard throughput**: build capacity now carries over across multiple queued ships in the same day
+  (no more "overbuilding" past 0 tons remaining).
+- **UI shipyard improvements**: the Colony tab now shows:
+  - shipyard per-ton costs (when configured)
+  - remaining mineral cost per queued ship
+  - a simple "STALLED" hint when a required mineral is at 0
+- **CI added**: GitHub Actions workflow builds the core + runs tests on Windows/Linux/macOS.
+- **Repo hygiene**: add `.gitignore` for common build outputs and IDE files.
 
 ## Apply locally
 
 1. Unzip `nebula4x_patch_pack.zip`.
-2. Copy the extracted folders into your repository root (overwrite when prompted).
-3. Build.
+2. Copy the extracted folders/files into your repository root (overwrite when prompted).
+3. Configure and build.
 
 ## Apply via GitHub web UI
 

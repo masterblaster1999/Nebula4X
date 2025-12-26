@@ -377,16 +377,67 @@ void draw_right_sidebar(Simulation& sim, Id selected_ship, Id& selected_colony) 
         ImGui::Separator();
         ImGui::Text("Shipyard");
 
+        const InstallationDef* shipyard_def = nullptr;
+        if (const auto it = sim.content().installations.find("shipyard"); it != sim.content().installations.end()) {
+          shipyard_def = &it->second;
+        }
+
         const bool has_yard = colony->installations["shipyard"] > 0;
         if (!has_yard) {
           ImGui::TextDisabled("No shipyard present");
           ImGui::EndTabItem();
         } else {
+          if (shipyard_def && !shipyard_def->build_costs_per_ton.empty()) {
+            ImGui::Text("Build costs (per ton)");
+            for (const auto& [mineral, cost_per_ton] : shipyard_def->build_costs_per_ton) {
+              ImGui::BulletText("%s: %.2f", mineral.c_str(), cost_per_ton);
+            }
+            ImGui::Spacing();
+          } else {
+            ImGui::TextDisabled("Build costs: (free / not configured)");
+          }
+
           if (colony->shipyard_queue.empty()) {
             ImGui::TextDisabled("Queue empty");
           } else {
             for (const auto& bo : colony->shipyard_queue) {
-              ImGui::BulletText("%s (%.1f tons remaining)", bo.design_id.c_str(), bo.tons_remaining);
+              const auto* d = sim.find_design(bo.design_id);
+              const std::string nm = d ? d->name : bo.design_id;
+              ImGui::BulletText("%s (%.1f tons remaining)", nm.c_str(), bo.tons_remaining);
+
+              if (shipyard_def && !shipyard_def->build_costs_per_ton.empty()) {
+                // Remaining mineral costs for this order.
+                std::string cost_line;
+                for (const auto& [mineral, cost_per_ton] : shipyard_def->build_costs_per_ton) {
+                  if (cost_per_ton <= 0.0) continue;
+                  const double remaining = bo.tons_remaining * cost_per_ton;
+                  if (!cost_line.empty()) cost_line += ", ";
+                  char buf[64];
+                  std::snprintf(buf, sizeof(buf), "%.1f", remaining);
+                  cost_line += mineral + " " + buf;
+                }
+
+                if (!cost_line.empty()) {
+                  ImGui::Indent();
+                  ImGui::TextDisabled("Remaining cost: %s", cost_line.c_str());
+
+                  // Simple stall hint: if any required mineral is at 0, the build cannot progress.
+                  std::string missing;
+                  for (const auto& [mineral, cost_per_ton] : shipyard_def->build_costs_per_ton) {
+                    if (cost_per_ton <= 0.0) continue;
+                    const auto it = colony->minerals.find(mineral);
+                    const double have = (it == colony->minerals.end()) ? 0.0 : it->second;
+                    if (have <= 1e-9) {
+                      missing = mineral;
+                      break;
+                    }
+                  }
+                  if (!missing.empty()) {
+                    ImGui::TextDisabled("Status: STALLED (need %s)", missing.c_str());
+                  }
+                  ImGui::Unindent();
+                }
+              }
             }
           }
 

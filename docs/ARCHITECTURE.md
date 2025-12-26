@@ -17,7 +17,7 @@
 - The sim advances in **whole days**. Each day:
   1. Update orbital positions (simple circular orbits)
   2. Produce minerals at colonies (based on installations)
-  3. Process shipyard build queues
+  3. Process shipyard build queues (optionally consuming minerals per ton built)
   4. Move ships (orders)
 
 ## Save/load

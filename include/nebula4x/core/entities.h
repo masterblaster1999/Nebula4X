@@ -77,6 +77,11 @@ struct InstallationDef {
   // Only used by shipyard.
   double build_rate_tons_per_day{0.0};
 
+  // Optional: mineral input costs for shipbuilding.
+  // Interpreted as "units of mineral required per ton built".
+  // If empty, shipbuilding is free (prototype/back-compat default).
+  std::unordered_map<std::string, double> build_costs_per_ton;
+
   // Only used by research labs.
   double research_points_per_day{0.0};
 };

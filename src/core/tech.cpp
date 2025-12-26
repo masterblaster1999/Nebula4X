@@ -94,6 +94,13 @@ ContentDB load_content_db_from_file(const std::string& path) {
         def.build_rate_tons_per_day = rate_v->number_value(0.0);
       }
 
+      // Optional: shipyard mineral input costs for shipbuilding.
+      if (const auto* costs_v = find_key(vo, "build_costs_per_ton")) {
+        for (const auto& [mineral, amount_v] : costs_v->object()) {
+          def.build_costs_per_ton[mineral] = amount_v.number_value(0.0);
+        }
+      }
+
       if (const auto* rp_v = find_key(vo, "research_points_per_day")) {
         def.research_points_per_day = rp_v->number_value(0.0);
       }

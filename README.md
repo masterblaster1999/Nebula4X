@@ -10,6 +10,7 @@ Nebula4X is an **open-source, turn-based space 4X** prototype in **C++20**, insp
 
 - Star systems, orbital bodies, ships, colonies, minerals, installations
 - Day-based turn advancement
+- Shipyard construction (optionally) consumes minerals per ton built (see `data/blueprints/starting_blueprints.json`)
 - Orders:
   - move-to-point / move-to-body
   - **travel via jump point** (multi-system travel)

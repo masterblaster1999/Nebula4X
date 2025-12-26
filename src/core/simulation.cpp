@@ -345,18 +345,63 @@ void Simulation::tick_research() {
 
 void Simulation::tick_shipyards() {
   const auto it_def = content_.installations.find("shipyard");
-  const double base_rate = (it_def == content_.installations.end()) ? 0.0 : it_def->second.build_rate_tons_per_day;
+  if (it_def == content_.installations.end()) return;
+
+  const InstallationDef& shipyard_def = it_def->second;
+  const double base_rate = shipyard_def.build_rate_tons_per_day;
   if (base_rate <= 0.0) return;
+
+  const auto& costs_per_ton = shipyard_def.build_costs_per_ton;
+
+  auto max_build_by_minerals = [&](const Colony& colony, double desired_tons) {
+    double max_tons = desired_tons;
+    for (const auto& [mineral, cost_per_ton] : costs_per_ton) {
+      if (cost_per_ton <= 0.0) continue;
+      const auto it = colony.minerals.find(mineral);
+      const double available = (it == colony.minerals.end()) ? 0.0 : it->second;
+      max_tons = std::min(max_tons, available / cost_per_ton);
+    }
+    return max_tons;
+  };
+
+  auto consume_minerals = [&](Colony& colony, double built_tons) {
+    for (const auto& [mineral, cost_per_ton] : costs_per_ton) {
+      if (cost_per_ton <= 0.0) continue;
+      const double cost = built_tons * cost_per_ton;
+      colony.minerals[mineral] = std::max(0.0, colony.minerals[mineral] - cost);
+    }
+  };
 
   for (auto& [_, colony] : state_.colonies) {
     const int yards = colony.installations["shipyard"];
     if (yards <= 0) continue;
-    const double rate = base_rate * static_cast<double>(yards);
 
-    while (!colony.shipyard_queue.empty()) {
+    double capacity_tons = base_rate * static_cast<double>(yards);
+
+    while (capacity_tons > 1e-9 && !colony.shipyard_queue.empty()) {
       auto& bo = colony.shipyard_queue.front();
-      bo.tons_remaining -= rate;
-      if (bo.tons_remaining > 0.0) break;
+
+      double build_tons = std::min(capacity_tons, bo.tons_remaining);
+
+      // Apply mineral constraints (if costs are configured).
+      if (!costs_per_ton.empty()) {
+        build_tons = max_build_by_minerals(colony, build_tons);
+      }
+
+      if (build_tons <= 1e-9) {
+        // Stalled due to lack of minerals (or zero capacity).
+        break;
+      }
+
+      // Spend minerals and progress the build.
+      if (!costs_per_ton.empty()) consume_minerals(colony, build_tons);
+      bo.tons_remaining -= build_tons;
+      capacity_tons -= build_tons;
+
+      if (bo.tons_remaining > 1e-9) {
+        // Not finished; all remaining capacity (if any) will be unused this day.
+        break;
+      }
 
       // Build complete: spawn ship at colony body position.
       const auto* design = find_design(bo.design_id);

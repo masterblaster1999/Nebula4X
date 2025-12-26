@@ -78,7 +78,11 @@
     },
     "shipyard": {
       "name": "Commercial Shipyard",
-      "build_rate_tons_per_day": 50
+      "build_rate_tons_per_day": 50,
+      "build_costs_per_ton": {
+        "Duranium": 1.0,
+        "Neutronium": 0.1
+      }
     },
     "research_lab": {
       "name": "Research Lab",
