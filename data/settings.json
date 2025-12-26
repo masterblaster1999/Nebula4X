@@ -1,0 +1,12 @@
+{
+  "startingScenario": "sol",
+  "ui": {
+    "windowWidth": 1280,
+    "windowHeight": 720,
+    "vsync": true
+  },
+  "sim": {
+    "startDate": "2200-01-01",
+    "secondsPerDay": 86400
+  }
+}
