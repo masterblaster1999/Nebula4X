@@ -1,10 +1,69 @@
-# Patch notes (generated 2025-12-27 r9)
+# Patch notes (generated 2025-12-27 r14)
 
 This patch pack contains only the files that changed.
 
 Apply by copying the files over the repo (drag/drop into GitHub's "Upload files"), preserving folder paths.
 
 ## Summary of changes
+
+### r14: event summary JSON + stdout-safe mode for exports
+
+- Utility:
+  - Adds `nebula4x::events_summary_to_json()` to generate a machine-friendly JSON summary (count, day/date range, counts by level/category).
+- CLI:
+  - Adds `--events-summary-json PATH` (`PATH` can be `-` for stdout) to export a JSON summary for the filtered event set.
+  - When exporting machine-readable output to stdout (`PATH='-'`), non-essential status output is routed to **stderr** automatically and incompatible stdout combinations are rejected.
+- Docs + tests:
+  - Updates README + `docs/EVENT_LOG.md`.
+  - Extends `test_event_export` to cover the summary JSON format.
+
+### r13: event log context filters (system/ship/colony) + targeted time-warp
+
+- Simulation:
+  - Extends `EventStopCondition` with optional `system_id`, `ship_id`, and `colony_id` filters.
+  - `advance_until_event` now supports stopping on events scoped to a particular system/ship/colony.
+- CLI:
+  - Adds new event log filters: `--events-system`, `--events-ship`, `--events-colony`.
+  - These accept either a numeric id or an exact name (case-insensitive), matching `--events-faction` behavior.
+  - The filters apply consistently across `--dump-events`, `--events-summary`, all event exports, and `--until-event`.
+- UI:
+  - Log tab adds **System / Ship / Colony** filters; Copy/Export actions respect the extended filters.
+  - Auto-run (pause on event) adds the same context filters for more precise time-warping.
+- Docs:
+  - Updates README + `docs/EVENT_LOG.md` with the new filters.
+
+### r12: JSONL/NDJSON event log export + script-safe stdout
+
+- Adds `nebula4x::events_to_jsonl()` (JSON Lines / NDJSON) alongside existing CSV/JSON array exporters.
+- CLI:
+  - New flag: `--export-events-jsonl PATH` (supports `PATH = '-'` for stdout, like the other exporters).
+  - When `--quiet` is used, the `--until-event` status line is now written to **stderr** so stdout can remain clean for machine-readable exports.
+  - Guards against accidentally requesting multiple `--export-events-*` outputs to stdout at the same time.
+- UI:
+  - Log tab adds **Export JSONL**.
+  - Export buttons now gently auto-fix the file extension when the export path looks like a common default (events.csv/json/jsonl).
+- Docs:
+  - Adds `docs/EVENT_LOG.md` documenting event export formats and the schema.
+- Tests:
+  - Extends `test_event_export` to cover JSONL output and CSV quote escaping.
+
+### r11: UI JSON event export + shared exporter in Log tab
+
+- UI Log tab:
+  - Adds **Export JSON** (writes the currently filtered/visible events to a structured JSON array).
+  - Refactors the existing **Export CSV** to use the shared `nebula4x::events_to_csv()` helper.
+  - Both exports preserve the existing behavior of exporting in chronological order within the visible set.
+- CLI help text + README:
+  - Documents that `--export-events-csv/-json` accept `PATH = '-'` to write directly to stdout (script-friendly with `--quiet`).
+- Tests:
+  - Extends `test_event_export` to assert JSON output ends with a trailing newline.
+
+### r10: fix `--export-events-json` + shared event export utils + tests
+
+- Fixes a CLI bug where `--export-events-json PATH` only worked when `--export-events-csv` was also provided.
+- Adds `nebula4x::events_to_csv()` and `nebula4x::events_to_json()` (shared helpers) under `nebula4x/util/event_export.*`.
+  - The CLI now uses these helpers for both exports.
+- Adds a small unit test (`test_event_export`) to prevent regressions.
 
 ### r9: CLI list bodies/jumps + export events JSON
 

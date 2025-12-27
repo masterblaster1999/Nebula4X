@@ -44,7 +44,7 @@ Nebula4X is an **open-source, turn-based space 4X** prototype in **C++20**, insp
 - Ship list + selection (shows HP, faction)
 - **Fog-of-war** toggle (hides undetected hostiles and undiscovered systems)
 - **Contacts tab**: recently seen hostiles + quick actions
-- **Log tab**: view/filter/clear the saved event log; copy visible entries; export CSV
+- **Log tab**: view/filter/clear the saved event log; copy visible entries; export CSV/JSON
 - **Jump point markers on the system map**
 - **Ship tab**: quick orders (move, jump travel, attack) + cargo load/unload
   - toggle **repeat orders** for simple looping routes
@@ -60,10 +60,12 @@ Nebula4X is an **open-source, turn-based space 4X** prototype in **C++20**, insp
 - Content validation helper (`--validate-content`) for blueprint/tech modding
 - Save canonicalizer (`--format-save`) to re-serialize JSON with stable ordering
 - Event log dump (`--dump-events`) to print saved simulation events
-- Event log export to CSV (`--export-events-csv PATH`) for spreadsheets/analysis
-- Event log export to JSON (`--export-events-json PATH`) for tooling/analysis
-- Event log filters: `--events-last`, `--events-category`, `--events-level`, `--events-faction`, `--events-contains`, `--events-since`, `--events-until`
+- Event log export to CSV (`--export-events-csv PATH`) for spreadsheets/analysis (`PATH` can be `-` for stdout)
+- Event log export to JSON (`--export-events-json PATH`) for tooling/analysis (`PATH` can be `-` for stdout)
+- Event log export to JSONL/NDJSON (`--export-events-jsonl PATH`) for streaming tools (`PATH` can be `-` for stdout)
+- Event log filters: `--events-last`, `--events-category`, `--events-level`, `--events-faction`, `--events-system`, `--events-ship`, `--events-colony`, `--events-contains`, `--events-since`, `--events-until`
 - Event log summary: `--events-summary` (counts by level/category) for the filtered set
+- Event log summary export: `--events-summary-json PATH` (`PATH` can be `-` for stdout)
 - Time warp: `--until-event N` to advance day-by-day until a new matching event occurs (defaults to warn/error; configurable via `--events-*`)
 - `--quiet` to suppress non-essential summary/status output (useful for scripting)
 - Script helpers: `--list-factions`, `--list-systems`, `--list-bodies`, `--list-jumps`, `--list-ships`, `--list-colonies` (print ids/names, then exit)
@@ -148,6 +150,12 @@ Run:
 
 # CLI (export event log to JSON)
 ./build/nebula4x_cli --days 30 --export-events-json events.json --events-level all
+
+# CLI (export event log to JSONL/NDJSON)
+./build/nebula4x_cli --days 30 --export-events-jsonl events.jsonl --events-level all
+
+# CLI (export JSON to stdout for scripting; suppress other output)
+./build/nebula4x_cli --load save.json --quiet --export-events-json - --events-level warn,error
 
 # CLI (script-friendly export, no summary output)
 ./build/nebula4x_cli --load save.json --quiet --export-events-csv events.csv --events-level warn,error

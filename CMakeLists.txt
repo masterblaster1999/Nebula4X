@@ -31,6 +31,7 @@ target_sources(nebula4x_core
     src/core/serialization.cpp
     src/core/tech.cpp
     src/util/file_io.cpp
+    src/util/event_export.cpp
     src/util/json.cpp
     src/util/log.cpp
     src/util/strings.cpp
@@ -149,6 +150,7 @@ if(NEBULA4X_BUILD_TESTS)
     tests/test_auto_routing.cpp
     tests/test_order_repeat.cpp
     tests/test_determinism.cpp
+    tests/test_event_export.cpp
     tests/test_content_validation.cpp
     tests/test_random_scenario.cpp
   )

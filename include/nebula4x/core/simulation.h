@@ -52,6 +52,15 @@ struct EventStopCondition {
   // either as primary or secondary faction id.
   Id faction_id{kInvalidId};
 
+  // Optional context filters.
+  //
+  // If set (non-zero), only stop when the event references this id.
+  // These filters are useful when "time warping" until something happens in
+  // a particular system, to a particular ship, etc.
+  Id system_id{kInvalidId};
+  Id ship_id{kInvalidId};
+  Id colony_id{kInvalidId};
+
   // If non-empty, only stop when the event message contains this substring.
   // Matching is case-insensitive.
   std::string message_contains;

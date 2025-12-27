@@ -12,6 +12,7 @@
 #include <utility>
 
 #include "nebula4x/core/serialization.h"
+#include "nebula4x/util/event_export.h"
 #include "nebula4x/util/file_io.h"
 #include "nebula4x/util/log.h"
 #include "nebula4x/util/strings.h"
@@ -29,6 +30,39 @@ bool case_insensitive_contains(const std::string& haystack, const char* needle_c
         return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
       });
   return it != haystack.end();
+}
+
+bool ends_with_ci(const std::string& s, const std::string& suffix) {
+  if (suffix.size() > s.size()) return false;
+  const std::string tail = s.substr(s.size() - suffix.size());
+  return nebula4x::to_lower(tail) == nebula4x::to_lower(suffix);
+}
+
+void maybe_fix_export_extension(char* path, std::size_t cap, const char* desired_ext) {
+  if (!path || cap == 0 || !desired_ext) return;
+  if (path[0] == '\0') return;
+
+  std::string p(path);
+  const std::string pl = nebula4x::to_lower(p);
+  const bool known_ext = ends_with_ci(pl, ".csv") || ends_with_ci(pl, ".json") || ends_with_ci(pl, ".jsonl");
+
+  const std::size_t last_sep = p.find_last_of("/\\");
+  const std::size_t last_dot = p.find_last_of('.');
+  const bool has_ext = (last_dot != std::string::npos) && (last_sep == std::string::npos || last_dot > last_sep);
+
+  // Only auto-tweak the suffix when the path looks like one of our common defaults.
+  if (!(known_ext || !has_ext)) return;
+
+  const std::string ext(desired_ext);
+  if (has_ext) {
+    p = p.substr(0, last_dot) + ext;
+  } else {
+    p += ext;
+  }
+
+  if (p.size() >= cap) p.resize(cap - 1);
+  std::strncpy(path, p.c_str(), cap);
+  path[cap - 1] = '\0';
 }
 
 const char* ship_role_label(ShipRole r) {
@@ -98,6 +132,36 @@ std::vector<std::pair<Id, std::string>> sorted_factions(const GameState& s) {
   std::vector<std::pair<Id, std::string>> out;
   out.reserve(s.factions.size());
   for (const auto& [id, f] : s.factions) out.push_back({id, f.name});
+  std::sort(out.begin(), out.end(), [](auto& a, auto& b) { return a.second < b.second; });
+  return out;
+}
+
+std::vector<std::pair<Id, std::string>> sorted_systems(const GameState& s) {
+  std::vector<std::pair<Id, std::string>> out;
+  out.reserve(s.systems.size());
+  for (const auto& [id, sys] : s.systems) {
+    out.push_back({id, sys.name + " (" + std::to_string(static_cast<unsigned long long>(id)) + ")"});
+  }
+  std::sort(out.begin(), out.end(), [](auto& a, auto& b) { return a.second < b.second; });
+  return out;
+}
+
+std::vector<std::pair<Id, std::string>> sorted_ships(const GameState& s) {
+  std::vector<std::pair<Id, std::string>> out;
+  out.reserve(s.ships.size());
+  for (const auto& [id, sh] : s.ships) {
+    out.push_back({id, sh.name + " (" + std::to_string(static_cast<unsigned long long>(id)) + ")"});
+  }
+  std::sort(out.begin(), out.end(), [](auto& a, auto& b) { return a.second < b.second; });
+  return out;
+}
+
+std::vector<std::pair<Id, std::string>> sorted_colonies(const GameState& s) {
+  std::vector<std::pair<Id, std::string>> out;
+  out.reserve(s.colonies.size());
+  for (const auto& [id, c] : s.colonies) {
+    out.push_back({id, c.name + " (" + std::to_string(static_cast<unsigned long long>(id)) + ")"});
+  }
   std::sort(out.begin(), out.end(), [](auto& a, auto& b) { return a.second < b.second; });
   return out;
 }
@@ -205,6 +269,9 @@ void draw_left_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sele
     static bool stop_error = true;
     static int category_idx = 0; // 0 = Any
     static Id faction_filter = kInvalidId;
+    static Id system_filter = kInvalidId;
+    static Id ship_filter = kInvalidId;
+    static Id colony_filter = kInvalidId;
     static char message_contains[128] = "";
     static std::string last_status;
 
@@ -251,6 +318,53 @@ void draw_left_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sele
         }
       }
 
+      // Optional context filters.
+      {
+        auto& s = sim.state();
+
+        // System filter.
+        {
+          const auto sys_list = sorted_systems(s);
+          const auto* sel = find_ptr(s.systems, system_filter);
+          const char* label = (system_filter == kInvalidId) ? "Any" : (sel ? sel->name.c_str() : "(missing)");
+          if (ImGui::BeginCombo("System##autorun", label)) {
+            if (ImGui::Selectable("Any", system_filter == kInvalidId)) system_filter = kInvalidId;
+            for (const auto& [sid, name] : sys_list) {
+              if (ImGui::Selectable(name.c_str(), system_filter == sid)) system_filter = sid;
+            }
+            ImGui::EndCombo();
+          }
+        }
+
+        // Ship filter.
+        {
+          const auto ship_list = sorted_ships(s);
+          const auto* sel = find_ptr(s.ships, ship_filter);
+          const char* label = (ship_filter == kInvalidId) ? "Any" : (sel ? sel->name.c_str() : "(missing)");
+          if (ImGui::BeginCombo("Ship##autorun", label)) {
+            if (ImGui::Selectable("Any", ship_filter == kInvalidId)) ship_filter = kInvalidId;
+            for (const auto& [shid, name] : ship_list) {
+              if (ImGui::Selectable(name.c_str(), ship_filter == shid)) ship_filter = shid;
+            }
+            ImGui::EndCombo();
+          }
+        }
+
+        // Colony filter.
+        {
+          const auto col_list = sorted_colonies(s);
+          const auto* sel = find_ptr(s.colonies, colony_filter);
+          const char* label = (colony_filter == kInvalidId) ? "Any" : (sel ? sel->name.c_str() : "(missing)");
+          if (ImGui::BeginCombo("Colony##autorun", label)) {
+            if (ImGui::Selectable("Any", colony_filter == kInvalidId)) colony_filter = kInvalidId;
+            for (const auto& [cid, name] : col_list) {
+              if (ImGui::Selectable(name.c_str(), colony_filter == cid)) colony_filter = cid;
+            }
+            ImGui::EndCombo();
+          }
+        }
+      }
+
       ImGui::InputText("Message contains##autorun", message_contains, IM_ARRAYSIZE(message_contains));
 
       if (ImGui::Button("Run until event##autorun")) {
@@ -261,6 +375,9 @@ void draw_left_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sele
         stop.filter_category = false;
         stop.category = EventCategory::General;
         stop.faction_id = faction_filter;
+        stop.system_id = system_filter;
+        stop.ship_id = ship_filter;
+        stop.colony_id = colony_filter;
         stop.message_contains = message_contains;
 
         if (category_idx > 0) {
@@ -1321,6 +1438,9 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
         static bool show_error = true;
         static int category_idx = 0; // 0=All
         static Id faction_filter = kInvalidId;
+        static Id system_filter = kInvalidId;
+        static Id ship_filter = kInvalidId;
+        static Id colony_filter = kInvalidId;
         static int max_show = 200;
         static char search_buf[128] = "";
 
@@ -1356,6 +1476,45 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
             if (ImGui::Selectable("All", faction_filter == kInvalidId)) faction_filter = kInvalidId;
             for (const auto& [fid, name] : fac_list) {
               if (ImGui::Selectable(name.c_str(), faction_filter == fid)) faction_filter = fid;
+            }
+            ImGui::EndCombo();
+          }
+        }
+
+        // Optional context filters.
+        {
+          // System filter.
+          const auto sys_list = sorted_systems(s);
+          const auto* sel = find_ptr(s.systems, system_filter);
+          const char* label = (system_filter == kInvalidId) ? "All" : (sel ? sel->name.c_str() : "(missing)");
+          if (ImGui::BeginCombo("System", label)) {
+            if (ImGui::Selectable("All", system_filter == kInvalidId)) system_filter = kInvalidId;
+            for (const auto& [sid, name] : sys_list) {
+              if (ImGui::Selectable(name.c_str(), system_filter == sid)) system_filter = sid;
+            }
+            ImGui::EndCombo();
+          }
+
+          // Ship filter.
+          const auto ship_list = sorted_ships(s);
+          const auto* sel_sh = find_ptr(s.ships, ship_filter);
+          const char* label_sh = (ship_filter == kInvalidId) ? "All" : (sel_sh ? sel_sh->name.c_str() : "(missing)");
+          if (ImGui::BeginCombo("Ship", label_sh)) {
+            if (ImGui::Selectable("All", ship_filter == kInvalidId)) ship_filter = kInvalidId;
+            for (const auto& [shid, name] : ship_list) {
+              if (ImGui::Selectable(name.c_str(), ship_filter == shid)) ship_filter = shid;
+            }
+            ImGui::EndCombo();
+          }
+
+          // Colony filter.
+          const auto col_list = sorted_colonies(s);
+          const auto* sel_c = find_ptr(s.colonies, colony_filter);
+          const char* label_c = (colony_filter == kInvalidId) ? "All" : (sel_c ? sel_c->name.c_str() : "(missing)");
+          if (ImGui::BeginCombo("Colony", label_c)) {
+            if (ImGui::Selectable("All", colony_filter == kInvalidId)) colony_filter = kInvalidId;
+            for (const auto& [cid, name] : col_list) {
+              if (ImGui::Selectable(name.c_str(), colony_filter == cid)) colony_filter = cid;
             }
             ImGui::EndCombo();
           }
@@ -1408,6 +1567,17 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
             if (ev.faction_id != faction_filter && ev.faction_id2 != faction_filter) continue;
           }
 
+          // Context filters.
+          if (system_filter != kInvalidId) {
+            if (ev.system_id != system_filter) continue;
+          }
+          if (ship_filter != kInvalidId) {
+            if (ev.ship_id != ship_filter) continue;
+          }
+          if (colony_filter != kInvalidId) {
+            if (ev.colony_id != colony_filter) continue;
+          }
+
           rows.push_back(i);
         }
 
@@ -1430,80 +1600,68 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
         ImGui::SameLine();
         if (ImGui::SmallButton("Export CSV")) {
           try {
+            maybe_fix_export_extension(export_path, IM_ARRAYSIZE(export_path), ".csv");
             if (export_path[0] == '\0') {
               export_status = "Export failed: export path is empty.";
             } else {
-              auto faction_name = [&](Id id) -> std::string {
-                if (id == kInvalidId) return {};
-                const auto* f = find_ptr(s.factions, id);
-                return f ? f->name : std::string{};
-              };
-              auto system_name = [&](Id id) -> std::string {
-                if (id == kInvalidId) return {};
-                const auto* sys = find_ptr(s.systems, id);
-                return sys ? sys->name : std::string{};
-              };
-              auto ship_name = [&](Id id) -> std::string {
-                if (id == kInvalidId) return {};
-                const auto* sh = find_ptr(s.ships, id);
-                return sh ? sh->name : std::string{};
-              };
-              auto colony_name = [&](Id id) -> std::string {
-                if (id == kInvalidId) return {};
-                const auto* c = find_ptr(s.colonies, id);
-                return c ? c->name : std::string{};
-              };
-
-              std::string csv;
-              csv += "day,date,seq,level,category,"
-                     "faction_id,faction,"
-                     "faction_id2,faction2,"
-                     "system_id,system,"
-                     "ship_id,ship,"
-                     "colony_id,colony,"
-                     "message\n";
-
               // Export in chronological order (oldest to newest within the visible set).
+              std::vector<const SimEvent*> visible;
+              visible.reserve(rows.size());
               for (auto it = rows.rbegin(); it != rows.rend(); ++it) {
-                const auto& ev = s.events[static_cast<std::size_t>(*it)];
-                const nebula4x::Date d(ev.day);
-
-                csv += std::to_string(static_cast<long long>(ev.day));
-                csv += ",";
-                csv += nebula4x::csv_escape(d.to_string());
-                csv += ",";
-                csv += std::to_string(static_cast<unsigned long long>(ev.seq));
-                csv += ",";
-                csv += nebula4x::csv_escape(std::string(event_level_label(ev.level)));
-                csv += ",";
-                csv += nebula4x::csv_escape(std::string(event_category_label(ev.category)));
-                csv += ",";
-                csv += std::to_string(static_cast<unsigned long long>(ev.faction_id));
-                csv += ",";
-                csv += nebula4x::csv_escape(faction_name(ev.faction_id));
-                csv += ",";
-                csv += std::to_string(static_cast<unsigned long long>(ev.faction_id2));
-                csv += ",";
-                csv += nebula4x::csv_escape(faction_name(ev.faction_id2));
-                csv += ",";
-                csv += std::to_string(static_cast<unsigned long long>(ev.system_id));
-                csv += ",";
-                csv += nebula4x::csv_escape(system_name(ev.system_id));
-                csv += ",";
-                csv += std::to_string(static_cast<unsigned long long>(ev.ship_id));
-                csv += ",";
-                csv += nebula4x::csv_escape(ship_name(ev.ship_id));
-                csv += ",";
-                csv += std::to_string(static_cast<unsigned long long>(ev.colony_id));
-                csv += ",";
-                csv += nebula4x::csv_escape(colony_name(ev.colony_id));
-                csv += ",";
-                csv += nebula4x::csv_escape(ev.message);
-                csv += "\n";
+                visible.push_back(&s.events[static_cast<std::size_t>(*it)]);
               }
 
-              write_text_file(export_path, csv);
-              export_status = "Exported " + std::to_string(rows.size()) + " event(s) to " + std::string(export_path);
+              write_text_file(export_path, nebula4x::events_to_csv(s, visible));
+              export_status =
+                  "Exported CSV (" + std::to_string(rows.size()) + " event(s)) to " + std::string(export_path);
+            }
+          } catch (const std::exception& e) {
+            export_status = std::string("Export failed: ") + e.what();
+            nebula4x::log::error(export_status);
+          }
+        }
+
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Export JSON")) {
+          try {
+            maybe_fix_export_extension(export_path, IM_ARRAYSIZE(export_path), ".json");
+            if (export_path[0] == '\0') {
+              export_status = "Export failed: export path is empty.";
+            } else {
+              // Export in chronological order (oldest to newest within the visible set).
+              std::vector<const SimEvent*> visible;
+              visible.reserve(rows.size());
+              for (auto it = rows.rbegin(); it != rows.rend(); ++it) {
+                visible.push_back(&s.events[static_cast<std::size_t>(*it)]);
+              }
+
+              write_text_file(export_path, nebula4x::events_to_json(s, visible));
+              export_status =
+                  "Exported JSON (" + std::to_string(rows.size()) + " event(s)) to " + std::string(export_path);
+            }
+          } catch (const std::exception& e) {
+            export_status = std::string("Export failed: ") + e.what();
+            nebula4x::log::error(export_status);
+          }
+        }
+
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Export JSONL")) {
+          try {
+            maybe_fix_export_extension(export_path, IM_ARRAYSIZE(export_path), ".jsonl");
+            if (export_path[0] == '\0') {
+              export_status = "Export failed: export path is empty.";
+            } else {
+              // Export in chronological order (oldest to newest within the visible set).
+              std::vector<const SimEvent*> visible;
+              visible.reserve(rows.size());
+              for (auto it = rows.rbegin(); it != rows.rend(); ++it) {
+                visible.push_back(&s.events[static_cast<std::size_t>(*it)]);
+              }
+
+              write_text_file(export_path, nebula4x::events_to_jsonl(s, visible));
+              export_status =
+                  "Exported JSONL (" + std::to_string(rows.size()) + " event(s)) to " + std::string(export_path);
             }
           } catch (const std::exception& e) {
             export_status = std::string("Export failed: ") + e.what();

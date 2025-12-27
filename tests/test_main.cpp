@@ -6,6 +6,7 @@ int test_serialization();
 int test_auto_routing();
 int test_order_repeat();
 int test_determinism();
+int test_event_export();
 int test_content_validation();
 int test_random_scenario();
 
@@ -17,6 +18,7 @@ int main() {
   fails += test_auto_routing();
   fails += test_order_repeat();
   fails += test_determinism();
+  fails += test_event_export();
   fails += test_content_validation();
   fails += test_random_scenario();
 

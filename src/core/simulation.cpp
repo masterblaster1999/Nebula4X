@@ -417,6 +417,18 @@ bool event_matches_stop(const SimEvent& ev, const EventStopCondition& stop) {
     if (ev.faction_id != stop.faction_id && ev.faction_id2 != stop.faction_id) return false;
   }
 
+  if (stop.system_id != kInvalidId) {
+    if (ev.system_id != stop.system_id) return false;
+  }
+
+  if (stop.ship_id != kInvalidId) {
+    if (ev.ship_id != stop.ship_id) return false;
+  }
+
+  if (stop.colony_id != kInvalidId) {
+    if (ev.colony_id != stop.colony_id) return false;
+  }
+
   if (!stop.message_contains.empty()) {
     const auto it = std::search(
         ev.message.begin(), ev.message.end(),

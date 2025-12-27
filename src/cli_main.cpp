@@ -11,6 +11,7 @@
 #include "nebula4x/core/simulation.h"
 #include "nebula4x/core/tech.h"
 #include "nebula4x/util/file_io.h"
+#include "nebula4x/util/event_export.h"
 #include "nebula4x/util/json.h"
 #include "nebula4x/util/log.h"
 #include "nebula4x/util/strings.h"
@@ -83,17 +84,12 @@ const char* body_type_label(nebula4x::BodyType t) {
   return "planet";
 }
 
-std::string to_lower(std::string s) {
-  for (char& ch : s) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-  return s;
-}
-
 bool is_digits(const std::string& s) {
   return !s.empty() && std::all_of(s.begin(), s.end(), [](unsigned char c) { return std::isdigit(c); });
 }
 
 bool parse_event_category(const std::string& raw, nebula4x::EventCategory& out) {
-  const std::string s = to_lower(raw);
+  const std::string s = nebula4x::to_lower(raw);
   if (s == "general") {
     out = nebula4x::EventCategory::General;
     return true;
@@ -138,7 +134,7 @@ std::string trim_copy(std::string t) {
 }
 
 bool parse_event_levels(const std::string& raw, bool& allow_info, bool& allow_warn, bool& allow_error) {
-  const std::string s = to_lower(raw);
+  const std::string s = nebula4x::to_lower(raw);
   if (s.empty() || s == "all") {
     allow_info = true;
     allow_warn = true;
@@ -224,9 +220,63 @@ nebula4x::Id resolve_faction_id(const nebula4x::GameState& s, const std::string&
   }
 
   // Name match (case-insensitive).
-  const std::string want = to_lower(raw);
+  const std::string want = nebula4x::to_lower(raw);
   for (const auto& [id, f] : s.factions) {
-    if (to_lower(f.name) == want) return id;
+    if (nebula4x::to_lower(f.name) == want) return id;
+  }
+  return nebula4x::kInvalidId;
+}
+
+nebula4x::Id resolve_system_id(const nebula4x::GameState& s, const std::string& raw) {
+  if (raw.empty()) return nebula4x::kInvalidId;
+
+  // Numeric id.
+  if (is_digits(raw)) {
+    const auto id = static_cast<nebula4x::Id>(std::stoll(raw));
+    if (s.systems.find(id) != s.systems.end()) return id;
+    return nebula4x::kInvalidId;
+  }
+
+  // Name match (case-insensitive).
+  const std::string want = nebula4x::to_lower(raw);
+  for (const auto& [id, sys] : s.systems) {
+    if (nebula4x::to_lower(sys.name) == want) return id;
+  }
+  return nebula4x::kInvalidId;
+}
+
+nebula4x::Id resolve_ship_id(const nebula4x::GameState& s, const std::string& raw) {
+  if (raw.empty()) return nebula4x::kInvalidId;
+
+  // Numeric id.
+  if (is_digits(raw)) {
+    const auto id = static_cast<nebula4x::Id>(std::stoll(raw));
+    if (s.ships.find(id) != s.ships.end()) return id;
+    return nebula4x::kInvalidId;
+  }
+
+  // Name match (case-insensitive).
+  const std::string want = nebula4x::to_lower(raw);
+  for (const auto& [id, sh] : s.ships) {
+    if (nebula4x::to_lower(sh.name) == want) return id;
+  }
+  return nebula4x::kInvalidId;
+}
+
+nebula4x::Id resolve_colony_id(const nebula4x::GameState& s, const std::string& raw) {
+  if (raw.empty()) return nebula4x::kInvalidId;
+
+  // Numeric id.
+  if (is_digits(raw)) {
+    const auto id = static_cast<nebula4x::Id>(std::stoll(raw));
+    if (s.colonies.find(id) != s.colonies.end()) return id;
+    return nebula4x::kInvalidId;
+  }
+
+  // Name match (case-insensitive).
+  const std::string want = nebula4x::to_lower(raw);
+  for (const auto& [id, c] : s.colonies) {
+    if (nebula4x::to_lower(c.name) == want) return id;
   }
   return nebula4x::kInvalidId;
 }
@@ -256,16 +306,21 @@ void print_usage(const char* exe) {
   std::cout << "  --list-ships     Print ship ids/names and basic context, then exit\n";
   std::cout << "  --list-colonies  Print colony ids/names and basic context, then exit\n";
   std::cout << "  --dump-events    Print the persistent simulation event log to stdout\n";
-  std::cout << "  --export-events-csv PATH  Export the persistent simulation event log to CSV\n";
-  std::cout << "  --export-events-json PATH Export the persistent simulation event log to JSON\n";
+  std::cout << "  --export-events-csv PATH  Export the persistent simulation event log to CSV (PATH can be '-' for stdout)\n";
+  std::cout << "  --export-events-json PATH Export the persistent simulation event log to JSON (PATH can be '-' for stdout)\n";
+  std::cout << "  --export-events-jsonl PATH Export the persistent simulation event log to JSONL/NDJSON (PATH can be '-' for stdout)\n";
   std::cout << "    --events-last N         Only print the last N matching events (0 = all)\n";
   std::cout << "    --events-category NAME  Filter by category (general|research|shipyard|construction|movement|combat|intel|exploration)\n";
   std::cout << "    --events-faction X      Filter by faction id or exact name (case-insensitive)\n";
+  std::cout << "    --events-system X       Filter by system id or exact name (case-insensitive)\n";
+  std::cout << "    --events-ship X         Filter by ship id or exact name (case-insensitive)\n";
+  std::cout << "    --events-colony X       Filter by colony id or exact name (case-insensitive)\n";
   std::cout << "    --events-contains TEXT  Filter by message substring (case-insensitive)\n";
   std::cout << "    --events-level LEVELS  Filter by level (all|info|warn|error or comma-separated list)\n";
   std::cout << "    --events-since X        Filter to events on/after X (day number or YYYY-MM-DD)\n";
   std::cout << "    --events-until X        Filter to events on/before X (day number or YYYY-MM-DD)\n";
   std::cout << "    --events-summary        Print a summary of the filtered events (counts by level/category)\n";
+  std::cout << "    --events-summary-json PATH  Export a JSON summary of the filtered events (PATH can be '-' for stdout)\n";
   std::cout << "  -h, --help       Show this help\n";
   std::cout << "  --version        Print version and exit\n";
 }
@@ -295,8 +350,16 @@ int main(int argc, char** argv) {
     const std::string save_path = get_str_arg(argc, argv, "--save", "");
     const std::string export_events_csv_path = get_str_arg(argc, argv, "--export-events-csv", "");
     const std::string export_events_json_path = get_str_arg(argc, argv, "--export-events-json", "");
+    const std::string export_events_jsonl_path = get_str_arg(argc, argv, "--export-events-jsonl", "");
+    const std::string events_summary_json_path = get_str_arg(argc, argv, "--events-summary-json", "");
 
     const bool quiet = has_flag(argc, argv, "--quiet");
+
+    const bool script_stdout =
+        (!export_events_csv_path.empty() && export_events_csv_path == "-") ||
+        (!export_events_json_path.empty() && export_events_json_path == "-") ||
+        (!export_events_jsonl_path.empty() && export_events_jsonl_path == "-") ||
+        (!events_summary_json_path.empty() && events_summary_json_path == "-");
 
     const bool list_factions = has_flag(argc, argv, "--list-factions");
     const bool list_systems = has_flag(argc, argv, "--list-systems");
@@ -317,7 +380,10 @@ int main(int argc, char** argv) {
 
       const auto loaded = nebula4x::deserialize_game_from_json(nebula4x::read_text_file(load_path));
       nebula4x::write_text_file(save_path, nebula4x::serialize_game_to_json(loaded));
-      if (!quiet) std::cout << "Formatted save written to " << save_path << "\n";
+      if (!quiet) {
+        std::ostream& info = script_stdout ? std::cerr : std::cout;
+        info << "Formatted save written to " << save_path << "\n";
+      }
       return 0;
     }
 
@@ -331,7 +397,10 @@ int main(int argc, char** argv) {
         for (const auto& e : errors) std::cerr << "  - " << e << "\n";
         return 1;
       }
-      if (!quiet) std::cout << "Content OK\n";
+      if (!quiet) {
+        std::ostream& info = script_stdout ? std::cerr : std::cout;
+        info << "Content OK\n";
+      }
       return 0;
     }
 
@@ -531,6 +600,36 @@ int main(int argc, char** argv) {
         }
       }
 
+      const std::string sys_raw = get_str_arg(argc, argv, "--events-system", "");
+      if (!sys_raw.empty()) {
+        const auto& st = sim.state();
+        stop.system_id = resolve_system_id(st, sys_raw);
+        if (stop.system_id == nebula4x::kInvalidId) {
+          std::cerr << "Unknown --events-system: " << sys_raw << "\n";
+          return 2;
+        }
+      }
+
+      const std::string ship_raw = get_str_arg(argc, argv, "--events-ship", "");
+      if (!ship_raw.empty()) {
+        const auto& st = sim.state();
+        stop.ship_id = resolve_ship_id(st, ship_raw);
+        if (stop.ship_id == nebula4x::kInvalidId) {
+          std::cerr << "Unknown --events-ship: " << ship_raw << "\n";
+          return 2;
+        }
+      }
+
+      const std::string col_raw = get_str_arg(argc, argv, "--events-colony", "");
+      if (!col_raw.empty()) {
+        const auto& st = sim.state();
+        stop.colony_id = resolve_colony_id(st, col_raw);
+        if (stop.colony_id == nebula4x::kInvalidId) {
+          std::cerr << "Unknown --events-colony: " << col_raw << "\n";
+          return 2;
+        }
+      }
+
       stop.message_contains = get_str_arg(argc, argv, "--events-contains", "");
 
       until_res = sim.advance_until_event(until_event_days, stop);
@@ -540,44 +639,71 @@ int main(int argc, char** argv) {
 
     const auto& s = sim.state();
     if (!quiet) {
-      std::cout << "Date: " << s.date.to_string() << "\n";
-      std::cout << "Systems: " << s.systems.size() << ", Bodies: " << s.bodies.size() << ", Jump Points: "
+      std::ostream& info = script_stdout ? std::cerr : info;
+      info << "Date: " << s.date.to_string() << "\n";
+      info << "Systems: " << s.systems.size() << ", Bodies: " << s.bodies.size() << ", Jump Points: "
                 << s.jump_points.size() << ", Ships: " << s.ships.size() << ", Colonies: " << s.colonies.size()
                 << "\n";
 
       for (const auto& [_, c] : s.colonies) {
-        std::cout << "\nColony " << c.name << " minerals:\n";
+        info << "\nColony " << c.name << " minerals:\n";
         for (const auto& [k, v] : c.minerals) {
-          std::cout << "  " << k << ": " << v << "\n";
+          info << "  " << k << ": " << v << "\n";
         }
       }
     }
 
     if (until_event) {
-      if (!quiet) std::cout << "\n";
+      std::ostream& status = (quiet || script_stdout) ? std::cerr : std::cout;
+      if (!quiet) status << "\n";
       if (until_res.hit) {
         const nebula4x::Date d(until_res.event.day);
-        std::cout << "Until-event: hit after " << until_res.days_advanced << " days -> [" << d.to_string() << "] #"
-                  << static_cast<unsigned long long>(until_res.event.seq) << " ["
-                  << event_category_label(until_res.event.category) << "] "
-                  << event_level_label(until_res.event.level) << ": " << until_res.event.message << "\n";
+        status << "Until-event: hit after " << until_res.days_advanced << " days -> [" << d.to_string() << "] #"
+               << static_cast<unsigned long long>(until_res.event.seq) << " ["
+               << event_category_label(until_res.event.category) << "] "
+               << event_level_label(until_res.event.level) << ": " << until_res.event.message << "\n";
       } else {
-        std::cout << "Until-event: no matching event within " << until_event_days << " days (advanced "
-                  << until_res.days_advanced << ", date now " << s.date.to_string() << ")\n";
+        status << "Until-event: no matching event within " << until_event_days << " days (advanced "
+               << until_res.days_advanced << ", date now " << s.date.to_string() << ")\n";
       }
     }
 
     const bool dump_events = has_flag(argc, argv, "--dump-events");
     const bool export_events_csv = !export_events_csv_path.empty();
     const bool export_events_json = !export_events_json_path.empty();
+    const bool export_events_jsonl = !export_events_jsonl_path.empty();
     const bool events_summary = has_flag(argc, argv, "--events-summary");
+    const bool events_summary_json = !events_summary_json_path.empty();
 
-    if (dump_events || export_events_csv || export_events_json || events_summary) {
+    if (dump_events || export_events_csv || export_events_json || export_events_jsonl || events_summary ||
+        events_summary_json) {
+      // Prevent ambiguous script output.
+      {
+        int stdout_exports = 0;
+        if (export_events_csv && export_events_csv_path == "-") ++stdout_exports;
+        if (export_events_json && export_events_json_path == "-") ++stdout_exports;
+        if (export_events_jsonl && export_events_jsonl_path == "-") ++stdout_exports;
+        if (events_summary_json && events_summary_json_path == "-") ++stdout_exports;
+        if (stdout_exports > 1) {
+          std::cerr << "Multiple machine-readable outputs set to '-' (stdout). Choose at most one.\n";
+          return 2;
+        }
+        if (stdout_exports == 1) {
+          if (dump_events || events_summary || has_flag(argc, argv, "--dump")) {
+            std::cerr << "Cannot combine --dump-events/--events-summary/--dump with stdout export (PATH='-').\n";
+            std::cerr << "Write those outputs to a file instead, or remove them for script-friendly stdout.\n";
+            return 2;
+          }
+        }
+      }
       const int events_last = std::max(0, get_int_arg(argc, argv, "--events-last", 0));
       const std::string cat_raw = get_str_arg(argc, argv, "--events-category", "");
       const std::string fac_raw = get_str_arg(argc, argv, "--events-faction", "");
+      const std::string sys_raw = get_str_arg(argc, argv, "--events-system", "");
+      const std::string ship_raw = get_str_arg(argc, argv, "--events-ship", "");
+      const std::string col_raw = get_str_arg(argc, argv, "--events-colony", "");
       const std::string contains_raw = get_str_arg(argc, argv, "--events-contains", "");
-      const std::string contains_filter = to_lower(contains_raw);
+      const std::string contains_filter = nebula4x::to_lower(contains_raw);
       const std::string levels_raw = get_str_arg(argc, argv, "--events-level", "all");
       const std::string since_raw = get_str_arg(argc, argv, "--events-since", "");
       const std::string until_raw = get_str_arg(argc, argv, "--events-until", "");
@@ -629,6 +755,24 @@ int main(int argc, char** argv) {
         return 2;
       }
 
+      const nebula4x::Id sys_filter = resolve_system_id(s, sys_raw);
+      if (!sys_raw.empty() && sys_filter == nebula4x::kInvalidId) {
+        std::cerr << "Unknown --events-system: " << sys_raw << "\n";
+        return 2;
+      }
+
+      const nebula4x::Id ship_filter = resolve_ship_id(s, ship_raw);
+      if (!ship_raw.empty() && ship_filter == nebula4x::kInvalidId) {
+        std::cerr << "Unknown --events-ship: " << ship_raw << "\n";
+        return 2;
+      }
+
+      const nebula4x::Id col_filter = resolve_colony_id(s, col_raw);
+      if (!col_raw.empty() && col_filter == nebula4x::kInvalidId) {
+        std::cerr << "Unknown --events-colony: " << col_raw << "\n";
+        return 2;
+      }
+
       std::vector<const nebula4x::SimEvent*> filtered;
       filtered.reserve(s.events.size());
       for (const auto& ev : s.events) {
@@ -639,8 +783,11 @@ int main(int argc, char** argv) {
         if (ev.level == nebula4x::EventLevel::Error && !allow_error) continue;
         if (has_cat && ev.category != cat_filter) continue;
         if (fac_filter != nebula4x::kInvalidId && ev.faction_id != fac_filter && ev.faction_id2 != fac_filter) continue;
+        if (sys_filter != nebula4x::kInvalidId && ev.system_id != sys_filter) continue;
+        if (ship_filter != nebula4x::kInvalidId && ev.ship_id != ship_filter) continue;
+        if (col_filter != nebula4x::kInvalidId && ev.colony_id != col_filter) continue;
         if (!contains_filter.empty()) {
-          if (to_lower(ev.message).find(contains_filter) == std::string::npos) continue;
+          if (nebula4x::to_lower(ev.message).find(contains_filter) == std::string::npos) continue;
         }
         filtered.push_back(&ev);
       }
@@ -660,6 +807,21 @@ int main(int argc, char** argv) {
           const auto itf = s.factions.find(fac_filter);
           const std::string name = (itf != s.factions.end()) ? itf->second.name : std::string("(missing)");
           std::cout << " (faction=" << name << ")";
+        }
+        if (sys_filter != nebula4x::kInvalidId) {
+          const auto its = s.systems.find(sys_filter);
+          const std::string name = (its != s.systems.end()) ? its->second.name : std::string("(missing)");
+          std::cout << " (system=" << name << ")";
+        }
+        if (ship_filter != nebula4x::kInvalidId) {
+          const auto itsh = s.ships.find(ship_filter);
+          const std::string name = (itsh != s.ships.end()) ? itsh->second.name : std::string("(missing)");
+          std::cout << " (ship=" << name << ")";
+        }
+        if (col_filter != nebula4x::kInvalidId) {
+          const auto itc = s.colonies.find(col_filter);
+          const std::string name = (itc != s.colonies.end()) ? itc->second.name : std::string("(missing)");
+          std::cout << " (colony=" << name << ")";
         }
         if (!contains_filter.empty()) std::cout << " (contains='" << contains_raw << "')";
         if (events_last > 0) std::cout << " (tail=" << events_last << ")";
@@ -713,6 +875,27 @@ int main(int argc, char** argv) {
         }
       }
 
+
+
+if (events_summary_json) {
+  try {
+    const std::string summary_json_text = nebula4x::events_summary_to_json(filtered);
+    if (events_summary_json_path == "-") {
+      // Explicit stdout export for scripting.
+      std::cout << summary_json_text;
+    } else {
+      nebula4x::write_text_file(events_summary_json_path, summary_json_text);
+      if (!quiet) {
+        std::ostream& info = script_stdout ? std::cerr : std::cout;
+        info << "\nWrote events summary JSON to " << events_summary_json_path << "\n";
+      }
+    }
+  } catch (const std::exception& e) {
+    std::cerr << "Failed to export events summary JSON: " << e.what() << "\n";
+    return 1;
+  }
+}
+
       if (dump_events) {
         if (!quiet) std::cout << "\n";
         std::cout << "Events: " << filtered.size();
@@ -724,6 +907,21 @@ int main(int argc, char** argv) {
           const auto itf = s.factions.find(fac_filter);
           const std::string name = (itf != s.factions.end()) ? itf->second.name : std::string("(missing)");
           std::cout << " (faction=" << name << ")";
+        }
+        if (sys_filter != nebula4x::kInvalidId) {
+          const auto its = s.systems.find(sys_filter);
+          const std::string name = (its != s.systems.end()) ? its->second.name : std::string("(missing)");
+          std::cout << " (system=" << name << ")";
+        }
+        if (ship_filter != nebula4x::kInvalidId) {
+          const auto itsh = s.ships.find(ship_filter);
+          const std::string name = (itsh != s.ships.end()) ? itsh->second.name : std::string("(missing)");
+          std::cout << " (ship=" << name << ")";
+        }
+        if (col_filter != nebula4x::kInvalidId) {
+          const auto itc = s.colonies.find(col_filter);
+          const std::string name = (itc != s.colonies.end()) ? itc->second.name : std::string("(missing)");
+          std::cout << " (colony=" << name << ")";
         }
         if (!contains_filter.empty()) std::cout << " (contains='" << contains_raw << "')";
         if (events_last > 0) std::cout << " (tail=" << events_last << ")";
@@ -743,145 +941,69 @@ int main(int argc, char** argv) {
 
       if (export_events_csv) {
         try {
-          auto faction_name = [&](nebula4x::Id id) -> std::string {
-            if (id == nebula4x::kInvalidId) return {};
-            const auto it = s.factions.find(id);
-            return (it != s.factions.end()) ? it->second.name : std::string{};
-          };
-          auto system_name = [&](nebula4x::Id id) -> std::string {
-            if (id == nebula4x::kInvalidId) return {};
-            const auto it = s.systems.find(id);
-            return (it != s.systems.end()) ? it->second.name : std::string{};
-          };
-          auto ship_name = [&](nebula4x::Id id) -> std::string {
-            if (id == nebula4x::kInvalidId) return {};
-            const auto it = s.ships.find(id);
-            return (it != s.ships.end()) ? it->second.name : std::string{};
-          };
-          auto colony_name = [&](nebula4x::Id id) -> std::string {
-            if (id == nebula4x::kInvalidId) return {};
-            const auto it = s.colonies.find(id);
-            return (it != s.colonies.end()) ? it->second.name : std::string{};
-          };
-
-          std::string csv;
-          csv += "day,date,seq,level,category,"
-                 "faction_id,faction,"
-                 "faction_id2,faction2,"
-                 "system_id,system,"
-                 "ship_id,ship,"
-                 "colony_id,colony,"
-                 "message\n";
-
-          for (const auto* ev : filtered) {
-            const nebula4x::Date d(ev->day);
-
-            csv += std::to_string(static_cast<long long>(ev->day));
-            csv += ",";
-            csv += nebula4x::csv_escape(d.to_string());
-            csv += ",";
-            csv += std::to_string(static_cast<unsigned long long>(ev->seq));
-            csv += ",";
-            csv += nebula4x::csv_escape(std::string(event_level_label(ev->level)));
-            csv += ",";
-            csv += nebula4x::csv_escape(std::string(event_category_label(ev->category)));
-            csv += ",";
-            csv += std::to_string(static_cast<unsigned long long>(ev->faction_id));
-            csv += ",";
-            csv += nebula4x::csv_escape(faction_name(ev->faction_id));
-            csv += ",";
-            csv += std::to_string(static_cast<unsigned long long>(ev->faction_id2));
-            csv += ",";
-            csv += nebula4x::csv_escape(faction_name(ev->faction_id2));
-            csv += ",";
-            csv += std::to_string(static_cast<unsigned long long>(ev->system_id));
-            csv += ",";
-            csv += nebula4x::csv_escape(system_name(ev->system_id));
-            csv += ",";
-            csv += std::to_string(static_cast<unsigned long long>(ev->ship_id));
-            csv += ",";
-            csv += nebula4x::csv_escape(ship_name(ev->ship_id));
-            csv += ",";
-            csv += std::to_string(static_cast<unsigned long long>(ev->colony_id));
-            csv += ",";
-            csv += nebula4x::csv_escape(colony_name(ev->colony_id));
-            csv += ",";
-            csv += nebula4x::csv_escape(ev->message);
-            csv += "\n";
+          const std::string csv = nebula4x::events_to_csv(s, filtered);
+          if (export_events_csv_path == "-") {
+            // Explicit stdout export for scripting.
+            std::cout << csv;
+          } else {
+            nebula4x::write_text_file(export_events_csv_path, csv);
+            if (!quiet) {
+              std::ostream& info = script_stdout ? std::cerr : std::cout;
+              info << "\nWrote events CSV to " << export_events_csv_path << "\n";
+            }
           }
-
-          nebula4x::write_text_file(export_events_csv_path, csv);
-          if (!quiet) std::cout << "\nWrote events CSV to " << export_events_csv_path << "\n";
         } catch (const std::exception& e) {
           std::cerr << "Failed to export events CSV: " << e.what() << "\n";
           return 1;
         }
+      }
 
       if (export_events_json) {
         try {
-          auto faction_name = [&](nebula4x::Id id) -> std::string {
-            if (id == nebula4x::kInvalidId) return {};
-            const auto it = s.factions.find(id);
-            return (it != s.factions.end()) ? it->second.name : std::string{};
-          };
-          auto system_name = [&](nebula4x::Id id) -> std::string {
-            if (id == nebula4x::kInvalidId) return {};
-            const auto it = s.systems.find(id);
-            return (it != s.systems.end()) ? it->second.name : std::string{};
-          };
-          auto ship_name = [&](nebula4x::Id id) -> std::string {
-            if (id == nebula4x::kInvalidId) return {};
-            const auto it = s.ships.find(id);
-            return (it != s.ships.end()) ? it->second.name : std::string{};
-          };
-          auto colony_name = [&](nebula4x::Id id) -> std::string {
-            if (id == nebula4x::kInvalidId) return {};
-            const auto it = s.colonies.find(id);
-            return (it != s.colonies.end()) ? it->second.name : std::string{};
-          };
-
-          nebula4x::json::Array out;
-          out.reserve(filtered.size());
-          for (const auto* ev : filtered) {
-            const nebula4x::Date d(ev->day);
-
-            nebula4x::json::Object obj;
-            obj["day"] = static_cast<double>(ev->day);
-            obj["date"] = d.to_string();
-            obj["seq"] = static_cast<double>(ev->seq);
-            obj["level"] = to_lower(std::string(event_level_label(ev->level)));
-            obj["category"] = to_lower(std::string(event_category_label(ev->category)));
-            obj["faction_id"] = static_cast<double>(ev->faction_id);
-            obj["faction"] = faction_name(ev->faction_id);
-            obj["faction_id2"] = static_cast<double>(ev->faction_id2);
-            obj["faction2"] = faction_name(ev->faction_id2);
-            obj["system_id"] = static_cast<double>(ev->system_id);
-            obj["system"] = system_name(ev->system_id);
-            obj["ship_id"] = static_cast<double>(ev->ship_id);
-            obj["ship"] = ship_name(ev->ship_id);
-            obj["colony_id"] = static_cast<double>(ev->colony_id);
-            obj["colony"] = colony_name(ev->colony_id);
-            obj["message"] = ev->message;
-
-            out.emplace_back(std::move(obj));
+          const std::string json_text = nebula4x::events_to_json(s, filtered);
+          if (export_events_json_path == "-") {
+            // Explicit stdout export for scripting.
+            std::cout << json_text;
+          } else {
+            nebula4x::write_text_file(export_events_json_path, json_text);
+            if (!quiet) {
+              std::ostream& info = script_stdout ? std::cerr : std::cout;
+              info << "\nWrote events JSON to " << export_events_json_path << "\n";
+            }
           }
-
-          std::string json_text = nebula4x::json::stringify(nebula4x::json::array(std::move(out)), 2);
-          json_text += "\n";
-          nebula4x::write_text_file(export_events_json_path, json_text);
-          if (!quiet) std::cout << "\nWrote events JSON to " << export_events_json_path << "\n";
         } catch (const std::exception& e) {
           std::cerr << "Failed to export events JSON: " << e.what() << "\n";
           return 1;
         }
       }
+
+      if (export_events_jsonl) {
+        try {
+          const std::string jsonl_text = nebula4x::events_to_jsonl(s, filtered);
+          if (export_events_jsonl_path == "-") {
+            // Explicit stdout export for scripting.
+            std::cout << jsonl_text;
+          } else {
+            nebula4x::write_text_file(export_events_jsonl_path, jsonl_text);
+            if (!quiet) {
+              std::ostream& info = script_stdout ? std::cerr : std::cout;
+              info << "\nWrote events JSONL to " << export_events_jsonl_path << "\n";
+            }
+          }
+        } catch (const std::exception& e) {
+          std::cerr << "Failed to export events JSONL: " << e.what() << "\n";
+          return 1;
+        }
       }
     }
 
 
     if (!save_path.empty()) {
       nebula4x::write_text_file(save_path, nebula4x::serialize_game_to_json(s));
-      if (!quiet) std::cout << "\nSaved to " << save_path << "\n";
+      if (!quiet) {
+        std::ostream& info = script_stdout ? std::cerr : std::cout;
+        info << "\nSaved to " << save_path << "\n";
+      }
     }
 
     if (has_flag(argc, argv, "--dump")) {
