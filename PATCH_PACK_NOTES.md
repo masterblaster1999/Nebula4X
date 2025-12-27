@@ -1,72 +1,54 @@
-# Patch pack notes (generated 2025-12-26)
+# Patch pack notes (generated 2025-12-27 r5)
 
-This patch pack upgrades Nebula4X with **cross-system auto-routing** for common orders,
-plus basic repo hygiene (CI + editor defaults) and a regression test.
+This patch pack is designed for **GitHub web uploads** (Add file → Upload files). It contains only the files that changed since the previous patch pack.
 
-## Included changes
+## New in this patch pack: build fixes (MSVC)
 
-### Gameplay / simulation
+- Fixes MSVC warning C4456 in `serialization.cpp` by avoiding variable shadowing in an `if/else if` chain.
+- Fixes MSVC warning C4456 in `panels.cpp` by renaming a nested `factions` variable.
+- Fixes a build break in the Design panel (`cargo_used_tons` undeclared) by defining it (designs don't carry cargo).
 
-- **New `WaitDays` ship order**:
-  - Adds a simple "do nothing for N days" order that can be queued between other orders.
-  - Useful for timing arrivals, pacing fleets, or delaying cargo transfers in the prototype.
+## Previously added (r1-r4): event log QoL + CSV export + time-warp CLI
 
-- **Cross-system Move-to-Body**:
-  - `Simulation::issue_move_to_body(..., restrict_to_discovered)` now auto-enqueues `TravelViaJump` steps
-    so you can click a body in another system and still get there.
+### UI: Log tab
 
-- **Cross-system Attack / Intercept**:
-  - `Simulation::issue_attack_ship(..., restrict_to_discovered)` now auto-routes to the target’s current
-    system (if detected) or last-known system (from contact memory), then executes the attack/intercept.
+- **Copy visible**: copies the currently filtered/visible events (last N, category, faction, search, level) to the clipboard.
+- **Export CSV**: writes the currently filtered/visible event list to a CSV file (chronological order).
 
-- **Cross-system Cargo (Load/Unload minerals)**:
-  - `Simulation::issue_load_mineral(..., restrict_to_discovered)` and `issue_unload_mineral(...)` now
-    auto-route to the colony’s system before performing the transfer.
+### CLI: export events to CSV
 
-- **Smarter queued travel routing**:
-  - `issue_travel_to_system` now pathfinds from the ship’s *predicted* system after already-queued
-    `TravelViaJump` orders (improves Shift-queue behavior).
+- New flag: `nebula4x_cli --export-events-csv PATH`
+- Respects the same filters as `--dump-events`:
+  - `--events-last N`
+  - `--events-category NAME`
+  - `--events-level LEVEL`
+  - `--events-faction X`
+  - `--events-contains TEXT`
 
-### UI
+### CLI: time warp until event
 
-- Adds a **Queue wait** control under **Ship → Quick orders**.
-- Attack and cargo buttons now pass the current fog-of-war flag into the routing calls (so routing can be
-  restricted to discovered systems when fog-of-war is enabled).
-- Adds a warning log when an order can’t be queued due to no known route.
+- New flag: `nebula4x_cli --until-event N`
+- Advances day-by-day up to `N` days, stopping early when a **newly recorded** event matches the filters.
+- Uses the existing `--events-*` flags for stop criteria.
+- Defaults to `warn,error` unless `--events-level` is explicitly provided.
+
+### Utility
+
+- Adds `nebula4x::csv_escape()` for correct CSV quoting/escaping.
 
 ### Tests
 
-- Adds `tests/test_auto_routing.cpp` and wires it into the test runner + CMake.
+- Adds a small regression check for `csv_escape()`.
 
-- Fixes missing includes in the test suite so CI builds cleanly.
+## Compatibility
 
-### Repo hygiene
+- **Save schema is unchanged** (still `save_version = 12`).
 
-- Adds GitHub Actions workflow: `.github/workflows/ci.yml` (core build + tests on Linux/macOS/Windows).
-- Adds `.gitignore`, `.editorconfig`, `.clang-format`.
-
-## How to apply
-
-### Local (recommended)
-
-1. Unzip this patch pack.
-2. Copy the extracted folders/files into your repo root (overwrite when prompted).
-3. Build + run tests:
-   - `cmake -S . -B build -DNEBULA4X_BUILD_UI=OFF -DNEBULA4X_BUILD_TESTS=ON`
-   - `cmake --build build`
-   - `ctest --test-dir build --output-on-failure`
-
-### Using git apply
-
-If you have the repo checked out locally:
-
-- `git apply nebula4x_patch.diff`
-
-### GitHub web UI
+## How to apply (GitHub web UI)
 
 GitHub does **not** auto-extract a zip you upload.
 
-1. Unzip locally.
+1. Unzip the patch pack zip locally.
 2. In GitHub: **Add file → Upload files**.
 3. Drag & drop the extracted folders/files (keep folder structure).
 4. Commit.

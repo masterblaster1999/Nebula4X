@@ -238,13 +238,13 @@ void draw_left_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sele
       // Faction filter.
       {
         auto& s = sim.state();
-        const auto factions = sorted_factions(s);
+        const auto fac_list = sorted_factions(s);
         const auto* sel = find_ptr(s.factions, faction_filter);
         const char* label = (faction_filter == kInvalidId) ? "Any" : (sel ? sel->name.c_str() : "(missing)");
 
         if (ImGui::BeginCombo("Faction##autorun", label)) {
           if (ImGui::Selectable("Any", faction_filter == kInvalidId)) faction_filter = kInvalidId;
-          for (const auto& [fid, name] : factions) {
+          for (const auto& [fid, name] : fac_list) {
             if (ImGui::Selectable(name.c_str(), faction_filter == fid)) faction_filter = fid;
           }
           ImGui::EndCombo();
@@ -1053,6 +1053,8 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
             ImGui::Text("Mass: %.0f t", d->mass_tons);
             ImGui::Text("Speed: %.1f km/s", d->speed_km_s);
             ImGui::Text("HP: %.0f", d->max_hp);
+            // A design isn't carrying cargo; only an instantiated ship has a cargo manifest.
+            const double cargo_used_tons = 0.0;
             ImGui::Text("Cargo: %.0f / %.0f t", cargo_used_tons, d->cargo_tons);
             ImGui::Text("Sensor: %.0f mkm", d->sensor_range_mkm);
             if (d->weapon_damage > 0.0) ImGui::Text("Weapons: %.1f (range %.1f)", d->weapon_damage, d->weapon_range_mkm);
@@ -1346,13 +1348,13 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
 
         // Faction filter.
         {
-          const auto factions = sorted_factions(s);
+          const auto fac_list = sorted_factions(s);
           const auto* sel = find_ptr(s.factions, faction_filter);
           const char* label = (faction_filter == kInvalidId) ? "All" : (sel ? sel->name.c_str() : "(missing)");
 
           if (ImGui::BeginCombo("Faction", label)) {
             if (ImGui::Selectable("All", faction_filter == kInvalidId)) faction_filter = kInvalidId;
-            for (const auto& [fid, name] : factions) {
+            for (const auto& [fid, name] : fac_list) {
               if (ImGui::Selectable(name.c_str(), faction_filter == fid)) faction_filter = fid;
             }
             ImGui::EndCombo();

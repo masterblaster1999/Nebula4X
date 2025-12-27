@@ -183,38 +183,38 @@ Order order_from_json(const Value& v) {
     a.target_ship_id = static_cast<Id>(o.at("target_ship_id").int_value());
 
     // Back-compat: older saves won't have last-known tracking.
-    if (auto it = o.find("last_known_position_mkm"); it != o.end()) {
-      a.last_known_position_mkm = vec2_from_json(it->second);
+    if (auto lk_it = o.find("last_known_position_mkm"); lk_it != o.end()) {
+      a.last_known_position_mkm = vec2_from_json(lk_it->second);
       a.has_last_known = true;
     }
-    if (auto it = o.find("has_last_known"); it != o.end()) {
-      a.has_last_known = it->second.bool_value(a.has_last_known);
+    if (auto hk_it = o.find("has_last_known"); hk_it != o.end()) {
+      a.has_last_known = hk_it->second.bool_value(a.has_last_known);
     }
 
     return a;
   }
   if (type == "wait_days") {
     WaitDays w;
-    if (auto it = o.find("days_remaining"); it != o.end()) {
-      w.days_remaining = static_cast<int>(it->second.int_value(0));
-    } else if (auto it = o.find("days"); it != o.end()) {
+    if (auto dr_it = o.find("days_remaining"); dr_it != o.end()) {
+      w.days_remaining = static_cast<int>(dr_it->second.int_value(0));
+    } else if (auto d_it = o.find("days"); d_it != o.end()) {
       // Friendly alias for manual edits.
-      w.days_remaining = static_cast<int>(it->second.int_value(0));
+      w.days_remaining = static_cast<int>(d_it->second.int_value(0));
     }
     return w;
   }
   if (type == "load_mineral") {
     LoadMineral l;
     l.colony_id = static_cast<Id>(o.at("colony_id").int_value(kInvalidId));
-    if (auto it = o.find("mineral"); it != o.end()) l.mineral = it->second.string_value();
-    if (auto it = o.find("tons"); it != o.end()) l.tons = it->second.number_value(0.0);
+    if (auto m_it = o.find("mineral"); m_it != o.end()) l.mineral = m_it->second.string_value();
+    if (auto t_it = o.find("tons"); t_it != o.end()) l.tons = t_it->second.number_value(0.0);
     return l;
   }
   if (type == "unload_mineral") {
     UnloadMineral u;
     u.colony_id = static_cast<Id>(o.at("colony_id").int_value(kInvalidId));
-    if (auto it = o.find("mineral"); it != o.end()) u.mineral = it->second.string_value();
-    if (auto it = o.find("tons"); it != o.end()) u.tons = it->second.number_value(0.0);
+    if (auto m_it = o.find("mineral"); m_it != o.end()) u.mineral = m_it->second.string_value();
+    if (auto t_it = o.find("tons"); t_it != o.end()) u.tons = t_it->second.number_value(0.0);
     return u;
   }
   throw std::runtime_error("Unknown order type: " + type);

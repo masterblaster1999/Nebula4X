@@ -44,7 +44,7 @@ Nebula4X is an **open-source, turn-based space 4X** prototype in **C++20**, insp
 - Ship list + selection (shows HP, faction)
 - **Fog-of-war** toggle (hides undetected hostiles and undiscovered systems)
 - **Contacts tab**: recently seen hostiles + quick actions
-- **Log tab**: view/filter/clear the saved event log
+- **Log tab**: view/filter/clear the saved event log; copy visible entries; export CSV
 - **Jump point markers on the system map**
 - **Ship tab**: quick orders (move, jump travel, attack) + cargo load/unload
   - toggle **repeat orders** for simple looping routes
@@ -60,6 +60,10 @@ Nebula4X is an **open-source, turn-based space 4X** prototype in **C++20**, insp
 - Content validation helper (`--validate-content`) for blueprint/tech modding
 - Save canonicalizer (`--format-save`) to re-serialize JSON with stable ordering
 - Event log dump (`--dump-events`) to print saved simulation events
+- Event log export to CSV (`--export-events-csv PATH`) for spreadsheets/analysis
+- Event log filters: `--events-last`, `--events-category`, `--events-level`, `--events-faction`, `--events-contains`
+- Time warp: `--until-event N` to advance day-by-day until a new matching event occurs (defaults to warn/error; configurable via `--events-*`)
+- `--quiet` to suppress non-essential summary/status output (useful for scripting)
 
 ### Tests
 
@@ -125,6 +129,22 @@ Run:
 
 # CLI (canonicalize a save file)
 ./build/nebula4x_cli --format-save --load save.json --save save_canonical.json
+
+
+# CLI (dump recent warning/error events)
+./build/nebula4x_cli --days 30 --dump-events --events-last 50 --events-level warn,error
+
+# CLI (export event log to CSV)
+./build/nebula4x_cli --days 30 --export-events-csv events.csv --events-level all
+
+# CLI (script-friendly export, no summary output)
+./build/nebula4x_cli --load save.json --quiet --export-events-csv events.csv --events-level warn,error
+
+# CLI (time warp until next warning/error event, then save)
+./build/nebula4x_cli --until-event 365 --save autosave.json
+
+# CLI (time warp from an existing save, script-friendly)
+./build/nebula4x_cli --load save.json --quiet --until-event 365 --save save_after.json
 
 # tests
 ctest --test-dir build

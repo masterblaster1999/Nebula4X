@@ -1,4 +1,4 @@
-# Patch notes (generated 2025-12-27)
+# Patch notes (generated 2025-12-27 r4)
 
 This patch pack contains only the files that changed.
 
@@ -6,31 +6,35 @@ Apply by copying the files over the repo (drag/drop into GitHub's "Upload files"
 
 ## Summary of changes
 
-### Event log v5: bulk copy + CSV export
+### r5: build fixes (MSVC)
 
-- Added **Copy visible** to copy the currently filtered/visible events (last N, category, faction, search, level) to the clipboard.
-- Added **Export CSV** with an editable export path to write the visible/filtered event list to disk.
-  - CSV includes both IDs and human-friendly names (faction/system/ship/colony) when available.
-  - Export is written in **chronological order** (oldest to newest within the exported set).
+- Fixes MSVC warning C4456 in `serialization.cpp` by avoiding variable shadowing in an `if/else if` chain.
+- Fixes MSVC warning C4456 in `panels.cpp` by renaming a nested `factions` variable.
+- Fixes a build break in the Design panel (`cargo_used_tons` undeclared) by defining it (designs don't carry cargo).
 
-### CLI: export events to CSV
+### CLI: time warp until a matching event (`--until-event N`)
 
-- Added `nebula4x_cli --export-events-csv PATH` to export the persistent event log to CSV.
-- The export respects the same filters as `--dump-events`:
-  - `--events-last N`
-  - `--events-category NAME`
-  - `--events-faction X`
-  - `--events-contains TEXT`
+Adds a new CLI option:
 
-### Utility: CSV escaping helper
+- `--until-event N`
 
-- Added `nebula4x::csv_escape()` for correct CSV quoting/escaping (commas, quotes, newlines).
+This advances the simulation **day-by-day** up to `N` days, stopping early when a **newly recorded** persistent simulation event matches the stop criteria.
 
-### Tests
+Notes:
 
-- Added a small test for `csv_escape()` behavior.
+- When `--until-event` is used, `--days` is ignored.
+- Stop criteria is defined via the existing `--events-*` flags:
+  - `--events-level` (defaults to `warn,error` for `--until-event` unless explicitly provided)
+  - `--events-category`
+  - `--events-faction`
+  - `--events-contains`
+- On completion, the CLI prints a single **hit / no-hit** status line (even in `--quiet` mode) so the feature is script-friendly.
+
+### Docs
+
+- README updated with `--until-event` examples.
 
 ## Compatibility notes
 
-- **Save schema is unchanged** (still v12 from the previous patches).
-- CSV export is UI/CLI-only; it does not affect simulation determinism.
+- **Save schema is unchanged** (still v12).
+- No simulation determinism changes; this uses the existing `Simulation::advance_until_event()` helper.
