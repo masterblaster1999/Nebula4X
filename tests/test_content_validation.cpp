@@ -7,7 +7,7 @@
 #define N4X_ASSERT(expr)                                                                            \
   do {                                                                                              \
     if (!(expr)) {                                                                                  \
-      std::cerr << "ASSERT failed: " #expr " (" << __FILE__ << ":" << __LINE__ << ")\n";          \
+      std::cerr << "ASSERT failed: " #expr " (" << __FILE__ << ":" << __LINE__ << ")\n";            \
       return 1;                                                                                     \
     }                                                                                               \
   } while (0)
@@ -37,7 +37,46 @@ int test_content_validation() {
     bad.techs[t.id] = t;
 
     const auto errors = nebula4x::validate_content_db(bad);
-    N4X_ASSERT(!errors.empty());
+    bool has_unlock_error = false;
+    for (const auto& e : errors) {
+      if (e.find("unlocks unknown component") != std::string::npos) {
+        has_unlock_error = true;
+        break;
+      }
+    }
+    N4X_ASSERT(has_unlock_error);
+  }
+
+  // Sanity: prereq cycles should be detected (can deadlock research).
+  {
+    auto bad = content;
+
+    nebula4x::TechDef a;
+    a.id = "cycle_a";
+    a.name = "Cycle A";
+    a.cost = 1;
+    a.prereqs.push_back("cycle_b");
+    a.effects.push_back({"unlock_component", "engine_chem_mk1", 0.0});
+
+    nebula4x::TechDef b;
+    b.id = "cycle_b";
+    b.name = "Cycle B";
+    b.cost = 1;
+    b.prereqs.push_back("cycle_a");
+    b.effects.push_back({"unlock_component", "cargo_mk1", 0.0});
+
+    bad.techs[a.id] = a;
+    bad.techs[b.id] = b;
+
+    const auto errors = nebula4x::validate_content_db(bad);
+    bool has_cycle = false;
+    for (const auto& e : errors) {
+      if (e.find("prerequisite cycle") != std::string::npos) {
+        has_cycle = true;
+        break;
+      }
+    }
+    N4X_ASSERT(has_cycle);
   }
 
   return 0;

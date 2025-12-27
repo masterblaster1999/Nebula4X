@@ -9,6 +9,11 @@ int test_determinism();
 int test_event_export();
 int test_content_validation();
 int test_random_scenario();
+int test_file_io();
+int test_json_unicode();
+int test_json_bom();
+int test_json_errors();
+int test_state_validation();
 
 int main() {
   int fails = 0;
@@ -21,6 +26,11 @@ int main() {
   fails += test_event_export();
   fails += test_content_validation();
   fails += test_random_scenario();
+  fails += test_file_io();
+  fails += test_json_unicode();
+  fails += test_json_bom();
+  fails += test_json_errors();
+  fails += test_state_validation();
 
   if (fails == 0) {
     std::cout << "All tests passed\n";

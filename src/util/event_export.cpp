@@ -265,4 +265,87 @@ std::string events_summary_to_json(const std::vector<const SimEvent*>& events) {
   return json_text;
 }
 
+std::string events_summary_to_csv(const std::vector<const SimEvent*>& events) {
+  // A single-row summary is convenient for spreadsheets and dashboards.
+  // Keep the schema aligned with events_summary_to_json().
+  std::size_t count = 0;
+  std::int64_t min_day = 0;
+  std::int64_t max_day = 0;
+
+  std::size_t info_count = 0;
+  std::size_t warn_count = 0;
+  std::size_t error_count = 0;
+
+  std::array<std::size_t, 8> by_cat{};
+
+  for (const auto* ev : events) {
+    if (!ev) continue;
+    ++count;
+
+    if (count == 1) {
+      min_day = ev->day;
+      max_day = ev->day;
+    } else {
+      min_day = std::min(min_day, ev->day);
+      max_day = std::max(max_day, ev->day);
+    }
+
+    if (ev->level == EventLevel::Info) ++info_count;
+    if (ev->level == EventLevel::Warn) ++warn_count;
+    if (ev->level == EventLevel::Error) ++error_count;
+
+    const int idx = static_cast<int>(ev->category);
+    if (idx >= 0 && idx < static_cast<int>(by_cat.size())) {
+      ++by_cat[static_cast<std::size_t>(idx)];
+    }
+  }
+
+  std::string csv;
+  csv += "count,day_min,day_max,date_min,date_max,"
+         "info,warn,error,"
+         "general,research,shipyard,construction,movement,combat,intel,exploration\n";
+
+  csv += std::to_string(count);
+  csv += ",";
+
+  if (count == 0) {
+    // Range fields are blank when the set is empty.
+    csv += ",,,,";
+  } else {
+    csv += std::to_string(static_cast<long long>(min_day));
+    csv += ",";
+    csv += std::to_string(static_cast<long long>(max_day));
+    csv += ",";
+    csv += csv_escape(Date(min_day).to_string());
+    csv += ",";
+    csv += csv_escape(Date(max_day).to_string());
+    csv += ",";
+  }
+
+  csv += std::to_string(info_count);
+  csv += ",";
+  csv += std::to_string(warn_count);
+  csv += ",";
+  csv += std::to_string(error_count);
+  csv += ",";
+
+  csv += std::to_string(by_cat[static_cast<std::size_t>(EventCategory::General)]);
+  csv += ",";
+  csv += std::to_string(by_cat[static_cast<std::size_t>(EventCategory::Research)]);
+  csv += ",";
+  csv += std::to_string(by_cat[static_cast<std::size_t>(EventCategory::Shipyard)]);
+  csv += ",";
+  csv += std::to_string(by_cat[static_cast<std::size_t>(EventCategory::Construction)]);
+  csv += ",";
+  csv += std::to_string(by_cat[static_cast<std::size_t>(EventCategory::Movement)]);
+  csv += ",";
+  csv += std::to_string(by_cat[static_cast<std::size_t>(EventCategory::Combat)]);
+  csv += ",";
+  csv += std::to_string(by_cat[static_cast<std::size_t>(EventCategory::Intel)]);
+  csv += ",";
+  csv += std::to_string(by_cat[static_cast<std::size_t>(EventCategory::Exploration)]);
+  csv += "\n";
+  return csv;
+}
+
 } // namespace nebula4x

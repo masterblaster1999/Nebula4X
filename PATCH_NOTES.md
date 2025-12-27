@@ -1,10 +1,113 @@
-# Patch notes (generated 2025-12-27 r14)
+# Patch notes (generated 2025-12-27 r25)
 
 This patch pack contains only the files that changed.
 
 Apply by copying the files over the repo (drag/drop into GitHub's "Upload files"), preserving folder paths.
 
 ## Summary of changes
+
+### r25: JSON parser BOM tolerance + CRLF-aware error line/col
+
+- JSON:
+  - `json::parse()` now ignores a UTF-8 BOM at the start of the document.
+  - JSON parse error reporting now treats Windows CRLF as a **single** newline so line/column numbers
+    are accurate for files edited on Windows.
+- Tests:
+  - Adds `test_json_bom` (parses a BOM-prefixed JSON document).
+  - Extends `test_json_errors` with a CRLF regression case.
+
+### r24: event summary CSV export (`--events-summary-csv`)
+
+- Utility:
+  - Adds `nebula4x::events_summary_to_csv()` producing a single-row CSV summary with a header.
+    (Convenient for spreadsheet dashboards alongside `--export-events-csv`.)
+- CLI:
+  - Adds `--events-summary-csv PATH` (`PATH` can be `-` for stdout) to export the summary for the
+    currently filtered event set.
+  - The existing stdout-safety rules apply (only one machine-readable stdout export at a time).
+- Tests:
+  - Extends `test_event_export` to validate summary CSV formatting.
+
+### r23: validate ship order references in `validate_game_state()`
+
+- Core:
+  - `validate_game_state()` now checks `ship_orders` for:
+    - entries whose ship id does not exist in `ships`,
+    - orders in `order_queue` / `repeat_template` that reference missing ids (bodies, jump points, target ships, colonies),
+    - negative `WaitDays.days_remaining` values.
+- Tests:
+  - Extends `test_state_validation` to cover missing-ship ship_orders entries and invalid `MoveToBody` references.
+
+### r22: forward-compatible ship order loading (drops unknown/invalid orders)
+
+- Serialization:
+  - Save deserialization now tolerates **unknown or malformed ship orders**.
+  - Instead of aborting the entire load, invalid orders are **dropped** (with a warning logged).
+- Tests:
+  - Extends `test_serialization` with a regression case that injects a fake future order type and
+    verifies the save still loads and the unknown order is dropped.
+
+### r21: game state integrity validator + CLI `--validate-save`
+
+- Core:
+  - Adds `validate_game_state()` to detect broken saves / inconsistent scenarios (missing ids, mismatched cross-links, non-monotonic `next_id`/`next_event_seq`).
+- CLI:
+  - Adds `--validate-save` to validate the loaded (or newly created) game state and exit with a non-zero code if issues are found.
+- Tests:
+  - Adds `test_state_validation` to lock in expected behavior (Sol scenario is valid; injected corruptions are reported).
+
+
+### r20: JSON parse errors now include line/col + a context caret
+
+- JSON:
+  - JSON parse errors now report **line/column** (1-based) in addition to the raw byte offset.
+  - Includes a small context snippet of the line with a `^` caret pointing at the failure location.
+    (Helps a lot when hand-editing content JSON for modding.)
+- Tests:
+  - Adds `test_json_errors` to verify line/col + caret formatting for a couple of common failure modes.
+
+### r19: more robust save loading for missing metadata fields
+
+- Serialization:
+  - `deserialize_game_from_json()` now treats `save_version`, `next_id`, and `selected_system` as optional,
+    making it more tolerant of very early prototypes or hand-edited saves.
+  - Invalid/missing `selected_system` is repaired to `kInvalidId`.
+- Tests:
+  - Extends `test_serialization` to cover deserializing saves with the above keys removed.
+
+### r18: JSON \uXXXX unicode escape support (UTF-8) + tests
+
+- JSON:
+  - The minimal JSON parser now fully decodes `\uXXXX` escapes into UTF-8.
+  - Correctly handles UTF-16 **surrogate pairs** (e.g. emoji like `\uD83D\uDE80`).
+  - Invalid/unpaired surrogate sequences now fail parsing instead of silently corrupting text.
+- Tests:
+  - Adds `test_json_unicode` to cover BMP codepoints, surrogate pairs, round-tripping, and invalid inputs.
+
+### r17: atomic file writes for saves/exports + file I/O test
+
+- Utility:
+  - `write_text_file()` now writes via a **temporary sibling file + rename** to avoid leaving a partially
+    written/truncated file behind on crash or interruption (best-effort replace on Windows).
+- Tests:
+  - Adds `test_file_io` to cover overwrite behavior and ensure temp siblings are not left behind.
+
+### r16: fix CLI stdout-safe status stream
+
+- CLI:
+  - Fixes a bug where the CLI tried to choose between `std::cout` and `std::cerr` using an
+    uninitialized reference (undefined behavior).
+  - Status output now correctly goes to **stderr** when a machine-readable export is sent to stdout
+    (`PATH='-'`), and to **stdout** otherwise.
+
+### r15: tech tree cycle detection + stricter tech validation
+
+- Content validation:
+  - Detects prerequisite **cycles** in the tech tree (prevents research deadlocks).
+  - Flags self-referential prerequisites and empty prereq ids.
+  - Adds basic checks for empty tech names and malformed effects (empty type/value).
+- Tests:
+  - Extends `test_content_validation` to cover cycle detection.
 
 ### r14: event summary JSON + stdout-safe mode for exports
 

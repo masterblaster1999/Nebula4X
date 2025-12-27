@@ -8,6 +8,9 @@ namespace nebula4x {
 std::string read_text_file(const std::string& path);
 
 // Writes string to file, creating parent directories if needed.
+//
+// Implementation detail: this uses a temporary sibling file + rename to avoid leaving a
+// partially written/truncated file behind if the process crashes mid-write.
 void write_text_file(const std::string& path, const std::string& contents);
 
 // Creates directory (and parents) if needed; no-op if exists.

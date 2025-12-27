@@ -49,4 +49,19 @@ std::string events_to_jsonl(const GameState& state, const std::vector<const SimE
 // Output ends with a trailing newline.
 std::string events_summary_to_json(const std::vector<const SimEvent*>& events);
 
+// Format a summary of a list of persistent simulation events as CSV.
+//
+// The CSV output is two lines:
+//   - a header row
+//   - a single data row
+//
+// Columns match the JSON summary schema:
+//   count,
+//   day_min, day_max, date_min, date_max,
+//   info, warn, error,
+//   general, research, shipyard, construction, movement, combat, intel, exploration
+//
+// Output ends with a trailing newline.
+std::string events_summary_to_csv(const std::vector<const SimEvent*>& events);
+
 } // namespace nebula4x

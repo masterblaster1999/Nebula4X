@@ -164,5 +164,14 @@ int test_event_export() {
   N4X_ASSERT(cats->at("movement").int_value() == 1);
   N4X_ASSERT(cats->at("research").int_value() == 1);
 
+  // Summary CSV: header + expected counts/range.
+  const std::string summary_csv = nebula4x::events_summary_to_csv(events);
+  N4X_ASSERT(summary_csv.find("count,day_min,day_max,date_min,date_max") != std::string::npos);
+  N4X_ASSERT(summary_csv.find("2200-01-11") != std::string::npos);
+  N4X_ASSERT(summary_csv.find("2200-01-12") != std::string::npos);
+  // count=2, info=1, warn=1, error=0
+  N4X_ASSERT(summary_csv.find("2,10,11") != std::string::npos);
+  N4X_ASSERT(summary_csv.find(",1,1,0,") != std::string::npos);
+
   return 0;
 }

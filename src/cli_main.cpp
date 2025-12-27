@@ -9,6 +9,7 @@
 #include "nebula4x/core/serialization.h"
 #include "nebula4x/core/scenario.h"
 #include "nebula4x/core/simulation.h"
+#include "nebula4x/core/state_validation.h"
 #include "nebula4x/core/tech.h"
 #include "nebula4x/util/file_io.h"
 #include "nebula4x/util/event_export.h"
@@ -297,6 +298,7 @@ void print_usage(const char* exe) {
   std::cout << "  --save PATH      Save state JSON after advancing\n";
   std::cout << "  --format-save    Load + re-save (canonicalize JSON) without advancing\n";
   std::cout << "  --validate-content  Validate content + tech files and exit\n";
+  std::cout << "  --validate-save     Validate loaded/new game state and exit\n";
   std::cout << "  --dump           Print the resulting save JSON to stdout\n";
   std::cout << "  --quiet          Suppress non-essential summary/status output (useful for scripts)\n";
   std::cout << "  --list-factions  Print faction ids and names, then exit\n";
@@ -321,6 +323,7 @@ void print_usage(const char* exe) {
   std::cout << "    --events-until X        Filter to events on/before X (day number or YYYY-MM-DD)\n";
   std::cout << "    --events-summary        Print a summary of the filtered events (counts by level/category)\n";
   std::cout << "    --events-summary-json PATH  Export a JSON summary of the filtered events (PATH can be '-' for stdout)\n";
+  std::cout << "    --events-summary-csv PATH  Export a CSV summary of the filtered events (PATH can be '-' for stdout)\n";
   std::cout << "  -h, --help       Show this help\n";
   std::cout << "  --version        Print version and exit\n";
 }
@@ -352,6 +355,7 @@ int main(int argc, char** argv) {
     const std::string export_events_json_path = get_str_arg(argc, argv, "--export-events-json", "");
     const std::string export_events_jsonl_path = get_str_arg(argc, argv, "--export-events-jsonl", "");
     const std::string events_summary_json_path = get_str_arg(argc, argv, "--events-summary-json", "");
+    const std::string events_summary_csv_path = get_str_arg(argc, argv, "--events-summary-csv", "");
 
     const bool quiet = has_flag(argc, argv, "--quiet");
 
@@ -359,7 +363,8 @@ int main(int argc, char** argv) {
         (!export_events_csv_path.empty() && export_events_csv_path == "-") ||
         (!export_events_json_path.empty() && export_events_json_path == "-") ||
         (!export_events_jsonl_path.empty() && export_events_jsonl_path == "-") ||
-        (!events_summary_json_path.empty() && events_summary_json_path == "-");
+        (!events_summary_json_path.empty() && events_summary_json_path == "-") ||
+        (!events_summary_csv_path.empty() && events_summary_csv_path == "-");
 
     const bool list_factions = has_flag(argc, argv, "--list-factions");
     const bool list_systems = has_flag(argc, argv, "--list-systems");
@@ -370,6 +375,7 @@ int main(int argc, char** argv) {
 
     const bool format_save = has_flag(argc, argv, "--format-save");
     const bool validate_content = has_flag(argc, argv, "--validate-content");
+    const bool validate_save = has_flag(argc, argv, "--validate-save");
 
     if (format_save) {
       if (load_path.empty() || save_path.empty()) {
@@ -418,6 +424,21 @@ int main(int argc, char** argv) {
         print_usage(argv[0]);
         return 2;
       }
+    }
+
+
+    if (validate_save) {
+      const auto errors = nebula4x::validate_game_state(sim.state(), &sim.content());
+      if (!errors.empty()) {
+        std::cerr << "State validation failed:\n";
+        for (const auto& e : errors) std::cerr << "  - " << e << "\n";
+        return 1;
+      }
+      if (!quiet) {
+        std::ostream& info = script_stdout ? std::cerr : std::cout;
+        info << "State OK\n";
+      }
+      return 0;
     }
 
     // Convenience helpers for scripting: list ids/names and exit.
@@ -639,7 +660,9 @@ int main(int argc, char** argv) {
 
     const auto& s = sim.state();
     if (!quiet) {
-      std::ostream& info = script_stdout ? std::cerr : info;
+      // When producing machine-readable output on stdout (PATH='-'), keep human
+      // status output on stderr so scripts can safely parse stdout.
+      std::ostream& info = script_stdout ? std::cerr : std::cout;
       info << "Date: " << s.date.to_string() << "\n";
       info << "Systems: " << s.systems.size() << ", Bodies: " << s.bodies.size() << ", Jump Points: "
                 << s.jump_points.size() << ", Ships: " << s.ships.size() << ", Colonies: " << s.colonies.size()
@@ -674,9 +697,10 @@ int main(int argc, char** argv) {
     const bool export_events_jsonl = !export_events_jsonl_path.empty();
     const bool events_summary = has_flag(argc, argv, "--events-summary");
     const bool events_summary_json = !events_summary_json_path.empty();
+    const bool events_summary_csv = !events_summary_csv_path.empty();
 
     if (dump_events || export_events_csv || export_events_json || export_events_jsonl || events_summary ||
-        events_summary_json) {
+        events_summary_json || events_summary_csv) {
       // Prevent ambiguous script output.
       {
         int stdout_exports = 0;
@@ -684,6 +708,7 @@ int main(int argc, char** argv) {
         if (export_events_json && export_events_json_path == "-") ++stdout_exports;
         if (export_events_jsonl && export_events_jsonl_path == "-") ++stdout_exports;
         if (events_summary_json && events_summary_json_path == "-") ++stdout_exports;
+        if (events_summary_csv && events_summary_csv_path == "-") ++stdout_exports;
         if (stdout_exports > 1) {
           std::cerr << "Multiple machine-readable outputs set to '-' (stdout). Choose at most one.\n";
           return 2;
@@ -892,6 +917,25 @@ if (events_summary_json) {
     }
   } catch (const std::exception& e) {
     std::cerr << "Failed to export events summary JSON: " << e.what() << "\n";
+    return 1;
+  }
+}
+
+if (events_summary_csv) {
+  try {
+    const std::string summary_csv_text = nebula4x::events_summary_to_csv(filtered);
+    if (events_summary_csv_path == "-") {
+      // Explicit stdout export for scripting.
+      std::cout << summary_csv_text;
+    } else {
+      nebula4x::write_text_file(events_summary_csv_path, summary_csv_text);
+      if (!quiet) {
+        std::ostream& info = script_stdout ? std::cerr : std::cout;
+        info << "\nWrote events summary CSV to " << events_summary_csv_path << "\n";
+      }
+    }
+  } catch (const std::exception& e) {
+    std::cerr << "Failed to export events summary CSV: " << e.what() << "\n";
     return 1;
   }
 }

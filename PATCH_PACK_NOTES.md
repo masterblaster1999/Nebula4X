@@ -1,25 +1,117 @@
-# Patch pack notes (generated 2025-12-27 r14)
+# Patch pack notes (generated 2025-12-27 r25)
 
-This patch pack is designed for **GitHub web uploads** (Add file → Upload files). It contains only the files that changed since the previous patch pack.
+This patch pack is designed for **GitHub web uploads** (Add file → Upload files).
 
-## New in this patch pack: event summary JSON + stdout-safe mode for exports
+It is **cumulative**: it contains the union of files changed/added in all rounds so far, so you can apply it in one upload.
 
-### Utility
+## New in this patch pack: BOM-tolerant JSON parsing + CRLF-aware error locations
 
-- Adds `nebula4x::events_summary_to_json()` to produce a JSON object summarizing a filtered event set (count, range, counts by level/category).
+- JSON:
+  - `json::parse()` now ignores a UTF-8 BOM at the start of the document (Windows-friendly).
+  - JSON parse error line/column reporting now treats CRLF as a **single** newline, fixing incorrect
+    line counts for Windows-edited files.
+- Tests:
+  - Adds `test_json_bom` and extends `test_json_errors` with a CRLF regression case.
 
-### CLI
+## New in this patch pack: event summary CSV export
 
-- Adds `--events-summary-json PATH` (`PATH` can be `-` for stdout) to export the summary for the filtered event set.
-- When exporting machine-readable output to stdout (`PATH='-'`), non-essential status output is written to **stderr** automatically so stdout stays clean.
-- Guards against ambiguous stdout combinations: cannot mix stdout exports with `--dump-events`, `--events-summary`, or `--dump`.
+- Utility:
+  - Adds `nebula4x::events_summary_to_csv()` (single-row CSV summary with a header).
+- CLI:
+  - Adds `--events-summary-csv PATH` (`PATH` can be `-` for stdout) to export the summary for the
+    currently filtered event set.
+  - Existing stdout-safety rules apply (only one machine-readable stdout export at a time).
+- Tests:
+  - Extends `test_event_export` to cover the CSV summary format.
 
-### Docs + tests
+## New in this patch pack: validate ship order references in state validation
 
-- Updates README + `docs/EVENT_LOG.md` with the new summary export and refreshed scripting notes.
+- Core:
+  - `validate_game_state()` now validates `ship_orders`:
+    - flags entries for missing ship ids, and
+    - flags orders in `order_queue` / `repeat_template` that refer to missing ids (body/jump/ship/colony).
+- Tests:
+  - Extends `test_state_validation` with regression coverage for invalid ship orders.
+
+## New in this patch pack: forward-compatible ship order loading
+
+- Serialization:
+  - Save deserialization now tolerates unknown/malformed **ship orders**.
+  - Invalid order entries are **dropped** instead of aborting the whole load.
+  - A warning is logged (first few details + a summary count) to aid debugging.
+- Tests:
+  - Extends `test_serialization` with a regression case injecting a fake future order type.
+
+## New in this patch pack: game state integrity validator + CLI `--validate-save`
+
+- Core:
+  - Adds `validate_game_state()` to detect broken saves / inconsistent scenarios (missing ids, mismatched cross-links, non-monotonic `next_id`/`next_event_seq`).
+- CLI:
+  - Adds `--validate-save` to validate the loaded/new state and exit (script-friendly; prints `State OK` on success).
+- Tests:
+  - Adds `test_state_validation` to cover a valid Sol scenario and a few injected corruption cases.
+
+
+## New in this patch pack: JSON parse errors now include line/col + a context caret
+
+- JSON:
+  - Parse errors now report **line/column** (1-based) in addition to the raw byte offset.
+  - Includes a small snippet of the line around the error with a `^` caret pointing at the failure location.
+- Tests:
+  - Adds `test_json_errors` to lock in the line/col + caret formatting for a couple of common failure cases.
+
+## Previously added (r1-r19): more robust save loading for missing metadata fields
+
+- Serialization:
+  - `deserialize_game_from_json()` now treats `save_version`, `next_id`, and `selected_system` as **optional**
+    (useful for very early prototypes or hand-edited saves).
+  - Missing `save_version` defaults to **1** and is promoted to the current in-memory schema version.
+  - Missing/invalid `selected_system` is repaired to `kInvalidId` to avoid UI issues.
+- Tests:
+  - Extends `test_serialization` with a regression case that strips these keys and verifies the loader
+    still succeeds and repairs `next_id`.
+
+## Previously added (r1-r18): JSON \uXXXX unicode escapes + tests
+
+- JSON:
+  - The minimal JSON parser now fully decodes `\uXXXX` escapes into UTF-8.
+  - Handles UTF-16 **surrogate pairs** correctly (e.g. emoji sequences).
+  - Invalid/unpaired surrogate sequences now fail parsing instead of silently corrupting text.
+- Tests:
+  - Adds `test_json_unicode` to cover BMP codepoints, surrogate pairs, round-tripping, and invalid inputs.
+
+## Previously added (r1-r17): event log QoL + exports + time-warp helpers + CI + validation + atomic writes
+
+### r17: atomic file writes + file I/O test
+
+- Utility:
+  - `write_text_file()` now writes via a **temporary sibling file + rename** to avoid leaving a partially
+    written/truncated file behind on crash or interruption (best-effort replace on Windows).
+- Tests:
+  - Adds `test_file_io` to cover overwrite behavior and ensure temp siblings are not left behind.
+
+### r16: fix CLI stdout-safe status stream
+
+- CLI:
+  - Fixes a bug where the CLI tried to choose between `std::cout` and `std::cerr` using an uninitialized
+    reference (undefined behavior).
+  - Status output now correctly goes to **stderr** when a machine-readable export is sent to stdout
+    (`PATH='-'`), and to **stdout** otherwise.
+
+### r15: tech tree cycle detection + stricter tech validation
+
+- Content validation:
+  - Detects prerequisite **cycles** in the tech tree (prevents research deadlocks).
+  - Flags self-referential prerequisites and empty prereq ids.
+  - Adds basic checks for empty tech names and malformed effects (empty type/value).
+- Tests:
+  - Extends `test_content_validation` to cover cycle detection.
+### r14: event summary JSON + stdout-safe mode for exports
+
+- Adds `nebula4x::events_summary_to_json()` and CLI `--events-summary-json`.
+- Keeps stdout clean for machine-readable exports by routing status output to stderr when needed.
 - Extends `test_event_export` to cover the summary JSON format.
 
-## Previously added (r1-r13): event log QoL + CSV/JSON/JSONL export + time-warp helpers + initial CI
 
 ### r13: event log context filters (system/ship/colony) + targeted time-warp
 

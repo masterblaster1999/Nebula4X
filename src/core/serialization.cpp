@@ -5,6 +5,7 @@
 #include <type_traits>
 
 #include "nebula4x/util/json.h"
+#include "nebula4x/util/log.h"
 
 namespace nebula4x {
 namespace {
@@ -513,19 +514,37 @@ GameState deserialize_game_from_json(const std::string& json_text) {
 
   GameState s;
   {
-    const int loaded_version = static_cast<int>(root.at("save_version").int_value(1));
+    // Extremely old/hand-edited saves may not include a version field.
+    // Treat it as version 1 and promote it to the current in-memory schema version.
+    int loaded_version = 1;
+    if (auto itv = root.find("save_version"); itv != root.end()) {
+      loaded_version = static_cast<int>(itv->second.int_value(1));
+    }
+
     // Promote older saves to the current in-memory schema version.
     s.save_version = loaded_version < kCurrentSaveVersion ? kCurrentSaveVersion : loaded_version;
   }
+
   s.date = Date::parse_iso_ymd(root.at("date").string_value());
-  s.next_id = static_cast<Id>(root.at("next_id").int_value(1));
+
+  // next_id is optional in very early prototypes; we repair it after loading all entities.
+  s.next_id = 1;
+  if (auto itnid = root.find("next_id"); itnid != root.end()) {
+    s.next_id = static_cast<Id>(itnid->second.int_value(1));
+  }
+
   // Optional (introduced in v12).
   s.next_event_seq = 1;
   if (auto itseq = root.find("next_event_seq"); itseq != root.end()) {
     s.next_event_seq = static_cast<std::uint64_t>(itseq->second.int_value(1));
   }
   if (s.next_event_seq == 0) s.next_event_seq = 1;
-  s.selected_system = static_cast<Id>(root.at("selected_system").int_value(kInvalidId));
+
+  // Optional UI convenience (older saves may not have it).
+  s.selected_system = kInvalidId;
+  if (auto itsel = root.find("selected_system"); itsel != root.end()) {
+    s.selected_system = static_cast<Id>(itsel->second.int_value(kInvalidId));
+  }
 
   // Systems
   for (const auto& sv : root.at("systems").array()) {
@@ -543,6 +562,11 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     }
 
     s.systems[sys.id] = sys;
+  }
+
+  // Repair invalid UI state (e.g. hand-edited saves or deleted systems).
+  if (s.selected_system != kInvalidId && s.systems.find(s.selected_system) == s.systems.end()) {
+    s.selected_system = kInvalidId;
   }
 
   // Bodies
@@ -692,20 +716,70 @@ GameState deserialize_game_from_json(const std::string& json_text) {
 
   // Orders
   if (auto it = root.find("ship_orders"); it != root.end()) {
-    for (const auto& ov : it->second.array()) {
-      const auto& o = ov.object();
-      const Id ship_id = static_cast<Id>(o.at("ship_id").int_value());
-      ShipOrders so;
-      for (const auto& qv : o.at("queue").array()) so.queue.push_back(order_from_json(qv));
+    if (!it->second.is_array()) {
+      log::warn("Save load: 'ship_orders' is not an array; ignoring");
+    } else {
+      std::size_t dropped = 0;
+      std::size_t detail_logs = 0;
+      constexpr std::size_t kMaxDetailLogs = 8;
 
-      if (auto itrep = o.find("repeat"); itrep != o.end()) {
-        so.repeat = itrep->second.bool_value(false);
-      }
-      if (auto ittmpl = o.find("repeat_template"); ittmpl != o.end()) {
-        for (const auto& tv : ittmpl->second.array()) so.repeat_template.push_back(order_from_json(tv));
+      for (const auto& ov : it->second.array()) {
+        if (!ov.is_object()) {
+          dropped += 1;
+          continue;
+        }
+
+        const auto& o = ov.object();
+
+        Id ship_id = kInvalidId;
+        if (auto itid = o.find("ship_id"); itid != o.end()) {
+          ship_id = static_cast<Id>(itid->second.int_value(kInvalidId));
+        }
+        if (ship_id == kInvalidId) {
+          dropped += 1;
+          continue;
+        }
+
+        ShipOrders so;
+
+        auto parse_order_list = [&](const Value& list_v, std::vector<Order>& out, const char* label) {
+          if (!list_v.is_array()) {
+            dropped += 1;
+            return;
+          }
+          for (const auto& qv : list_v.array()) {
+            try {
+              out.push_back(order_from_json(qv));
+            } catch (const std::exception& e) {
+              dropped += 1;
+              if (detail_logs < kMaxDetailLogs) {
+                detail_logs += 1;
+                log::warn(std::string("Save load: dropped invalid order in '") + label +
+                          "' for ship_id=" + std::to_string(static_cast<unsigned long long>(ship_id)) +
+                          ": " + e.what());
+              }
+            }
+          }
+        };
+
+        if (auto itq = o.find("queue"); itq != o.end()) {
+          parse_order_list(itq->second, so.queue, "queue");
+        }
+
+        if (auto itrep = o.find("repeat"); itrep != o.end()) {
+          so.repeat = itrep->second.bool_value(false);
+        }
+        if (auto ittmpl = o.find("repeat_template"); ittmpl != o.end()) {
+          parse_order_list(ittmpl->second, so.repeat_template, "repeat_template");
+        }
+
+        s.ship_orders[ship_id] = std::move(so);
       }
 
-      s.ship_orders[ship_id] = so;
+      if (dropped > 0) {
+        log::warn("Save load: dropped " + std::to_string(static_cast<unsigned long long>(dropped)) +
+                  " invalid ship order entries");
+      }
     }
   }
 

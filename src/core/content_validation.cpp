@@ -2,7 +2,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <sstream>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 namespace nebula4x {
@@ -126,15 +129,33 @@ std::vector<std::string> validate_content_db(const ContentDB& db) {
     if (t.id.empty()) push(errors, join("Tech '", key, "' has an empty id field"));
     if (!t.id.empty() && !key.empty() && t.id != key)
       push(errors, join("Tech key/id mismatch: key '", key, "' != id '", t.id, "'"));
+    if (t.name.empty()) push(errors, join("Tech '", key, "' has an empty name field"));
     if (!is_non_negative(t.cost)) push(errors, join("Tech '", key, "' has invalid cost: ", t.cost));
 
     for (const auto& prereq : t.prereqs) {
+      if (prereq.empty()) {
+        push(errors, join("Tech '", key, "' has an empty prereq tech id"));
+        continue;
+      }
+      if (prereq == key) {
+        push(errors, join("Tech '", key, "' lists itself as a prerequisite"));
+        continue;
+      }
       if (db.techs.find(prereq) == db.techs.end()) {
         push(errors, join("Tech '", key, "' references unknown prereq tech '", prereq, "'"));
       }
     }
 
     for (const auto& eff : t.effects) {
+      if (eff.type.empty()) {
+        push(errors, join("Tech '", key, "' has an effect with empty type"));
+        continue;
+      }
+      if (eff.value.empty()) {
+        push(errors, join("Tech '", key, "' has an effect with empty value"));
+        continue;
+      }
+
       if (eff.type == "unlock_component") {
         if (db.components.find(eff.value) == db.components.end()) {
           push(errors, join("Tech '", key, "' unlocks unknown component '", eff.value, "'"));
@@ -147,6 +168,88 @@ std::vector<std::string> validate_content_db(const ContentDB& db) {
         // Unknown effect types are effectively ignored by the simulation.
         push(errors, join("Tech '", key, "' has unknown effect type '", eff.type, "'"));
       }
+    }
+  }
+
+  // Detect prereq cycles (these can deadlock research).
+  {
+    std::vector<std::string> tech_ids;
+    tech_ids.reserve(db.techs.size());
+    for (const auto& [id, _] : db.techs) tech_ids.push_back(id);
+    std::sort(tech_ids.begin(), tech_ids.end());
+
+    // 0 = unvisited, 1 = visiting, 2 = done.
+    std::unordered_map<std::string, int> visit;
+    visit.reserve(db.techs.size() * 2);
+
+    std::vector<std::string> stack;
+    stack.reserve(db.techs.size());
+
+    std::unordered_map<std::string, std::size_t> stack_pos;
+    stack_pos.reserve(db.techs.size() * 2);
+
+    // Track cycles we've already reported (canonicalized as sorted ids joined by '|').
+    std::unordered_set<std::string> reported;
+    reported.reserve(db.techs.size() * 2);
+
+    std::function<void(const std::string&)> dfs = [&](const std::string& id) {
+      visit[id] = 1;
+      stack_pos[id] = stack.size();
+      stack.push_back(id);
+
+      const auto it = db.techs.find(id);
+      if (it != db.techs.end()) {
+        // Deterministic: iterate prereqs in sorted/unique order.
+        std::vector<std::string> prereqs = it->second.prereqs;
+        std::sort(prereqs.begin(), prereqs.end());
+        prereqs.erase(std::unique(prereqs.begin(), prereqs.end()), prereqs.end());
+
+        for (const auto& pre : prereqs) {
+          if (pre.empty()) continue;
+          if (db.techs.find(pre) == db.techs.end()) continue;
+
+          const auto vit = visit.find(pre);
+          const int st = (vit == visit.end()) ? 0 : vit->second;
+
+          if (st == 0) {
+            dfs(pre);
+          } else if (st == 1) {
+            // Cycle detected. Extract the cycle portion of the stack.
+            std::size_t idx = 0;
+            if (const auto sit = stack_pos.find(pre); sit != stack_pos.end()) idx = sit->second;
+
+            std::vector<std::string> cycle(stack.begin() + static_cast<std::ptrdiff_t>(idx), stack.end());
+            std::sort(cycle.begin(), cycle.end());
+            cycle.erase(std::unique(cycle.begin(), cycle.end()), cycle.end());
+
+            std::ostringstream key_ss;
+            for (std::size_t i = 0; i < cycle.size(); ++i) {
+              if (i) key_ss << "|";
+              key_ss << cycle[i];
+            }
+            const std::string key = key_ss.str();
+
+            if (reported.insert(key).second) {
+              std::ostringstream ss;
+              for (std::size_t i = 0; i < cycle.size(); ++i) {
+                if (i) ss << ", ";
+                ss << "'" << cycle[i] << "'";
+              }
+              push(errors, "Tech prerequisite cycle detected among: " + ss.str());
+            }
+          }
+        }
+      }
+
+      stack.pop_back();
+      stack_pos.erase(id);
+      visit[id] = 2;
+    };
+
+    for (const auto& id : tech_ids) {
+      const auto vit = visit.find(id);
+      const int st = (vit == visit.end()) ? 0 : vit->second;
+      if (st == 0) dfs(id);
     }
   }
 

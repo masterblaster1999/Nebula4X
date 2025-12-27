@@ -23,8 +23,101 @@ struct Parser {
   }
 
   [[noreturn]] void fail(const std::string& msg) const {
+    // We track `i` as a raw byte offset; for error messages, it's more helpful to also show
+    // line/column and a small context snippet (handy for modding content JSON).
+    const std::size_t pos = std::min(i, s.size());
+
+    // Compute 1-based line/column, plus the [line_start, line_end) bounds.
+    //
+    // Notes:
+    //  - Treat CRLF as a single newline for accurate line/col reporting on Windows-edited files.
+    //  - Ignore a UTF-8 BOM (0xEF 0xBB 0xBF) if present at the very start of the document.
+    std::size_t line_start = 0;
+    std::size_t scan = 0;
+
+    const bool has_bom =
+        (s.size() >= 3 &&
+         static_cast<unsigned char>(s[0]) == 0xEF &&
+         static_cast<unsigned char>(s[1]) == 0xBB &&
+         static_cast<unsigned char>(s[2]) == 0xBF);
+
+    if (has_bom) {
+      line_start = 3;
+      scan = 3;
+    }
+
+    int line = 1;
+    int col = 1;
+
+    // If the failure is somehow inside the BOM bytes, clamp.
+    if (scan > pos) {
+      scan = pos;
+      line_start = pos;
+    }
+
+    while (scan < pos && scan < s.size()) {
+      const char ch = s[scan];
+      if (ch == '\n') {
+        ++line;
+        col = 1;
+        line_start = scan + 1;
+        ++scan;
+        continue;
+      }
+      if (ch == '\r') {
+        ++line;
+        col = 1;
+        // CRLF counts as a single newline.
+        if (scan + 1 < s.size() && s[scan + 1] == '\n') {
+          scan += 2;
+          line_start = scan;
+        } else {
+          ++scan;
+          line_start = scan;
+        }
+        continue;
+      }
+      ++col;
+      ++scan;
+    }
+
+    std::size_t line_end = line_start;
+    while (line_end < s.size() && s[line_end] != '\n' && s[line_end] != '\r') ++line_end;
+
+    // Build a context snippet. If the line is very long, trim and add ellipses.
+    const std::size_t line_len = line_end - line_start;
+    const std::size_t in_line = (pos >= line_start) ? (pos - line_start) : 0;
+
+    std::size_t snippet_start = line_start;
+    std::size_t snippet_end = line_end;
+    bool prefix_ellipsis = false;
+    bool suffix_ellipsis = false;
+
+    constexpr std::size_t kContextBefore = 80;
+    constexpr std::size_t kContextAfter = 80;
+    constexpr std::size_t kMaxContextLine = kContextBefore + kContextAfter;
+
+    if (line_len > kMaxContextLine) {
+      snippet_start = (in_line > kContextBefore) ? (pos - kContextBefore) : line_start;
+      snippet_end = std::min(line_end, pos + kContextAfter);
+      if (snippet_start > line_start) prefix_ellipsis = true;
+      if (snippet_end < line_end) suffix_ellipsis = true;
+    }
+
+    std::string snippet;
+    if (prefix_ellipsis) snippet += "...";
+    if (snippet_end > snippet_start) snippet += s.substr(snippet_start, snippet_end - snippet_start);
+    if (suffix_ellipsis) snippet += "...";
+
+    std::size_t caret_pos = (prefix_ellipsis ? 3 : 0) + ((pos >= snippet_start) ? (pos - snippet_start) : 0);
+    if (caret_pos > snippet.size()) caret_pos = snippet.size();
+
     std::ostringstream ss;
-    ss << "JSON parse error at " << i << ": " << msg;
+    ss << "JSON parse error at " << i << " (line " << line << ", col " << col << "): " << msg;
+    if (!snippet.empty()) {
+      ss << "\n" << snippet << "\n";
+      ss << std::string(caret_pos, ' ') << "^";
+    }
     throw std::runtime_error(ss.str());
   }
 
@@ -40,6 +133,44 @@ struct Parser {
   void expect(char c) {
     skip_ws();
     if (get() != c) fail(std::string("expected '") + c + "'");
+  }
+
+  unsigned parse_hex4() {
+    if (i + 4 > s.size()) fail("bad unicode escape");
+    unsigned code = 0;
+    for (int k = 0; k < 4; ++k) {
+      char h = get();
+      code <<= 4;
+      if (h >= '0' && h <= '9')
+        code += static_cast<unsigned>(h - '0');
+      else if (h >= 'a' && h <= 'f')
+        code += static_cast<unsigned>(h - 'a' + 10);
+      else if (h >= 'A' && h <= 'F')
+        code += static_cast<unsigned>(h - 'A' + 10);
+      else
+        fail("bad unicode hex");
+    }
+    return code;
+  }
+
+  void append_utf8(std::uint32_t codepoint, std::string& out) {
+    if (codepoint <= 0x7F) {
+      out.push_back(static_cast<char>(codepoint));
+    } else if (codepoint <= 0x7FF) {
+      out.push_back(static_cast<char>(0xC0 | ((codepoint >> 6) & 0x1F)));
+      out.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+    } else if (codepoint <= 0xFFFF) {
+      out.push_back(static_cast<char>(0xE0 | ((codepoint >> 12) & 0x0F)));
+      out.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+      out.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+    } else if (codepoint <= 0x10FFFF) {
+      out.push_back(static_cast<char>(0xF0 | ((codepoint >> 18) & 0x07)));
+      out.push_back(static_cast<char>(0x80 | ((codepoint >> 12) & 0x3F)));
+      out.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+      out.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+    } else {
+      fail("unicode codepoint out of range");
+    }
   }
 
   Value parse_value() {
@@ -111,19 +242,25 @@ struct Parser {
           case 'r': out.push_back('\r'); break;
           case 't': out.push_back('\t'); break;
           case 'u': {
-            // Minimal \uXXXX support: parse but only emit ASCII if possible.
-            if (i + 4 > s.size()) fail("bad unicode escape");
-            unsigned code = 0;
-            for (int k = 0; k < 4; ++k) {
-              char h = get();
-              code <<= 4;
-              if (h >= '0' && h <= '9') code += static_cast<unsigned>(h - '0');
-              else if (h >= 'a' && h <= 'f') code += static_cast<unsigned>(h - 'a' + 10);
-              else if (h >= 'A' && h <= 'F') code += static_cast<unsigned>(h - 'A' + 10);
-              else fail("bad unicode hex");
+            // Decode a JSON \uXXXX escape into UTF-8.
+            // JSON escapes are UTF-16 code units; handle surrogate pairs.
+            const unsigned hi = parse_hex4();
+
+            // High surrogate: must be followed by another \uXXXX with a low surrogate.
+            if (hi >= 0xD800 && hi <= 0xDBFF) {
+              if (i + 2 > s.size()) fail("bad unicode surrogate pair");
+              if (get() != '\\' || get() != 'u') fail("expected low surrogate");
+              const unsigned lo = parse_hex4();
+              if (lo < 0xDC00 || lo > 0xDFFF) fail("invalid low surrogate");
+
+              const std::uint32_t codepoint = 0x10000u + (((hi - 0xD800u) << 10u) | (lo - 0xDC00u));
+              append_utf8(codepoint, out);
+            } else if (hi >= 0xDC00 && hi <= 0xDFFF) {
+              // Low surrogate without a preceding high surrogate.
+              fail("unexpected low surrogate");
+            } else {
+              append_utf8(static_cast<std::uint32_t>(hi), out);
             }
-            if (code <= 0x7F) out.push_back(static_cast<char>(code));
-            else out.push_back('?');
             break;
           }
           default: fail("unknown escape");
@@ -324,6 +461,15 @@ const Array& Value::array() const {
 
 Value parse(const std::string& text) {
   Parser p{text};
+
+  // Be tolerant of files saved with a UTF-8 BOM (common on Windows).
+  if (text.size() >= 3 &&
+      static_cast<unsigned char>(text[0]) == 0xEF &&
+      static_cast<unsigned char>(text[1]) == 0xBB &&
+      static_cast<unsigned char>(text[2]) == 0xBF) {
+    p.i = 3;
+  }
+
   Value v = p.parse_value();
   p.skip_ws();
   if (p.i != text.size()) throw std::runtime_error("Trailing characters after JSON");

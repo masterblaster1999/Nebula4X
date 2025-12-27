@@ -30,6 +30,7 @@ target_sources(nebula4x_core
     src/core/simulation.cpp
     src/core/serialization.cpp
     src/core/tech.cpp
+    src/core/state_validation.cpp
     src/util/file_io.cpp
     src/util/event_export.cpp
     src/util/json.cpp
@@ -153,6 +154,11 @@ if(NEBULA4X_BUILD_TESTS)
     tests/test_event_export.cpp
     tests/test_content_validation.cpp
     tests/test_random_scenario.cpp
+    tests/test_file_io.cpp
+    tests/test_json_unicode.cpp
+    tests/test_json_bom.cpp
+    tests/test_json_errors.cpp
+    tests/test_state_validation.cpp
   )
   target_link_libraries(nebula4x_tests PRIVATE nebula4x::core)
   nebula4x_set_project_warnings(nebula4x_tests ${NEBULA4X_WARNINGS_AS_ERRORS})
