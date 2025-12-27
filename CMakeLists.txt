@@ -22,6 +22,7 @@ add_library(nebula4x::core ALIAS nebula4x_core)
 
 target_sources(nebula4x_core
   PRIVATE
+    src/core/content_validation.cpp
     src/core/date.cpp
     src/core/game_state.cpp
     src/core/orders.cpp
@@ -55,6 +56,13 @@ nebula4x_set_project_warnings(nebula4x_core ${NEBULA4X_WARNINGS_AS_ERRORS})
 add_executable(nebula4x_cli src/cli_main.cpp)
 target_link_libraries(nebula4x_cli PRIVATE nebula4x::core)
 nebula4x_set_project_warnings(nebula4x_cli ${NEBULA4X_WARNINGS_AS_ERRORS})
+
+# Copy data directory next to the CLI executable for convenience.
+add_custom_command(TARGET nebula4x_cli POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_directory
+    ${CMAKE_CURRENT_SOURCE_DIR}/data
+    $<TARGET_FILE_DIR:nebula4x_cli>/data
+)
 
 # --- UI executable ---
 if(NEBULA4X_BUILD_UI)
@@ -140,9 +148,14 @@ if(NEBULA4X_BUILD_TESTS)
     tests/test_serialization.cpp
     tests/test_auto_routing.cpp
     tests/test_order_repeat.cpp
+    tests/test_determinism.cpp
+    tests/test_content_validation.cpp
+    tests/test_random_scenario.cpp
   )
   target_link_libraries(nebula4x_tests PRIVATE nebula4x::core)
   nebula4x_set_project_warnings(nebula4x_tests ${NEBULA4X_WARNINGS_AS_ERRORS})
 
+  # Tests read data/... in a couple of places, so run from the repo root.
   add_test(NAME nebula4x_tests COMMAND nebula4x_tests)
+  set_tests_properties(nebula4x_tests PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 endif()

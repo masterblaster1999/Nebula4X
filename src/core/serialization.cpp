@@ -13,6 +13,8 @@ using json::Array;
 using json::Object;
 using json::Value;
 
+constexpr int kCurrentSaveVersion = 12;
+
 template <typename Map>
 std::vector<typename Map::key_type> sorted_keys(const Map& m) {
   std::vector<typename Map::key_type> keys;
@@ -20,6 +22,14 @@ std::vector<typename Map::key_type> sorted_keys(const Map& m) {
   for (const auto& [k, _] : m) keys.push_back(k);
   std::sort(keys.begin(), keys.end());
   return keys;
+}
+
+template <typename T>
+std::vector<T> sorted_unique_copy(const std::vector<T>& v) {
+  std::vector<T> out = v;
+  std::sort(out.begin(), out.end());
+  out.erase(std::unique(out.begin(), out.end()), out.end());
+  return out;
 }
 
 Value vec2_to_json(const Vec2& v) {
@@ -68,6 +78,46 @@ ShipRole ship_role_from_string(const std::string& s) {
   if (s == "surveyor") return ShipRole::Surveyor;
   if (s == "combatant") return ShipRole::Combatant;
   return ShipRole::Unknown;
+}
+
+const char* event_level_to_string(EventLevel l) {
+  switch (l) {
+    case EventLevel::Info: return "info";
+    case EventLevel::Warn: return "warn";
+    case EventLevel::Error: return "error";
+  }
+  return "info";
+}
+
+const char* event_category_to_string(EventCategory c) {
+  switch (c) {
+    case EventCategory::General: return "general";
+    case EventCategory::Research: return "research";
+    case EventCategory::Shipyard: return "shipyard";
+    case EventCategory::Construction: return "construction";
+    case EventCategory::Movement: return "movement";
+    case EventCategory::Combat: return "combat";
+    case EventCategory::Intel: return "intel";
+    case EventCategory::Exploration: return "exploration";
+  }
+  return "general";
+}
+
+EventCategory event_category_from_string(const std::string& s) {
+  if (s == "research") return EventCategory::Research;
+  if (s == "shipyard") return EventCategory::Shipyard;
+  if (s == "construction") return EventCategory::Construction;
+  if (s == "movement") return EventCategory::Movement;
+  if (s == "combat") return EventCategory::Combat;
+  if (s == "intel") return EventCategory::Intel;
+  if (s == "exploration") return EventCategory::Exploration;
+  return EventCategory::General;
+}
+
+EventLevel event_level_from_string(const std::string& s) {
+  if (s == "warn") return EventLevel::Warn;
+  if (s == "error") return EventLevel::Error;
+  return EventLevel::Info;
 }
 
 Value order_to_json(const Order& order) {
@@ -214,6 +264,7 @@ std::string serialize_game_to_json(const GameState& s) {
   root["save_version"] = static_cast<double>(s.save_version);
   root["date"] = s.date.to_string();
   root["next_id"] = static_cast<double>(s.next_id);
+  root["next_event_seq"] = static_cast<double>(s.next_event_seq);
   root["selected_system"] = static_cast<double>(s.selected_system);
 
   // Systems
@@ -227,15 +278,30 @@ std::string serialize_game_to_json(const GameState& s) {
     o["galaxy_pos"] = vec2_to_json(sys.galaxy_pos);
 
     Array bodies;
-    for (Id bid : sys.bodies) bodies.push_back(static_cast<double>(bid));
+    {
+      // Deterministic output: StarSystem entity lists are stored as vectors
+      // that can be mutated by gameplay (e.g. ships moving between systems).
+      // Sort ids so saves don't churn due to incidental ordering.
+      auto ids = sys.bodies;
+      std::sort(ids.begin(), ids.end());
+      for (Id bid : ids) bodies.push_back(static_cast<double>(bid));
+    }
     o["bodies"] = bodies;
 
     Array ships;
-    for (Id sid : sys.ships) ships.push_back(static_cast<double>(sid));
+    {
+      auto ids = sys.ships;
+      std::sort(ids.begin(), ids.end());
+      for (Id sid : ids) ships.push_back(static_cast<double>(sid));
+    }
     o["ships"] = ships;
 
     Array jps;
-    for (Id jid : sys.jump_points) jps.push_back(static_cast<double>(jid));
+    {
+      auto ids = sys.jump_points;
+      std::sort(ids.begin(), ids.end());
+      for (Id jid : ids) jps.push_back(static_cast<double>(jid));
+    }
     o["jump_points"] = jps;
 
     systems.push_back(o);
@@ -343,14 +409,16 @@ std::string serialize_game_to_json(const GameState& s) {
     o["active_research_id"] = f.active_research_id;
     o["active_research_progress"] = f.active_research_progress;
     o["research_queue"] = string_vector_to_json(f.research_queue);
-    o["known_techs"] = string_vector_to_json(f.known_techs);
-    o["unlocked_components"] = string_vector_to_json(f.unlocked_components);
-    o["unlocked_installations"] = string_vector_to_json(f.unlocked_installations);
+    // Treat these as sets for save stability (reduce churn / diffs).
+    o["known_techs"] = string_vector_to_json(sorted_unique_copy(f.known_techs));
+    o["unlocked_components"] = string_vector_to_json(sorted_unique_copy(f.unlocked_components));
+    o["unlocked_installations"] = string_vector_to_json(sorted_unique_copy(f.unlocked_installations));
 
     // Exploration / map knowledge.
     Array discovered_systems;
-    discovered_systems.reserve(f.discovered_systems.size());
-    for (Id sid : f.discovered_systems) discovered_systems.push_back(static_cast<double>(sid));
+    const auto disc = sorted_unique_copy(f.discovered_systems);
+    discovered_systems.reserve(disc.size());
+    for (Id sid : disc) discovered_systems.push_back(static_cast<double>(sid));
     o["discovered_systems"] = discovered_systems;
 
     // Optional contact memory (prototype intel).
@@ -416,6 +484,27 @@ std::string serialize_game_to_json(const GameState& s) {
   }
   root["ship_orders"] = ship_orders;
 
+
+
+  // Persistent simulation event log.
+  Array events;
+  events.reserve(s.events.size());
+  for (const auto& ev : s.events) {
+    Object o;
+    o["seq"] = static_cast<double>(ev.seq);
+    o["day"] = static_cast<double>(ev.day);
+    o["level"] = std::string(event_level_to_string(ev.level));
+    o["category"] = std::string(event_category_to_string(ev.category));
+    o["faction_id"] = static_cast<double>(ev.faction_id);
+    o["faction_id2"] = static_cast<double>(ev.faction_id2);
+    o["system_id"] = static_cast<double>(ev.system_id);
+    o["ship_id"] = static_cast<double>(ev.ship_id);
+    o["colony_id"] = static_cast<double>(ev.colony_id);
+    o["message"] = ev.message;
+    events.push_back(o);
+  }
+  root["events"] = events;
+
   return json::stringify(root, 2);
 }
 
@@ -423,9 +512,19 @@ GameState deserialize_game_from_json(const std::string& json_text) {
   const auto root = json::parse(json_text).object();
 
   GameState s;
-  s.save_version = static_cast<int>(root.at("save_version").int_value(1));
+  {
+    const int loaded_version = static_cast<int>(root.at("save_version").int_value(1));
+    // Promote older saves to the current in-memory schema version.
+    s.save_version = loaded_version < kCurrentSaveVersion ? kCurrentSaveVersion : loaded_version;
+  }
   s.date = Date::parse_iso_ymd(root.at("date").string_value());
   s.next_id = static_cast<Id>(root.at("next_id").int_value(1));
+  // Optional (introduced in v12).
+  s.next_event_seq = 1;
+  if (auto itseq = root.find("next_event_seq"); itseq != root.end()) {
+    s.next_event_seq = static_cast<std::uint64_t>(itseq->second.int_value(1));
+  }
+  if (s.next_event_seq == 0) s.next_event_seq = 1;
   s.selected_system = static_cast<Id>(root.at("selected_system").int_value(kInvalidId));
 
   // Systems
@@ -609,6 +708,45 @@ GameState deserialize_game_from_json(const std::string& json_text) {
       s.ship_orders[ship_id] = so;
     }
   }
+
+  // Persistent simulation event log (optional; older saves won't have it).
+  if (auto it = root.find("events"); it != root.end()) {
+    std::uint64_t seq_cursor = 0;
+    for (const auto& evv : it->second.array()) {
+      const auto& o = evv.object();
+      SimEvent ev;
+
+      // Optional (introduced in v12). We also repair seq values to ensure they
+      // are monotonic-increasing in memory, which makes it safe to use seq as
+      // a stable "new event" marker for time-warp helpers.
+      std::uint64_t wanted_seq = 0;
+      if (auto its = o.find("seq"); its != o.end()) {
+        wanted_seq = static_cast<std::uint64_t>(its->second.int_value(0));
+      }
+      if (wanted_seq == 0) wanted_seq = seq_cursor + 1;
+      if (wanted_seq <= seq_cursor) wanted_seq = seq_cursor + 1;
+      ev.seq = wanted_seq;
+      seq_cursor = ev.seq;
+
+      ev.day = static_cast<std::int64_t>(o.at("day").int_value(0));
+      if (auto itl = o.find("level"); itl != o.end()) ev.level = event_level_from_string(itl->second.string_value("info"));
+      if (auto itc = o.find("category"); itc != o.end()) {
+        ev.category = event_category_from_string(itc->second.string_value("general"));
+      }
+
+      if (auto itf = o.find("faction_id"); itf != o.end()) ev.faction_id = static_cast<Id>(itf->second.int_value(kInvalidId));
+      if (auto itf2 = o.find("faction_id2"); itf2 != o.end()) ev.faction_id2 = static_cast<Id>(itf2->second.int_value(kInvalidId));
+      if (auto its = o.find("system_id"); its != o.end()) ev.system_id = static_cast<Id>(its->second.int_value(kInvalidId));
+      if (auto itsh = o.find("ship_id"); itsh != o.end()) ev.ship_id = static_cast<Id>(itsh->second.int_value(kInvalidId));
+      if (auto itcol = o.find("colony_id"); itcol != o.end()) ev.colony_id = static_cast<Id>(itcol->second.int_value(kInvalidId));
+      if (auto itm = o.find("message"); itm != o.end()) ev.message = itm->second.string_value();
+      s.events.push_back(std::move(ev));
+    }
+
+    // Ensure next_event_seq is ahead of the largest loaded seq.
+    if (s.next_event_seq <= seq_cursor) s.next_event_seq = seq_cursor + 1;
+  }
+
 
   // Ensure next_id is sane.
   Id max_id = 0;

@@ -1,60 +1,36 @@
-# Patch notes (generated 2025-12-26)
+# Patch notes (generated 2025-12-27)
 
 This patch pack contains only the files that changed.
 
-## Changes in this patch pack
+Apply by copying the files over the repo (drag/drop into GitHub's "Upload files"), preserving folder paths.
 
-### Ship order automation: repeating queues (trade routes / patrol loops)
+## Summary of changes
 
-- Ships can now optionally **repeat** their order queue once it becomes empty.
-- This is meant as a lightweight automation primitive for early logistics routes:
-  1. Load minerals at Colony A
-  2. Travel to Colony B
-  3. Unload minerals at Colony B
-  4. Travel back to Colony A
-  5. Repeat
+### Event log v5: bulk copy + CSV export
 
-#### Implementation
+- Added **Copy visible** to copy the currently filtered/visible events (last N, category, faction, search, level) to the clipboard.
+- Added **Export CSV** with an editable export path to write the visible/filtered event list to disk.
+  - CSV includes both IDs and human-friendly names (faction/system/ship/colony) when available.
+  - Export is written in **chronological order** (oldest to newest within the exported set).
 
-- Added two new fields to `ShipOrders`:
-  - `repeat` (bool)
-  - `repeat_template` (vector of orders)
-- When `repeat` is enabled and the ship's queue is empty at the start of a tick, the simulation refills the queue from `repeat_template`.
-- `Clear orders` now also disables repeat and clears the template (so clearing really means "stop").
+### CLI: export events to CSV
 
-#### UI
+- Added `nebula4x_cli --export-events-csv PATH` to export the persistent event log to CSV.
+- The export respects the same filters as `--dump-events`:
+  - `--events-last N`
+  - `--events-category NAME`
+  - `--events-faction X`
+  - `--events-contains TEXT`
 
-- The **Ship** tab now shows **Repeat: ON/OFF** and provides:
-  - **Enable repeat**: snapshots the current queue into the template and enables repeating.
-  - **Update repeat template**: re-snapshots the current queue (repeat remains enabled).
-  - **Disable repeat**: turns repeating off and clears the template.
+### Utility: CSV escaping helper
 
-### Save / versioning
-
-- Scenario `save_version` bumped to **9**.
-- Save/load now persists `ShipOrders.repeat` and `ShipOrders.repeat_template`.
-
-### Docs
-
-- `docs/ARCHITECTURE.md` updated with a short section describing repeating order queues.
-- `README.md` updated to list repeat orders as a supported automation.
+- Added `nebula4x::csv_escape()` for correct CSV quoting/escaping (commas, quotes, newlines).
 
 ### Tests
 
-- Added a regression test `test_order_repeat` covering:
-  - queue refill behavior,
-  - `clear_orders` disabling repeat,
-  - serialization round-trip preserving repeat state/template.
+- Added a small test for `csv_escape()` behavior.
 
-## Apply locally
+## Compatibility notes
 
-1. Unzip the patch pack zip.
-2. Copy the extracted folders/files into your repository root (overwrite when prompted).
-3. Configure/build as usual.
-
-## Apply via GitHub web UI
-
-1. Unzip the patch pack zip on your machine.
-2. In your repo on GitHub: **Add file → Upload files**.
-3. Drag & drop the extracted folders/files into the upload area (keep the same folder structure).
-4. Commit changes.
+- **Save schema is unchanged** (still v12 from the previous patches).
+- CSV export is UI/CLI-only; it does not affect simulation determinism.

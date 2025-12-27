@@ -233,4 +233,49 @@ struct StarSystem {
   std::vector<Id> jump_points;
 };
 
+
+// --- simulation event log (persisted in saves) ---
+
+enum class EventLevel { Info, Warn, Error };
+
+// High-level grouping for persistent simulation events.
+//
+// This is intentionally coarse. The goal is to support basic UI filtering
+// and future structured event handling without committing to a huge taxonomy.
+enum class EventCategory {
+  General,
+  Research,
+  Shipyard,
+  Construction,
+  Movement,
+  Combat,
+  Intel,
+  Exploration,
+};
+
+struct SimEvent {
+  // Monotonic event sequence number within a save.
+  // Assigned by the simulation when the event is recorded.
+  std::uint64_t seq{0};
+
+  // Date::days_since_epoch() at the time the event occurred.
+  std::int64_t day{0};
+
+  EventLevel level{EventLevel::Info};
+
+  // Coarse category for filtering.
+  EventCategory category{EventCategory::General};
+
+  // Optional context for quick UI navigation and filtering.
+  // 0 (kInvalidId) means "not set".
+  Id faction_id{kInvalidId};
+  Id faction_id2{kInvalidId};
+  Id system_id{kInvalidId};
+  Id ship_id{kInvalidId};
+  Id colony_id{kInvalidId};
+
+  std::string message;
+};
+
+
 } // namespace nebula4x

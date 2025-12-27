@@ -18,6 +18,49 @@ struct SimConfig {
 
   // Generic "arrived" epsilon used for fixed targets (move-to-point).
   double arrival_epsilon_mkm{1e-6};
+
+  // Maximum number of persistent simulation events to keep in GameState::events.
+  // 0 means "unlimited" (not recommended for very long runs).
+  int max_events{1000};
+};
+
+// Optional context passed when recording a persistent simulation event.
+//
+// IDs use 0 (kInvalidId) to mean "unset".
+struct EventContext {
+  Id faction_id{kInvalidId};
+  Id faction_id2{kInvalidId};
+  Id system_id{kInvalidId};
+  Id ship_id{kInvalidId};
+  Id colony_id{kInvalidId};
+};
+
+// Criteria used by Simulation::advance_until_event.
+//
+// Fields are intentionally minimal; this is meant to be a convenient "time warp"
+// helper for the UI/CLI, not a fully-fledged rules engine.
+struct EventStopCondition {
+  bool stop_on_info{true};
+  bool stop_on_warn{true};
+  bool stop_on_error{true};
+
+  // If true, only stop when the event category matches.
+  bool filter_category{false};
+  EventCategory category{EventCategory::General};
+
+  // If set (non-zero), only stop when the event references this faction
+  // either as primary or secondary faction id.
+  Id faction_id{kInvalidId};
+
+  // If non-empty, only stop when the event message contains this substring.
+  // Matching is case-insensitive.
+  std::string message_contains;
+};
+
+struct AdvanceUntilEventResult {
+  int days_advanced{0};
+  bool hit{false};
+  SimEvent event;
 };
 
 class Simulation {
@@ -37,6 +80,13 @@ class Simulation {
 
   // Advance simulation by N days.
   void advance_days(int days);
+
+  // Advance simulation day-by-day up to max_days, stopping early if a newly
+  // recorded persistent SimEvent matches the provided stop condition.
+  //
+  // This is primarily a UI/CLI convenience to "time warp" until something
+  // interesting happens.
+  AdvanceUntilEventResult advance_until_event(int max_days, const EventStopCondition& stop);
 
   // --- Order helpers ---
   // Clear all queued orders for a ship.
@@ -159,6 +209,9 @@ class Simulation {
 
   void apply_design_stats_to_ship(Ship& ship);
   void initialize_unlocks_for_faction(Faction& f);
+
+  void push_event(EventLevel level, std::string message);
+  void push_event(EventLevel level, EventCategory category, std::string message, EventContext ctx = {});
 
   ContentDB content_;
   SimConfig cfg_;

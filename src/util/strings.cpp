@@ -12,4 +12,31 @@ std::string to_lower(std::string s) {
   return s;
 }
 
+
+std::string csv_escape(const std::string& s) {
+  bool needs_quotes = false;
+  for (unsigned char c : s) {
+    if (c == ',' || c == '"' || c == '\n' || c == '\r') {
+      needs_quotes = true;
+      break;
+    }
+  }
+
+  if (!needs_quotes) return s;
+
+  std::string out;
+  out.reserve(s.size() + 2);
+  out.push_back('"');
+  for (unsigned char c : s) {
+    if (c == '"') {
+      out.push_back('"');
+      out.push_back('"');
+    } else {
+      out.push_back(static_cast<char>(c));
+    }
+  }
+  out.push_back('"');
+  return out;
+}
+
 } // namespace nebula4x

@@ -6,6 +6,16 @@
 - Keep **UI** as a thin layer over the simulation.
 - Make most content **data-driven** via JSON.
 
+## Determinism and iteration order
+
+Most core entity stores are `std::unordered_map<Id, ...>` for ergonomics.
+
+Because unordered-map iteration order is **not specified**, the simulation avoids relying on it when order
+can change outcomes (e.g. ships competing for a limited mineral stockpile, or combat target selection when
+distances are tied). Instead, these systems collect IDs and process them in a **stable sorted order**.
+
+Save output is also kept stable by sorting per-system entity ID lists before serializing.
+
 ## Modules
 
 - `nebula4x_core`: all game rules, entities, turn progression, save/load.
@@ -75,6 +85,51 @@ This enables simple trade routes like:
 - The UI can optionally hide undiscovered systems when fog-of-war is enabled.
 - The simulation exposes a small convenience helper, `Simulation::issue_travel_to_system`,
   that pathfinds through the known jump network and enqueues the required `TravelViaJump` steps.
+
+## Determinism
+
+The project aims to keep core simulation behavior deterministic across platforms.
+
+Because many entity stores are `std::unordered_map<Id, ...>`, the simulation avoids relying on unspecified
+iteration order for rules where it can affect outcomes. Where ordering matters (e.g. competing ships, multiple colonies
+finishing builds), entities are processed in **stable sorted-id** order.
+
+## Persistent event log
+
+Key simulation events are appended to `GameState::events` during the daily tick and are saved/loaded with the game.
+
+Each event includes:
+
+- `seq` (monotonic event id within a save, useful for "new event" detection)
+- `day` (simulation day)
+- `level` (info/warn/error)
+- `category` (coarse grouping for filtering)
+- optional context IDs (`faction_id`, `system_id`, `ship_id`, `colony_id`, plus an optional secondary faction)
+- a human-readable `message`
+
+Examples include:
+
+- shipyard build completion
+- colony construction completion
+- research completion
+- jump point transit
+- new system discovery
+- contact gained/lost/reacquired
+- ship destruction
+
+The UI exposes this as a **Log** tab with basic filtering by level, category, and faction.
+
+## Time warp helpers
+
+The simulation provides `Simulation::advance_until_event(max_days, stop_condition)` to advance
+day-by-day until a newly recorded event matches a filter (e.g. pause on construction completion
+or on warnings/errors). The UI exposes this in the left sidebar as **Auto-run (pause on event)**.
+
+The CLI can print it via `--dump-events`, optionally filtered:
+
+- `--events-category NAME`
+- `--events-faction X`
+- `--events-last N`
 
 ## Save/load
 

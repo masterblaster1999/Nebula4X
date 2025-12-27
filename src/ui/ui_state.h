@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 #include "nebula4x/core/ids.h"
 
 namespace nebula4x::ui {
@@ -23,6 +25,11 @@ struct UIState {
 
   // Max age (in days) for showing contact markers on the map.
   int contact_max_age_days{30};
+
+  // Event log UI helpers.
+  // The newest SimEvent::seq the UI considers "seen".
+  // Not persisted in saves.
+  std::uint64_t last_seen_event_seq{0};
 };
 
 } // namespace nebula4x::ui

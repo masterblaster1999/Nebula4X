@@ -5,6 +5,7 @@
 #include "nebula4x/core/serialization.h"
 #include "nebula4x/core/simulation.h"
 #include "nebula4x/util/json.h"
+#include "nebula4x/util/strings.h"
 
 #define N4X_ASSERT(expr) \
   do { \
@@ -72,6 +73,12 @@ int test_serialization() {
   for (const auto& [_, c] : loaded_no_queue.colonies) {
     N4X_ASSERT(c.shipyard_queue.empty());
   }
+
+  // 3) CSV escaping helper should behave as expected.
+  N4X_ASSERT(nebula4x::csv_escape("hello") == "hello");
+  N4X_ASSERT(nebula4x::csv_escape("a,b") == "\"a,b\"");
+  N4X_ASSERT(nebula4x::csv_escape("a\"b") == "\"a\"\"b\"");
+  N4X_ASSERT(nebula4x::csv_escape("a\nb") == "\"a\nb\"");
 
   return 0;
 }

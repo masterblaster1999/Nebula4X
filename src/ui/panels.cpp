@@ -3,6 +3,8 @@
 #include <imgui.h>
 
 #include <algorithm>
+#include <cstdint>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -12,9 +14,22 @@
 #include "nebula4x/core/serialization.h"
 #include "nebula4x/util/file_io.h"
 #include "nebula4x/util/log.h"
+#include "nebula4x/util/strings.h"
 
 namespace nebula4x::ui {
 namespace {
+
+bool case_insensitive_contains(const std::string& haystack, const char* needle_cstr) {
+  if (!needle_cstr) return true;
+  if (needle_cstr[0] == '\0') return true;
+  const std::string needle(needle_cstr);
+  const auto it = std::search(
+      haystack.begin(), haystack.end(), needle.begin(), needle.end(),
+      [](char a, char b) {
+        return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
+      });
+  return it != haystack.end();
+}
 
 const char* ship_role_label(ShipRole r) {
   switch (r) {
@@ -35,6 +50,29 @@ const char* component_type_label(ComponentType t) {
     case ComponentType::Armor: return "Armor";
     default: return "Unknown";
   }
+}
+
+const char* event_level_label(EventLevel l) {
+  switch (l) {
+    case EventLevel::Info: return "Info";
+    case EventLevel::Warn: return "Warn";
+    case EventLevel::Error: return "Error";
+  }
+  return "Info";
+}
+
+const char* event_category_label(EventCategory c) {
+  switch (c) {
+    case EventCategory::General: return "General";
+    case EventCategory::Research: return "Research";
+    case EventCategory::Shipyard: return "Shipyard";
+    case EventCategory::Construction: return "Construction";
+    case EventCategory::Movement: return "Movement";
+    case EventCategory::Combat: return "Combat";
+    case EventCategory::Intel: return "Intel";
+    case EventCategory::Exploration: return "Exploration";
+  }
+  return "General";
 }
 
 std::vector<std::string> sorted_all_design_ids(const Simulation& sim) {
@@ -159,6 +197,113 @@ void draw_left_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sele
   ImGui::SameLine();
   if (ImGui::Button("+30")) sim.advance_days(30);
 
+  // --- Auto-run / time warp ---
+  {
+    static int max_days = 365;
+    static bool stop_info = true;
+    static bool stop_warn = true;
+    static bool stop_error = true;
+    static int category_idx = 0; // 0 = Any
+    static Id faction_filter = kInvalidId;
+    static char message_contains[128] = "";
+    static std::string last_status;
+
+    ImGui::Separator();
+    if (ImGui::CollapsingHeader("Auto-run (pause on event)", ImGuiTreeNodeFlags_DefaultOpen)) {
+      ImGui::InputInt("Max days##autorun", &max_days);
+      max_days = std::clamp(max_days, 1, 36500);
+
+      ImGui::Checkbox("Info##autorun", &stop_info);
+      ImGui::SameLine();
+      ImGui::Checkbox("Warn##autorun", &stop_warn);
+      ImGui::SameLine();
+      ImGui::Checkbox("Error##autorun", &stop_error);
+
+      // Category filter.
+      {
+        const char* cats[] = {
+            "Any",
+            "General",
+            "Research",
+            "Shipyard",
+            "Construction",
+            "Movement",
+            "Combat",
+            "Intel",
+            "Exploration",
+        };
+        ImGui::Combo("Category##autorun", &category_idx, cats, IM_ARRAYSIZE(cats));
+      }
+
+      // Faction filter.
+      {
+        auto& s = sim.state();
+        const auto factions = sorted_factions(s);
+        const auto* sel = find_ptr(s.factions, faction_filter);
+        const char* label = (faction_filter == kInvalidId) ? "Any" : (sel ? sel->name.c_str() : "(missing)");
+
+        if (ImGui::BeginCombo("Faction##autorun", label)) {
+          if (ImGui::Selectable("Any", faction_filter == kInvalidId)) faction_filter = kInvalidId;
+          for (const auto& [fid, name] : factions) {
+            if (ImGui::Selectable(name.c_str(), faction_filter == fid)) faction_filter = fid;
+          }
+          ImGui::EndCombo();
+        }
+      }
+
+      ImGui::InputText("Message contains##autorun", message_contains, IM_ARRAYSIZE(message_contains));
+
+      if (ImGui::Button("Run until event##autorun")) {
+        EventStopCondition stop;
+        stop.stop_on_info = stop_info;
+        stop.stop_on_warn = stop_warn;
+        stop.stop_on_error = stop_error;
+        stop.filter_category = false;
+        stop.category = EventCategory::General;
+        stop.faction_id = faction_filter;
+        stop.message_contains = message_contains;
+
+        if (category_idx > 0) {
+          static const EventCategory cat_vals[] = {
+              EventCategory::General,
+              EventCategory::Research,
+              EventCategory::Shipyard,
+              EventCategory::Construction,
+              EventCategory::Movement,
+              EventCategory::Combat,
+              EventCategory::Intel,
+              EventCategory::Exploration,
+          };
+          const int idx = category_idx - 1;
+          if (idx >= 0 && idx < (int)IM_ARRAYSIZE(cat_vals)) {
+            stop.filter_category = true;
+            stop.category = cat_vals[idx];
+          }
+        }
+
+        auto res = sim.advance_until_event(max_days, stop);
+
+        if (res.hit) {
+          // Jump UI context to the event payload when possible.
+          auto& s = sim.state();
+          if (res.event.system_id != kInvalidId) s.selected_system = res.event.system_id;
+          if (res.event.colony_id != kInvalidId) selected_colony = res.event.colony_id;
+          if (res.event.ship_id != kInvalidId) {
+            if (find_ptr(s.ships, res.event.ship_id)) selected_ship = res.event.ship_id;
+          }
+
+          last_status = "Paused on event after " + std::to_string(res.days_advanced) + " day(s): " + res.event.message;
+        } else {
+          last_status = "No matching events in " + std::to_string(res.days_advanced) + " day(s).";
+        }
+      }
+
+      if (!last_status.empty()) {
+        ImGui::TextWrapped("%s", last_status.c_str());
+      }
+    }
+  }
+
   ImGui::Separator();
   ImGui::Text("Systems");
   const Ship* viewer_ship_for_fow = (selected_ship != kInvalidId) ? find_ptr(sim.state().ships, selected_ship) : nullptr;
@@ -258,7 +403,7 @@ void draw_left_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sele
   }
 }
 
-void draw_right_sidebar(Simulation& sim, UIState& ui, Id selected_ship, Id& selected_colony) {
+void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& selected_colony) {
   auto& s = sim.state();
 
   static int faction_combo_idx = 0;
@@ -1138,6 +1283,282 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id selected_ship, Id& sele
               ImGui::TreePop();
             }
           }
+        }
+
+        ImGui::EndTabItem();
+      }
+    }
+
+    // --- Event log tab ---
+    {
+      const std::uint64_t newest_seq = (s.next_event_seq > 0) ? (s.next_event_seq - 1) : 0;
+      // UIState isn't persisted; it can be out of sync after New Game / Load.
+      if (ui.last_seen_event_seq > newest_seq) ui.last_seen_event_seq = 0;
+
+      int unread = 0;
+      for (const auto& ev : s.events) {
+        if (ev.seq > ui.last_seen_event_seq) ++unread;
+      }
+
+      std::string log_label;
+      if (unread > 0) {
+        log_label = "Log (" + std::to_string(unread) + ")###log_tab";
+      } else {
+        log_label = "Log###log_tab";
+      }
+
+      if (ImGui::BeginTabItem(log_label.c_str())) {
+        // Mark everything up to the newest event as "seen" while the tab is open.
+        if (newest_seq > ui.last_seen_event_seq) ui.last_seen_event_seq = newest_seq;
+
+        ImGui::Text("Event log (saved with game)");
+        ImGui::TextDisabled("Entries: %d   (unread when opened: %d)", (int)s.events.size(), unread);
+
+        static bool show_info = true;
+        static bool show_warn = true;
+        static bool show_error = true;
+        static int category_idx = 0; // 0=All
+        static Id faction_filter = kInvalidId;
+        static int max_show = 200;
+        static char search_buf[128] = "";
+
+        ImGui::Checkbox("Info", &show_info);
+        ImGui::SameLine();
+        ImGui::Checkbox("Warn", &show_warn);
+        ImGui::SameLine();
+        ImGui::Checkbox("Error", &show_error);
+
+        // Category filter.
+        {
+          const char* cats[] = {
+              "All",
+              "General",
+              "Research",
+              "Shipyard",
+              "Construction",
+              "Movement",
+              "Combat",
+              "Intel",
+              "Exploration",
+          };
+          ImGui::Combo("Category", &category_idx, cats, IM_ARRAYSIZE(cats));
+        }
+
+        // Faction filter.
+        {
+          const auto factions = sorted_factions(s);
+          const auto* sel = find_ptr(s.factions, faction_filter);
+          const char* label = (faction_filter == kInvalidId) ? "All" : (sel ? sel->name.c_str() : "(missing)");
+
+          if (ImGui::BeginCombo("Faction", label)) {
+            if (ImGui::Selectable("All", faction_filter == kInvalidId)) faction_filter = kInvalidId;
+            for (const auto& [fid, name] : factions) {
+              if (ImGui::Selectable(name.c_str(), faction_filter == fid)) faction_filter = fid;
+            }
+            ImGui::EndCombo();
+          }
+        }
+
+        ImGui::InputText("Search", search_buf, IM_ARRAYSIZE(search_buf));
+
+        ImGui::InputInt("Show last N", &max_show);
+        max_show = std::clamp(max_show, 10, 5000);
+
+        static char export_path[256] = "events.csv";
+        static std::string export_status;
+
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Clear log")) {
+          s.events.clear();
+          export_status = "Event log cleared.";
+        }
+
+        // Collect visible indices (newest-first) based on filters + limit.
+        std::vector<int> rows;
+        rows.reserve(std::min(max_show, static_cast<int>(s.events.size())));
+        for (int i = static_cast<int>(s.events.size()) - 1; i >= 0 && (int)rows.size() < max_show; --i) {
+          const auto& ev = s.events[static_cast<std::size_t>(i)];
+          const bool ok = (ev.level == EventLevel::Info && show_info) || (ev.level == EventLevel::Warn && show_warn) ||
+                          (ev.level == EventLevel::Error && show_error);
+          if (!ok) continue;
+
+          if (!case_insensitive_contains(ev.message, search_buf)) continue;
+
+          // Category filter.
+          if (category_idx > 0) {
+            static const EventCategory cat_vals[] = {
+                EventCategory::General,
+                EventCategory::Research,
+                EventCategory::Shipyard,
+                EventCategory::Construction,
+                EventCategory::Movement,
+                EventCategory::Combat,
+                EventCategory::Intel,
+                EventCategory::Exploration,
+            };
+            const int idx = category_idx - 1;
+            if (idx < 0 || idx >= (int)IM_ARRAYSIZE(cat_vals)) continue;
+            if (ev.category != cat_vals[idx]) continue;
+          }
+
+          // Faction filter (match either primary or secondary).
+          if (faction_filter != kInvalidId) {
+            if (ev.faction_id != faction_filter && ev.faction_id2 != faction_filter) continue;
+          }
+
+          rows.push_back(i);
+        }
+
+        ImGui::InputText("Export path", export_path, IM_ARRAYSIZE(export_path));
+
+        if (ImGui::SmallButton("Copy visible")) {
+          std::string out;
+          out.reserve(rows.size() * 96);
+          for (int idx : rows) {
+            const auto& ev = s.events[static_cast<std::size_t>(idx)];
+            const nebula4x::Date d(ev.day);
+            out += std::string("[") + d.to_string() + "] #" + std::to_string(static_cast<unsigned long long>(ev.seq)) +
+                   " [" + event_category_label(ev.category) + "] " + event_level_label(ev.level) + ": " + ev.message;
+            out.push_back('\n');
+          }
+          ImGui::SetClipboardText(out.c_str());
+          export_status = "Copied " + std::to_string(rows.size()) + " event(s) to clipboard.";
+        }
+
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Export CSV")) {
+          try {
+            if (export_path[0] == '\0') {
+              export_status = "Export failed: export path is empty.";
+            } else {
+              auto faction_name = [&](Id id) -> std::string {
+                if (id == kInvalidId) return {};
+                const auto* f = find_ptr(s.factions, id);
+                return f ? f->name : std::string{};
+              };
+              auto system_name = [&](Id id) -> std::string {
+                if (id == kInvalidId) return {};
+                const auto* sys = find_ptr(s.systems, id);
+                return sys ? sys->name : std::string{};
+              };
+              auto ship_name = [&](Id id) -> std::string {
+                if (id == kInvalidId) return {};
+                const auto* sh = find_ptr(s.ships, id);
+                return sh ? sh->name : std::string{};
+              };
+              auto colony_name = [&](Id id) -> std::string {
+                if (id == kInvalidId) return {};
+                const auto* c = find_ptr(s.colonies, id);
+                return c ? c->name : std::string{};
+              };
+
+              std::string csv;
+              csv += "day,date,seq,level,category,"
+                     "faction_id,faction,"
+                     "faction_id2,faction2,"
+                     "system_id,system,"
+                     "ship_id,ship,"
+                     "colony_id,colony,"
+                     "message\n";
+
+              // Export in chronological order (oldest to newest within the visible set).
+              for (auto it = rows.rbegin(); it != rows.rend(); ++it) {
+                const auto& ev = s.events[static_cast<std::size_t>(*it)];
+                const nebula4x::Date d(ev.day);
+
+                csv += std::to_string(static_cast<long long>(ev.day));
+                csv += ",";
+                csv += nebula4x::csv_escape(d.to_string());
+                csv += ",";
+                csv += std::to_string(static_cast<unsigned long long>(ev.seq));
+                csv += ",";
+                csv += nebula4x::csv_escape(std::string(event_level_label(ev.level)));
+                csv += ",";
+                csv += nebula4x::csv_escape(std::string(event_category_label(ev.category)));
+                csv += ",";
+                csv += std::to_string(static_cast<unsigned long long>(ev.faction_id));
+                csv += ",";
+                csv += nebula4x::csv_escape(faction_name(ev.faction_id));
+                csv += ",";
+                csv += std::to_string(static_cast<unsigned long long>(ev.faction_id2));
+                csv += ",";
+                csv += nebula4x::csv_escape(faction_name(ev.faction_id2));
+                csv += ",";
+                csv += std::to_string(static_cast<unsigned long long>(ev.system_id));
+                csv += ",";
+                csv += nebula4x::csv_escape(system_name(ev.system_id));
+                csv += ",";
+                csv += std::to_string(static_cast<unsigned long long>(ev.ship_id));
+                csv += ",";
+                csv += nebula4x::csv_escape(ship_name(ev.ship_id));
+                csv += ",";
+                csv += std::to_string(static_cast<unsigned long long>(ev.colony_id));
+                csv += ",";
+                csv += nebula4x::csv_escape(colony_name(ev.colony_id));
+                csv += ",";
+                csv += nebula4x::csv_escape(ev.message);
+                csv += "\n";
+              }
+
+              write_text_file(export_path, csv);
+              export_status = "Exported " + std::to_string(rows.size()) + " event(s) to " + std::string(export_path);
+            }
+          } catch (const std::exception& e) {
+            export_status = std::string("Export failed: ") + e.what();
+            nebula4x::log::error(export_status);
+          }
+        }
+
+        if (!export_status.empty()) {
+          ImGui::TextWrapped("%s", export_status.c_str());
+        }
+
+        ImGui::Separator();
+
+        int shown = 0;
+        for (int i : rows) {
+          const auto& ev = s.events[static_cast<std::size_t>(i)];
+          const nebula4x::Date d(ev.day);
+          ImGui::BulletText("[%s] #%llu [%s] %s: %s", d.to_string().c_str(),
+                            static_cast<unsigned long long>(ev.seq), event_category_label(ev.category),
+                            event_level_label(ev.level), ev.message.c_str());
+
+          ImGui::PushID(i);
+          ImGui::SameLine();
+          if (ImGui::SmallButton("Copy")) {
+            std::string line = std::string("[") + d.to_string() + "] #" +
+                              std::to_string(static_cast<unsigned long long>(ev.seq)) + " [" +
+                              event_category_label(ev.category) + "] " + event_level_label(ev.level) + ": " +
+                              ev.message;
+            ImGui::SetClipboardText(line.c_str());
+          }
+          if (ev.system_id != kInvalidId) {
+            ImGui::SameLine();
+            if (ImGui::SmallButton("View system")) {
+              s.selected_system = ev.system_id;
+            }
+          }
+          if (ev.colony_id != kInvalidId) {
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Select colony")) {
+              selected_colony = ev.colony_id;
+            }
+          }
+          if (ev.ship_id != kInvalidId) {
+            if (const auto* sh = find_ptr(s.ships, ev.ship_id)) {
+              ImGui::SameLine();
+              if (ImGui::SmallButton("Select ship")) {
+                selected_ship = ev.ship_id;
+                s.selected_system = sh->system_id;
+              }
+            }
+          }
+          ImGui::PopID();
+          ++shown;
+        }
+
+        if (shown == 0) {
+          ImGui::TextDisabled("(none)");
         }
 
         ImGui::EndTabItem();

@@ -22,10 +22,14 @@ struct ContentDB {
 
 // A single save-game state.
 struct GameState {
-  int save_version{9};
+  int save_version{12};
   Date date;
 
   Id next_id{1};
+
+  // Monotonic id for SimEvent::seq.
+  // Persisted so that clearing/pruning the event log does not reset the sequence.
+  std::uint64_t next_event_seq{1};
 
   std::unordered_map<Id, StarSystem> systems;
   std::unordered_map<Id, Body> bodies;
@@ -38,6 +42,10 @@ struct GameState {
   std::unordered_map<std::string, ShipDesign> custom_designs;
 
   std::unordered_map<Id, ShipOrders> ship_orders;
+
+  // Persistent simulation event log.
+  // Events are appended during ticks and saved/loaded with the game.
+  std::vector<SimEvent> events;
 
   // UI convenience: which system is selected.
   Id selected_system{kInvalidId};

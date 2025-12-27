@@ -34,6 +34,7 @@ Nebula4X is an **open-source, turn-based space 4X** prototype in **C++20**, insp
   - armed ships auto-fire once/day at hostiles within weapon range
   - damage + ship destruction
 - JSON save/load (versioned)
+- Persistent event log (saved): build/research/jump/combat notifications
 
 ### Desktop UI (`nebula4x`) — SDL2 + Dear ImGui
 
@@ -43,6 +44,7 @@ Nebula4X is an **open-source, turn-based space 4X** prototype in **C++20**, insp
 - Ship list + selection (shows HP, faction)
 - **Fog-of-war** toggle (hides undetected hostiles and undiscovered systems)
 - **Contacts tab**: recently seen hostiles + quick actions
+- **Log tab**: view/filter/clear the saved event log
 - **Jump point markers on the system map**
 - **Ship tab**: quick orders (move, jump travel, attack) + cargo load/unload
   - toggle **repeat orders** for simple looping routes
@@ -54,6 +56,10 @@ Nebula4X is an **open-source, turn-based space 4X** prototype in **C++20**, insp
 
 - Headless simulation runs
 - Optional save/load
+- Start a new game from either the built-in **Sol** scenario or a seeded **random** scenario
+- Content validation helper (`--validate-content`) for blueprint/tech modding
+- Save canonicalizer (`--format-save`) to re-serialize JSON with stable ordering
+- Event log dump (`--dump-events`) to print saved simulation events
 
 ### Tests
 
@@ -108,8 +114,17 @@ Run:
 # UI
 ./build/nebula4x
 
-# CLI
+# CLI (Sol scenario)
 ./build/nebula4x_cli --days 30
+
+# CLI (random scenario)
+./build/nebula4x_cli --scenario random --seed 42 --systems 12 --days 30
+
+# CLI (validate content files)
+./build/nebula4x_cli --validate-content
+
+# CLI (canonicalize a save file)
+./build/nebula4x_cli --format-save --load save.json --save save_canonical.json
 
 # tests
 ctest --test-dir build

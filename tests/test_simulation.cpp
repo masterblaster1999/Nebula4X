@@ -158,6 +158,16 @@ int test_simulation() {
 
     N4X_ASSERT(mines_after == mines_before + 1);
     N4X_ASSERT(dur_after < dur_before);
+
+    // Event log should record the completion.
+    bool saw_event = false;
+    for (const auto& ev : sim.state().events) {
+      if (ev.message.find("Constructed Automated Mine") != std::string::npos) {
+        saw_event = true;
+        break;
+      }
+    }
+    N4X_ASSERT(saw_event);
   }
 
   // --- cargo transfer sanity check ---
@@ -905,6 +915,161 @@ int test_simulation() {
     N4X_ASSERT(fac.active_research_id == "tech_b");
     N4X_ASSERT(std::fabs(fac.active_research_progress - 5.0) < 1e-6);
     N4X_ASSERT(fac.research_queue.empty());
+  }
+
+  // Event log should record exploration + contact state changes.
+  {
+    nebula4x::ContentDB content;
+
+    auto make_min_design = [](const std::string& id, double speed_km_s, double sensor_range_mkm) {
+      nebula4x::ShipDesign d;
+      d.id = id;
+      d.name = id;
+      d.max_hp = 10.0;
+      d.speed_km_s = speed_km_s;
+      d.sensor_range_mkm = sensor_range_mkm;
+      return d;
+    };
+
+    content.designs["freighter_alpha"] = make_min_design("freighter_alpha", 0.0, 0.0);
+    content.designs["surveyor_beta"] = make_min_design("surveyor_beta", 1000000.0, 1000.0);
+    content.designs["escort_gamma"] = make_min_design("escort_gamma", 0.0, 0.0);
+    content.designs["pirate_raider"] = make_min_design("pirate_raider", 0.0, 0.0);
+
+    nebula4x::Simulation sim(std::move(content), nebula4x::SimConfig{});
+
+    const auto terrans_id = find_faction_id(sim.state(), "Terran Union");
+    N4X_ASSERT(terrans_id != nebula4x::kInvalidId);
+
+    const auto surveyor_id = find_ship_id(sim.state(), "Surveyor Beta");
+    N4X_ASSERT(surveyor_id != nebula4x::kInvalidId);
+
+    auto find_jump_id = [](const nebula4x::GameState& s, const std::string& name) {
+      for (const auto& [id, jp] : s.jump_points) {
+        if (jp.name == name) return id;
+      }
+      return nebula4x::kInvalidId;
+    };
+
+    const auto sol_jump = find_jump_id(sim.state(), "Sol Jump Point");
+    N4X_ASSERT(sol_jump != nebula4x::kInvalidId);
+
+    // Transit to Alpha Centauri in one day (very fast ship).
+    N4X_ASSERT(sim.issue_travel_via_jump(surveyor_id, sol_jump));
+    sim.advance_days(1);
+
+    bool saw_discovery = false;
+    bool saw_contact = false;
+    for (const auto& ev : sim.state().events) {
+      if (ev.category == nebula4x::EventCategory::Exploration &&
+          ev.message.find("discovered system Alpha Centauri") != std::string::npos) {
+        saw_discovery = true;
+      }
+      if (ev.category == nebula4x::EventCategory::Intel &&
+          ev.message.find("New contact for Terran Union") != std::string::npos) {
+        saw_contact = true;
+      }
+    }
+
+    N4X_ASSERT(saw_discovery);
+    N4X_ASSERT(saw_contact);
+  }
+
+  // Event seq ids should be monotonic and advance_until_event should pause on a matching new event.
+  {
+    auto make_content = []() {
+      nebula4x::ContentDB content;
+
+      nebula4x::InstallationDef mine;
+      mine.id = "automated_mine";
+      mine.name = "Automated Mine";
+      mine.construction_cost = 200.0; // should take multiple days with baseline CP
+      content.installations[mine.id] = mine;
+
+      nebula4x::InstallationDef yard;
+      yard.id = "shipyard";
+      yard.name = "Shipyard";
+      yard.build_rate_tons_per_day = 0.0;
+      content.installations[yard.id] = yard;
+
+      // Minimal designs referenced by scenario.
+      auto make_min_design = [](const std::string& id) {
+        nebula4x::ShipDesign d;
+        d.id = id;
+        d.name = id;
+        d.max_hp = 10.0;
+        d.speed_km_s = 0.0;
+        d.sensor_range_mkm = 0.0;
+        return d;
+      };
+      content.designs["freighter_alpha"] = make_min_design("freighter_alpha");
+      content.designs["surveyor_beta"] = make_min_design("surveyor_beta");
+      content.designs["escort_gamma"] = make_min_design("escort_gamma");
+      content.designs["pirate_raider"] = make_min_design("pirate_raider");
+
+      return content;
+    };
+
+    nebula4x::Simulation sim(make_content(), nebula4x::SimConfig{});
+
+    const auto earth_id = find_colony_id(sim.state(), "Earth");
+    N4X_ASSERT(earth_id != nebula4x::kInvalidId);
+
+    N4X_ASSERT(sim.enqueue_installation_build(earth_id, "automated_mine", 1));
+
+    nebula4x::EventStopCondition stop;
+    stop.stop_on_info = true;
+    stop.stop_on_warn = true;
+    stop.stop_on_error = true;
+    stop.filter_category = true;
+    stop.category = nebula4x::EventCategory::Construction;
+    stop.message_contains = "Automated Mine";
+
+    auto r = sim.advance_until_event(50, stop);
+    N4X_ASSERT(r.hit);
+    N4X_ASSERT(r.days_advanced > 0 && r.days_advanced <= 50);
+    N4X_ASSERT(r.event.category == nebula4x::EventCategory::Construction);
+    N4X_ASSERT(r.event.message.find("Automated Mine") != std::string::npos);
+    N4X_ASSERT(r.event.seq > 0);
+
+    // Seq should be strictly increasing in the in-memory log.
+    std::uint64_t prev = 0;
+    for (const auto& ev : sim.state().events) {
+      N4X_ASSERT(ev.seq > prev);
+      prev = ev.seq;
+    }
+
+    // Round-trip serialization should preserve seq and keep next_event_seq ahead.
+    const std::string json_text = nebula4x::serialize_game_to_json(sim.state());
+    const auto loaded = nebula4x::deserialize_game_from_json(json_text);
+
+    std::uint64_t prev2 = 0;
+    for (const auto& ev : loaded.events) {
+      N4X_ASSERT(ev.seq > prev2);
+      prev2 = ev.seq;
+    }
+    N4X_ASSERT(loaded.next_event_seq > prev2);
+
+    // Negative filter: if the substring doesn't match, advance_until_event should
+    // not stop even if construction events occur.
+    {
+      nebula4x::Simulation sim2(make_content(), nebula4x::SimConfig{});
+      const auto earth2_id = find_colony_id(sim2.state(), "Earth");
+      N4X_ASSERT(earth2_id != nebula4x::kInvalidId);
+      N4X_ASSERT(sim2.enqueue_installation_build(earth2_id, "automated_mine", 1));
+
+      nebula4x::EventStopCondition stop2;
+      stop2.stop_on_info = true;
+      stop2.stop_on_warn = true;
+      stop2.stop_on_error = true;
+      stop2.filter_category = true;
+      stop2.category = nebula4x::EventCategory::Construction;
+      stop2.message_contains = "THIS SUBSTRING DOES NOT EXIST";
+
+      auto r2 = sim2.advance_until_event(50, stop2);
+      N4X_ASSERT(!r2.hit);
+      N4X_ASSERT(r2.days_advanced == 50);
+    }
   }
 
   return 0;
