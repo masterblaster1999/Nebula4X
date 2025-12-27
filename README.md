@@ -61,9 +61,12 @@ Nebula4X is an **open-source, turn-based space 4X** prototype in **C++20**, insp
 - Save canonicalizer (`--format-save`) to re-serialize JSON with stable ordering
 - Event log dump (`--dump-events`) to print saved simulation events
 - Event log export to CSV (`--export-events-csv PATH`) for spreadsheets/analysis
-- Event log filters: `--events-last`, `--events-category`, `--events-level`, `--events-faction`, `--events-contains`
+- Event log export to JSON (`--export-events-json PATH`) for tooling/analysis
+- Event log filters: `--events-last`, `--events-category`, `--events-level`, `--events-faction`, `--events-contains`, `--events-since`, `--events-until`
+- Event log summary: `--events-summary` (counts by level/category) for the filtered set
 - Time warp: `--until-event N` to advance day-by-day until a new matching event occurs (defaults to warn/error; configurable via `--events-*`)
 - `--quiet` to suppress non-essential summary/status output (useful for scripting)
+- Script helpers: `--list-factions`, `--list-systems`, `--list-bodies`, `--list-jumps`, `--list-ships`, `--list-colonies` (print ids/names, then exit)
 
 ### Tests
 
@@ -134,11 +137,38 @@ Run:
 # CLI (dump recent warning/error events)
 ./build/nebula4x_cli --days 30 --dump-events --events-last 50 --events-level warn,error
 
+# CLI (event log summary for scripts/analysis)
+./build/nebula4x_cli --days 30 --events-summary --events-level warn,error
+
+# CLI (summary of warn/error events in a date range)
+./build/nebula4x_cli --days 365 --events-summary --events-level warn,error --events-since 2200-01-01 --events-until 2200-12-31
+
 # CLI (export event log to CSV)
 ./build/nebula4x_cli --days 30 --export-events-csv events.csv --events-level all
 
+# CLI (export event log to JSON)
+./build/nebula4x_cli --days 30 --export-events-json events.json --events-level all
+
 # CLI (script-friendly export, no summary output)
 ./build/nebula4x_cli --load save.json --quiet --export-events-csv events.csv --events-level warn,error
+
+# CLI (list factions in a save)
+./build/nebula4x_cli --load save.json --list-factions
+
+# CLI (list systems in a save)
+./build/nebula4x_cli --load save.json --list-systems
+
+# CLI (list bodies in a save)
+./build/nebula4x_cli --load save.json --list-bodies
+
+# CLI (list jump points in a save)
+./build/nebula4x_cli --load save.json --list-jumps
+
+# CLI (list ships in a save)
+./build/nebula4x_cli --load save.json --list-ships
+
+# CLI (list colonies in a save)
+./build/nebula4x_cli --load save.json --list-colonies
 
 # CLI (time warp until next warning/error event, then save)
 ./build/nebula4x_cli --until-event 365 --save autosave.json
