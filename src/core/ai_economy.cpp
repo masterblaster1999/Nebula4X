@@ -195,7 +195,7 @@ void ensure_research_plan(const Simulation& sim, Faction& f) {
   // If still nothing queued, pick a cheapest currently-researchable tech.
   if (f.research_queue.empty()) {
     std::string best;
-    int best_cost = 0;
+    double best_cost = 0.0;
     for (const auto& tid : sorted_keys(sim.content().techs)) {
       const auto& t = sim.content().techs.at(tid);
       if (tech_known(f, tid)) continue;

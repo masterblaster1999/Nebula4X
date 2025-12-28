@@ -62,8 +62,12 @@ void maybe_fix_export_extension(char* path, std::size_t cap, const char* desired
   }
 
   if (p.size() >= cap) p.resize(cap - 1);
+#if defined(_MSC_VER)
+  strncpy_s(path, cap, p.c_str(), _TRUNCATE);
+#else
   std::strncpy(path, p.c_str(), cap);
   path[cap - 1] = '\0';
+#endif
 }
 
 const char* ship_role_label(ShipRole r) {
@@ -1975,7 +1979,7 @@ if (colony->shipyard_queue.empty()) {
     for (int i = 0; i < static_cast<int>(colony->shipyard_queue.size()); ++i) {
       const auto& bo = colony->shipyard_queue[static_cast<std::size_t>(i)];
       const bool is_refit = (bo.refit_ship_id != kInvalidId);
-      const Ship* refit_ship = is_refit ? find_ptr(st.ships, bo.refit_ship_id) : nullptr;
+      const Ship* refit_ship = is_refit ? find_ptr(s.ships, bo.refit_ship_id) : nullptr;
 
       const auto* d = sim.find_design(bo.design_id);
       const std::string design_nm = d ? d->name : bo.design_id;
@@ -2150,10 +2154,10 @@ if (colony->shipyard_queue.empty()) {
           }
 
           std::vector<Id> docked_ships;
-          if (const auto* body = find_ptr(st.bodies, colony->body_id)) {
-            if (const auto* sys = find_ptr(st.systems, body->system_id)) {
+          if (const auto* body = find_ptr(s.bodies, colony->body_id)) {
+            if (const auto* sys = find_ptr(s.systems, body->system_id)) {
               for (Id sid : sys->ships) {
-                const Ship* sh = find_ptr(st.ships, sid);
+                const Ship* sh = find_ptr(s.ships, sid);
                 if (!sh) continue;
                 if (sh->faction_id != colony->faction_id) continue;
                 if (already_refitting.count(sid)) continue;
@@ -2183,7 +2187,7 @@ if (colony->shipyard_queue.empty()) {
             ship_label_storage.reserve(docked_ships.size());
             ship_labels.reserve(docked_ships.size());
             for (Id sid : docked_ships) {
-              const Ship* sh = find_ptr(st.ships, sid);
+              const Ship* sh = find_ptr(s.ships, sid);
               ship_label_storage.push_back((sh ? sh->name : std::string("Ship ") + std::to_string((int)sid)) + "##" +
                                            std::to_string((int)sid));
             }
@@ -2242,7 +2246,7 @@ if (colony->shipyard_queue.empty()) {
             "unpaid construction orders.");
 
         if (ImGui::Button("Enable auto-freight for all freighters")) {
-          for (auto& [sid, ship] : st.ships) {
+          for (auto& [sid, ship] : s.ships) {
             if (ship.faction_id != selected_faction_id) continue;
             const auto* d = sim.find_design(ship.design_id);
             if (!d || d->cargo_tons <= 0.0) continue;
@@ -2253,7 +2257,7 @@ if (colony->shipyard_queue.empty()) {
         }
         ImGui::SameLine();
         if (ImGui::Button("Disable auto-freight for this faction")) {
-          for (auto& [sid, ship] : st.ships) {
+          for (auto& [sid, ship] : s.ships) {
             if (ship.faction_id != selected_faction_id) continue;
             ship.auto_freight = false;
           }
@@ -2291,7 +2295,7 @@ if (colony->shipyard_queue.empty()) {
           ImGui::TableHeadersRow();
 
           for (const auto& r : rows) {
-            const Colony* c = find_ptr(st.colonies, r.colony_id);
+            const Colony* c = find_ptr(s.colonies, r.colony_id);
             ImGui::TableNextRow();
             ImGui::TableSetColumnIndex(0);
             if (c) {
@@ -2311,8 +2315,8 @@ if (colony->shipyard_queue.empty()) {
 
         ImGui::SeparatorText("Auto-freight ships");
         std::vector<Id> ship_ids_sorted;
-        ship_ids_sorted.reserve(st.ships.size());
-        for (const auto& [sid, _] : st.ships) ship_ids_sorted.push_back(sid);
+        ship_ids_sorted.reserve(s.ships.size());
+        for (const auto& [sid, _] : s.ships) ship_ids_sorted.push_back(sid);
         std::sort(ship_ids_sorted.begin(), ship_ids_sorted.end());
 
         int shown = 0;
@@ -2325,7 +2329,7 @@ if (colony->shipyard_queue.empty()) {
           ImGui::TableHeadersRow();
 
           for (Id sid : ship_ids_sorted) {
-            const Ship* sh = find_ptr(st.ships, sid);
+            const Ship* sh = find_ptr(s.ships, sid);
             if (!sh) continue;
             if (sh->faction_id != selected_faction_id) continue;
             if (!sh->auto_freight) continue;
@@ -2335,7 +2339,7 @@ if (colony->shipyard_queue.empty()) {
             double used = 0.0;
             for (const auto& [_, tons] : sh->cargo) used += std::max(0.0, tons);
 
-            const StarSystem* sys = find_ptr(st.systems, sh->system_id);
+            const StarSystem* sys = find_ptr(s.systems, sh->system_id);
             const bool in_fleet = (sim.fleet_for_ship(sid) != kInvalidId);
 
             ImGui::TableNextRow();
@@ -2344,11 +2348,13 @@ if (colony->shipyard_queue.empty()) {
             ImGui::TableSetColumnIndex(1);
             ImGui::TextUnformatted(sys ? sys->name.c_str() : "?");
             ImGui::TableSetColumnIndex(2);
-            if (sh->order_queue.empty()) {
+            const ShipOrders* so = find_ptr(s.ship_orders, sid);
+            if (!so || so->queue.empty()) {
               ImGui::TextDisabled("Idle");
             } else {
-              const std::string s = order_to_string(sh->order_queue.front());
-              ImGui::TextUnformatted(s.c_str());
+              std::string order_str = order_to_string(so->queue.front());
+              if (so->repeat) order_str += " (repeat)";
+              ImGui::TextUnformatted(order_str.c_str());
             }
             ImGui::TableSetColumnIndex(3);
             if (cap > 0.0) {
@@ -2448,7 +2454,7 @@ if (colony->shipyard_queue.empty()) {
         ImGui::Separator();
         ImGui::Text("Available techs");
 
-        // Compute available list.
+        // Compute available lis.
         std::vector<std::string> available;
         for (const auto& [tid, tech] : sim.content().techs) {
           if (vec_contains(selected_faction->known_techs, tid)) continue;
@@ -2623,7 +2629,7 @@ if (colony->shipyard_queue.empty()) {
             ImGui::Text("Mass: %.0f t", d->mass_tons);
             ImGui::Text("Speed: %.1f km/s", d->speed_km_s);
             ImGui::Text("HP: %.0f", d->max_hp);
-            // A design isn't carrying cargo; only an instantiated ship has a cargo manifest.
+            // A design isn't carrying cargo; only an instantiated ship has a cargo manifes.
             const double cargo_used_tons = 0.0;
             ImGui::Text("Cargo: %.0f / %.0f t", cargo_used_tons, d->cargo_tons);
             ImGui::Text("Sensor: %.0f mkm", d->sensor_range_mkm);
@@ -2643,6 +2649,86 @@ if (colony->shipyard_queue.empty()) {
         const char* roles[] = {"Freighter", "Surveyor", "Combatant"};
         role_idx = std::clamp(role_idx, 0, 2);
 
+        // --- Editor helpers ---
+        // Seed the editor from the currently selected design (either load the custom
+        // design for editing, or clone any design to a new custom id).
+        if (!all_ids.empty()) {
+          const auto* seed = sim.find_design(all_ids[design_sel]);
+          if (seed) {
+            const bool is_custom = (sim.state().custom_designs.find(seed->id) != sim.state().custom_designs.end());
+            const bool is_builtin = (sim.content().designs.find(seed->id) != sim.content().designs.end());
+
+            auto copy_to_buf = [](char* dst, size_t dst_size, const std::string& src) {
+              if (!dst || dst_size == 0) return;
+              std::snprintf(dst, dst_size, "%s", src.c_str());
+              dst[dst_size - 1] = '\0';
+            };
+
+            auto role_to_idx = [](ShipRole r) -> int {
+              switch (r) {
+                case ShipRole::Freighter: return 0;
+                case ShipRole::Surveyor: return 1;
+                case ShipRole::Combatant: return 2;
+                default: return 0;
+              }
+            };
+
+            auto make_unique_custom_id = [&](const std::string& base) -> std::string {
+              std::string stem = base.empty() ? "custom_design" : base;
+              // Built-in ids can't be used for custom upserts.
+              if (sim.content().designs.find(stem) != sim.content().designs.end()) stem += "_custom";
+
+              std::string out = stem;
+              int n = 2;
+              while (sim.content().designs.find(out) != sim.content().designs.end() ||
+                     sim.state().custom_designs.find(out) != sim.state().custom_designs.end()) {
+                out = stem + std::to_string(n++);
+              }
+              return out;
+            };
+
+            ImGui::Spacing();
+            ImGui::TextDisabled("Seed editor from selected design");
+
+            if (is_custom) {
+              if (ImGui::SmallButton("Load custom##design_load")) {
+                copy_to_buf(new_id, sizeof(new_id), seed->id);
+                copy_to_buf(new_name, sizeof(new_name), seed->name);
+                role_idx = role_to_idx(seed->role);
+                comp_list = seed->components;
+                status = "Loaded custom design: " + seed->id;
+              }
+              if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Loads the selected custom design into the editor for editing.");
+              }
+              ImGui::SameLine();
+            }
+
+            const char* clone_label = is_builtin ? "Clone built-in##design_clone" : "Clone##design_clone";
+            if (ImGui::SmallButton(clone_label)) {
+              const std::string new_custom_id = make_unique_custom_id(seed->id);
+              copy_to_buf(new_id, sizeof(new_id), new_custom_id);
+              copy_to_buf(new_name, sizeof(new_name), seed->name);
+              role_idx = role_to_idx(seed->role);
+              comp_list = seed->components;
+              status = "Cloned design: " + seed->id + " -> " + new_custom_id;
+            }
+            if (ImGui::IsItemHovered()) {
+              ImGui::SetTooltip(is_builtin ? "Built-in designs can't be overwritten; this makes a new custom id."
+                                           : "Copies the selected design into the editor under a new id.");
+            }
+
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Clear##design_clear")) {
+              new_id[0] = '\0';
+              new_name[0] = '\0';
+              role_idx = 0;
+              comp_list.clear();
+              status = "Cleared editor.";
+            }
+          }
+        }
+
         ImGui::InputText("Design ID", new_id, sizeof(new_id));
         ImGui::InputText("Name", new_name, sizeof(new_name));
         ImGui::Combo("Role", &role_idx, roles, IM_ARRAYSIZE(roles));
@@ -2650,18 +2736,57 @@ if (colony->shipyard_queue.empty()) {
         ImGui::Spacing();
         ImGui::Text("Components");
 
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Sort##comp_sort")) {
+          auto type_rank = [](ComponentType t) {
+            switch (t) {
+              case ComponentType::Engine: return 0;
+              case ComponentType::Reactor: return 1;
+              case ComponentType::Cargo: return 2;
+              case ComponentType::Sensor: return 3;
+              case ComponentType::Weapon: return 4;
+              case ComponentType::Armor: return 5;
+              default: return 6;
+            }
+          };
+
+          std::sort(comp_list.begin(), comp_list.end(), [&](const std::string& a, const std::string& b) {
+            const auto ita = sim.content().components.find(a);
+            const auto itb = sim.content().components.find(b);
+            const ComponentDef* ca = (ita == sim.content().components.end()) ? nullptr : &ita->second;
+            const ComponentDef* cb = (itb == sim.content().components.end()) ? nullptr : &itb->second;
+
+            const int ra = ca ? type_rank(ca->type) : 999;
+            const int rb = cb ? type_rank(cb->type) : 999;
+            if (ra != rb) return ra < rb;
+
+            const std::string& na = ca ? ca->name : a;
+            const std::string& nb = cb ? cb->name : b;
+            if (na != nb) return na < nb;
+            return a < b;
+          });
+        }
+
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Clear##comp_clear")) {
+          comp_list.clear();
+        }
+
         // Show current components with remove buttons.
-        for (size_t i = 0; i < comp_list.size(); ++i) {
-          const auto& cid = comp_list[i];
+        if (comp_list.empty()) {
+          ImGui::TextDisabled("(none)");
+        }
+        for (int i = 0; i < static_cast<int>(comp_list.size());) {
+          const auto& cid = comp_list[static_cast<size_t>(i)];
           const auto it = sim.content().components.find(cid);
           const char* cname = (it == sim.content().components.end()) ? cid.c_str() : it->second.name.c_str();
           ImGui::BulletText("%s", cname);
           ImGui::SameLine();
           if (ImGui::SmallButton(("Remove##" + std::to_string(i)).c_str())) {
-            comp_list.erase(comp_list.begin() + static_cast<long>(i));
-            --i;
-            continue;
+            comp_list.erase(comp_list.begin() + i);
+            continue; // don't advance index
           }
+          ++i;
         }
 
         // Available components (unlocked)
@@ -2672,11 +2797,21 @@ if (colony->shipyard_queue.empty()) {
         const char* filters[] = {"All", "Engine", "Cargo", "Sensor", "Reactor", "Weapon", "Armor"};
         ImGui::Combo("Filter", &comp_filter, filters, IM_ARRAYSIZE(filters));
 
+        static char comp_search[64] = "";
+        ImGui::InputText("Search##comp_search", comp_search, sizeof(comp_search));
+        ImGui::SameLine();
+        ImGui::TextDisabled("(name or id...)");
+
         std::vector<std::string> avail_components;
         for (const auto& [cid, cdef] : sim.content().components) {
           // Only show unlocked for this faction (unless it's already in the design).
           const bool unlocked = vec_contains(selected_faction->unlocked_components, cid);
-          if (!unlocked) continue;
+          const bool in_design = vec_contains(comp_list, cid);
+          if (!unlocked && !in_design) continue;
+
+          if (comp_search[0] != '\0') {
+            if (!case_insensitive_contains(cid, comp_search) && !case_insensitive_contains(cdef.name, comp_search)) continue;
+          }
 
           if (comp_filter != 0) {
             const ComponentType desired =
@@ -2713,6 +2848,22 @@ if (colony->shipyard_queue.empty()) {
           for (const auto& s2 : comp_label_storage) comp_labels.push_back(s2.c_str());
 
           ImGui::Combo("Component", &add_comp_idx, comp_labels.data(), static_cast<int>(comp_labels.size()));
+
+          // Quick preview of the selected component.
+          if (!avail_components.empty()) {
+            const auto it = sim.content().components.find(avail_components[add_comp_idx]);
+            if (it != sim.content().components.end()) {
+              const auto& c = it->second;
+              ImGui::TextDisabled("Selected: %s (%s)", c.name.c_str(), component_type_label(c.type));
+              ImGui::TextDisabled("Mass: %.0f t", c.mass_tons);
+              if (c.speed_km_s > 0.0) ImGui::TextDisabled("Speed: %.1f km/s", c.speed_km_s);
+              if (c.power > 0.0) ImGui::TextDisabled("Power: %.1f", c.power);
+              if (c.cargo_tons > 0.0) ImGui::TextDisabled("Cargo: %.0f t", c.cargo_tons);
+              if (c.sensor_range_mkm > 0.0) ImGui::TextDisabled("Sensor: %.0f mkm", c.sensor_range_mkm);
+              if (c.weapon_damage > 0.0) ImGui::TextDisabled("Weapon: %.1f (range %.1f)", c.weapon_damage, c.weapon_range_mkm);
+              if (c.hp_bonus > 0.0) ImGui::TextDisabled("HP bonus: %.0f", c.hp_bonus);
+            }
+          }
 
           if (ImGui::Button("Add")) {
             comp_list.push_back(avail_components[add_comp_idx]);

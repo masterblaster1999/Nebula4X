@@ -550,12 +550,12 @@ std::string serialize_game_to_json(const GameState& s) {
     o["formation"] = std::string(fleet_formation_to_string(f.formation));
     o["formation_spacing_mkm"] = f.formation_spacing_mkm;
 
-    auto ships = f.ship_ids;
-    std::sort(ships.begin(), ships.end());
-    ships.erase(std::unique(ships.begin(), ships.end()), ships.end());
+    auto fleet_ship_ids = f.ship_ids;
+    std::sort(fleet_ship_ids.begin(), fleet_ship_ids.end());
+    fleet_ship_ids.erase(std::unique(fleet_ship_ids.begin(), fleet_ship_ids.end()), fleet_ship_ids.end());
     Array ship_ids;
-    ship_ids.reserve(ships.size());
-    for (Id sid : ships) ship_ids.push_back(static_cast<double>(sid));
+    ship_ids.reserve(fleet_ship_ids.size());
+    for (Id sid : fleet_ship_ids) ship_ids.push_back(static_cast<double>(sid));
     o["ship_ids"] = ship_ids;
 
     fleets.push_back(o);
