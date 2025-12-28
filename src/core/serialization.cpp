@@ -132,6 +132,10 @@ Value order_to_json(const Order& order) {
         } else if constexpr (std::is_same_v<T, MoveToBody>) {
           obj["type"] = std::string("move_to_body");
           obj["body_id"] = static_cast<double>(o.body_id);
+        } else if constexpr (std::is_same_v<T, OrbitBody>) {
+          obj["type"] = std::string("orbit_body");
+          obj["body_id"] = static_cast<double>(o.body_id);
+          obj["duration_days"] = static_cast<double>(o.duration_days);
         } else if constexpr (std::is_same_v<T, TravelViaJump>) {
           obj["type"] = std::string("travel_via_jump");
           obj["jump_point_id"] = static_cast<double>(o.jump_point_id);
@@ -155,6 +159,14 @@ Value order_to_json(const Order& order) {
           obj["colony_id"] = static_cast<double>(o.colony_id);
           if (!o.mineral.empty()) obj["mineral"] = o.mineral;
           obj["tons"] = o.tons;
+        } else if constexpr (std::is_same_v<T, TransferCargoToShip>) {
+          obj["type"] = std::string("transfer_cargo_to_ship");
+          obj["target_ship_id"] = static_cast<double>(o.target_ship_id);
+          if (!o.mineral.empty()) obj["mineral"] = o.mineral;
+          obj["tons"] = o.tons;
+        } else if constexpr (std::is_same_v<T, ScrapShip>) {
+          obj["type"] = std::string("scrap_ship");
+          obj["colony_id"] = static_cast<double>(o.colony_id);
         }
         return obj;
       },
@@ -174,6 +186,12 @@ Order order_from_json(const Value& v) {
     m.body_id = static_cast<Id>(o.at("body_id").int_value());
     return m;
   }
+  if (type == "orbit_body") {
+    OrbitBody m;
+    m.body_id = static_cast<Id>(o.at("body_id").int_value());
+    m.duration_days = static_cast<int>(o.at("duration_days").int_value(-1));
+    return m;
+  }
   if (type == "travel_via_jump") {
     TravelViaJump t;
     t.jump_point_id = static_cast<Id>(o.at("jump_point_id").int_value());
@@ -183,7 +201,6 @@ Order order_from_json(const Value& v) {
     AttackShip a;
     a.target_ship_id = static_cast<Id>(o.at("target_ship_id").int_value());
 
-    // Back-compat: older saves won't have last-known tracking.
     if (auto lk_it = o.find("last_known_position_mkm"); lk_it != o.end()) {
       a.last_known_position_mkm = vec2_from_json(lk_it->second);
       a.has_last_known = true;
@@ -191,7 +208,6 @@ Order order_from_json(const Value& v) {
     if (auto hk_it = o.find("has_last_known"); hk_it != o.end()) {
       a.has_last_known = hk_it->second.bool_value(a.has_last_known);
     }
-
     return a;
   }
   if (type == "wait_days") {
@@ -199,7 +215,6 @@ Order order_from_json(const Value& v) {
     if (auto dr_it = o.find("days_remaining"); dr_it != o.end()) {
       w.days_remaining = static_cast<int>(dr_it->second.int_value(0));
     } else if (auto d_it = o.find("days"); d_it != o.end()) {
-      // Friendly alias for manual edits.
       w.days_remaining = static_cast<int>(d_it->second.int_value(0));
     }
     return w;
@@ -217,6 +232,18 @@ Order order_from_json(const Value& v) {
     if (auto m_it = o.find("mineral"); m_it != o.end()) u.mineral = m_it->second.string_value();
     if (auto t_it = o.find("tons"); t_it != o.end()) u.tons = t_it->second.number_value(0.0);
     return u;
+  }
+  if (type == "transfer_cargo_to_ship") {
+    TransferCargoToShip t;
+    t.target_ship_id = static_cast<Id>(o.at("target_ship_id").int_value(kInvalidId));
+    if (auto m_it = o.find("mineral"); m_it != o.end()) t.mineral = m_it->second.string_value();
+    if (auto t_it = o.find("tons"); t_it != o.end()) t.tons = t_it->second.number_value(0.0);
+    return t;
+  }
+  if (type == "scrap_ship") {
+    ScrapShip s;
+    s.colony_id = static_cast<Id>(o.at("colony_id").int_value(kInvalidId));
+    return s;
   }
   throw std::runtime_error("Unknown order type: " + type);
 }
@@ -280,9 +307,6 @@ std::string serialize_game_to_json(const GameState& s) {
 
     Array bodies;
     {
-      // Deterministic output: StarSystem entity lists are stored as vectors
-      // that can be mutated by gameplay (e.g. ships moving between systems).
-      // Sort ids so saves don't churn due to incidental ordering.
       auto ids = sys.bodies;
       std::sort(ids.begin(), ids.end());
       for (Id bid : ids) bodies.push_back(static_cast<double>(bid));
@@ -410,19 +434,16 @@ std::string serialize_game_to_json(const GameState& s) {
     o["active_research_id"] = f.active_research_id;
     o["active_research_progress"] = f.active_research_progress;
     o["research_queue"] = string_vector_to_json(f.research_queue);
-    // Treat these as sets for save stability (reduce churn / diffs).
     o["known_techs"] = string_vector_to_json(sorted_unique_copy(f.known_techs));
     o["unlocked_components"] = string_vector_to_json(sorted_unique_copy(f.unlocked_components));
     o["unlocked_installations"] = string_vector_to_json(sorted_unique_copy(f.unlocked_installations));
 
-    // Exploration / map knowledge.
     Array discovered_systems;
     const auto disc = sorted_unique_copy(f.discovered_systems);
     discovered_systems.reserve(disc.size());
     for (Id sid : disc) discovered_systems.push_back(static_cast<double>(sid));
     o["discovered_systems"] = discovered_systems;
 
-    // Optional contact memory (prototype intel).
     Array contacts;
     contacts.reserve(f.ship_contacts.size());
     for (Id sid : sorted_keys(f.ship_contacts)) {
@@ -474,7 +495,6 @@ std::string serialize_game_to_json(const GameState& s) {
     for (const auto& ord : orders.queue) q.push_back(order_to_json(ord));
     o["queue"] = q;
 
-    // Optional: order repeating (trade routes / patrol loops).
     o["repeat"] = orders.repeat;
     Array tmpl;
     tmpl.reserve(orders.repeat_template.size());
@@ -484,8 +504,6 @@ std::string serialize_game_to_json(const GameState& s) {
     ship_orders.push_back(o);
   }
   root["ship_orders"] = ship_orders;
-
-
 
   // Persistent simulation event log.
   Array events;
@@ -514,33 +532,26 @@ GameState deserialize_game_from_json(const std::string& json_text) {
 
   GameState s;
   {
-    // Extremely old/hand-edited saves may not include a version field.
-    // Treat it as version 1 and promote it to the current in-memory schema version.
     int loaded_version = 1;
     if (auto itv = root.find("save_version"); itv != root.end()) {
       loaded_version = static_cast<int>(itv->second.int_value(1));
     }
-
-    // Promote older saves to the current in-memory schema version.
     s.save_version = loaded_version < kCurrentSaveVersion ? kCurrentSaveVersion : loaded_version;
   }
 
   s.date = Date::parse_iso_ymd(root.at("date").string_value());
 
-  // next_id is optional in very early prototypes; we repair it after loading all entities.
   s.next_id = 1;
   if (auto itnid = root.find("next_id"); itnid != root.end()) {
     s.next_id = static_cast<Id>(itnid->second.int_value(1));
   }
 
-  // Optional (introduced in v12).
   s.next_event_seq = 1;
   if (auto itseq = root.find("next_event_seq"); itseq != root.end()) {
     s.next_event_seq = static_cast<std::uint64_t>(itseq->second.int_value(1));
   }
   if (s.next_event_seq == 0) s.next_event_seq = 1;
 
-  // Optional UI convenience (older saves may not have it).
   s.selected_system = kInvalidId;
   if (auto itsel = root.find("selected_system"); itsel != root.end()) {
     s.selected_system = static_cast<Id>(itsel->second.int_value(kInvalidId));
@@ -564,7 +575,6 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     s.systems[sys.id] = sys;
   }
 
-  // Repair invalid UI state (e.g. hand-edited saves or deleted systems).
   if (s.selected_system != kInvalidId && s.systems.find(s.selected_system) == s.systems.end()) {
     s.selected_system = kInvalidId;
   }
@@ -625,7 +635,6 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     c.minerals = map_string_double_from_json(o.at("minerals"));
     c.installations = map_string_int_from_json(o.at("installations"));
 
-    // shipyard_queue was added after the earliest prototypes; treat it as optional.
     if (auto itq = o.find("shipyard_queue"); itq != o.end()) {
       for (const auto& qv : itq->second.array()) {
         const auto& qo = qv.object();
@@ -636,7 +645,6 @@ GameState deserialize_game_from_json(const std::string& json_text) {
       }
     }
 
-    // construction_queue is optional (older saves won't have it).
     if (auto itq = o.find("construction_queue"); itq != o.end()) {
       for (const auto& qv : itq->second.array()) {
         const auto& qo = qv.object();
@@ -675,7 +683,6 @@ GameState deserialize_game_from_json(const std::string& json_text) {
       }
     }
 
-    // Optional contact memory.
     if (auto it = o.find("ship_contacts"); it != o.end()) {
       for (const auto& cv : it->second.array()) {
         const auto& co = cv.object();
@@ -783,16 +790,13 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     }
   }
 
-  // Persistent simulation event log (optional; older saves won't have it).
+  // Persistent simulation event log.
   if (auto it = root.find("events"); it != root.end()) {
     std::uint64_t seq_cursor = 0;
     for (const auto& evv : it->second.array()) {
       const auto& o = evv.object();
       SimEvent ev;
 
-      // Optional (introduced in v12). We also repair seq values to ensure they
-      // are monotonic-increasing in memory, which makes it safe to use seq as
-      // a stable "new event" marker for time-warp helpers.
       std::uint64_t wanted_seq = 0;
       if (auto its = o.find("seq"); its != o.end()) {
         wanted_seq = static_cast<std::uint64_t>(its->second.int_value(0));
@@ -817,10 +821,8 @@ GameState deserialize_game_from_json(const std::string& json_text) {
       s.events.push_back(std::move(ev));
     }
 
-    // Ensure next_event_seq is ahead of the largest loaded seq.
     if (s.next_event_seq <= seq_cursor) s.next_event_seq = seq_cursor + 1;
   }
-
 
   // Ensure next_id is sane.
   Id max_id = 0;
