@@ -629,7 +629,6 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
         if (sh->cargo.empty()) {
           ImGui::TextDisabled("(empty)");
         } else {
-          // Show carried minerals (sorted for readability).
           std::vector<std::pair<std::string, double>> cargo_list;
           cargo_list.reserve(sh->cargo.size());
           for (const auto& [k, v] : sh->cargo) cargo_list.emplace_back(k, v);
@@ -640,6 +639,7 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
           }
         }
 
+        // --- Colony Transfer ---
         ImGui::Spacing();
         ImGui::Text("Transfer with selected colony");
         ImGui::TextDisabled("Load/unload is an order: the ship will move to the colony body, then transfer in one day.");
@@ -666,7 +666,6 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
                                 dest_label.c_str());
           }
 
-          // Build a stable mineral list (union of colony minerals + ship cargo).
           std::vector<std::string> minerals;
           minerals.reserve(sel_col->minerals.size() + sh->cargo.size());
           for (const auto& [k, _] : sel_col->minerals) minerals.push_back(k);
@@ -677,13 +676,12 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
           static int mineral_idx = 0;
           static double transfer_tons = 0.0;
 
-          // Clamp idx when list changes.
-          const int max_idx = static_cast<int>(minerals.size()); // + 1 for "All"
+          const int max_idx = static_cast<int>(minerals.size());
           mineral_idx = std::max(0, std::min(mineral_idx, max_idx));
 
           const std::string current_label = (mineral_idx == 0) ? std::string("All minerals") : minerals[mineral_idx - 1];
 
-          if (ImGui::BeginCombo("Mineral", current_label.c_str())) {
+          if (ImGui::BeginCombo("Mineral##Col", current_label.c_str())) {
             if (ImGui::Selectable("All minerals", mineral_idx == 0)) mineral_idx = 0;
             for (int i = 0; i < static_cast<int>(minerals.size()); ++i) {
               const bool selected = (mineral_idx == i + 1);
@@ -692,21 +690,93 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
             ImGui::EndCombo();
           }
 
-          ImGui::InputDouble("Tons (0 = as much as possible)", &transfer_tons, 10.0, 100.0, "%.1f");
+          ImGui::InputDouble("Tons##Col (0 = max)", &transfer_tons, 10.0, 100.0, "%.1f");
 
           const std::string mineral_id = (mineral_idx == 0) ? std::string() : minerals[mineral_idx - 1];
 
-          if (ImGui::Button("Load##cargo")) {
+          if (ImGui::Button("Load##Col")) {
             if (!sim.issue_load_mineral(selected_ship, selected_colony, mineral_id, transfer_tons, ui.fog_of_war)) {
               nebula4x::log::warn("Couldn't queue load order (no known route?).");
             }
           }
           ImGui::SameLine();
-          if (ImGui::Button("Unload##cargo")) {
+          if (ImGui::Button("Unload##Col")) {
             if (!sim.issue_unload_mineral(selected_ship, selected_colony, mineral_id, transfer_tons, ui.fog_of_war)) {
               nebula4x::log::warn("Couldn't queue unload order (no known route?).");
             }
           }
+          ImGui::SameLine();
+          if (ImGui::Button("Scrap Ship")) {
+              if(!sim.issue_scrap_ship(selected_ship, selected_colony, ui.fog_of_war)) {
+                  nebula4x::log::warn("Couldn't queue scrap order.");
+              }
+          }
+        }
+
+        // --- Ship-to-Ship Transfer ---
+        ImGui::Separator();
+        ImGui::Text("Ship-to-Ship Transfer");
+        ImGui::TextDisabled("Transfers cargo to another friendly ship in the same system.");
+        
+        static int target_ship_idx = -1;
+        std::vector<std::pair<Id, std::string>> friendly_ships;
+        if (sys) {
+            for (Id sid : sys->ships) {
+                if (sid == selected_ship) continue;
+                const auto* other = find_ptr(s.ships, sid);
+                if (other && other->faction_id == sh->faction_id) {
+                    friendly_ships.push_back({sid, other->name});
+                }
+            }
+        }
+
+        if (friendly_ships.empty()) {
+            ImGui::TextDisabled("No other friendly ships in system.");
+        } else {
+            // Validate selection index
+            if (target_ship_idx >= static_cast<int>(friendly_ships.size())) target_ship_idx = -1;
+            
+            const char* current_ship_label = (target_ship_idx >= 0) ? friendly_ships[target_ship_idx].second.c_str() : "Select Target...";
+            if (ImGui::BeginCombo("Target Ship", current_ship_label)) {
+                for(int i=0; i < static_cast<int>(friendly_ships.size()); ++i) {
+                     const bool selected = (target_ship_idx == i);
+                     if (ImGui::Selectable(friendly_ships[i].second.c_str(), selected)) target_ship_idx = i;
+                }
+                ImGui::EndCombo();
+            }
+
+            // Reuse mineral list from ship cargo only
+            std::vector<std::string> ship_minerals;
+            for(const auto& [k, v] : sh->cargo) ship_minerals.push_back(k);
+            std::sort(ship_minerals.begin(), ship_minerals.end());
+            
+            static int ship_min_idx = 0;
+            static double ship_transfer_tons = 0.0;
+            // Ensure index is valid
+            if (ship_min_idx > static_cast<int>(ship_minerals.size())) ship_min_idx = 0;
+            
+            const std::string cur_ship_min_label = (ship_min_idx == 0) ? "All minerals" : ship_minerals[ship_min_idx - 1];
+
+            if (ImGui::BeginCombo("Mineral##Ship", cur_ship_min_label.c_str())) {
+                if (ImGui::Selectable("All minerals", ship_min_idx == 0)) ship_min_idx = 0;
+                for(int i=0; i< static_cast<int>(ship_minerals.size()); ++i) {
+                    const bool selected = (ship_min_idx == i+1);
+                    if (ImGui::Selectable(ship_minerals[i].c_str(), selected)) ship_min_idx = i+1;
+                }
+                ImGui::EndCombo();
+            }
+            
+            ImGui::InputDouble("Tons##Ship (0 = max)", &ship_transfer_tons, 10.0, 100.0, "%.1f");
+            
+            if (ImGui::Button("Transfer to Target")) {
+                if (target_ship_idx >= 0) {
+                    const Id target_id = friendly_ships[target_ship_idx].first;
+                    const std::string min_id = (ship_min_idx == 0) ? "" : ship_minerals[ship_min_idx-1];
+                    if (!sim.issue_transfer_cargo_to_ship(selected_ship, target_id, min_id, ship_transfer_tons, ui.fog_of_war)) {
+                         nebula4x::log::warn("Couldn't queue transfer order.");
+                    }
+                }
+            }
         }
 
 
@@ -737,6 +807,17 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
               }
             }
           }
+        }
+
+        // Orbit button logic
+        if (sel_col_body && sel_col_body->system_id == sh->system_id) {
+            std::string btn_label = "Orbit " + sel_col->name;
+            if (ImGui::Button(btn_label.c_str())) {
+                // Orbit indefinitely (-1)
+                if (!sim.issue_orbit_body(selected_ship, sel_col_body->id, -1, ui.fog_of_war)) {
+                    nebula4x::log::warn("Couldn't issue orbit order.");
+                }
+            }
         }
 
         // Jump point travel
