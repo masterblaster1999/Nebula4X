@@ -104,7 +104,7 @@ class Simulation {
 
   // Enable repeating the ship's current order queue.
   //
-  // When enabled, once the queue becomes empty it will be refilled from a saved
+  // When enabled, once the order queue becomes empty it will be refilled from a saved
   // template (captured at enable time or via update).
   //
   // Returns false if the ship does not exist or has no queued orders.
@@ -138,6 +138,11 @@ class Simulation {
   // When restrict_to_discovered is true, jump routing will only traverse
   // systems discovered by the ship's faction.
   bool issue_move_to_body(Id ship_id, Id body_id, bool restrict_to_discovered = false);
+  
+  // Station keep with a body for a duration (-1 for indefinite).
+  // Unlike MoveToBody, this keeps updating the ship's position to match the body's orbit.
+  bool issue_orbit_body(Id ship_id, Id body_id, int duration_days = -1, bool restrict_to_discovered = false);
+
   bool issue_travel_via_jump(Id ship_id, Id jump_point_id);
   // Pathfind through the jump network and enqueue TravelViaJump steps to reach a target system.
   //
@@ -170,6 +175,13 @@ class Simulation {
                           bool restrict_to_discovered = false);
   bool issue_unload_mineral(Id ship_id, Id colony_id, const std::string& mineral, double tons = 0.0,
                             bool restrict_to_discovered = false);
+
+  // Transfer cargo directly to another ship in space.
+  bool issue_transfer_cargo_to_ship(Id ship_id, Id target_ship_id, const std::string& mineral, double tons = 0.0,
+                                    bool restrict_to_discovered = false);
+
+  // Decommission a ship at a friendly colony, recovering some mineral cost.
+  bool issue_scrap_ship(Id ship_id, Id colony_id, bool restrict_to_discovered = false);
 
   bool enqueue_build(Id colony_id, const std::string& design_id);
 
