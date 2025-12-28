@@ -14,6 +14,10 @@ std::string order_to_string(const Order& order) {
           ss << "MoveToPoint(" << o.target_mkm.x << ", " << o.target_mkm.y << ")";
         } else if constexpr (std::is_same_v<T, MoveToBody>) {
           ss << "MoveToBody(id=" << o.body_id << ")";
+        } else if constexpr (std::is_same_v<T, OrbitBody>) {
+          ss << "OrbitBody(id=" << o.body_id;
+          ss << ", days=" << o.duration_days;
+          ss << ")";
         } else if constexpr (std::is_same_v<T, TravelViaJump>) {
           ss << "TravelViaJump(jump_id=" << o.jump_point_id << ")";
         } else if constexpr (std::is_same_v<T, AttackShip>) {
@@ -34,6 +38,13 @@ std::string order_to_string(const Order& order) {
           if (!o.mineral.empty()) ss << ", mineral=" << o.mineral;
           if (o.tons > 0.0) ss << ", tons=" << o.tons;
           ss << ")";
+        } else if constexpr (std::is_same_v<T, TransferCargoToShip>) {
+          ss << "TransferCargoToShip(target_ship_id=" << o.target_ship_id;
+          if (!o.mineral.empty()) ss << ", mineral=" << o.mineral;
+          if (o.tons > 0.0) ss << ", tons=" << o.tons;
+          ss << ")";
+        } else if constexpr (std::is_same_v<T, ScrapShip>) {
+          ss << "ScrapShip(colony_id=" << o.colony_id << ")";
         }
         return ss.str();
       },

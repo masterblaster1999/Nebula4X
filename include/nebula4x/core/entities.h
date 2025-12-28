@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -206,6 +207,30 @@ struct Faction {
   // Simple per-faction ship contact memory.
   // Key: ship id.
   std::unordered_map<Id, Contact> ship_contacts;
+};
+
+// A lightweight grouping of ships for UI / order-issuing convenience.
+//
+// Design goals:
+// - Fleets are *not* a simulation entity (no combat modifiers, no formation logic).
+// - Fleets are persisted in saves.
+// - A ship may belong to at most one fleet at a time.
+//
+// Future direction: add a dedicated fleet-order system and formation / jump coordination.
+// For now, fleets are a convenience layer on top of per-ship orders.
+struct Fleet {
+  Id id{kInvalidId};
+  std::string name;
+  Id faction_id{kInvalidId};
+
+  // Designated leader ship.
+  //
+  // If leader_ship_id becomes invalid (ship destroyed / removed), the simulation
+  // will automatically pick a new leader from ship_ids when possible.
+  Id leader_ship_id{kInvalidId};
+
+  // Member ships.
+  std::vector<Id> ship_ids;
 };
 
 // Jump points connect star systems.

@@ -11,16 +11,22 @@ Nebula4X is an **open-source, turn-based space 4X** prototype in **C++20**, insp
 ### Core simulation (`nebula4x_core`)
 
 - Star systems, orbital bodies, ships, colonies, minerals, installations
+- **Fleets**: persistent ship groups (same-faction) for bulk order issuing (no formation logic yet)
 - **Cargo holds** on ships + mineral transfer orders (prototype logistics)
 - Day-based turn advancement
+- Colony **population growth/decline** (simple, configurable)
+- **Shipyard repairs**: docked ships repair HP at friendly colonies with shipyards (configurable)
 - Shipyard construction (optionally) consumes minerals per ton built (see `data/blueprints/starting_blueprints.json`)
 - **Colony construction queue**: build installations using construction points + mineral build costs (also configured in JSON)
 - Orders:
   - move-to-point / move-to-body
+  - **orbit body** (station keep)
   - **travel via jump point** (multi-system travel)
   - **attack ship** (simple targeting)
   - **wait days** (simple scheduling)
   - **load/unload minerals** (prototype cargo logistics)
+  - **ship-to-ship cargo transfer**
+  - **scrap ship** (decommission at a colony; refunds some minerals)
   - **repeat orders** (optional looping of a ship's queue for trade routes/patrols)
 - **Jump points + multi-system state**
 - **Sensors + intel**: in-system detection + last-known contact snapshots (saved)
@@ -66,6 +72,11 @@ Nebula4X is an **open-source, turn-based space 4X** prototype in **C++20**, insp
 - Event log filters: `--events-last`, `--events-category`, `--events-level`, `--events-faction`, `--events-system`, `--events-ship`, `--events-colony`, `--events-contains`, `--events-since`, `--events-until`
 - Event log summary: `--events-summary` (counts by level/category) for the filtered set
 - Event log summary export: `--events-summary-json PATH` (`PATH` can be `-` for stdout)
+- State export to JSON:
+  - `--export-ships-json PATH`
+  - `--export-colonies-json PATH`
+  - `--export-fleets-json PATH`
+  (`PATH` can be `-` for stdout)
 - Time warp: `--until-event N` to advance day-by-day until a new matching event occurs (defaults to warn/error; configurable via `--events-*`)
 - `--quiet` to suppress non-essential summary/status output (useful for scripting)
 - Script helpers: `--list-factions`, `--list-systems`, `--list-bodies`, `--list-jumps`, `--list-ships`, `--list-colonies` (print ids/names, then exit)
@@ -177,6 +188,10 @@ Run:
 
 # CLI (list colonies in a save)
 ./build/nebula4x_cli --load save.json --list-colonies
+
+# CLI (export ships/colonies state to JSON)
+./build/nebula4x_cli --load save.json --quiet --export-ships-json ships.json
+./build/nebula4x_cli --load save.json --quiet --export-colonies-json colonies.json
 
 # CLI (time warp until next warning/error event, then save)
 ./build/nebula4x_cli --until-event 365 --save autosave.json

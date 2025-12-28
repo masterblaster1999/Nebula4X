@@ -35,7 +35,9 @@ target_sources(nebula4x_core
     src/util/event_export.cpp
     src/util/json.cpp
     src/util/log.cpp
+    src/util/state_export.cpp
     src/util/strings.cpp
+    src/util/save_diff.cpp
 )
 
 target_include_directories(nebula4x_core
@@ -159,6 +161,12 @@ if(NEBULA4X_BUILD_TESTS)
     tests/test_json_bom.cpp
     tests/test_json_errors.cpp
     tests/test_state_validation.cpp
+    tests/test_save_diff.cpp
+    tests/test_state_export.cpp
+    tests/test_fleets.cpp
+    tests/test_combat_events.cpp
+    tests/test_population_growth.cpp
+    tests/test_ship_repairs.cpp
   )
   target_link_libraries(nebula4x_tests PRIVATE nebula4x::core)
   nebula4x_set_project_warnings(nebula4x_tests ${NEBULA4X_WARNINGS_AS_ERRORS})

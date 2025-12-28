@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -22,7 +23,7 @@ struct ContentDB {
 
 // A single save-game state.
 struct GameState {
-  int save_version{12};
+  int save_version{13};
   Date date;
 
   Id next_id{1};
@@ -37,6 +38,9 @@ struct GameState {
   std::unordered_map<Id, Ship> ships;
   std::unordered_map<Id, Colony> colonies;
   std::unordered_map<Id, Faction> factions;
+
+  // Fleets are lightweight groupings of ships for convenience.
+  std::unordered_map<Id, Fleet> fleets;
 
   // Player-created designs persisted in saves.
   std::unordered_map<std::string, ShipDesign> custom_designs;

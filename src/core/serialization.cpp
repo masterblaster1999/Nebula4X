@@ -14,7 +14,7 @@ using json::Array;
 using json::Object;
 using json::Value;
 
-constexpr int kCurrentSaveVersion = 12;
+constexpr int kCurrentSaveVersion = 13;
 
 template <typename Map>
 std::vector<typename Map::key_type> sorted_keys(const Map& m) {
@@ -463,6 +463,29 @@ std::string serialize_game_to_json(const GameState& s) {
   }
   root["factions"] = factions;
 
+  // Fleets
+  Array fleets;
+  fleets.reserve(s.fleets.size());
+  for (Id id : sorted_keys(s.fleets)) {
+    const auto& f = s.fleets.at(id);
+    Object o;
+    o["id"] = static_cast<double>(id);
+    o["name"] = f.name;
+    o["faction_id"] = static_cast<double>(f.faction_id);
+    o["leader_ship_id"] = static_cast<double>(f.leader_ship_id);
+
+    auto ships = f.ship_ids;
+    std::sort(ships.begin(), ships.end());
+    ships.erase(std::unique(ships.begin(), ships.end()), ships.end());
+    Array ship_ids;
+    ship_ids.reserve(ships.size());
+    for (Id sid : ships) ship_ids.push_back(static_cast<double>(sid));
+    o["ship_ids"] = ship_ids;
+
+    fleets.push_back(o);
+  }
+  root["fleets"] = fleets;
+
   // Custom designs
   Array designs;
   designs.reserve(s.custom_designs.size());
@@ -701,6 +724,36 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     s.factions[f.id] = f;
   }
 
+  // Fleets (optional field; older saves may not include it).
+  if (auto it = root.find("fleets"); it != root.end()) {
+    if (!it->second.is_array()) {
+      log::warn("Save load: 'fleets' is not an array; ignoring");
+    } else {
+      for (const auto& fv : it->second.array()) {
+        if (!fv.is_object()) continue;
+        const auto& o = fv.object();
+
+        Fleet fl;
+        fl.id = static_cast<Id>(o.at("id").int_value(kInvalidId));
+        if (fl.id == kInvalidId) continue;
+        fl.name = o.at("name").string_value();
+        fl.faction_id = static_cast<Id>(o.at("faction_id").int_value(kInvalidId));
+
+        if (auto itl = o.find("leader_ship_id"); itl != o.end()) {
+          fl.leader_ship_id = static_cast<Id>(itl->second.int_value(kInvalidId));
+        }
+
+        if (auto its = o.find("ship_ids"); its != o.end() && its->second.is_array()) {
+          for (const auto& sv : its->second.array()) {
+            fl.ship_ids.push_back(static_cast<Id>(sv.int_value(kInvalidId)));
+          }
+        }
+
+        s.fleets[fl.id] = std::move(fl);
+      }
+    }
+  }
+
   // Custom designs
   if (auto it = root.find("custom_designs"); it != root.end()) {
     for (const auto& dv : it->second.array()) {
@@ -833,6 +886,7 @@ GameState deserialize_game_from_json(const std::string& json_text) {
   for (auto& [id, _] : s.ships) bump(id);
   for (auto& [id, _] : s.colonies) bump(id);
   for (auto& [id, _] : s.factions) bump(id);
+  for (auto& [id, _] : s.fleets) bump(id);
   if (s.next_id <= max_id) s.next_id = max_id + 1;
 
   return s;

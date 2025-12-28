@@ -13,6 +13,8 @@
 #include "nebula4x/core/tech.h"
 #include "nebula4x/util/file_io.h"
 #include "nebula4x/util/event_export.h"
+#include "nebula4x/util/save_diff.h"
+#include "nebula4x/util/state_export.h"
 #include "nebula4x/util/json.h"
 #include "nebula4x/util/log.h"
 #include "nebula4x/util/strings.h"
@@ -35,6 +37,18 @@ std::string get_str_arg(int argc, char** argv, const std::string& key, const std
     if (argv[i] == key) return argv[i + 1];
   }
   return def;
+}
+
+
+bool get_two_str_args(int argc, char** argv, const std::string& key, std::string& out_a, std::string& out_b) {
+  for (int i = 1; i < argc - 2; ++i) {
+    if (argv[i] == key) {
+      out_a = argv[i + 1];
+      out_b = argv[i + 2];
+      return true;
+    }
+  }
+  return false;
 }
 
 bool has_kv_arg(int argc, char** argv, const std::string& key) {
@@ -297,6 +311,8 @@ void print_usage(const char* exe) {
   std::cout << "  --load PATH      Load a save JSON before advancing\n";
   std::cout << "  --save PATH      Save state JSON after advancing\n";
   std::cout << "  --format-save    Load + re-save (canonicalize JSON) without advancing\n";
+  std::cout << "  --diff-saves A B Compare two save JSON files and print a structural diff\n";
+  std::cout << "  --diff-saves-json PATH  (optional) Also emit a JSON diff report (PATH can be '-' for stdout)\n";
   std::cout << "  --validate-content  Validate content + tech files and exit\n";
   std::cout << "  --validate-save     Validate loaded/new game state and exit\n";
   std::cout << "  --dump           Print the resulting save JSON to stdout\n";
@@ -307,6 +323,9 @@ void print_usage(const char* exe) {
   std::cout << "  --list-jumps     Print jump point ids/names and links, then exit\n";
   std::cout << "  --list-ships     Print ship ids/names and basic context, then exit\n";
   std::cout << "  --list-colonies  Print colony ids/names and basic context, then exit\n";
+  std::cout << "  --export-ships-json PATH    Export ships state to JSON (PATH can be '-' for stdout)\n";
+  std::cout << "  --export-colonies-json PATH Export colonies state to JSON (PATH can be '-' for stdout)\n";
+  std::cout << "  --export-fleets-json PATH   Export fleets state to JSON (PATH can be '-' for stdout)\n";
   std::cout << "  --dump-events    Print the persistent simulation event log to stdout\n";
   std::cout << "  --export-events-csv PATH  Export the persistent simulation event log to CSV (PATH can be '-' for stdout)\n";
   std::cout << "  --export-events-json PATH Export the persistent simulation event log to JSON (PATH can be '-' for stdout)\n";
@@ -341,6 +360,50 @@ int main(int argc, char** argv) {
       return 0;
     }
 
+    const bool quiet = has_flag(argc, argv, "--quiet");
+
+    // Save diff utility:
+    //   --diff-saves A B
+    //   --diff-saves A B --diff-saves-json OUT.json
+    //   --diff-saves A B --diff-saves-json -   (JSON to stdout; human diff to stderr unless --quiet)
+    std::string diff_a;
+    std::string diff_b;
+    const bool diff_saves = get_two_str_args(argc, argv, "--diff-saves", diff_a, diff_b);
+    const bool diff_flag = has_flag(argc, argv, "--diff-saves");
+    const std::string diff_json_path = get_str_arg(argc, argv, "--diff-saves-json", "");
+
+    if (diff_flag && !diff_saves) {
+      std::cerr << "--diff-saves requires two paths: --diff-saves A B\n\n";
+      print_usage(argv[0]);
+      return 2;
+    }
+
+    if (diff_saves) {
+      const bool json_to_stdout = (!diff_json_path.empty() && diff_json_path == "-");
+      const auto a_state = nebula4x::deserialize_game_from_json(nebula4x::read_text_file(diff_a));
+      const auto b_state = nebula4x::deserialize_game_from_json(nebula4x::read_text_file(diff_b));
+      const std::string a_canon = nebula4x::serialize_game_to_json(a_state);
+      const std::string b_canon = nebula4x::serialize_game_to_json(b_state);
+
+      if (!diff_json_path.empty()) {
+        const std::string report = nebula4x::diff_saves_to_json(a_canon, b_canon);
+        if (diff_json_path == "-") {
+          std::cout << report;
+        } else {
+          nebula4x::write_text_file(diff_json_path, report);
+          if (!quiet) {
+            std::cout << "JSON diff written to " << diff_json_path << "\n";
+          }
+        }
+      }
+
+      if (!quiet) {
+        std::ostream& out = json_to_stdout ? std::cerr : std::cout;
+        out << nebula4x::diff_saves_to_text(a_canon, b_canon);
+      }
+      return 0;
+    }
+
     const int days = get_int_arg(argc, argv, "--days", 30);
     const int until_event_days = get_int_arg(argc, argv, "--until-event", -1);
     const bool until_event = (until_event_days != -1);
@@ -356,15 +419,19 @@ int main(int argc, char** argv) {
     const std::string export_events_jsonl_path = get_str_arg(argc, argv, "--export-events-jsonl", "");
     const std::string events_summary_json_path = get_str_arg(argc, argv, "--events-summary-json", "");
     const std::string events_summary_csv_path = get_str_arg(argc, argv, "--events-summary-csv", "");
-
-    const bool quiet = has_flag(argc, argv, "--quiet");
+    const std::string export_ships_json_path = get_str_arg(argc, argv, "--export-ships-json", "");
+    const std::string export_colonies_json_path = get_str_arg(argc, argv, "--export-colonies-json", "");
+    const std::string export_fleets_json_path = get_str_arg(argc, argv, "--export-fleets-json", "");
 
     const bool script_stdout =
         (!export_events_csv_path.empty() && export_events_csv_path == "-") ||
         (!export_events_json_path.empty() && export_events_json_path == "-") ||
         (!export_events_jsonl_path.empty() && export_events_jsonl_path == "-") ||
         (!events_summary_json_path.empty() && events_summary_json_path == "-") ||
-        (!events_summary_csv_path.empty() && events_summary_csv_path == "-");
+        (!events_summary_csv_path.empty() && events_summary_csv_path == "-") ||
+        (!export_ships_json_path.empty() && export_ships_json_path == "-") ||
+        (!export_colonies_json_path.empty() && export_colonies_json_path == "-") ||
+        (!export_fleets_json_path.empty() && export_fleets_json_path == "-");
 
     const bool list_factions = has_flag(argc, argv, "--list-factions");
     const bool list_systems = has_flag(argc, argv, "--list-systems");
@@ -698,9 +765,12 @@ int main(int argc, char** argv) {
     const bool events_summary = has_flag(argc, argv, "--events-summary");
     const bool events_summary_json = !events_summary_json_path.empty();
     const bool events_summary_csv = !events_summary_csv_path.empty();
+    const bool export_ships_json = !export_ships_json_path.empty();
+    const bool export_colonies_json = !export_colonies_json_path.empty();
+    const bool export_fleets_json = !export_fleets_json_path.empty();
 
     if (dump_events || export_events_csv || export_events_json || export_events_jsonl || events_summary ||
-        events_summary_json || events_summary_csv) {
+        events_summary_json || events_summary_csv || export_ships_json || export_colonies_json || export_fleets_json) {
       // Prevent ambiguous script output.
       {
         int stdout_exports = 0;
@@ -709,6 +779,9 @@ int main(int argc, char** argv) {
         if (export_events_jsonl && export_events_jsonl_path == "-") ++stdout_exports;
         if (events_summary_json && events_summary_json_path == "-") ++stdout_exports;
         if (events_summary_csv && events_summary_csv_path == "-") ++stdout_exports;
+        if (export_ships_json && export_ships_json_path == "-") ++stdout_exports;
+        if (export_colonies_json && export_colonies_json_path == "-") ++stdout_exports;
+        if (export_fleets_json && export_fleets_json_path == "-") ++stdout_exports;
         if (stdout_exports > 1) {
           std::cerr << "Multiple machine-readable outputs set to '-' (stdout). Choose at most one.\n";
           return 2;
@@ -1038,6 +1111,63 @@ if (events_summary_csv) {
           std::cerr << "Failed to export events JSONL: " << e.what() << "\n";
           return 1;
         }
+      }
+    }
+
+    if (export_ships_json) {
+      try {
+        const std::string json_text = nebula4x::ships_to_json(s, &sim.content());
+        if (export_ships_json_path == "-") {
+          // Explicit stdout export for scripting.
+          std::cout << json_text;
+        } else {
+          nebula4x::write_text_file(export_ships_json_path, json_text);
+          if (!quiet) {
+            std::ostream& info = script_stdout ? std::cerr : std::cout;
+            info << "\nWrote ships JSON to " << export_ships_json_path << "\n";
+          }
+        }
+      } catch (const std::exception& e) {
+        std::cerr << "Failed to export ships JSON: " << e.what() << "\n";
+        return 1;
+      }
+    }
+
+    if (export_colonies_json) {
+      try {
+        const std::string json_text = nebula4x::colonies_to_json(s, &sim.content());
+        if (export_colonies_json_path == "-") {
+          // Explicit stdout export for scripting.
+          std::cout << json_text;
+        } else {
+          nebula4x::write_text_file(export_colonies_json_path, json_text);
+          if (!quiet) {
+            std::ostream& info = script_stdout ? std::cerr : std::cout;
+            info << "\nWrote colonies JSON to " << export_colonies_json_path << "\n";
+          }
+        }
+      } catch (const std::exception& e) {
+        std::cerr << "Failed to export colonies JSON: " << e.what() << "\n";
+        return 1;
+      }
+    }
+
+    if (export_fleets_json) {
+      try {
+        const std::string json_text = nebula4x::fleets_to_json(s);
+        if (export_fleets_json_path == "-") {
+          // Explicit stdout export for scripting.
+          std::cout << json_text;
+        } else {
+          nebula4x::write_text_file(export_fleets_json_path, json_text);
+          if (!quiet) {
+            std::ostream& info = script_stdout ? std::cerr : std::cout;
+            info << "\nWrote fleets JSON to " << export_fleets_json_path << "\n";
+          }
+        }
+      } catch (const std::exception& e) {
+        std::cerr << "Failed to export fleets JSON: " << e.what() << "\n";
+        return 1;
       }
     }
 

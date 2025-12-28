@@ -14,6 +14,12 @@ int test_json_unicode();
 int test_json_bom();
 int test_json_errors();
 int test_state_validation();
+int test_save_diff();
+int test_state_export();
+int test_population_growth();
+int test_combat_events();
+int test_ship_repairs();
+int test_fleets();
 
 int main() {
   int fails = 0;
@@ -31,6 +37,12 @@ int main() {
   fails += test_json_bom();
   fails += test_json_errors();
   fails += test_state_validation();
+  fails += test_save_diff();
+  fails += test_state_export();
+  fails += test_fleets();
+  fails += test_population_growth();
+  fails += test_combat_events();
+  fails += test_ship_repairs();
 
   if (fails == 0) {
     std::cout << "All tests passed\n";

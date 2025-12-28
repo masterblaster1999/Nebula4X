@@ -3,9 +3,12 @@
 #include <algorithm>
 #include <cmath>
 #include <cctype>
+#include <iomanip>
 #include <queue>
+#include <sstream>
 #include <stdexcept>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "nebula4x/core/scenario.h"
 #include "nebula4x/util/log.h"
@@ -299,6 +302,80 @@ void Simulation::initialize_unlocks_for_faction(Faction& f) {
   }
 }
 
+void Simulation::remove_ship_from_fleets(Id ship_id) {
+  if (ship_id == kInvalidId) return;
+  if (state_.fleets.empty()) return;
+
+  bool changed = false;
+  for (auto& [_, fl] : state_.fleets) {
+    const auto it = std::remove(fl.ship_ids.begin(), fl.ship_ids.end(), ship_id);
+    if (it != fl.ship_ids.end()) {
+      fl.ship_ids.erase(it, fl.ship_ids.end());
+      changed = true;
+    }
+    if (fl.leader_ship_id == ship_id) {
+      fl.leader_ship_id = kInvalidId;
+      changed = true;
+    }
+  }
+
+  if (changed) prune_fleets();
+}
+
+void Simulation::prune_fleets() {
+  if (state_.fleets.empty()) return;
+
+  // Deterministic pruning.
+  const auto fleet_ids = sorted_keys(state_.fleets);
+
+  // Enforce the invariant that a ship may belong to at most one fleet.
+  std::unordered_set<Id> claimed;
+  claimed.reserve(state_.ships.size() * 2);
+
+  for (Id fleet_id : fleet_ids) {
+    auto* fl = find_ptr(state_.fleets, fleet_id);
+    if (!fl) continue;
+
+    std::vector<Id> members;
+    members.reserve(fl->ship_ids.size());
+    for (Id sid : fl->ship_ids) {
+      if (sid == kInvalidId) continue;
+      const auto* sh = find_ptr(state_.ships, sid);
+      if (!sh) continue;
+      if (fl->faction_id != kInvalidId && sh->faction_id != fl->faction_id) continue;
+      members.push_back(sid);
+    }
+
+    std::sort(members.begin(), members.end());
+    members.erase(std::unique(members.begin(), members.end()), members.end());
+
+    std::vector<Id> unique_members;
+    unique_members.reserve(members.size());
+    for (Id sid : members) {
+      if (claimed.insert(sid).second) unique_members.push_back(sid);
+    }
+
+    fl->ship_ids = std::move(unique_members);
+
+    if (!fl->ship_ids.empty()) {
+      if (fl->leader_ship_id == kInvalidId ||
+          std::find(fl->ship_ids.begin(), fl->ship_ids.end(), fl->leader_ship_id) == fl->ship_ids.end()) {
+        fl->leader_ship_id = fl->ship_ids.front();
+      }
+    } else {
+      fl->leader_ship_id = kInvalidId;
+    }
+  }
+
+  for (auto it = state_.fleets.begin(); it != state_.fleets.end();) {
+    if (it->second.ship_ids.empty()) {
+      it = state_.fleets.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
 void Simulation::discover_system_for_faction(Id faction_id, Id system_id) {
   if (system_id == kInvalidId) return;
   auto* fac = find_ptr(state_.factions, faction_id);
@@ -363,6 +440,10 @@ void Simulation::load_game(GameState loaded) {
   for (auto& [_, f] : state_.factions) {
     initialize_unlocks_for_faction(f);
   }
+
+  // Older saves (or hand-edited JSON) may contain stale fleet references.
+  // Clean them up on load.
+  prune_fleets();
 
   recompute_body_positions();
   tick_contacts();
@@ -484,6 +565,263 @@ bool Simulation::cancel_current_order(Id ship_id) {
   if (it == state_.ship_orders.end() || it->second.queue.empty()) return false;
   it->second.queue.erase(it->second.queue.begin());
   return true;
+}
+
+Id Simulation::create_fleet(Id faction_id, const std::string& name, const std::vector<Id>& ship_ids,
+                            std::string* error) {
+  prune_fleets();
+
+  auto fail = [&](const std::string& msg) -> Id {
+    if (error) *error = msg;
+    return kInvalidId;
+  };
+
+  if (faction_id == kInvalidId) return fail("Invalid faction id");
+  if (!find_ptr(state_.factions, faction_id)) return fail("Faction does not exist");
+  if (ship_ids.empty()) return fail("No ships provided");
+
+  std::vector<Id> members;
+  members.reserve(ship_ids.size());
+
+  for (Id sid : ship_ids) {
+    if (sid == kInvalidId) return fail("Invalid ship id in list");
+    const auto* sh = find_ptr(state_.ships, sid);
+    if (!sh) return fail("Ship does not exist: " + std::to_string(static_cast<unsigned long long>(sid)));
+    if (sh->faction_id != faction_id) {
+      return fail("Ship belongs to a different faction: " + sh->name);
+    }
+    const Id existing = fleet_for_ship(sid);
+    if (existing != kInvalidId) {
+      return fail("Ship already belongs to fleet " + std::to_string(static_cast<unsigned long long>(existing)));
+    }
+    members.push_back(sid);
+  }
+
+  std::sort(members.begin(), members.end());
+  members.erase(std::unique(members.begin(), members.end()), members.end());
+  if (members.empty()) return fail("No valid ships provided");
+
+  Fleet fl;
+  fl.id = allocate_id(state_);
+  fl.name = name.empty() ? ("Fleet " + std::to_string(static_cast<unsigned long long>(fl.id))) : name;
+  fl.faction_id = faction_id;
+  fl.ship_ids = members;
+  fl.leader_ship_id = members.front();
+
+  const Id fleet_id = fl.id;
+  state_.fleets[fleet_id] = std::move(fl);
+  return fleet_id;
+}
+
+bool Simulation::disband_fleet(Id fleet_id) {
+  return state_.fleets.erase(fleet_id) > 0;
+}
+
+bool Simulation::add_ship_to_fleet(Id fleet_id, Id ship_id, std::string* error) {
+  prune_fleets();
+
+  auto fail = [&](const std::string& msg) {
+    if (error) *error = msg;
+    return false;
+  };
+
+  auto* fl = find_ptr(state_.fleets, fleet_id);
+  if (!fl) return fail("Fleet does not exist");
+
+  if (ship_id == kInvalidId) return fail("Invalid ship id");
+  const auto* sh = find_ptr(state_.ships, ship_id);
+  if (!sh) return fail("Ship does not exist");
+  if (fl->faction_id != kInvalidId && sh->faction_id != fl->faction_id) {
+    return fail("Ship faction does not match fleet faction");
+  }
+
+  const Id existing = fleet_for_ship(ship_id);
+  if (existing != kInvalidId && existing != fleet_id) {
+    return fail("Ship already belongs to fleet " + std::to_string(static_cast<unsigned long long>(existing)));
+  }
+
+  if (std::find(fl->ship_ids.begin(), fl->ship_ids.end(), ship_id) != fl->ship_ids.end()) {
+    return true; // already in this fleet
+  }
+
+  fl->ship_ids.push_back(ship_id);
+  std::sort(fl->ship_ids.begin(), fl->ship_ids.end());
+  fl->ship_ids.erase(std::unique(fl->ship_ids.begin(), fl->ship_ids.end()), fl->ship_ids.end());
+  if (fl->leader_ship_id == kInvalidId && !fl->ship_ids.empty()) fl->leader_ship_id = fl->ship_ids.front();
+  return true;
+}
+
+bool Simulation::remove_ship_from_fleet(Id fleet_id, Id ship_id) {
+  auto* fl = find_ptr(state_.fleets, fleet_id);
+  if (!fl) return false;
+
+  const auto it = std::remove(fl->ship_ids.begin(), fl->ship_ids.end(), ship_id);
+  if (it == fl->ship_ids.end()) return false;
+  fl->ship_ids.erase(it, fl->ship_ids.end());
+  if (fl->leader_ship_id == ship_id) fl->leader_ship_id = kInvalidId;
+  prune_fleets();
+  return true;
+}
+
+bool Simulation::set_fleet_leader(Id fleet_id, Id ship_id) {
+  auto* fl = find_ptr(state_.fleets, fleet_id);
+  if (!fl) return false;
+  if (ship_id == kInvalidId) return false;
+  if (std::find(fl->ship_ids.begin(), fl->ship_ids.end(), ship_id) == fl->ship_ids.end()) return false;
+  fl->leader_ship_id = ship_id;
+  return true;
+}
+
+bool Simulation::rename_fleet(Id fleet_id, const std::string& name) {
+  auto* fl = find_ptr(state_.fleets, fleet_id);
+  if (!fl) return false;
+  if (name.empty()) return false;
+  fl->name = name;
+  return true;
+}
+
+Id Simulation::fleet_for_ship(Id ship_id) const {
+  if (ship_id == kInvalidId) return kInvalidId;
+  for (const auto& [fid, fl] : state_.fleets) {
+    if (std::find(fl.ship_ids.begin(), fl.ship_ids.end(), ship_id) != fl.ship_ids.end()) return fid;
+  }
+  return kInvalidId;
+}
+
+bool Simulation::clear_fleet_orders(Id fleet_id) {
+  prune_fleets();
+  const auto* fl = find_ptr(state_.fleets, fleet_id);
+  if (!fl) return false;
+
+  bool any = false;
+  for (Id sid : fl->ship_ids) {
+    if (clear_orders(sid)) any = true;
+  }
+  return any;
+}
+
+bool Simulation::issue_fleet_wait_days(Id fleet_id, int days) {
+  prune_fleets();
+  const auto* fl = find_ptr(state_.fleets, fleet_id);
+  if (!fl) return false;
+  bool any = false;
+  for (Id sid : fl->ship_ids) {
+    if (issue_wait_days(sid, days)) any = true;
+  }
+  return any;
+}
+
+bool Simulation::issue_fleet_move_to_point(Id fleet_id, Vec2 target_mkm) {
+  prune_fleets();
+  const auto* fl = find_ptr(state_.fleets, fleet_id);
+  if (!fl) return false;
+  bool any = false;
+  for (Id sid : fl->ship_ids) {
+    if (issue_move_to_point(sid, target_mkm)) any = true;
+  }
+  return any;
+}
+
+bool Simulation::issue_fleet_move_to_body(Id fleet_id, Id body_id, bool restrict_to_discovered) {
+  prune_fleets();
+  const auto* fl = find_ptr(state_.fleets, fleet_id);
+  if (!fl) return false;
+  bool any = false;
+  for (Id sid : fl->ship_ids) {
+    if (issue_move_to_body(sid, body_id, restrict_to_discovered)) any = true;
+  }
+  return any;
+}
+
+bool Simulation::issue_fleet_orbit_body(Id fleet_id, Id body_id, int duration_days, bool restrict_to_discovered) {
+  prune_fleets();
+  const auto* fl = find_ptr(state_.fleets, fleet_id);
+  if (!fl) return false;
+  bool any = false;
+  for (Id sid : fl->ship_ids) {
+    if (issue_orbit_body(sid, body_id, duration_days, restrict_to_discovered)) any = true;
+  }
+  return any;
+}
+
+bool Simulation::issue_fleet_travel_via_jump(Id fleet_id, Id jump_point_id) {
+  prune_fleets();
+  const auto* fl = find_ptr(state_.fleets, fleet_id);
+  if (!fl) return false;
+  bool any = false;
+  for (Id sid : fl->ship_ids) {
+    if (issue_travel_via_jump(sid, jump_point_id)) any = true;
+  }
+  return any;
+}
+
+bool Simulation::issue_fleet_travel_to_system(Id fleet_id, Id target_system_id, bool restrict_to_discovered) {
+  prune_fleets();
+  const auto* fl = find_ptr(state_.fleets, fleet_id);
+  if (!fl) return false;
+  bool any = false;
+  for (Id sid : fl->ship_ids) {
+    if (issue_travel_to_system(sid, target_system_id, restrict_to_discovered)) any = true;
+  }
+  return any;
+}
+
+bool Simulation::issue_fleet_attack_ship(Id fleet_id, Id target_ship_id, bool restrict_to_discovered) {
+  prune_fleets();
+  const auto* fl = find_ptr(state_.fleets, fleet_id);
+  if (!fl) return false;
+  bool any = false;
+  for (Id sid : fl->ship_ids) {
+    if (issue_attack_ship(sid, target_ship_id, restrict_to_discovered)) any = true;
+  }
+  return any;
+}
+
+bool Simulation::issue_fleet_load_mineral(Id fleet_id, Id colony_id, const std::string& mineral, double tons,
+                                          bool restrict_to_discovered) {
+  prune_fleets();
+  const auto* fl = find_ptr(state_.fleets, fleet_id);
+  if (!fl) return false;
+  bool any = false;
+  for (Id sid : fl->ship_ids) {
+    if (issue_load_mineral(sid, colony_id, mineral, tons, restrict_to_discovered)) any = true;
+  }
+  return any;
+}
+
+bool Simulation::issue_fleet_unload_mineral(Id fleet_id, Id colony_id, const std::string& mineral, double tons,
+                                            bool restrict_to_discovered) {
+  prune_fleets();
+  const auto* fl = find_ptr(state_.fleets, fleet_id);
+  if (!fl) return false;
+  bool any = false;
+  for (Id sid : fl->ship_ids) {
+    if (issue_unload_mineral(sid, colony_id, mineral, tons, restrict_to_discovered)) any = true;
+  }
+  return any;
+}
+
+bool Simulation::issue_fleet_transfer_cargo_to_ship(Id fleet_id, Id target_ship_id, const std::string& mineral,
+                                                    double tons, bool restrict_to_discovered) {
+  prune_fleets();
+  const auto* fl = find_ptr(state_.fleets, fleet_id);
+  if (!fl) return false;
+  bool any = false;
+  for (Id sid : fl->ship_ids) {
+    if (issue_transfer_cargo_to_ship(sid, target_ship_id, mineral, tons, restrict_to_discovered)) any = true;
+  }
+  return any;
+}
+
+bool Simulation::issue_fleet_scrap_ship(Id fleet_id, Id colony_id, bool restrict_to_discovered) {
+  prune_fleets();
+  const auto* fl = find_ptr(state_.fleets, fleet_id);
+  if (!fl) return false;
+  bool any = false;
+  for (Id sid : fl->ship_ids) {
+    if (issue_scrap_ship(sid, colony_id, restrict_to_discovered)) any = true;
+  }
+  return any;
 }
 
 bool Simulation::issue_wait_days(Id ship_id, int days) {
@@ -798,6 +1136,7 @@ void Simulation::tick_one_day() {
   tick_ships();
   tick_contacts();
   tick_combat();
+  tick_repairs();
 }
 
 void Simulation::push_event(EventLevel level, std::string message) {
@@ -981,6 +1320,16 @@ void Simulation::tick_colonies() {
       for (const auto& [mineral, per_day] : dit->second.produces_per_day) {
         colony.minerals[mineral] += per_day * static_cast<double>(count);
       }
+    }
+
+    // Simple population growth/decline (global rate).
+    //
+    // This intentionally does not generate events (would be too spammy). The UI can
+    // display the updated value and players can tune the rate via SimConfig.
+    if (std::fabs(cfg_.population_growth_rate_per_year) > 1e-12 && colony.population_millions > 0.0) {
+      const double per_day = cfg_.population_growth_rate_per_year / 365.25;
+      const double next = colony.population_millions * (1.0 + per_day);
+      colony.population_millions = std::max(0.0, next);
     }
   }
 }
@@ -1356,7 +1705,6 @@ void Simulation::tick_ships() {
     Vec2 target = ship.position_mkm;
     double desired_range = 0.0; 
     bool attack_has_contact = false;
-    bool orbit_active = false;
 
     // Cargo vars
     bool is_cargo_op = false;
@@ -1396,7 +1744,6 @@ void Simulation::tick_ships() {
         continue;
       }
       target = body->position_mkm;
-      orbit_active = true;
     } else if (std::holds_alternative<TravelViaJump>(q.front())) {
       const Id jump_id = std::get<TravelViaJump>(q.front()).jump_point_id;
       const auto* jp = find_ptr(state_.jump_points, jump_id);
@@ -1603,34 +1950,100 @@ void Simulation::tick_ships() {
       if (cargo_order_complete(moved)) q.erase(q.begin());
       continue;
     }
-
     if (is_scrap && dist <= dock_range) {
-       // Perform scrap
-       auto& ord = std::get<ScrapShip>(q.front());
-       if (auto* col = find_ptr(state_.colonies, ord.colony_id)) {
-           // Recover mineral cost logic (simplified: 50% of cost if known)
-           // We don't track original cost easily unless we look up design.
-           if (const auto* d = find_design(ship.design_id)) {
-             // We'll estimate based on mass/components if possible, or just skip strictly.
-             // For this prototype, let's just delete the ship and log it.
-             // A real implementation would refund minerals.
-             
-             // Remove ship
-             if (auto* sys = find_ptr(state_.systems, ship.system_id)) {
-                 sys->ships.erase(std::remove(sys->ships.begin(), sys->ships.end(), ship_id), sys->ships.end());
-             }
-             state_.ship_orders.erase(ship_id);
-             state_.ships.erase(ship_id); // invalidates 'ship' ref!
-             
-             // Important: ship is gone, so break/continue outer loop carefully.
-             // We can't continue the loop for this ship_id.
-             // Since we are iterating a copy of keys, it's safe to continue to next ship_id.
-             // But we must stop processing THIS ship immediately.
-             goto next_ship; 
-           }
-       }
-       q.erase(q.begin());
-       continue;
+      // Decommission the ship at a friendly colony.
+      // - Return carried cargo minerals to the colony stockpile.
+      // - Refund a fraction of shipyard mineral costs (estimated by design mass * build_costs_per_ton).
+      ship.position_mkm = target;
+
+      const ScrapShip ord = std::get<ScrapShip>(q.front()); // copy (we may erase the ship)
+      q.erase(q.begin());
+
+      auto* col = find_ptr(state_.colonies, ord.colony_id);
+      if (!col || col->faction_id != ship.faction_id) {
+        continue;
+      }
+
+      // Snapshot before erasing from state_.
+      const Ship ship_snapshot = ship;
+
+      // Return cargo to colony.
+      for (const auto& [mineral, tons] : ship_snapshot.cargo) {
+        if (tons > 1e-9) col->minerals[mineral] += tons;
+      }
+
+      // Refund a fraction of shipyard build costs (if configured/content available).
+      std::unordered_map<std::string, double> refunded;
+      const double refund_frac = std::clamp(cfg_.scrap_refund_fraction, 0.0, 1.0);
+
+      if (refund_frac > 1e-9) {
+        const auto it_yard = content_.installations.find("shipyard");
+        const auto* design = find_design(ship_snapshot.design_id);
+        if (it_yard != content_.installations.end() && design) {
+          const double mass_tons = std::max(0.0, design->mass_tons);
+          for (const auto& [mineral, per_ton] : it_yard->second.build_costs_per_ton) {
+            if (per_ton <= 0.0) continue;
+            const double amt = mass_tons * per_ton * refund_frac;
+            if (amt > 1e-9) {
+              refunded[mineral] += amt;
+              col->minerals[mineral] += amt;
+            }
+          }
+        }
+      }
+
+      // Remove ship from the system list.
+      if (auto* sys = find_ptr(state_.systems, ship_snapshot.system_id)) {
+        sys->ships.erase(std::remove(sys->ships.begin(), sys->ships.end(), ship_id), sys->ships.end());
+      }
+
+      // Remove ship orders, contacts, and the ship itself.
+      state_.ship_orders.erase(ship_id);
+      state_.ships.erase(ship_id);
+
+      // Keep fleet membership consistent.
+      remove_ship_from_fleets(ship_id);
+
+      for (auto& [_, fac] : state_.factions) {
+        fac.ship_contacts.erase(ship_id);
+      }
+
+      // Record event.
+      {
+        std::string msg = "Ship scrapped at " + col->name + ": " + ship_snapshot.name;
+        if (!refunded.empty()) {
+          std::vector<std::string> keys;
+          keys.reserve(refunded.size());
+          for (const auto& [k, _] : refunded) keys.push_back(k);
+          std::sort(keys.begin(), keys.end());
+
+          msg += " (refund:";
+          for (const auto& k : keys) {
+            const double v = refunded[k];
+            // Print near-integers cleanly.
+            if (std::fabs(v - std::round(v)) < 1e-6) {
+              msg += " " + k + " " + std::to_string(static_cast<long long>(std::llround(v)));
+            } else {
+              // Use a compact representation for fractional refunds.
+              std::ostringstream ss;
+              ss.setf(std::ios::fixed);
+              ss.precision(2);
+              ss << v;
+              msg += " " + k + " " + ss.str();
+            }
+          }
+          msg += ")";
+        }
+
+        EventContext ctx;
+        ctx.faction_id = col->faction_id;
+        ctx.system_id = ship_snapshot.system_id;
+        ctx.ship_id = ship_snapshot.id;
+        ctx.colony_id = col->id;
+        push_event(EventLevel::Info, EventCategory::Shipyard, msg, ctx);
+      }
+
+      continue;
     }
 
     if (is_body && dist <= dock_range) {
@@ -1748,8 +2161,6 @@ void Simulation::tick_ships() {
 
     const Vec2 dir = delta.normalized();
     ship.position_mkm += dir * step;
-
-    next_ship:;
   }
 }
 
@@ -1816,6 +2227,13 @@ void Simulation::tick_combat() {
 
   if (incoming_damage.empty()) return;
 
+  auto fmt1 = [](double x) {
+    std::ostringstream ss;
+    ss.setf(std::ios::fixed);
+    ss << std::setprecision(1) << x;
+    return ss.str();
+  };
+
   std::vector<Id> destroyed;
   destroyed.reserve(incoming_damage.size());
 
@@ -1825,6 +2243,80 @@ void Simulation::tick_combat() {
     if (!tgt) continue;
     tgt->hp -= dmg;
     if (tgt->hp <= 0.0) destroyed.push_back(tid);
+  }
+
+  // Damage events for ships that survive.
+  // Destruction is logged separately below.
+  {
+    const double min_abs = std::max(0.0, cfg_.combat_damage_event_min_abs);
+    const double min_frac = std::max(0.0, cfg_.combat_damage_event_min_fraction);
+    const double warn_frac = std::clamp(cfg_.combat_damage_event_warn_remaining_fraction, 0.0, 1.0);
+
+    for (Id tid : sorted_keys(incoming_damage)) {
+      const double dmg = incoming_damage[tid];
+      if (dmg <= 1e-12) continue;
+
+      const auto* tgt = find_ptr(state_.ships, tid);
+      if (!tgt) continue;
+      if (tgt->hp <= 0.0) continue; // handled by destruction log
+
+      const auto* sys = find_ptr(state_.systems, tgt->system_id);
+      const std::string sys_name = sys ? sys->name : std::string("(unknown)");
+
+      // Use design max HP when available; otherwise approximate from pre-damage HP.
+      const double pre_hp = tgt->hp + dmg;
+      double max_hp = std::max(1.0, pre_hp);
+      if (const auto* d = find_design(tgt->design_id)) {
+        if (d->max_hp > 1e-9) max_hp = d->max_hp;
+      }
+
+      const double frac = dmg / std::max(1e-9, max_hp);
+      if (dmg + 1e-12 < min_abs && frac + 1e-12 < min_frac) continue;
+
+      // Summarize attackers for context.
+      Id attacker_ship_id = kInvalidId;
+      Id attacker_fid = kInvalidId;
+      std::string attacker_ship_name;
+      std::string attacker_fac_name;
+      std::size_t attackers_count = 0;
+
+      if (auto ita = attackers_for_target.find(tid); ita != attackers_for_target.end()) {
+        auto& vec = ita->second;
+        std::sort(vec.begin(), vec.end());
+        vec.erase(std::unique(vec.begin(), vec.end()), vec.end());
+        attackers_count = vec.size();
+        if (!vec.empty()) {
+          attacker_ship_id = vec.front();
+          if (const auto* atk = find_ptr(state_.ships, attacker_ship_id)) {
+            attacker_fid = atk->faction_id;
+            attacker_ship_name = atk->name;
+            if (const auto* af = find_ptr(state_.factions, attacker_fid)) attacker_fac_name = af->name;
+          }
+        }
+      }
+
+      EventContext ctx;
+      ctx.faction_id = tgt->faction_id;
+      ctx.faction_id2 = attacker_fid;
+      ctx.system_id = tgt->system_id;
+      ctx.ship_id = tid;
+
+      std::string msg = "Ship damaged: " + tgt->name;
+      msg += " took " + fmt1(dmg) + " dmg (HP " + fmt1(std::max(0.0, tgt->hp)) + "/" + fmt1(max_hp) + ")";
+      msg += " in " + sys_name;
+
+      if (attacker_ship_id != kInvalidId) {
+        msg += " (attacked by " + (attacker_ship_name.empty() ? (std::string("Ship ") + std::to_string(attacker_ship_id))
+                                                          : attacker_ship_name);
+        if (!attacker_fac_name.empty()) msg += " / " + attacker_fac_name;
+        if (attackers_count > 1) msg += " +" + std::to_string(attackers_count - 1) + " more";
+        msg += ")";
+      }
+
+      const double remaining_frac = std::clamp(tgt->hp / std::max(1e-9, max_hp), 0.0, 1.0);
+      const EventLevel lvl = (remaining_frac <= warn_frac) ? EventLevel::Warn : EventLevel::Info;
+      push_event(lvl, EventCategory::Combat, msg, ctx);
+    }
   }
 
   std::sort(destroyed.begin(), destroyed.end());
@@ -1905,6 +2397,9 @@ void Simulation::tick_combat() {
     state_.ship_orders.erase(dead_id);
     state_.ships.erase(dead_id);
 
+    // Keep fleet membership consistent.
+    remove_ship_from_fleets(dead_id);
+
     for (auto& [_, fac] : state_.factions) {
       fac.ship_contacts.erase(dead_id);
     }
@@ -1916,5 +2411,87 @@ void Simulation::tick_combat() {
   }
 }
 
-} // namespace nebula4x
+void Simulation::tick_repairs() {
+  const double per_yard = std::max(0.0, cfg_.repair_hp_per_day_per_shipyard);
+  if (per_yard <= 0.0) return;
+
+  const double dock_range = std::max(0.0, cfg_.docking_range_mkm);
+
+  const auto ship_ids = sorted_keys(state_.ships);
+  for (Id sid : ship_ids) {
+    auto* ship = find_ptr(state_.ships, sid);
+    if (!ship) continue;
+
+    const auto* d = find_design(ship->design_id);
+    const double max_hp = d ? d->max_hp : ship->hp;
+    if (max_hp <= 0.0) continue;
+
+    // Clamp just in case something drifted out of bounds (custom content, etc.).
+    if (ship->hp > max_hp) ship->hp = max_hp;
+    if (ship->hp >= max_hp - 1e-9) continue;
+
+    Id best_colony = kInvalidId;
+    int best_shipyards = 0;
+    double best_dist = 0.0;
+
+    const auto colony_ids = sorted_keys(state_.colonies);
+    for (Id cid : colony_ids) {
+      const auto* colony = find_ptr(state_.colonies, cid);
+      if (!colony) continue;
+      if (colony->faction_id != ship->faction_id) continue;
+
+      const auto it_yard = colony->installations.find("shipyard");
+      const int yards = (it_yard != colony->installations.end()) ? it_yard->second : 0;
+      if (yards <= 0) continue;
+
+      const auto* body = find_ptr(state_.bodies, colony->body_id);
+      if (!body) continue;
+      if (body->system_id != ship->system_id) continue;
+
+      const double dist = (ship->position_mkm - body->position_mkm).length();
+      if (dist > dock_range + 1e-9) continue;
+
+      // Prefer the colony with the most shipyards, then the closest distance, then lowest id.
+      bool better = false;
+      if (yards > best_shipyards) {
+        better = true;
+      } else if (yards == best_shipyards) {
+        if (best_colony == kInvalidId || dist < best_dist - 1e-9) {
+          better = true;
+        } else if (std::abs(dist - best_dist) <= 1e-9 && cid < best_colony) {
+          better = true;
+        }
+      }
+
+      if (better) {
+        best_colony = cid;
+        best_shipyards = yards;
+        best_dist = dist;
+      }
+    }
+
+    if (best_colony == kInvalidId || best_shipyards <= 0) continue;
+
+    const double before = ship->hp;
+    ship->hp = std::min(max_hp, ship->hp + per_yard * static_cast<double>(best_shipyards));
+
+    if (before < max_hp - 1e-9 && ship->hp >= max_hp - 1e-9) {
+      // Log only when the ship is fully repaired to avoid event spam.
+      const auto* colony = find_ptr(state_.colonies, best_colony);
+      const auto* sys = find_ptr(state_.systems, ship->system_id);
+
+      EventContext ctx;
+      ctx.faction_id = ship->faction_id;
+      ctx.system_id = ship->system_id;
+      ctx.ship_id = ship->id;
+      ctx.colony_id = best_colony;
+
+      std::string msg = "Ship repaired: " + ship->name;
+      if (colony) msg += " at " + colony->name;
+      if (sys) msg += " in " + sys->name;
+      push_event(EventLevel::Info, EventCategory::Shipyard, std::move(msg), ctx);
+    }
+  }
 }
+
+} // namespace nebula4x

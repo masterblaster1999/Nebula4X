@@ -1,8 +1,82 @@
-# Patch pack notes (generated 2025-12-27 r25)
+# Patch pack notes (generated 2025-12-28 r31)
 
 This patch pack is designed for **GitHub web uploads** (Add file → Upload files).
 
 It is **cumulative**: it contains the union of files changed/added in all rounds so far, so you can apply it in one upload.
+
+## New in this patch pack: Fleets (persistent ship groups) + JSON export
+
+- Core:
+  - Adds a new persisted entity: `Fleet` (stored in `GameState::fleets`).
+  - Fleets contain ship ids and a designated leader.
+- Serialization:
+  - Save version bumped to `13`.
+  - Saves now include a `fleets` array (older saves without it still load).
+- Simulation:
+  - Fleet management helpers (`create_fleet`, `add_ship_to_fleet`, `remove_ship_from_fleet`, etc.).
+  - Bulk order helpers (`issue_fleet_*`) for issuing orders to all member ships.
+  - Fleet cleanup on load + when ships are destroyed/scrapped.
+- CLI:
+  - Adds `--export-fleets-json PATH` (`PATH` can be `-` for stdout).
+- Utility:
+  - Adds `nebula4x::fleets_to_json()`.
+- Tests:
+  - Adds `test_fleets` and extends `test_state_export`.
+
+## New in this patch pack: ships/colonies JSON export + validate newer order types
+
+- CLI:
+  - Adds `--export-ships-json PATH` and `--export-colonies-json PATH` (`PATH` can be `-` for stdout).
+- Utility:
+  - Adds deterministic JSON export helpers: `nebula4x::ships_to_json()` and `nebula4x::colonies_to_json()`.
+- Validation:
+  - `validate_game_state()` now validates `OrbitBody`, `TransferCargoToShip`, and `ScrapShip` orders instead of
+    flagging them as unknown.
+- Tests:
+  - Adds `test_state_export` and extends `test_state_validation`.
+
+## New in this patch pack: shipyard repairs for docked ships
+
+- Simulation:
+  - Ships docked at a friendly colony with at least one `shipyard` installation now automatically repair HP.
+  - New `SimConfig::repair_hp_per_day_per_shipyard` (default: `0.5`).
+  - Logs a `Shipyard` event when a ship becomes fully repaired (to avoid event spam).
+- Tests:
+  - Adds `test_ship_repairs`.
+
+## New in this patch pack: colony population growth/decline (simple)
+
+- Simulation:
+  - Adds a simple daily population growth/decline model for colonies.
+  - New `SimConfig::population_growth_rate_per_year` (default `0.01`).
+- Tests:
+  - Adds `test_population_growth`.
+- Docs:
+  - Updates README feature list.
+
+## New in this patch pack: combat hit events (non-lethal damage logs)
+
+- Simulation:
+  - Combat now emits persistent `Combat` events when ships take damage but survive.
+  - Adds `SimConfig` thresholds:
+    - `combat_damage_event_min_abs`
+    - `combat_damage_event_min_fraction`
+    - `combat_damage_event_warn_remaining_fraction`
+- Tests:
+  - Adds `test_combat_events`.
+
+## New in this patch pack: save diff tooling + ship scrapping refunds
+
+- Fix (build-breaking): restores missing ship order variants (`OrbitBody`, `TransferCargoToShip`, `ScrapShip`).
+- CLI:
+  - `--diff-saves A B` prints a deterministic structural diff between two saves.
+  - `--diff-saves-json PATH` emits a machine-readable JSON diff report (`PATH` can be `-`).
+- Simulation:
+  - Ship scrapping returns carried cargo to the colony and refunds a fraction of shipyard build costs.
+  - New `SimConfig::scrap_refund_fraction` (default 0.5).
+  - Logs a Shipyard event when scrapping.
+- Tests:
+  - Adds `test_save_diff`.
 
 ## New in this patch pack: BOM-tolerant JSON parsing + CRLF-aware error locations
 

@@ -1,10 +1,103 @@
-# Patch notes (generated 2025-12-27 r25)
+# Patch notes (generated 2025-12-28 r31)
 
 This patch pack contains only the files that changed.
 
 Apply by copying the files over the repo (drag/drop into GitHub's "Upload files"), preserving folder paths.
 
 ## Summary of changes
+
+### r31: Fleet system (persistent ship groups) + JSON export
+
+- Core:
+  - Introduces a new persisted entity: `Fleet`.
+  - Fleets belong to a faction and contain a list of ship ids + a designated leader.
+  - Fleets are stored in `GameState::fleets`.
+- Serialization:
+  - Save version bumped to `13`.
+  - Saves now include a new top-level `fleets` array (older saves without it still load).
+- Validation:
+  - `validate_game_state()` now validates fleet invariants:
+    - faction existence,
+    - ships exist and belong to the fleet's faction,
+    - ships are not duplicated across fleets,
+    - leader is a member (when set).
+- Simulation:
+  - Adds fleet management helpers (`create_fleet`, `add_ship_to_fleet`, `remove_ship_from_fleet`, etc.).
+  - Adds bulk order helpers (`issue_fleet_*`) to issue orders to all ships in a fleet.
+  - Automatically prunes stale fleet references on load, and keeps fleets consistent when ships are
+    destroyed in combat or scrapped.
+- CLI:
+  - Adds `--export-fleets-json PATH` (`PATH` can be `-` for stdout).
+- Utility:
+  - Adds `nebula4x::fleets_to_json()` (includes per-fleet ship summaries).
+- Tests:
+  - Adds `test_fleets`.
+  - Extends `test_state_export` with fleet JSON export coverage.
+
+### r30: ships/colonies JSON export + validate newer order types
+
+- CLI:
+  - Adds `--export-ships-json PATH` and `--export-colonies-json PATH` (`PATH` can be `-` for stdout).
+- Utility:
+  - Adds deterministic JSON export helpers: `nebula4x::ships_to_json()` and `nebula4x::colonies_to_json()`.
+    - Exports include resolved names (when content is available) and some computed per-day colony rates.
+- Validation:
+  - `validate_game_state()` now validates `OrbitBody`, `TransferCargoToShip`, and `ScrapShip` orders instead of
+    flagging them as unknown.
+- Tests:
+  - Adds `test_state_export`.
+  - Extends `test_state_validation` to cover the newer order types.
+
+### r29: shipyard repairs for docked ships
+
+- Simulation:
+  - Ships docked at a friendly colony with at least one `shipyard` installation now automatically repair HP.
+  - New `SimConfig::repair_hp_per_day_per_shipyard` (default: `0.5`).
+    - Daily repair = `repair_hp_per_day_per_shipyard * shipyard_count`.
+  - Logs a `Shipyard` event when a ship becomes fully repaired (to avoid event spam).
+- Tests:
+  - Adds `test_ship_repairs`.
+
+### r28: colony population growth/decline (simple)
+
+- Simulation:
+  - Adds a simple daily population growth/decline model for colonies.
+  - New `SimConfig::population_growth_rate_per_year` (fraction per year; default `0.01`).
+    - Example: `0.01` ≈ +1%/year.
+    - Negative values model population decline.
+- Tests:
+  - Adds `test_population_growth`.
+- Docs:
+  - Updates README feature list.
+
+### r27: combat hit events (non-lethal damage logs)
+
+- Simulation:
+  - Combat now emits persistent `Combat` events when ships take damage but survive.
+  - Adds `SimConfig` thresholds to control when damage events are emitted and when they are elevated to `Warn`:
+    - `combat_damage_event_min_abs`
+    - `combat_damage_event_min_fraction`
+    - `combat_damage_event_warn_remaining_fraction`
+- Tests:
+  - Adds `test_combat_events`.
+
+### r26: Save diff tooling + fix missing ship orders + scrapping refunds
+
+- Fix (build-breaking): Restores missing `Order` variants (`OrbitBody`, `TransferCargoToShip`, `ScrapShip`) that
+  were referenced by simulation/UI/serialization but absent from `orders.h`.
+- Simulation:
+  - Scrapping a ship at a colony now:
+    - returns any carried cargo minerals to the colony stockpile, and
+    - refunds a configurable fraction of shipyard mineral build costs (estimated from design mass).
+  - New `SimConfig::scrap_refund_fraction` (default: 0.5).
+  - Logs a persistent Shipyard event when a ship is scrapped.
+- CLI:
+  - Adds `--diff-saves A B` to print a deterministic structural diff between two saves.
+  - Adds `--diff-saves-json PATH` (optional) to emit a machine-readable JSON diff report (`PATH` can be `-`).
+- Utility:
+  - Adds `nebula4x::diff_saves_to_text()` and `nebula4x::diff_saves_to_json()`.
+- Tests:
+  - Adds `test_save_diff`.
 
 ### r25: JSON parser BOM tolerance + CRLF-aware error line/col
 

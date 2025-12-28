@@ -9,6 +9,12 @@ namespace nebula4x {
 struct SimConfig {
   double seconds_per_day{86400.0};
 
+  // Colony population growth rate (fraction per year).
+  //
+  // Example: 0.01 = +1% per year. A negative value models population decline.
+  // Applied once per simulated day in tick_colonies().
+  double population_growth_rate_per_year{0.01};
+
   // When interacting with moving orbital bodies (colonies), ships need a tolerance
   // for being considered "in orbit / docked".
   //
@@ -22,6 +28,36 @@ struct SimConfig {
   // Maximum number of persistent simulation events to keep in GameState::events.
   // 0 means "unlimited" (not recommended for very long runs).
   int max_events{1000};
+
+  // Fraction of shipyard mineral costs refunded when scrapping a ship at a colony.
+  //
+  // 0.0 = no refund, 1.0 = full refund.
+  double scrap_refund_fraction{0.5};
+
+  // Ship repair rate when docked at a friendly colony with a shipyard.
+  //
+  // A ship is considered docked if it is within docking_range_mkm of the colony's body.
+  // Each day, a docked ship repairs (repair_hp_per_day_per_shipyard * shipyard_count)
+  // hitpoints, capped to the design max HP.
+  //
+  // 0.0 disables repairs.
+  double repair_hp_per_day_per_shipyard{0.5};
+
+  // Combat event logging controls.
+  //
+  // Combat already logs ship destruction. These thresholds control whether we also
+  // emit events for ships that take damage but survive (useful for debugging and
+  // for "what just happened?" UX in the event log).
+  //
+  // An event is logged for a damaged ship when either:
+  // - damage >= combat_damage_event_min_abs, OR
+  // - damage/max_hp >= combat_damage_event_min_fraction.
+  double combat_damage_event_min_abs{1.0};
+  double combat_damage_event_min_fraction{0.10};
+
+  // If a damaged ship's remaining HP fraction is <= this value, log the damage
+  // event as Warn (otherwise Info).
+  double combat_damage_event_warn_remaining_fraction{0.25};
 };
 
 // Optional context passed when recording a persistent simulation event.
@@ -124,6 +160,47 @@ class Simulation {
   // Returns false if the ship does not exist or has no queued orders.
   bool cancel_current_order(Id ship_id);
 
+  // --- Fleet helpers ---
+  // Fleets are lightweight groupings of ships (same faction) to make it easier
+  // to issue orders in bulk.
+  //
+  // Fleets are persisted in GameState::fleets.
+  // Invariants enforced by the Simulation helpers:
+  // - All ships in a fleet must exist and belong to the fleet faction_id.
+  // - A ship may belong to at most one fleet at a time.
+  // - leader_ship_id, if set, must be a member of the fleet.
+  Id create_fleet(Id faction_id, const std::string& name, const std::vector<Id>& ship_ids,
+                  std::string* error = nullptr);
+  bool disband_fleet(Id fleet_id);
+  bool add_ship_to_fleet(Id fleet_id, Id ship_id, std::string* error = nullptr);
+  bool remove_ship_from_fleet(Id fleet_id, Id ship_id);
+  bool set_fleet_leader(Id fleet_id, Id ship_id);
+  bool rename_fleet(Id fleet_id, const std::string& name);
+
+  // Returns the fleet id containing ship_id, or kInvalidId if none.
+  Id fleet_for_ship(Id ship_id) const;
+
+  // Convenience to clear orders for every ship in a fleet.
+  bool clear_fleet_orders(Id fleet_id);
+
+  // Fleet order helpers (issue the same order to every member ship).
+  bool issue_fleet_wait_days(Id fleet_id, int days);
+  bool issue_fleet_move_to_point(Id fleet_id, Vec2 target_mkm);
+  bool issue_fleet_move_to_body(Id fleet_id, Id body_id, bool restrict_to_discovered = false);
+  bool issue_fleet_orbit_body(Id fleet_id, Id body_id, int duration_days = -1,
+                              bool restrict_to_discovered = false);
+  bool issue_fleet_travel_via_jump(Id fleet_id, Id jump_point_id);
+  bool issue_fleet_travel_to_system(Id fleet_id, Id target_system_id, bool restrict_to_discovered = false);
+  bool issue_fleet_attack_ship(Id fleet_id, Id target_ship_id, bool restrict_to_discovered = false);
+
+  bool issue_fleet_load_mineral(Id fleet_id, Id colony_id, const std::string& mineral, double tons = 0.0,
+                                bool restrict_to_discovered = false);
+  bool issue_fleet_unload_mineral(Id fleet_id, Id colony_id, const std::string& mineral, double tons = 0.0,
+                                  bool restrict_to_discovered = false);
+  bool issue_fleet_transfer_cargo_to_ship(Id fleet_id, Id target_ship_id, const std::string& mineral, double tons = 0.0,
+                                          bool restrict_to_discovered = false);
+  bool issue_fleet_scrap_ship(Id fleet_id, Id colony_id, bool restrict_to_discovered = false);
+
   // Gameplay actions
   // Insert a delay into the ship's order queue.
   //
@@ -225,11 +302,17 @@ class Simulation {
   void tick_ships();
   void tick_contacts();
   void tick_combat();
+  void tick_repairs();
 
   void discover_system_for_faction(Id faction_id, Id system_id);
 
   void apply_design_stats_to_ship(Ship& ship);
   void initialize_unlocks_for_faction(Faction& f);
+
+  // Remove a ship reference from any fleets and prune empty fleets.
+  void remove_ship_from_fleets(Id ship_id);
+  // Prune invalid ship references from fleets (missing ships) and drop empty fleets.
+  void prune_fleets();
 
   void push_event(EventLevel level, std::string message);
   void push_event(EventLevel level, EventCategory category, std::string message, EventContext ctx = {});

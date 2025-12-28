@@ -17,6 +17,17 @@ struct MoveToBody {
   Id body_id{kInvalidId};
 };
 
+// Station-keep with a body for a duration.
+//
+// duration_days:
+//  -1  => indefinite
+//   0  => complete immediately
+//  >0  => decrement once per sim day while in docking range
+struct OrbitBody {
+  Id body_id{kInvalidId};
+  int duration_days{-1};
+};
+
 // Move to a jump point and transit to the linked system when reached.
 struct TravelViaJump {
   Id jump_point_id{kInvalidId};
@@ -41,7 +52,6 @@ struct WaitDays {
   int days_remaining{0};
 };
 
-
 // Load minerals from a friendly colony into this ship's cargo.
 // If mineral is empty, load from all minerals (until capacity or requested tons).
 // If tons <= 0, load as much as possible.
@@ -60,8 +70,30 @@ struct UnloadMineral {
   double tons{0.0};
 };
 
-using Order =
-    std::variant<MoveToPoint, MoveToBody, TravelViaJump, AttackShip, WaitDays, LoadMineral, UnloadMineral>;
+// Transfer minerals from this ship's cargo into another friendly ship.
+// If mineral is empty, transfer all minerals (until capacity or requested tons).
+// If tons <= 0, transfer as much as possible.
+struct TransferCargoToShip {
+  Id target_ship_id{kInvalidId};
+  std::string mineral;
+  double tons{0.0};
+};
+
+// Decommission (scrap) a ship at a friendly colony.
+struct ScrapShip {
+  Id colony_id{kInvalidId};
+};
+
+using Order = std::variant<MoveToPoint,
+                           MoveToBody,
+                           OrbitBody,
+                           TravelViaJump,
+                           AttackShip,
+                           WaitDays,
+                           LoadMineral,
+                           UnloadMineral,
+                           TransferCargoToShip,
+                           ScrapShip>;
 
 struct ShipOrders {
   std::vector<Order> queue;

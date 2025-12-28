@@ -100,6 +100,12 @@ std::vector<std::string> validate_game_state(const GameState& s, const ContentDB
       push(errors, join("Faction id mismatch: key=", id_u64(id), " value.id=", id_u64(f.id)));
     }
   }
+  for (const auto& [id, fl] : s.fleets) {
+    bump_max(id);
+    if (fl.id != kInvalidId && fl.id != id) {
+      push(errors, join("Fleet id mismatch: key=", id_u64(id), " value.id=", id_u64(fl.id)));
+    }
+  }
 
   if (s.next_id != kInvalidId && max_id != kInvalidId && s.next_id <= max_id) {
     push(errors,
@@ -269,6 +275,31 @@ std::vector<std::string> validate_game_state(const GameState& s, const ContentDB
                 } else if (!has_colony(ord.colony_id)) {
                   push(errors, prefix() + join("UnloadMineral references missing colony_id ", id_u64(ord.colony_id)));
                 }
+              } else if constexpr (std::is_same_v<T, OrbitBody>) {
+                if (ord.body_id == kInvalidId) {
+                  push(errors, prefix() + "OrbitBody has invalid body_id");
+                } else if (!has_body(ord.body_id)) {
+                  push(errors, prefix() + join("OrbitBody references missing body_id ", id_u64(ord.body_id)));
+                }
+                if (ord.duration_days < -1) {
+                  push(errors, prefix() + join("OrbitBody has invalid duration_days ", ord.duration_days));
+                }
+              } else if constexpr (std::is_same_v<T, TransferCargoToShip>) {
+                if (ord.target_ship_id == kInvalidId) {
+                  push(errors, prefix() + "TransferCargoToShip has invalid target_ship_id");
+                } else if (!has_ship(ord.target_ship_id)) {
+                  push(errors,
+                       prefix() + join("TransferCargoToShip references missing target_ship_id ",
+                                       id_u64(ord.target_ship_id)));
+                } else if (ord.target_ship_id == ship_id) {
+                  push(errors, prefix() + "TransferCargoToShip targets itself");
+                }
+              } else if constexpr (std::is_same_v<T, ScrapShip>) {
+                if (ord.colony_id == kInvalidId) {
+                  push(errors, prefix() + "ScrapShip has invalid colony_id");
+                } else if (!has_colony(ord.colony_id)) {
+                  push(errors, prefix() + join("ScrapShip references missing colony_id ", id_u64(ord.colony_id)));
+                }
               } else if constexpr (std::is_same_v<T, MoveToPoint>) {
                 // No ids.
               } else {
@@ -413,6 +444,64 @@ std::vector<std::string> validate_game_state(const GameState& s, const ContentDB
                join("Faction ", id_u64(fid), " ('", f.name, "') unlocked_installations contains unknown installation '",
                     i_id, "'"));
         }
+      }
+    }
+  }
+
+  // --- Fleets ---
+  // Validate basic invariants:
+  // - fleet faction exists
+  // - ship_ids exist, belong to faction, and do not appear in multiple fleets
+  // - leader_ship_id (if set) is a member ship
+  {
+    std::unordered_map<Id, Id> ship_to_fleet;
+    ship_to_fleet.reserve(s.ships.size() * 2);
+
+    for (const auto& [fleet_id, fl] : s.fleets) {
+      if (fl.faction_id == kInvalidId || !has_faction(fl.faction_id)) {
+        push(errors,
+             join("Fleet ", id_u64(fleet_id), " ('", fl.name, "') references unknown faction_id ", id_u64(fl.faction_id)));
+      }
+
+      if (fl.ship_ids.empty()) {
+        push(errors, join("Fleet ", id_u64(fleet_id), " ('", fl.name, "') has empty ship_ids"));
+        continue;
+      }
+
+      std::unordered_set<Id> seen;
+      seen.reserve(fl.ship_ids.size() * 2);
+      for (const auto sid : fl.ship_ids) {
+        if (sid == kInvalidId) {
+          push(errors, join("Fleet ", id_u64(fleet_id), " ('", fl.name, "') contains kInvalidId in ship_ids"));
+          continue;
+        }
+        if (!has_ship(sid)) {
+          push(errors, join("Fleet ", id_u64(fleet_id), " ('", fl.name, "') references missing ship_id ", id_u64(sid)));
+          continue;
+        }
+        const auto& sh = s.ships.at(sid);
+        if (fl.faction_id != kInvalidId && sh.faction_id != fl.faction_id) {
+          push(errors,
+               join("Fleet ", id_u64(fleet_id), " ('", fl.name, "') contains ship ", id_u64(sid), " ('", sh.name,
+                    "') with faction_id=", id_u64(sh.faction_id), " != fleet faction_id=", id_u64(fl.faction_id)));
+        }
+        if (!seen.insert(sid).second) {
+          push(errors,
+               join("Fleet ", id_u64(fleet_id), " ('", fl.name, "') ship_ids contains duplicate ship ", id_u64(sid)));
+        }
+
+        auto [it, inserted] = ship_to_fleet.insert({sid, fleet_id});
+        if (!inserted && it->second != fleet_id) {
+          push(errors,
+               join("Ship ", id_u64(sid), " appears in multiple fleets: ", id_u64(it->second), " and ",
+                    id_u64(fleet_id)));
+        }
+      }
+
+      if (fl.leader_ship_id != kInvalidId && !seen.count(fl.leader_ship_id)) {
+        push(errors,
+             join("Fleet ", id_u64(fleet_id), " ('", fl.name, "') leader_ship_id ", id_u64(fl.leader_ship_id),
+                  " is not present in ship_ids"));
       }
     }
   }
