@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 5,
   "components": {
     "engine_chem_mk1": {
       "name": "Chemical Engine Mk.I",
@@ -43,6 +43,37 @@
       "type": "armor",
       "mass_tons": 25,
       "hp_bonus": 40
+    },
+    "sensor_mk2": {
+      "name": "Advanced Sensor Suite",
+      "type": "sensor",
+      "mass_tons": 12,
+      "range_mkm": 600
+    },
+    "laser_mk2": {
+      "name": "Improved Laser Cannon",
+      "type": "weapon",
+      "mass_tons": 30,
+      "damage": 12,
+      "weapon_range_mkm": 7
+    },
+    "armor_mk2": {
+      "name": "Composite Armor",
+      "type": "armor",
+      "mass_tons": 30,
+      "hp_bonus": 70
+    },
+    "reactor_mk2": {
+      "name": "Reactor Mk2",
+      "type": "reactor",
+      "mass_tons": 30,
+      "power": 20
+    },
+    "engine_ion_mk2": {
+      "name": "Ion Engine Mk2",
+      "type": "engine",
+      "mass_tons": 40,
+      "speed_km_s": 45
     }
   },
   "designs": [
@@ -86,6 +117,99 @@
         "laser_mk1",
         "laser_mk1",
         "armor_mk1"
+      ]
+    },
+    {
+      "id": "freighter_alpha_ion",
+      "name": "Freighter Alpha (Ion)",
+      "role": "freighter",
+      "components": [
+        "engine_ion_mk1",
+        "reactor_mk1",
+        "cargo_mk1",
+        "cargo_mk1"
+      ]
+    },
+    {
+      "id": "surveyor_beta_ion",
+      "name": "Surveyor Beta (Ion)",
+      "role": "surveyor",
+      "components": [
+        "engine_ion_mk1",
+        "reactor_mk1",
+        "sensor_mk1"
+      ]
+    },
+    {
+      "id": "escort_delta",
+      "name": "Escort Delta",
+      "role": "combatant",
+      "components": [
+        "engine_ion_mk1",
+        "reactor_mk1",
+        "sensor_mk1",
+        "laser_mk1",
+        "armor_mk1"
+      ]
+    },
+    {
+      "id": "pirate_raider_ion",
+      "name": "Pirate Raider (Ion)",
+      "role": "combatant",
+      "components": [
+        "engine_ion_mk1",
+        "reactor_mk1",
+        "sensor_mk1",
+        "laser_mk1",
+        "laser_mk1",
+        "armor_mk1"
+      ]
+    },
+    {
+      "id": "surveyor_gamma",
+      "name": "Surveyor Gamma",
+      "role": "surveyor",
+      "components": [
+        "engine_ion_mk2",
+        "reactor_mk2",
+        "sensor_mk2"
+      ]
+    },
+    {
+      "id": "escort_epsilon",
+      "name": "Escort Epsilon",
+      "role": "combatant",
+      "components": [
+        "engine_ion_mk2",
+        "reactor_mk2",
+        "sensor_mk2",
+        "laser_mk2",
+        "armor_mk2"
+      ]
+    },
+    {
+      "id": "pirate_raider_mk2",
+      "name": "Pirate Raider Mk2",
+      "role": "combatant",
+      "components": [
+        "engine_ion_mk2",
+        "reactor_mk2",
+        "sensor_mk2",
+        "laser_mk2",
+        "laser_mk2",
+        "armor_mk2"
+      ]
+    },
+    {
+      "id": "freighter_beta",
+      "name": "Freighter Beta",
+      "role": "freighter",
+      "components": [
+        "engine_ion_mk2",
+        "reactor_mk2",
+        "cargo_mk1",
+        "cargo_mk1",
+        "cargo_mk1"
       ]
     }
   ],

@@ -28,6 +28,7 @@ target_sources(nebula4x_core
     src/core/orders.cpp
     src/core/scenario.cpp
     src/core/simulation.cpp
+  src/core/ai_economy.cpp
     src/core/serialization.cpp
     src/core/tech.cpp
     src/core/state_validation.cpp
@@ -150,6 +151,10 @@ if(NEBULA4X_BUILD_TESTS)
     tests/test_date.cpp
     tests/test_simulation.cpp
     tests/test_serialization.cpp
+    tests/test_auto_freight.cpp
+  tests/test_ai_economy.cpp
+  tests/test_refit.cpp
+    tests/test_diplomacy.cpp
     tests/test_auto_routing.cpp
     tests/test_order_repeat.cpp
     tests/test_determinism.cpp

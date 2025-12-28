@@ -20,7 +20,8 @@ GameState make_sol_scenario() {
   // v10: adds persistent GameState::events (simulation event log).
   // v11: adds structured event fields (category + context ids).
   // v12: adds SimEvent::seq + GameState::next_event_seq (monotonic event ids).
-  s.save_version = 12;
+  // New games should start at the current save schema version.
+  s.save_version = GameState{}.save_version;
   s.date = Date::from_ymd(2200, 1, 1);
 
   // --- Factions ---
@@ -40,6 +41,7 @@ GameState make_sol_scenario() {
     Faction f;
     f.id = pirates;
     f.name = "Pirate Raiders";
+    f.control = FactionControl::AI_Pirate;
     f.research_points = 0.0;
     s.factions[pirates] = f;
   }
@@ -197,6 +199,25 @@ GameState make_sol_scenario() {
     s.colonies[c.id] = c;
   }
 
+  // --- Pirate base colony (Alpha Centauri) ---
+  // Gives the default pirates an economy so they can scale up over time.
+  {
+    Colony c;
+    c.id = allocate_id(s);
+    c.name = "Haven";
+    c.faction_id = pirates;
+    c.body_id = centauri_prime;
+    c.population_millions = 200.0;
+    c.installations["shipyard"] = 1;
+    c.installations["construction_factory"] = 1;
+    c.installations["research_lab"] = 5;
+    c.installations["sensor_station"] = 1;
+    c.installations["automated_mine"] = 10;
+    c.minerals["Duranium"] = 15000.0;
+    c.minerals["Neutronium"] = 1500.0;
+    s.colonies[c.id] = c;
+  }
+
   auto add_ship = [&](Id faction_id, Id system_id, const Vec2& pos, const std::string& name,
                       const std::string& design_id) {
     const Id id = allocate_id(s);
@@ -258,7 +279,8 @@ GameState make_random_scenario(std::uint32_t seed, int num_systems) {
   // v9: adds ShipOrders repeat fields (repeat + repeat_template).
   // v10: adds persistent GameState::events (simulation event log).
   // v11: adds structured event fields (category + context ids).
-  s.save_version = 12;
+  // New games should start at the current save schema version.
+  s.save_version = GameState{}.save_version;
   s.date = Date::from_ymd(2200, 1, 1);
 
   if (num_systems < 1) num_systems = 1;
@@ -284,6 +306,7 @@ GameState make_random_scenario(std::uint32_t seed, int num_systems) {
     Faction f;
     f.id = pirates;
     f.name = "Pirate Raiders";
+    f.control = FactionControl::AI_Pirate;
     f.research_points = 0.0;
     s.factions[pirates] = f;
   }
@@ -450,6 +473,35 @@ GameState make_random_scenario(std::uint32_t seed, int num_systems) {
         {"shipyard", 1},
         {"research_lab", 20},
         {"sensor_station", 1},
+    };
+    s.colonies[c.id] = c;
+  }
+
+
+  // --- Pirate base colony ---
+  // Gives pirates a home industry so they can grow beyond their starting ships.
+  {
+    const SysInfo& ps = (pirate_system == home_system) ? systems.front() : systems.back();
+    Id base_body = ps.star_body;
+    if (!ps.planet_bodies.empty()) base_body = ps.planet_bodies.front();
+    if (pirate_system == home_system && ps.planet_bodies.size() >= 2) base_body = ps.planet_bodies[1];
+
+    Colony c;
+    c.id = allocate_id(s);
+    c.name = "Pirate Haven";
+    c.faction_id = pirates;
+    c.body_id = base_body;
+    c.population_millions = 200.0;
+    c.installations = {
+        {"shipyard", 1},
+        {"construction_factory", 1},
+        {"research_lab", 5},
+        {"sensor_station", 1},
+        {"automated_mine", 10},
+    };
+    c.minerals = {
+        {"Duranium", 15000.0},
+        {"Neutronium", 1500.0},
     };
     s.colonies[c.id] = c;
   }

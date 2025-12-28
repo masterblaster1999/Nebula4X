@@ -1,6 +1,8 @@
 #pragma once
 
+#include <optional>
 #include <string>
+#include <vector>
 
 #include "nebula4x/core/game_state.h"
 
@@ -34,6 +36,14 @@ struct SimConfig {
   // 0.0 = no refund, 1.0 = full refund.
   double scrap_refund_fraction{0.5};
 
+  // Ship refit efficiency (shipyard).
+  //
+  // Refit work is expressed in "tons of shipyard capacity", similar to building a new ship.
+  // This multiplier scales the target design mass to determine how many tons of work a refit requires.
+  //
+  // Example: design mass 100t with multiplier 0.5 => 50 tons of work.
+  double ship_refit_tons_multiplier{0.5};
+
   // Ship repair rate when docked at a friendly colony with a shipyard.
   //
   // A ship is considered docked if it is within docking_range_mkm of the colony's body.
@@ -58,6 +68,41 @@ struct SimConfig {
   // If a damaged ship's remaining HP fraction is <= this value, log the damage
   // event as Warn (otherwise Info).
   double combat_damage_event_warn_remaining_fraction{0.25};
+
+  // --- Fleet cohesion helpers ---
+  //
+  // These options are purely simulation-side quality-of-life features to make
+  // fleet-issued orders behave more like a "real" group movement.
+  //
+  // When enabled, ships that belong to the same fleet and have the same *current*
+  // movement order (front of queue) will match speed to the slowest ship in that
+  // cohort. This keeps fleets from stringing out due to speed differences.
+  bool fleet_speed_matching{true};
+
+  // When enabled, if multiple ships in the same fleet are trying to transit the
+  // same jump point in the same system, the simulation will hold the transit
+  // until *all* of those ships have arrived at the jump point. This prevents
+  // faster ships from jumping early and leaving slower ships behind.
+  bool fleet_coordinated_jumps{true};
+
+  // When enabled, fleets may apply simple formations as a cohesion helper.
+  //
+  // Formation settings live on Fleet and are applied for some cohorts
+  // (currently: move-to-point and attack) by offsetting each ship's target.
+  bool fleet_formations{true};
+
+  // --- Auto-freight (mineral logistics) ---
+  //
+  // Ships with Ship::auto_freight enabled will, when idle, automatically haul minerals
+  // between same-faction colonies to relieve shipyard/construction stalls.
+  //
+  // Minimum tons moved in a single auto-freight task (avoids tiny shipments).
+  double auto_freight_min_transfer_tons{1.0};
+
+  // When pulling minerals from a source colony, auto-freight will never take more than
+  // this fraction of that colony's computed exportable surplus in a single task.
+  // (0.0 = take nothing, 1.0 = take full surplus).
+  double auto_freight_max_take_fraction_of_surplus{0.75};
 };
 
 // Optional context passed when recording a persistent simulation event.
@@ -106,6 +151,53 @@ struct AdvanceUntilEventResult {
   int days_advanced{0};
   bool hit{false};
   SimEvent event;
+};
+
+// A query-only path plan through the jump network.
+//
+// This is primarily used by the UI to preview routes and estimated travel time
+// before committing to issuing orders.
+//
+// --- Logistics helper types (UI/AI convenience) ---
+
+// High-level reasons a colony is considered "in need" of minerals.
+enum class LogisticsNeedKind {
+  Shipyard,
+  Construction,
+};
+
+// A computed mineral shortfall at a colony.
+//
+// desired_tons is a best-effort "target" amount to have on-hand to avoid stalling:
+// - Shipyard: enough minerals to run the shipyard at full capacity for one day
+// - Construction: enough minerals to pay for one unit of an installation build order
+struct LogisticsNeed {
+  Id colony_id{kInvalidId};
+  LogisticsNeedKind kind{LogisticsNeedKind::Shipyard};
+
+  std::string mineral;
+  double desired_tons{0.0};
+  double have_tons{0.0};
+  double missing_tons{0.0};
+
+  // Optional context identifier. For Construction needs this is typically the installation_id.
+  // For Shipyard needs this is usually empty.
+  std::string context_id;
+};
+
+// Notes:
+// - jump_ids are the *source-side* jump points to traverse (i.e. the ids that
+//   would be enqueued as TravelViaJump orders).
+// - systems includes both start and destination systems.
+// - distance/eta are best-effort estimates based on in-system straight-line
+//   travel between jump point positions (jump transit itself is instantaneous
+//   in the prototype).
+struct JumpRoutePlan {
+  std::vector<Id> systems;   // start -> ... -> destination
+  std::vector<Id> jump_ids;  // one per hop (systems.size() - 1)
+
+  double distance_mkm{0.0};
+  double eta_days{0.0};
 };
 
 class Simulation {
@@ -160,6 +252,38 @@ class Simulation {
   // Returns false if the ship does not exist or has no queued orders.
   bool cancel_current_order(Id ship_id);
 
+  // --- Order queue editing (UI convenience) ---
+  // Delete a queued order at a specific index.
+  // Returns false if the ship/order index is invalid.
+  bool delete_queued_order(Id ship_id, int index);
+
+  // Duplicate a queued order at a specific index (inserts copy after index).
+  // Returns false if the ship/order index is invalid.
+  bool duplicate_queued_order(Id ship_id, int index);
+
+  // Move a queued order from one index to another.
+  // to_index may be == queue.size() to move to end.
+  // Returns false if ship/from_index is invalid.
+  bool move_queued_order(Id ship_id, int from_index, int to_index);
+
+  // --- Order template library (persisted in saves) ---
+  // Store a named order template.
+  //
+  // If overwrite is false and the template already exists, this fails.
+  bool save_order_template(const std::string& name, const std::vector<Order>& orders,
+                           bool overwrite = false, std::string* error = nullptr);
+  bool delete_order_template(const std::string& name);
+  bool rename_order_template(const std::string& old_name, const std::string& new_name,
+                             std::string* error = nullptr);
+
+  const std::vector<Order>* find_order_template(const std::string& name) const;
+  std::vector<std::string> order_template_names() const;
+
+  // Apply a saved template to a ship/fleet order queue.
+  // If append is false, existing orders are cleared first.
+  bool apply_order_template_to_ship(Id ship_id, const std::string& name, bool append = true);
+  bool apply_order_template_to_fleet(Id fleet_id, const std::string& name, bool append = true);
+
   // --- Fleet helpers ---
   // Fleets are lightweight groupings of ships (same faction) to make it easier
   // to issue orders in bulk.
@@ -176,6 +300,12 @@ class Simulation {
   bool remove_ship_from_fleet(Id fleet_id, Id ship_id);
   bool set_fleet_leader(Id fleet_id, Id ship_id);
   bool rename_fleet(Id fleet_id, const std::string& name);
+
+  // Fleet formation configuration.
+  //
+  // Formation settings are persisted in saves and (optionally) used during
+  // tick_ships() as a small cohesion helper.
+  bool configure_fleet_formation(Id fleet_id, FleetFormation formation, double spacing_mkm);
 
   // Returns the fleet id containing ship_id, or kInvalidId if none.
   Id fleet_for_ship(Id ship_id) const;
@@ -262,15 +392,53 @@ class Simulation {
 
   bool enqueue_build(Id colony_id, const std::string& design_id);
 
+  // Refit an existing ship at a colony shipyard (prototype).
+  // Enqueues a shipyard order that, when complete, updates the ship's design_id.
+  bool enqueue_refit(Id colony_id, Id ship_id, const std::string& target_design_id, std::string* error = nullptr);
+
+  // Estimate shipyard work (tons) required to refit a ship to a target design.
+  double estimate_refit_tons(Id ship_id, const std::string& target_design_id) const;
+
   // Build installations at a colony using construction points + minerals.
   // Returns false if the colony/installation is invalid, quantity <= 0, or the
   // installation is not unlocked for that colony's faction.
   bool enqueue_installation_build(Id colony_id, const std::string& installation_id, int quantity = 1);
 
+// --- Colony production queue editing (UI convenience) ---
+// Shipyard queue (build orders)
+bool delete_shipyard_order(Id colony_id, int index);
+bool move_shipyard_order(Id colony_id, int from_index, int to_index);
+
+// Construction queue (installation build orders)
+// If refund_minerals is true, deleting an order refunds the mineral costs that were
+// already paid for the currently in-progress unit (if any).
+bool delete_construction_order(Id colony_id, int index, bool refund_minerals = true);
+bool move_construction_order(Id colony_id, int from_index, int to_index);
+
+
   // UI helpers (pure queries)
+  bool is_ship_docked_at_colony(Id ship_id, Id colony_id) const;
   bool is_design_buildable_for_faction(Id faction_id, const std::string& design_id) const;
   bool is_installation_buildable_for_faction(Id faction_id, const std::string& installation_id) const;
   double construction_points_per_day(const Colony& colony) const;
+
+  // Logistics helpers (pure queries)
+  // Compute per-colony mineral shortfalls that would stall shipyard/construction.
+  std::vector<LogisticsNeed> logistics_needs_for_faction(Id faction_id) const;
+
+  // Diplomacy / Rules-of-Engagement helpers.
+  //
+  // Stances are directed: A->B may differ from B->A.
+  //
+  // Backward compatibility: if no stance is defined, the relationship defaults to Hostile.
+  DiplomacyStatus diplomatic_status(Id from_faction_id, Id to_faction_id) const;
+  bool are_factions_hostile(Id from_faction_id, Id to_faction_id) const;
+
+  // Set a diplomatic stance. If reciprocal is true, also sets the inverse (B->A).
+  //
+  // If push_event is true, records a General event when the stance changes.
+  bool set_diplomatic_status(Id from_faction_id, Id to_faction_id, DiplomacyStatus status,
+                             bool reciprocal = true, bool push_event = true);
 
   // Sensor / intel helpers (simple in-system detection).
   // A ship is detected if it is within sensor range of any friendly ship or colony sensor in the same system.
@@ -284,6 +452,19 @@ class Simulation {
 
   // Exploration / map knowledge helpers.
   bool is_system_discovered_by_faction(Id viewer_faction_id, Id system_id) const;
+
+  // --- Jump route planning (query-only) ---
+  // Plan a path through the jump network without mutating ship orders.
+  //
+  // If include_queued_jumps is true, the plan starts from the system/position
+  // the ship/fleet leader would be at after executing already-queued TravelViaJump
+  // orders (useful for Shift-queue previews in the UI).
+  std::optional<JumpRoutePlan> plan_jump_route_for_ship(Id ship_id, Id target_system_id,
+                                                       bool restrict_to_discovered = false,
+                                                       bool include_queued_jumps = false) const;
+  std::optional<JumpRoutePlan> plan_jump_route_for_fleet(Id fleet_id, Id target_system_id,
+                                                        bool restrict_to_discovered = false,
+                                                        bool include_queued_jumps = false) const;
 
 
   // Player design creation. Designs are stored in GameState::custom_designs and are saved.
@@ -299,6 +480,7 @@ class Simulation {
   void tick_research();
   void tick_shipyards();
   void tick_construction();
+  void tick_ai();
   void tick_ships();
   void tick_contacts();
   void tick_combat();

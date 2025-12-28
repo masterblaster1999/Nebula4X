@@ -4,6 +4,7 @@
 #include <string>
 #include <utility>
 #include <variant>
+#include <vector>
 
 #include "nebula4x/core/simulation.h"
 #include "nebula4x/core/serialization.h"
@@ -170,7 +171,124 @@ int test_simulation() {
     N4X_ASSERT(saw_event);
   }
 
-  // --- cargo transfer sanity check ---
+  
+// --- construction queue should not be blocked by stalled front order ---
+// If the first queued build cannot start due to missing minerals, later orders
+// should still be able to progress.
+{
+  nebula4x::ContentDB content;
+
+  // Define two installations that are already unlocked in the default scenario.
+  nebula4x::InstallationDef expensive;
+  expensive.id = "research_lab";
+  expensive.name = "Research Lab";
+  expensive.construction_cost = 20.0;
+  expensive.build_costs = {{"Duranium", 1.0e9}}; // unaffordable -> stall
+  content.installations[expensive.id] = expensive;
+
+  nebula4x::InstallationDef cheap;
+  cheap.id = "sensor_station";
+  cheap.name = "Sensor Station";
+  cheap.construction_cost = 5.0;
+  // No mineral costs -> should be buildable even when the first order stalls.
+  content.installations[cheap.id] = cheap;
+
+  nebula4x::Simulation sim(std::move(content), nebula4x::SimConfig{});
+  const auto earth_id = find_colony_id(sim.state(), "Earth");
+  N4X_ASSERT(earth_id != nebula4x::kInvalidId);
+
+  const auto& before = sim.state().colonies.at(earth_id);
+  const int sensors_before =
+      before.installations.count("sensor_station") ? before.installations.at("sensor_station") : 0;
+
+  N4X_ASSERT(sim.enqueue_installation_build(earth_id, "research_lab", 1));
+  N4X_ASSERT(sim.enqueue_installation_build(earth_id, "sensor_station", 1));
+
+  sim.advance_days(1);
+
+  const auto& after = sim.state().colonies.at(earth_id);
+  const int sensors_after =
+      after.installations.count("sensor_station") ? after.installations.at("sensor_station") : 0;
+
+  N4X_ASSERT(sensors_after == sensors_before + 1);
+}
+
+// --- deleting a construction order refunds already-paid minerals for the current unit ---
+{
+  nebula4x::ContentDB content;
+
+  nebula4x::InstallationDef fac;
+  fac.id = "construction_factory";
+  fac.name = "Construction Factory";
+  fac.construction_cost = 200.0;           // > Earth daily CP baseline, so it won't finish in a day.
+  fac.build_costs = {{"Duranium", 100.0}}; // paid up-front per unit
+  content.installations[fac.id] = fac;
+
+  nebula4x::Simulation sim(std::move(content), nebula4x::SimConfig{});
+  const auto earth_id = find_colony_id(sim.state(), "Earth");
+  N4X_ASSERT(earth_id != nebula4x::kInvalidId);
+
+  const double dur_before = sim.state().colonies.at(earth_id).minerals.at("Duranium");
+
+  N4X_ASSERT(sim.enqueue_installation_build(earth_id, "construction_factory", 1));
+  sim.advance_days(1);
+
+  const double dur_after_pay = sim.state().colonies.at(earth_id).minerals.at("Duranium");
+  N4X_ASSERT(dur_after_pay < dur_before);
+
+  N4X_ASSERT(sim.delete_construction_order(earth_id, 0, true));
+  const double dur_after_refund = sim.state().colonies.at(earth_id).minerals.at("Duranium");
+
+  N4X_ASSERT(std::abs(dur_after_refund - dur_before) < 1e-6);
+}
+
+// --- shipyard queue editing helpers ---
+{
+  nebula4x::ContentDB content;
+
+  nebula4x::InstallationDef yard;
+  yard.id = "shipyard";
+  yard.name = "Shipyard";
+  yard.build_rate_tons_per_day = 50;
+  yard.build_costs_per_ton = {{"Duranium", 1.0}};
+  content.installations[yard.id] = yard;
+
+  nebula4x::ShipDesign a;
+  a.id = "a";
+  a.name = "A";
+  a.mass_tons = 100;
+  a.speed_km_s = 0;
+  content.designs[a.id] = a;
+
+  nebula4x::ShipDesign b;
+  b.id = "b";
+  b.name = "B";
+  b.mass_tons = 100;
+  b.speed_km_s = 0;
+  content.designs[b.id] = b;
+
+  nebula4x::Simulation sim(std::move(content), nebula4x::SimConfig{});
+  const auto earth_id = find_colony_id(sim.state(), "Earth");
+  N4X_ASSERT(earth_id != nebula4x::kInvalidId);
+
+  N4X_ASSERT(sim.enqueue_build(earth_id, "a"));
+  N4X_ASSERT(sim.enqueue_build(earth_id, "b"));
+
+  auto& q = sim.state().colonies.at(earth_id).shipyard_queue;
+  N4X_ASSERT(q.size() == 2);
+  N4X_ASSERT(q[0].design_id == "a");
+  N4X_ASSERT(q[1].design_id == "b");
+
+  N4X_ASSERT(sim.move_shipyard_order(earth_id, 1, 0));
+  N4X_ASSERT(q[0].design_id == "b");
+  N4X_ASSERT(q[1].design_id == "a");
+
+  N4X_ASSERT(sim.delete_shipyard_order(earth_id, 0));
+  N4X_ASSERT(q.size() == 1);
+  N4X_ASSERT(q[0].design_id == "a");
+}
+
+// --- cargo transfer sanity check ---
   // Load minerals from Earth onto a freighter, then unload to Mars Outpost.
   {
     nebula4x::ContentDB content;
@@ -722,6 +840,118 @@ int test_simulation() {
     N4X_ASSERT(sim.state().ships[terran_ship].system_id == bar);
     N4X_ASSERT(sim.is_system_discovered_by_faction(terrans, cen));
     N4X_ASSERT(sim.is_system_discovered_by_faction(terrans, bar));
+  }
+
+  // --- distance-weighted jump routing prefers shorter in-system travel over hop count ---
+  {
+    nebula4x::ContentDB content;
+
+    // Minimal design so ships have a non-zero speed / hp.
+    nebula4x::ShipDesign d;
+    d.id = "test_ship";
+    d.name = "Test Ship";
+    d.speed_km_s = 100.0;
+    d.max_hp = 10.0;
+    content.designs[d.id] = d;
+
+    nebula4x::Simulation sim(std::move(content), nebula4x::SimConfig{});
+
+    nebula4x::GameState st;
+    st.save_version = sim.state().save_version;
+    st.date = nebula4x::Date::from_ymd(2200, 1, 1);
+    st.next_id = 1;
+
+    // Faction.
+    nebula4x::Faction f;
+    f.id = nebula4x::allocate_id(st);
+    f.name = "Test";
+    st.factions[f.id] = f;
+
+    auto add_system = [&](const std::string& name, const nebula4x::Vec2& pos) {
+      nebula4x::StarSystem sys;
+      sys.id = nebula4x::allocate_id(st);
+      sys.name = name;
+      sys.galaxy_pos = pos;
+      st.systems[sys.id] = sys;
+      return sys.id;
+    };
+
+    const nebula4x::Id a = add_system("A", nebula4x::Vec2{0.0, 0.0});
+    const nebula4x::Id b = add_system("B", nebula4x::Vec2{1.0, 0.0});
+    const nebula4x::Id c = add_system("C", nebula4x::Vec2{2.0, 0.0});
+    const nebula4x::Id dsys = add_system("D", nebula4x::Vec2{3.0, 0.0});
+
+    auto add_jump_pair = [&](nebula4x::Id sys1, const std::string& name1, const nebula4x::Vec2& pos1,
+                             nebula4x::Id sys2, const std::string& name2, const nebula4x::Vec2& pos2) {
+      nebula4x::JumpPoint j1;
+      j1.id = nebula4x::allocate_id(st);
+      j1.name = name1;
+      j1.system_id = sys1;
+      j1.position_mkm = pos1;
+
+      nebula4x::JumpPoint j2;
+      j2.id = nebula4x::allocate_id(st);
+      j2.name = name2;
+      j2.system_id = sys2;
+      j2.position_mkm = pos2;
+
+      j1.linked_jump_id = j2.id;
+      j2.linked_jump_id = j1.id;
+
+      st.jump_points[j1.id] = j1;
+      st.jump_points[j2.id] = j2;
+
+      st.systems[sys1].jump_points.push_back(j1.id);
+      st.systems[sys2].jump_points.push_back(j2.id);
+      return std::pair<nebula4x::Id, nebula4x::Id>{j1.id, j2.id};
+    };
+
+    // Cheap 3-hop route A->B->C->D (total approach distance = 3 mkm).
+    const auto jp_ab = add_jump_pair(a, "JP-AB", nebula4x::Vec2{1.0, 0.0}, b, "JP-BA", nebula4x::Vec2{0.0, 0.0}).first;
+    const auto jp_bc = add_jump_pair(b, "JP-BC", nebula4x::Vec2{1.0, 0.0}, c, "JP-CB", nebula4x::Vec2{0.0, 0.0}).first;
+    const auto jp_cd = add_jump_pair(c, "JP-CD", nebula4x::Vec2{1.0, 0.0}, dsys, "JP-DC", nebula4x::Vec2{0.0, 0.0}).first;
+
+    // Tempting 1-hop route A->D but far away (approach distance = 1000 mkm).
+    const auto jp_ad = add_jump_pair(a, "JP-AD", nebula4x::Vec2{1000.0, 0.0}, dsys, "JP-DA", nebula4x::Vec2{0.0, 0.0}).first;
+
+    // Ship in system A at the origin.
+    nebula4x::Ship sh;
+    sh.id = nebula4x::allocate_id(st);
+    sh.name = "S";
+    sh.faction_id = f.id;
+    sh.system_id = a;
+    sh.position_mkm = nebula4x::Vec2{0.0, 0.0};
+    sh.design_id = "test_ship";
+    st.ships[sh.id] = sh;
+    st.systems[a].ships.push_back(sh.id);
+    st.selected_system = a;
+
+    const nebula4x::Id ship_id = sh.id;
+
+    sim.load_game(st);
+
+    N4X_ASSERT(sim.clear_orders(ship_id));
+    N4X_ASSERT(sim.issue_travel_to_system(ship_id, dsys, false));
+
+    const auto& q = sim.state().ship_orders.at(ship_id).queue;
+    N4X_ASSERT(q.size() == 3);
+    N4X_ASSERT(std::get<nebula4x::TravelViaJump>(q[0]).jump_point_id == jp_ab);
+    N4X_ASSERT(std::get<nebula4x::TravelViaJump>(q[1]).jump_point_id == jp_bc);
+    N4X_ASSERT(std::get<nebula4x::TravelViaJump>(q[2]).jump_point_id == jp_cd);
+
+    auto plan = sim.plan_jump_route_for_ship(ship_id, dsys, false, false);
+    N4X_ASSERT(plan.has_value());
+    N4X_ASSERT(plan->jump_ids.size() == 3);
+    N4X_ASSERT(plan->jump_ids[0] == jp_ab);
+    N4X_ASSERT(plan->jump_ids[1] == jp_bc);
+    N4X_ASSERT(plan->jump_ids[2] == jp_cd);
+    N4X_ASSERT(plan->systems.size() == 4);
+    N4X_ASSERT(plan->systems.front() == a);
+    N4X_ASSERT(plan->systems.back() == dsys);
+    N4X_ASSERT(plan->distance_mkm < 10.0);
+
+    // Make sure we did not pick the direct jump.
+    N4X_ASSERT(plan->jump_ids[0] != jp_ad);
   }
 
 

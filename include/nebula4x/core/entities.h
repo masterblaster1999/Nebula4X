@@ -18,6 +18,37 @@ enum class ShipRole { Freighter, Surveyor, Combatant, Unknown };
 
 enum class ComponentType { Engine, Cargo, Sensor, Reactor, Weapon, Armor, Unknown };
 
+// Prototype AI / control flags.
+//
+// The game is primarily player-driven, but some scenarios include non-player
+// factions (e.g. pirates). This enum allows the simulation to optionally
+// generate orders for those factions.
+//
+// NOTE: "Player" here means "no simulation AI"; it does not necessarily
+// mean "human-controlled" in a future multiplayer sense.
+enum class FactionControl : std::uint8_t {
+  Player = 0,
+  AI_Passive = 1,
+  AI_Explorer = 2,
+  AI_Pirate = 3,
+};
+
+// Diplomatic stance between factions.
+//
+// This is currently used as a simple Rules-of-Engagement / auto-targeting gate:
+// ships will only auto-engage factions they consider Hostile. The map is directed
+// (A's stance toward B can differ from B's stance toward A).
+//
+// Backwards compatibility: if no stance is defined, factions default to Hostile,
+// which matches the earlier prototype behavior of "all non-self factions are enemies".
+enum class DiplomacyStatus : std::uint8_t {
+  Friendly = 0,
+  Neutral = 1,
+  Hostile = 2,
+};
+
+
+
 struct Body {
   Id id{kInvalidId};
   std::string name;
@@ -121,13 +152,30 @@ struct Ship {
   // This enables basic logistics between colonies.
   std::unordered_map<std::string, double> cargo;
 
+  // Automation: when enabled, the simulation will generate exploration orders
+  // for this ship whenever it is idle (no queued orders).
+  bool auto_explore{false};
+
+  // Automation: when enabled, the simulation will generate freight (mineral hauling) orders
+  // for this ship whenever it is idle (no queued orders).
+  bool auto_freight{false};
+
   // Combat state.
   double hp{0.0};
 };
 
 struct BuildOrder {
+  // Shipyard queue entry.
+  //
+  // - If refit_ship_id == kInvalidId, this is a "build new ship" order for design_id.
+  // - Otherwise, this is a "refit existing ship" order for refit_ship_id, targeting design_id.
   std::string design_id;
   double tons_remaining{0.0};
+
+  // The ship being refitted (optional).
+  Id refit_ship_id{kInvalidId};
+
+  bool is_refit() const { return refit_ship_id != kInvalidId; }
 };
 
 // Installation construction order for a colony.
@@ -184,6 +232,17 @@ struct Faction {
   Id id{kInvalidId};
   std::string name;
 
+  // Control type (player vs simulation AI).
+  FactionControl control{FactionControl::Player};
+
+  // Diplomatic stances toward other factions (directed).
+  //
+  // NOTE: Missing entries default to Hostile for backward compatibility with
+  // older saves and tests.
+  std::unordered_map<Id, DiplomacyStatus> relations;
+
+
+
   // Banked research points waiting to be applied.
   double research_points{0.0};
 
@@ -212,12 +271,22 @@ struct Faction {
 // A lightweight grouping of ships for UI / order-issuing convenience.
 //
 // Design goals:
-// - Fleets are *not* a simulation entity (no combat modifiers, no formation logic).
+// - Fleets are *not* a heavyweight simulation entity (no combat modifiers).
 // - Fleets are persisted in saves.
 // - A ship may belong to at most one fleet at a time.
 //
-// Future direction: add a dedicated fleet-order system and formation / jump coordination.
-// For now, fleets are a convenience layer on top of per-ship orders.
+// Fleets may optionally specify a formation. Formations are applied as a
+// small "cohesion" helper inside tick_ships() for some movement / attack
+// cohorts (currently: move-to-point + attack) so that fleet-issued orders
+// don't result in every ship piling onto the exact same coordinates.
+
+enum class FleetFormation : std::uint8_t {
+  None = 0,
+  LineAbreast = 1,
+  Column = 2,
+  Wedge = 3,
+  Ring = 4,
+};
 struct Fleet {
   Id id{kInvalidId};
   std::string name;
@@ -231,6 +300,10 @@ struct Fleet {
 
   // Member ships.
   std::vector<Id> ship_ids;
+
+  // Optional formation settings.
+  FleetFormation formation{FleetFormation::None};
+  double formation_spacing_mkm{1.0};
 };
 
 // Jump points connect star systems.

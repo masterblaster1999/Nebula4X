@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <string>
+#include <unordered_set>
 
 namespace nebula4x::ui {
 namespace {
@@ -60,6 +61,18 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   std::vector<Id> detected_hostiles;
   if (ui.fog_of_war && viewer_faction_id != kInvalidId) {
     detected_hostiles = sim.detected_hostile_ships_in_system(viewer_faction_id, sys->id);
+  }
+
+
+  // Selected fleet member cache (for highlighting / fleet orders).
+  std::unordered_set<Id> selected_fleet_members;
+  const Fleet* selected_fleet = nullptr;
+  if (ui.selected_fleet_id != kInvalidId) {
+    selected_fleet = find_ptr(s.fleets, ui.selected_fleet_id);
+    if (selected_fleet) {
+      selected_fleet_members.reserve(selected_fleet->ship_ids.size() * 2);
+      for (Id sid : selected_fleet->ship_ids) selected_fleet_members.insert(sid);
+    }
   }
 
   const ImVec2 avail = ImGui::GetContentRegionAvail();
@@ -164,6 +177,12 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
     if (selected_ship == sid) {
       draw->AddCircle(p, 10.0f, IM_COL32(0, 255, 140, 255), 0, 1.5f);
     }
+
+
+    // Highlight selected fleet members.
+    if (!selected_fleet_members.empty() && selected_fleet_members.count(sid)) {
+      draw->AddCircle(p, 13.0f, IM_COL32(0, 160, 255, 200), 0, 1.5f);
+    }
   }
 
   // Contact markers (last known positions)
@@ -192,11 +211,14 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   }
 
   // Interaction: left click issues an order for the selected ship.
+  // Ctrl + left click issues an order for the selected fleet (if any).
   // - Click near a body: MoveToBody
   // - Click near a jump point: TravelViaJump
   // - Otherwise: MoveToPoint
   // Holding Shift will *queue* the order; otherwise it replaces the current queue.
-  if (hovered && selected_ship != kInvalidId && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+  const bool fleet_mode = ImGui::GetIO().KeyCtrl && selected_fleet != nullptr;
+  const bool can_issue_orders = fleet_mode || (selected_ship != kInvalidId);
+  if (hovered && can_issue_orders && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
     // Don't issue orders when clicking UI controls (legend, etc.).
     if (!ImGui::IsAnyItemHovered()) {
       const ImVec2 mp = ImGui::GetIO().MousePos;
@@ -205,7 +227,11 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
       if (mp.x >= origin.x && mp.x <= origin.x + avail.x && mp.y >= origin.y && mp.y <= origin.y + avail.y) {
         const bool queue = ImGui::GetIO().KeyShift;
         if (!queue) {
-          sim.clear_orders(selected_ship);
+          if (fleet_mode) {
+            sim.clear_fleet_orders(selected_fleet->id);
+          } else {
+            sim.clear_orders(selected_ship);
+          }
         }
 
         constexpr float kPickRadiusPx = 12.0f;
@@ -244,12 +270,24 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
 
         // Prefer the closest of (jump, body) if both were in range.
         if (picked_jump != kInvalidId && best_jump_d2 <= best_body_d2) {
-          sim.issue_travel_via_jump(selected_ship, picked_jump);
+          if (fleet_mode) {
+            sim.issue_fleet_travel_via_jump(selected_fleet->id, picked_jump);
+          } else {
+            sim.issue_travel_via_jump(selected_ship, picked_jump);
+          }
         } else if (picked_body != kInvalidId) {
-          sim.issue_move_to_body(selected_ship, picked_body);
+          if (fleet_mode) {
+            sim.issue_fleet_move_to_body(selected_fleet->id, picked_body, ui.fog_of_war);
+          } else {
+            sim.issue_move_to_body(selected_ship, picked_body);
+          }
         } else {
           const Vec2 world = to_world(mp, center, scale, zoom, pan);
-          sim.issue_move_to_point(selected_ship, world);
+          if (fleet_mode) {
+            sim.issue_fleet_move_to_point(selected_fleet->id, world);
+          } else {
+            sim.issue_move_to_point(selected_ship, world);
+          }
         }
       }
     }
@@ -261,7 +299,8 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   ImGui::Text("Controls");
   ImGui::BulletText("Mouse wheel: zoom");
   ImGui::BulletText("Middle drag: pan");
-  ImGui::BulletText("Left click: issue order (Shift queues)");
+  ImGui::BulletText("Left click: issue order to ship (Shift queues)");
+  ImGui::BulletText("Ctrl+Left click: issue order to fleet");
   ImGui::BulletText("Click body: move-to-body");
   ImGui::BulletText("Click jump point: travel via jump");
   ImGui::BulletText("Jump points are purple rings");

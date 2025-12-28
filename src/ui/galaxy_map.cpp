@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -32,6 +33,15 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
 
   const Ship* viewer_ship = (selected_ship != kInvalidId) ? find_ptr(s.ships, selected_ship) : nullptr;
   const Id viewer_faction_id = viewer_ship ? viewer_ship->faction_id : ui.viewer_faction_id;
+
+
+  // Selected fleet (for routing/highlighting).
+  const Fleet* selected_fleet = (ui.selected_fleet_id != kInvalidId) ? find_ptr(s.fleets, ui.selected_fleet_id) : nullptr;
+  Id selected_fleet_system = kInvalidId;
+  if (selected_fleet && selected_fleet->leader_ship_id != kInvalidId) {
+    const auto* leader = find_ptr(s.ships, selected_fleet->leader_ship_id);
+    if (leader) selected_fleet_system = leader->system_id;
+  }
 
   if (ui.fog_of_war && viewer_faction_id == kInvalidId) {
     ImGui::TextDisabled("Fog of war requires a viewer faction.");
@@ -156,37 +166,29 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
     }
   }
 
-  // Nodes (systems)
+  // Nodes (systems) + hover selection.
   const float base_r = 7.0f;
   Id hovered_system = kInvalidId;
   float hovered_d2 = 1e30f;
 
   const ImVec2 mouse = ImGui::GetIO().MousePos;
 
+  struct NodeDrawInfo {
+    Id id{kInvalidId};
+    const StarSystem* sys{nullptr};
+    ImVec2 p{0.0f, 0.0f};
+  };
+
+  std::vector<NodeDrawInfo> nodes;
+  nodes.reserve(visible.size());
+  std::unordered_map<Id, ImVec2> pos_px;
+  pos_px.reserve(visible.size() * 2);
+
   for (const auto& v : visible) {
     const Vec2 rel = v.sys->galaxy_pos - world_center;
     const ImVec2 p = to_screen(rel, center_px, scale, zoom, pan);
-
-    const bool is_selected = (s.selected_system == v.id);
-
-    const ImU32 fill = is_selected ? IM_COL32(0, 220, 140, 255) : IM_COL32(240, 240, 240, 255);
-    const ImU32 outline = IM_COL32(20, 20, 20, 255);
-
-    draw->AddCircleFilled(p, base_r, fill);
-    draw->AddCircle(p, base_r, outline, 0, 1.5f);
-
-    // Unknown-exit hint ring.
-    if (ui.show_galaxy_unknown_exits) {
-      auto it = unknown_exits.find(v.id);
-      if (it != unknown_exits.end() && it->second > 0) {
-        draw->AddCircle(p, base_r + 4.0f, IM_COL32(255, 180, 0, 200), 0, 2.0f);
-      }
-    }
-
-    if (ui.show_galaxy_labels) {
-      draw->AddText(ImVec2(p.x + base_r + 4.0f, p.y - base_r), IM_COL32(220, 220, 220, 255),
-                    v.sys->name.c_str());
-    }
+    nodes.push_back(NodeDrawInfo{v.id, v.sys, p});
+    pos_px[v.id] = p;
 
     // Hover detection.
     const float dx = mouse.x - p.x;
@@ -198,9 +200,66 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
     }
   }
 
+  // --- Route preview (hover target) ---
+  std::optional<JumpRoutePlan> preview_route;
+  bool preview_is_fleet = false;
+  bool preview_from_queue = false;
+  if (hovered && hovered_system != kInvalidId) {
+    const bool restrict = ui.fog_of_war;
+    preview_from_queue = ImGui::GetIO().KeyShift;
+    const bool fleet_mode = (ImGui::GetIO().KeyCtrl && selected_fleet != nullptr);
+    if (fleet_mode) {
+      preview_is_fleet = true;
+      preview_route = sim.plan_jump_route_for_fleet(selected_fleet->id, hovered_system, restrict, preview_from_queue);
+    } else if (selected_ship != kInvalidId) {
+      preview_route = sim.plan_jump_route_for_ship(selected_ship, hovered_system, restrict, preview_from_queue);
+    }
+  }
+
+  if (preview_route && preview_route->systems.size() >= 2) {
+    for (std::size_t i = 0; i + 1 < preview_route->systems.size(); ++i) {
+      const Id a = preview_route->systems[i];
+      const Id b = preview_route->systems[i + 1];
+      auto ita = pos_px.find(a);
+      auto itb = pos_px.find(b);
+      if (ita == pos_px.end() || itb == pos_px.end()) continue;
+      draw->AddLine(ita->second, itb->second, IM_COL32(255, 235, 80, 200), 3.0f);
+    }
+  }
+
+  // Draw nodes.
+  for (const auto& n : nodes) {
+    const bool is_selected = (s.selected_system == n.id);
+
+    const ImU32 fill = is_selected ? IM_COL32(0, 220, 140, 255) : IM_COL32(240, 240, 240, 255);
+    const ImU32 outline = IM_COL32(20, 20, 20, 255);
+
+    draw->AddCircleFilled(n.p, base_r, fill);
+    draw->AddCircle(n.p, base_r, outline, 0, 1.5f);
+
+    // Highlight the selected fleet's leader system.
+    if (selected_fleet_system != kInvalidId && n.id == selected_fleet_system) {
+      draw->AddCircle(n.p, base_r + 6.0f, IM_COL32(0, 160, 255, 200), 0, 2.0f);
+    }
+
+    // Unknown-exit hint ring.
+    if (ui.show_galaxy_unknown_exits) {
+      auto it = unknown_exits.find(n.id);
+      if (it != unknown_exits.end() && it->second > 0) {
+        draw->AddCircle(n.p, base_r + 4.0f, IM_COL32(255, 180, 0, 200), 0, 2.0f);
+      }
+    }
+
+    if (ui.show_galaxy_labels && n.sys) {
+      draw->AddText(ImVec2(n.p.x + base_r + 4.0f, n.p.y - base_r), IM_COL32(220, 220, 220, 255),
+                    n.sys->name.c_str());
+    }
+  }
+
   // Click interaction:
   // - Left click selects a system.
-  // - Right click issues a multi-jump travel route for the selected ship (Shift queues).
+  // - Right click routes selected ship to the target system (Shift queues).
+  // - Ctrl + right click routes selected fleet to the target system (Shift queues).
   if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
     if (mouse.x >= origin.x && mouse.x <= origin.x + avail.x && mouse.y >= origin.y && mouse.y <= origin.y + avail.y) {
       if (hovered_system != kInvalidId) {
@@ -218,8 +277,20 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
     if (mouse.x >= origin.x && mouse.x <= origin.x + avail.x && mouse.y >= origin.y && mouse.y <= origin.y + avail.y) {
       if (hovered_system != kInvalidId) {
-        // If a ship is selected, route it to the target system.
-        if (selected_ship != kInvalidId) {
+        // Ctrl + right click: route selected fleet.
+        const bool fleet_mode = ImGui::GetIO().KeyCtrl && selected_fleet != nullptr;
+
+        if (fleet_mode) {
+          const bool queue_orders = ImGui::GetIO().KeyShift;
+          if (!queue_orders) sim.clear_fleet_orders(selected_fleet->id);
+
+          // In fog-of-war mode, only allow routing through systems the faction already knows.
+          const bool restrict = ui.fog_of_war;
+          if (!sim.issue_fleet_travel_to_system(selected_fleet->id, hovered_system, restrict)) {
+            nebula4x::log::warn("No known jump route to that system.");
+          }
+        } else if (selected_ship != kInvalidId) {
+          // Route the selected ship to the target system.
           const bool queue_orders = ImGui::GetIO().KeyShift;
           if (!queue_orders) sim.clear_orders(selected_ship);
 
@@ -271,6 +342,31 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
           ImGui::Text("Unknown jump exits: %d", unknown);
         }
       }
+
+      // Route preview details (when a ship/fleet is selected).
+      if (preview_route && !preview_route->systems.empty() && preview_route->systems.back() == sys->id) {
+        ImGui::Separator();
+        ImGui::Text("%s route preview%s:", preview_is_fleet ? "Fleet" : "Ship",
+                    preview_from_queue ? " (queued)" : "");
+        ImGui::Text("Jumps: %d", (int)preview_route->jump_ids.size());
+        ImGui::Text("Distance: %.1f mkm", preview_route->distance_mkm);
+        if (std::isfinite(preview_route->eta_days)) {
+          ImGui::Text("ETA: %.1f days", preview_route->eta_days);
+        } else {
+          ImGui::TextDisabled("ETA: n/a");
+        }
+
+        std::string route;
+        route.reserve(preview_route->systems.size() * 24);
+        for (std::size_t i = 0; i < preview_route->systems.size(); ++i) {
+          const Id sid = preview_route->systems[i];
+          const auto* rsys = find_ptr(s.systems, sid);
+          const char* name = rsys ? rsys->name.c_str() : "?";
+          if (i > 0) route += " -> ";
+          route += name;
+        }
+        ImGui::TextWrapped("%s", route.c_str());
+      }
       ImGui::EndTooltip();
     }
   }
@@ -283,6 +379,8 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   ImGui::BulletText("Middle drag: pan");
   ImGui::BulletText("Left click: select system");
   ImGui::BulletText("Right click: route selected ship (Shift queues)");
+  ImGui::BulletText("Ctrl+Right click: route selected fleet (Shift queues)");
+  ImGui::BulletText("Hover: route preview (Shift=queued, Ctrl=fleet)");
   ImGui::Separator();
   ImGui::Checkbox("Fog of war", &ui.fog_of_war);
   ImGui::Checkbox("Labels", &ui.show_galaxy_labels);

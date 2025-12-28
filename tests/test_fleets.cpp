@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cmath>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -82,6 +83,127 @@ nebula4x::GameState make_minimal_state() {
   return s;
 }
 
+nebula4x::GameState make_jump_state() {
+  using namespace nebula4x;
+
+  GameState s;
+  s.save_version = 13;
+  s.date = Date::from_ymd(2200, 1, 1);
+  s.next_id = 2000;
+
+  // One faction.
+  {
+    Faction f;
+    f.id = 1;
+    f.name = "Terrans";
+    s.factions[f.id] = f;
+  }
+
+  // Two star systems.
+  {
+    StarSystem a;
+    a.id = 10;
+    a.name = "Alpha";
+    s.systems[a.id] = a;
+  }
+  {
+    StarSystem b;
+    b.id = 20;
+    b.name = "Beta";
+    s.systems[b.id] = b;
+  }
+
+  // Connected jump points.
+  {
+    JumpPoint jp;
+    jp.id = 100;
+    jp.name = "JP-Alpha";
+    jp.system_id = 10;
+    jp.position_mkm = Vec2{0.0, 0.0};
+    jp.linked_jump_id = 101;
+    s.jump_points[jp.id] = jp;
+    s.systems[jp.system_id].jump_points.push_back(jp.id);
+  }
+  {
+    JumpPoint jp;
+    jp.id = 101;
+    jp.name = "JP-Beta";
+    jp.system_id = 20;
+    jp.position_mkm = Vec2{0.0, 0.0};
+    jp.linked_jump_id = 100;
+    s.jump_points[jp.id] = jp;
+    s.systems[jp.system_id].jump_points.push_back(jp.id);
+  }
+
+  // Two ships in the same system but at different distances from the jump point.
+  {
+    Ship sh;
+    sh.id = 1000;
+    sh.name = "Fast";
+    sh.faction_id = 1;
+    sh.system_id = 10;
+    sh.design_id = "fast";
+    sh.position_mkm = Vec2{0.0, 0.0}; // already at the jump point
+    s.ships[sh.id] = sh;
+    s.systems[sh.system_id].ships.push_back(sh.id);
+  }
+  {
+    Ship sh;
+    sh.id = 1001;
+    sh.name = "Slow";
+    sh.faction_id = 1;
+    sh.system_id = 10;
+    sh.design_id = "slow";
+    sh.position_mkm = Vec2{17.28, 0.0}; // 2 days @ 100 km/s (8.64 mkm/day)
+    s.ships[sh.id] = sh;
+    s.systems[sh.system_id].ships.push_back(sh.id);
+  }
+
+  s.selected_system = 10;
+  return s;
+}
+
+nebula4x::GameState make_formation_state() {
+  using namespace nebula4x;
+
+  GameState s;
+  s.save_version = GameState{}.save_version;
+  s.date = Date::from_ymd(2200, 1, 1);
+  s.next_id = 9000;
+
+  // One faction.
+  {
+    Faction f;
+    f.id = 1;
+    f.name = "Terrans";
+    s.factions[f.id] = f;
+  }
+
+  // One star system.
+  {
+    StarSystem sys;
+    sys.id = 10;
+    sys.name = "TestSys";
+    s.systems[sys.id] = sys;
+  }
+
+  // Three ships in the same system.
+  for (Id sid : std::vector<Id>{1000, 1001, 1002}) {
+    Ship sh;
+    sh.id = sid;
+    sh.name = std::string("Ship-") + std::to_string(static_cast<unsigned long long>(sid));
+    sh.faction_id = 1;
+    sh.system_id = 10;
+    sh.design_id = "fast";
+    sh.position_mkm = Vec2{0.0, 0.0};
+    s.ships[sh.id] = sh;
+    s.systems[sh.system_id].ships.push_back(sh.id);
+  }
+
+  s.selected_system = 10;
+  return s;
+}
+
 } // namespace
 
 int test_fleets() {
@@ -149,6 +271,9 @@ int test_fleets() {
     const Id fid = sim.create_fleet(1, "SerializeMe", std::vector<Id>{10, 11}, &err);
     N4X_ASSERT(fid != kInvalidId);
 
+    // Newer saves should persist optional formation settings.
+    N4X_ASSERT(sim.configure_fleet_formation(fid, FleetFormation::Wedge, 2.5));
+
     const std::string json_text = serialize_game_to_json(sim.state());
     const GameState loaded = deserialize_game_from_json(json_text);
 
@@ -160,6 +285,110 @@ int test_fleets() {
     N4X_ASSERT(fl.ship_ids.size() == 2);
     N4X_ASSERT(std::find(fl.ship_ids.begin(), fl.ship_ids.end(), 10) != fl.ship_ids.end());
     N4X_ASSERT(std::find(fl.ship_ids.begin(), fl.ship_ids.end(), 11) != fl.ship_ids.end());
+
+    N4X_ASSERT(fl.formation == FleetFormation::Wedge);
+    N4X_ASSERT(std::fabs(fl.formation_spacing_mkm - 2.5) < 1e-9);
+  }
+
+  // --- Coordinated fleet jump transit ---
+  {
+    ContentDB content;
+
+    // Two simple designs with different speeds.
+    {
+      ShipDesign d;
+      d.id = "fast";
+      d.name = "Fast";
+      d.speed_km_s = 200.0;
+      d.max_hp = 10.0;
+      content.designs[d.id] = d;
+    }
+    {
+      ShipDesign d;
+      d.id = "slow";
+      d.name = "Slow";
+      d.speed_km_s = 100.0;
+      d.max_hp = 10.0;
+      content.designs[d.id] = d;
+    }
+
+    Simulation sim(content, SimConfig{});
+    sim.load_game(make_jump_state());
+
+    std::string err;
+    const Id fid = sim.create_fleet(1, "JumpFleet", std::vector<Id>{1000, 1001}, &err);
+    N4X_ASSERT(fid != kInvalidId);
+    N4X_ASSERT(err.empty());
+
+    // Issue a fleet jump. The leader is already at the jump point.
+    N4X_ASSERT(sim.issue_fleet_travel_via_jump(fid, 100));
+
+    // Day 1: leader should *not* jump yet, because the slower ship hasn't arrived.
+    sim.advance_days(1);
+    N4X_ASSERT(sim.state().ships.at(1000).system_id == 10);
+    N4X_ASSERT(sim.state().ships.at(1001).system_id == 10);
+    N4X_ASSERT(!sim.state().ship_orders.at(1000).queue.empty());
+    N4X_ASSERT(std::holds_alternative<TravelViaJump>(sim.state().ship_orders.at(1000).queue.front()));
+    N4X_ASSERT(std::fabs(sim.state().ships.at(1001).position_mkm.x - 8.64) < 1e-6);
+
+    // Day 2: slower ship arrives; still no jump until the following day.
+    sim.advance_days(1);
+    N4X_ASSERT(sim.state().ships.at(1000).system_id == 10);
+    N4X_ASSERT(sim.state().ships.at(1001).system_id == 10);
+    N4X_ASSERT(std::fabs(sim.state().ships.at(1001).position_mkm.x) < 1e-6);
+    N4X_ASSERT(!sim.state().ship_orders.at(1000).queue.empty());
+    N4X_ASSERT(std::holds_alternative<TravelViaJump>(sim.state().ship_orders.at(1000).queue.front()));
+
+    // Day 3: both ships are at the jump point at the start of the tick, so they
+    // should transit together.
+    sim.advance_days(1);
+    N4X_ASSERT(sim.state().ships.at(1000).system_id == 20);
+    N4X_ASSERT(sim.state().ships.at(1001).system_id == 20);
+    N4X_ASSERT(sim.state().ship_orders.at(1000).queue.empty());
+    N4X_ASSERT(sim.state().ship_orders.at(1001).queue.empty());
+  }
+
+  // --- Fleet formations (move-to-point) ---
+  {
+    ContentDB content;
+
+    // A very fast design so ships snap to targets in a single day.
+    {
+      ShipDesign d;
+      d.id = "fast";
+      d.name = "Fast";
+      d.speed_km_s = 10000.0;
+      d.max_hp = 10.0;
+      content.designs[d.id] = d;
+    }
+
+    Simulation sim(content, SimConfig{});
+    sim.load_game(make_formation_state());
+
+    std::string err;
+    const Id fid = sim.create_fleet(1, "FormFleet", std::vector<Id>{1000, 1001, 1002}, &err);
+    N4X_ASSERT(fid != kInvalidId);
+    N4X_ASSERT(err.empty());
+
+    N4X_ASSERT(sim.configure_fleet_formation(fid, FleetFormation::LineAbreast, 2.0));
+    N4X_ASSERT(sim.issue_fleet_move_to_point(fid, Vec2{100.0, 0.0}));
+
+    sim.advance_days(1);
+
+    const auto& a = sim.state().ships.at(1000);
+    const auto& b = sim.state().ships.at(1001);
+    const auto& c = sim.state().ships.at(1002);
+
+    N4X_ASSERT(std::fabs(a.position_mkm.x - 100.0) < 1e-9);
+    N4X_ASSERT(std::fabs(a.position_mkm.y - 0.0) < 1e-9);
+
+    N4X_ASSERT(std::fabs(b.position_mkm.x - 100.0) < 1e-9);
+    N4X_ASSERT(std::fabs(c.position_mkm.x - 100.0) < 1e-9);
+
+    // With forward=(1,0) and right=(0,1), line-abreast offsets should be in +/-Y.
+    N4X_ASSERT(std::fabs(std::fabs(b.position_mkm.y) - 2.0) < 1e-9);
+    N4X_ASSERT(std::fabs(std::fabs(c.position_mkm.y) - 2.0) < 1e-9);
+    N4X_ASSERT(b.position_mkm.y * c.position_mkm.y < 0.0);
   }
 
   return 0;

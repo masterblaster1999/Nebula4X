@@ -23,7 +23,7 @@ struct ContentDB {
 
 // A single save-game state.
 struct GameState {
-  int save_version{13};
+  int save_version{19};
   Date date;
 
   Id next_id{1};
@@ -44,6 +44,12 @@ struct GameState {
 
   // Player-created designs persisted in saves.
   std::unordered_map<std::string, ShipDesign> custom_designs;
+
+  // Player-defined order templates (UI convenience).
+  //
+  // Stored in saves so players can build a small library of common
+  // routes/patrols/etc and apply them to ships or fleets.
+  std::unordered_map<std::string, std::vector<Order>> order_templates;
 
   std::unordered_map<Id, ShipOrders> ship_orders;
 

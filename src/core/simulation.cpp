@@ -3,7 +3,10 @@
 #include <algorithm>
 #include <cmath>
 #include <cctype>
+#include <cstring>
 #include <iomanip>
+#include <limits>
+#include <optional>
 #include <queue>
 #include <sstream>
 #include <stdexcept>
@@ -11,6 +14,7 @@
 #include <unordered_set>
 
 #include "nebula4x/core/scenario.h"
+#include "nebula4x/core/ai_economy.h"
 #include "nebula4x/util/log.h"
 
 namespace nebula4x {
@@ -30,6 +34,236 @@ void push_unique(std::vector<T>& v, const T& x) {
 
 bool vec_contains(const std::vector<std::string>& v, const std::string& x) {
   return std::find(v.begin(), v.end(), x) != v.end();
+}
+
+struct PredictedNavState {
+  Id system_id{kInvalidId};
+  Vec2 position_mkm{0.0, 0.0};
+};
+
+// Predict which system/position a ship would be in after executing the queued
+// TravelViaJump orders currently in its ShipOrders queue.
+//
+// This is a lightweight helper used for:
+// - Shift-queue previews (UI)
+// - Ensuring subsequent travel commands pathfind from the end-of-queue system.
+PredictedNavState predicted_nav_state_after_queued_jumps(const GameState& s, Id ship_id,
+                                                        bool include_queued_jumps) {
+  const auto* ship = find_ptr(s.ships, ship_id);
+  if (!ship) return PredictedNavState{};
+
+  PredictedNavState out;
+  out.system_id = ship->system_id;
+  out.position_mkm = ship->position_mkm;
+  if (!include_queued_jumps) return out;
+
+  auto it = s.ship_orders.find(ship_id);
+  if (it == s.ship_orders.end()) return out;
+
+  Id sys = out.system_id;
+  Vec2 pos = out.position_mkm;
+
+  for (const auto& ord : it->second.queue) {
+    if (!std::holds_alternative<TravelViaJump>(ord)) continue;
+    const Id jump_id = std::get<TravelViaJump>(ord).jump_point_id;
+    const auto* jp = find_ptr(s.jump_points, jump_id);
+    if (!jp) continue;
+    if (jp->system_id != sys) continue;
+    if (jp->linked_jump_id == kInvalidId) continue;
+    const auto* dest = find_ptr(s.jump_points, jp->linked_jump_id);
+    if (!dest) continue;
+    if (dest->system_id == kInvalidId) continue;
+    if (!find_ptr(s.systems, dest->system_id)) continue;
+    sys = dest->system_id;
+    pos = dest->position_mkm;
+  }
+
+  out.system_id = sys;
+  out.position_mkm = pos;
+  return out;
+}
+
+struct JumpRouteNode {
+  Id system_id{kInvalidId};
+  Id entry_jump_id{kInvalidId}; // the jump point we are currently "at" in this system
+};
+
+bool operator==(const JumpRouteNode& a, const JumpRouteNode& b) {
+  return a.system_id == b.system_id && a.entry_jump_id == b.entry_jump_id;
+}
+
+struct JumpRouteNodeHash {
+  std::size_t operator()(const JumpRouteNode& n) const noexcept {
+    std::size_t h1 = std::hash<Id>{}(n.system_id);
+    std::size_t h2 = std::hash<Id>{}(n.entry_jump_id);
+    // A simple hash combine.
+    return h1 ^ (h2 + 0x9e3779b97f4a7c15ULL + (h1 << 6) + (h1 >> 2));
+  }
+};
+
+struct JumpRouteDist {
+  double cost_mkm{0.0};
+  int hops{0};
+};
+
+bool dist_better(const JumpRouteDist& a, const JumpRouteDist& b) {
+  constexpr double kEps = 1e-9;
+  if (a.cost_mkm + kEps < b.cost_mkm) return true;
+  if (std::fabs(a.cost_mkm - b.cost_mkm) <= kEps && a.hops < b.hops) return true;
+  return false;
+}
+
+struct JumpRoutePQItem {
+  JumpRouteDist d;
+  JumpRouteNode node;
+};
+
+struct JumpRoutePQComp {
+  bool operator()(const JumpRoutePQItem& a, const JumpRoutePQItem& b) const {
+    // priority_queue is max-heap; return true if a should come after b.
+    if (a.d.cost_mkm != b.d.cost_mkm) return a.d.cost_mkm > b.d.cost_mkm;
+    if (a.d.hops != b.d.hops) return a.d.hops > b.d.hops;
+    if (a.node.system_id != b.node.system_id) return a.node.system_id > b.node.system_id;
+    return a.node.entry_jump_id > b.node.entry_jump_id;
+  }
+};
+
+std::optional<JumpRoutePlan> compute_jump_route_plan(const Simulation& sim, Id start_system_id,
+                                                    Vec2 start_pos_mkm, Id faction_id,
+                                                    double speed_km_s, Id target_system_id,
+                                                    bool restrict_to_discovered) {
+  const auto& s = sim.state();
+
+  if (!find_ptr(s.systems, start_system_id)) return std::nullopt;
+  if (!find_ptr(s.systems, target_system_id)) return std::nullopt;
+
+  auto allow_system = [&](Id sys_id) {
+    if (!restrict_to_discovered) return true;
+    return sim.is_system_discovered_by_faction(faction_id, sys_id);
+  };
+
+  if (restrict_to_discovered && !allow_system(target_system_id)) return std::nullopt;
+
+  if (start_system_id == target_system_id) {
+    JumpRoutePlan plan;
+    plan.systems = {start_system_id};
+    plan.distance_mkm = 0.0;
+    plan.eta_days = 0.0;
+    return plan;
+  }
+
+  std::priority_queue<JumpRoutePQItem, std::vector<JumpRoutePQItem>, JumpRoutePQComp> pq;
+  std::unordered_map<JumpRouteNode, JumpRouteDist, JumpRouteNodeHash> dist;
+  std::unordered_map<JumpRouteNode, JumpRouteNode, JumpRouteNodeHash> prev;
+  std::unordered_map<JumpRouteNode, Id, JumpRouteNodeHash> prev_jump;
+
+  const JumpRouteNode start{start_system_id, kInvalidId};
+  dist[start] = JumpRouteDist{0.0, 0};
+  prev[start] = JumpRouteNode{kInvalidId, kInvalidId};
+  pq.push(JumpRoutePQItem{dist[start], start});
+
+  JumpRouteNode goal{kInvalidId, kInvalidId};
+
+  while (!pq.empty()) {
+    const JumpRoutePQItem cur = pq.top();
+    pq.pop();
+
+    const auto it_best = dist.find(cur.node);
+    if (it_best == dist.end()) continue;
+    if (dist_better(it_best->second, cur.d)) continue; // stale
+
+    if (cur.node.system_id == target_system_id) {
+      goal = cur.node;
+      break;
+    }
+
+    const auto* sys = find_ptr(s.systems, cur.node.system_id);
+    if (!sys) continue;
+
+    Vec2 cur_pos = start_pos_mkm;
+    if (cur.node.entry_jump_id != kInvalidId) {
+      const auto* entry = find_ptr(s.jump_points, cur.node.entry_jump_id);
+      if (!entry || entry->system_id != cur.node.system_id) continue;
+      cur_pos = entry->position_mkm;
+    }
+
+    std::vector<Id> outgoing = sys->jump_points;
+    std::sort(outgoing.begin(), outgoing.end());
+    outgoing.erase(std::unique(outgoing.begin(), outgoing.end()), outgoing.end());
+
+    for (Id jid : outgoing) {
+      const auto* jp = find_ptr(s.jump_points, jid);
+      if (!jp) continue;
+      if (jp->system_id != cur.node.system_id) continue;
+      if (jp->linked_jump_id == kInvalidId) continue;
+
+      const auto* dest_jp = find_ptr(s.jump_points, jp->linked_jump_id);
+      if (!dest_jp) continue;
+      const Id next_sys = dest_jp->system_id;
+      if (next_sys == kInvalidId) continue;
+      if (!find_ptr(s.systems, next_sys)) continue;
+      if (restrict_to_discovered && !allow_system(next_sys)) continue;
+
+      const Vec2 jp_pos = jp->position_mkm;
+      const double leg = (jp_pos - cur_pos).length();
+
+      const JumpRouteNode nxt{next_sys, dest_jp->id};
+      const JumpRouteDist cand{cur.d.cost_mkm + leg, cur.d.hops + 1};
+
+      auto it = dist.find(nxt);
+      if (it == dist.end() || dist_better(cand, it->second)) {
+        dist[nxt] = cand;
+        prev[nxt] = cur.node;
+        prev_jump[nxt] = jid;
+        pq.push(JumpRoutePQItem{cand, nxt});
+      }
+    }
+  }
+
+  if (goal.system_id == kInvalidId) return std::nullopt;
+
+  // Reconstruct jump ids.
+  std::vector<Id> jump_ids;
+  JumpRouteNode cur = goal;
+  while (!(cur == start)) {
+    auto itp = prev.find(cur);
+    auto itj = prev_jump.find(cur);
+    if (itp == prev.end() || itj == prev_jump.end()) return std::nullopt;
+    jump_ids.push_back(itj->second);
+    cur = itp->second;
+  }
+  std::reverse(jump_ids.begin(), jump_ids.end());
+
+  // Build system list from jump ids.
+  std::vector<Id> systems;
+  systems.reserve(jump_ids.size() + 1);
+  systems.push_back(start_system_id);
+  Id sys_id = start_system_id;
+  for (Id jid : jump_ids) {
+    const auto* jp = find_ptr(s.jump_points, jid);
+    if (!jp || jp->system_id != sys_id || jp->linked_jump_id == kInvalidId) return std::nullopt;
+    const auto* dest = find_ptr(s.jump_points, jp->linked_jump_id);
+    if (!dest) return std::nullopt;
+    sys_id = dest->system_id;
+    systems.push_back(sys_id);
+  }
+
+  JumpRoutePlan plan;
+  plan.systems = std::move(systems);
+  plan.jump_ids = std::move(jump_ids);
+
+  // Best-known distance is stored in dist for the goal node.
+  const auto it_goal = dist.find(goal);
+  if (it_goal != dist.end()) plan.distance_mkm = it_goal->second.cost_mkm;
+
+  const double mkm_per_day = mkm_per_day_from_speed(speed_km_s, sim.cfg().seconds_per_day);
+  if (mkm_per_day > 0.0) {
+    plan.eta_days = plan.distance_mkm / mkm_per_day;
+  } else {
+    plan.eta_days = std::numeric_limits<double>::infinity();
+  }
+
+  return plan;
 }
 
 bool faction_has_tech(const Faction& f, const std::string& tech_id) {
@@ -111,6 +345,21 @@ const ShipDesign* Simulation::find_design(const std::string& design_id) const {
   return nullptr;
 }
 
+
+bool Simulation::is_ship_docked_at_colony(Id ship_id, Id colony_id) const {
+  const auto* ship = find_ptr(state_.ships, ship_id);
+  const auto* colony = find_ptr(state_.colonies, colony_id);
+  if (!ship || !colony) return false;
+
+  const auto* body = find_ptr(state_.bodies, colony->body_id);
+  if (!body) return false;
+  if (body->system_id != ship->system_id) return false;
+
+  const double dock_range = std::max(0.0, cfg_.docking_range_mkm);
+  const double dist = (ship->position_mkm - body->position_mkm).length();
+  return dist <= dock_range + 1e-9;
+}
+
 bool Simulation::is_design_buildable_for_faction(Id faction_id, const std::string& design_id) const {
   const auto* d = find_design(design_id);
   if (!d) return false;
@@ -148,11 +397,206 @@ double Simulation::construction_points_per_day(const Colony& colony) const {
   return total;
 }
 
+std::vector<LogisticsNeed> Simulation::logistics_needs_for_faction(Id faction_id) const {
+  std::vector<LogisticsNeed> out;
+  if (faction_id == kInvalidId) return out;
+
+  const InstallationDef* shipyard_def = nullptr;
+  if (auto it = content_.installations.find("shipyard"); it != content_.installations.end()) {
+    shipyard_def = &it->second;
+  }
+
+  const auto colony_ids = sorted_keys(state_.colonies);
+  for (Id cid : colony_ids) {
+    const Colony* colony = find_ptr(state_.colonies, cid);
+    if (!colony) continue;
+    if (colony->faction_id != faction_id) continue;
+
+    // Shipyard needs: keep enough minerals to run the shipyard at full capacity for one day.
+    if (shipyard_def) {
+      int yards = 0;
+      if (auto it = colony->installations.find(shipyard_def->id); it != colony->installations.end()) {
+        yards = std::max(0, it->second);
+      }
+
+      if (yards > 0 && !colony->shipyard_queue.empty() && shipyard_def->build_rate_tons_per_day > 0.0 &&
+          !shipyard_def->build_costs_per_ton.empty()) {
+        const double capacity_tons = shipyard_def->build_rate_tons_per_day * static_cast<double>(yards);
+        for (const auto& [mineral, cost_per_ton] : shipyard_def->build_costs_per_ton) {
+          const double desired = std::max(0.0, cost_per_ton) * capacity_tons;
+          if (desired <= 1e-9) continue;
+          const double have = [&]() {
+            if (auto it2 = colony->minerals.find(mineral); it2 != colony->minerals.end()) return it2->second;
+            return 0.0;
+          }();
+
+          LogisticsNeed n;
+          n.colony_id = cid;
+          n.kind = LogisticsNeedKind::Shipyard;
+          n.mineral = mineral;
+          n.desired_tons = desired;
+          n.have_tons = have;
+          n.missing_tons = std::max(0.0, desired - have);
+          out.push_back(std::move(n));
+        }
+      }
+    }
+
+    // Construction needs: installation build orders that have not yet paid minerals.
+    for (const auto& ord : colony->construction_queue) {
+      if (ord.quantity_remaining <= 0) continue;
+      if (ord.minerals_paid) continue;
+
+      auto it = content_.installations.find(ord.installation_id);
+      if (it == content_.installations.end()) continue;
+      const InstallationDef& def = it->second;
+
+      for (const auto& [mineral, cost] : def.build_costs) {
+        const double desired = std::max(0.0, cost);
+        if (desired <= 1e-9) continue;
+        const double have = [&]() {
+          if (auto it2 = colony->minerals.find(mineral); it2 != colony->minerals.end()) return it2->second;
+          return 0.0;
+        }();
+        const double missing = std::max(0.0, desired - have);
+        if (missing <= 1e-9) continue;
+
+        LogisticsNeed n;
+        n.colony_id = cid;
+        n.kind = LogisticsNeedKind::Construction;
+        n.mineral = mineral;
+        n.desired_tons = desired;
+        n.have_tons = have;
+        n.missing_tons = missing;
+        n.context_id = def.id;
+        out.push_back(std::move(n));
+      }
+    }
+  }
+
+  return out;
+}
+
 bool Simulation::is_system_discovered_by_faction(Id viewer_faction_id, Id system_id) const {
   const auto* fac = find_ptr(state_.factions, viewer_faction_id);
   if (!fac) return true;
   return std::find(fac->discovered_systems.begin(), fac->discovered_systems.end(), system_id) !=
          fac->discovered_systems.end();
+}
+
+std::optional<JumpRoutePlan> Simulation::plan_jump_route_for_ship(Id ship_id, Id target_system_id,
+                                                                 bool restrict_to_discovered,
+                                                                 bool include_queued_jumps) const {
+  const auto* ship = find_ptr(state_.ships, ship_id);
+  if (!ship) return std::nullopt;
+
+  const PredictedNavState nav = predicted_nav_state_after_queued_jumps(state_, ship_id, include_queued_jumps);
+  if (nav.system_id == kInvalidId) return std::nullopt;
+
+  return compute_jump_route_plan(*this, nav.system_id, nav.position_mkm, ship->faction_id, ship->speed_km_s,
+                                 target_system_id, restrict_to_discovered);
+}
+
+std::optional<JumpRoutePlan> Simulation::plan_jump_route_for_fleet(Id fleet_id, Id target_system_id,
+                                                                  bool restrict_to_discovered,
+                                                                  bool include_queued_jumps) const {
+  const auto* fl = find_ptr(state_.fleets, fleet_id);
+  if (!fl) return std::nullopt;
+  if (fl->ship_ids.empty()) return std::nullopt;
+
+  // Pick a leader for planning: prefer the explicit fleet leader, otherwise first valid ship.
+  Id leader_id = fl->leader_ship_id;
+  const Ship* leader = (leader_id != kInvalidId) ? find_ptr(state_.ships, leader_id) : nullptr;
+  if (!leader) {
+    leader_id = kInvalidId;
+    for (Id sid : fl->ship_ids) {
+      if (const auto* sh = find_ptr(state_.ships, sid)) {
+        leader_id = sid;
+        leader = sh;
+        break;
+      }
+    }
+  }
+  if (!leader) return std::nullopt;
+
+  const PredictedNavState nav = predicted_nav_state_after_queued_jumps(state_, leader_id, include_queued_jumps);
+  if (nav.system_id == kInvalidId) return std::nullopt;
+
+  // Conservative ETA: use the slowest ship speed.
+  double slowest = std::numeric_limits<double>::infinity();
+  for (Id sid : fl->ship_ids) {
+    const auto* sh = find_ptr(state_.ships, sid);
+    if (!sh) continue;
+    slowest = std::min(slowest, sh->speed_km_s);
+  }
+  if (!std::isfinite(slowest)) slowest = leader->speed_km_s;
+
+  return compute_jump_route_plan(*this, nav.system_id, nav.position_mkm, fl->faction_id, slowest, target_system_id,
+                                 restrict_to_discovered);
+}
+
+
+DiplomacyStatus Simulation::diplomatic_status(Id from_faction_id, Id to_faction_id) const {
+  if (from_faction_id == kInvalidId || to_faction_id == kInvalidId) return DiplomacyStatus::Hostile;
+  if (from_faction_id == to_faction_id) return DiplomacyStatus::Friendly;
+
+  const auto* from = find_ptr(state_.factions, from_faction_id);
+  if (!from) return DiplomacyStatus::Hostile;
+
+  auto it = from->relations.find(to_faction_id);
+  if (it == from->relations.end()) return DiplomacyStatus::Hostile;
+  return it->second;
+}
+
+bool Simulation::are_factions_hostile(Id from_faction_id, Id to_faction_id) const {
+  return diplomatic_status(from_faction_id, to_faction_id) == DiplomacyStatus::Hostile;
+}
+
+bool Simulation::set_diplomatic_status(Id from_faction_id, Id to_faction_id, DiplomacyStatus status, bool reciprocal,
+                                       bool push_event_on_change) {
+  if (from_faction_id == kInvalidId || to_faction_id == kInvalidId) return false;
+  if (from_faction_id == to_faction_id) return false;
+
+  auto* a = find_ptr(state_.factions, from_faction_id);
+  auto* b = find_ptr(state_.factions, to_faction_id);
+  if (!a || !b) return false;
+
+  const auto prev_a = diplomatic_status(from_faction_id, to_faction_id);
+  const auto prev_b = diplomatic_status(to_faction_id, from_faction_id);
+
+  auto set_one = [](Faction& f, Id other, DiplomacyStatus st) {
+    if (st == DiplomacyStatus::Hostile) {
+      // Hostile is the implicit default; removing the entry keeps saves clean.
+      f.relations.erase(other);
+    } else {
+      f.relations[other] = st;
+    }
+  };
+
+  set_one(*a, to_faction_id, status);
+  if (reciprocal) set_one(*b, from_faction_id, status);
+
+  if (push_event_on_change) {
+    const bool changed_a = (prev_a != status);
+    const bool changed_b = reciprocal && (prev_b != status);
+    if (changed_a || changed_b) {
+      const std::string status_str = (status == DiplomacyStatus::Friendly)
+                                         ? "Friendly"
+                                         : (status == DiplomacyStatus::Neutral ? "Neutral" : "Hostile");
+      std::string msg;
+      if (reciprocal) {
+        msg = "Diplomacy: " + a->name + " and " + b->name + " are now " + status_str;
+      } else {
+        msg = "Diplomacy: " + a->name + " now views " + b->name + " as " + status_str;
+      }
+      EventContext ctx;
+      ctx.faction_id = from_faction_id;
+      ctx.faction_id2 = to_faction_id;
+      push_event(EventLevel::Info, EventCategory::General, msg, ctx);
+    }
+  }
+
+  return true;
 }
 
 bool Simulation::is_ship_detected_by_faction(Id viewer_faction_id, Id target_ship_id) const {
@@ -177,6 +621,7 @@ std::vector<Id> Simulation::detected_hostile_ships_in_system(Id viewer_faction_i
     const auto* sh = find_ptr(state_.ships, sid);
     if (!sh) continue;
     if (sh->faction_id == viewer_faction_id) continue;
+    if (!are_factions_hostile(viewer_faction_id, sh->faction_id)) continue;
     if (any_source_detects(sources, sh->position_mkm)) out.push_back(sid);
   }
 
@@ -567,6 +1012,219 @@ bool Simulation::cancel_current_order(Id ship_id) {
   return true;
 }
 
+bool Simulation::delete_queued_order(Id ship_id, int index) {
+  if (!find_ptr(state_.ships, ship_id)) return false;
+  auto it = state_.ship_orders.find(ship_id);
+  if (it == state_.ship_orders.end()) return false;
+  auto& q = it->second.queue;
+  if (index < 0 || index >= static_cast<int>(q.size())) return false;
+  q.erase(q.begin() + index);
+  return true;
+}
+
+bool Simulation::duplicate_queued_order(Id ship_id, int index) {
+  if (!find_ptr(state_.ships, ship_id)) return false;
+  auto it = state_.ship_orders.find(ship_id);
+  if (it == state_.ship_orders.end()) return false;
+  auto& q = it->second.queue;
+  if (index < 0 || index >= static_cast<int>(q.size())) return false;
+  const Order copy = q[index];
+  q.insert(q.begin() + index + 1, copy);
+  return true;
+}
+
+bool Simulation::move_queued_order(Id ship_id, int from_index, int to_index) {
+  if (!find_ptr(state_.ships, ship_id)) return false;
+  auto it = state_.ship_orders.find(ship_id);
+  if (it == state_.ship_orders.end()) return false;
+
+  auto& q = it->second.queue;
+  const int n = static_cast<int>(q.size());
+  if (from_index < 0 || from_index >= n) return false;
+
+  // Interpret to_index as the desired final index after the move.
+  // Allow callers to pass n (or larger) to mean "move to end".
+  to_index = std::max(0, std::min(to_index, n));
+  if (to_index >= n) to_index = n - 1;
+  if (from_index == to_index) return true;
+
+  Order moved = q[from_index];
+  q.erase(q.begin() + from_index);
+
+  // Insert at the desired index in the reduced vector. insert() allows index == size (end).
+  to_index = std::max(0, std::min(to_index, static_cast<int>(q.size())));
+  q.insert(q.begin() + to_index, std::move(moved));
+  return true;
+}
+
+
+// --- Colony production queue editing (UI convenience) ---
+
+bool Simulation::delete_shipyard_order(Id colony_id, int index) {
+  auto* colony = find_ptr(state_.colonies, colony_id);
+  if (!colony) return false;
+  auto& q = colony->shipyard_queue;
+  if (index < 0 || index >= static_cast<int>(q.size())) return false;
+  q.erase(q.begin() + index);
+  return true;
+}
+
+bool Simulation::move_shipyard_order(Id colony_id, int from_index, int to_index) {
+  auto* colony = find_ptr(state_.colonies, colony_id);
+  if (!colony) return false;
+  auto& q = colony->shipyard_queue;
+  const int n = static_cast<int>(q.size());
+  if (from_index < 0 || from_index >= n) return false;
+
+  // Interpret to_index as the desired final index after the move.
+  // Allow callers to pass n (or larger) to mean "move to end".
+  to_index = std::max(0, std::min(to_index, n));
+  if (to_index >= n) to_index = n - 1;
+  if (from_index == to_index) return true;
+
+  BuildOrder moved = q[from_index];
+  q.erase(q.begin() + from_index);
+
+  to_index = std::max(0, std::min(to_index, static_cast<int>(q.size())));
+  q.insert(q.begin() + to_index, std::move(moved));
+  return true;
+}
+
+bool Simulation::delete_construction_order(Id colony_id, int index, bool refund_minerals) {
+  auto* colony = find_ptr(state_.colonies, colony_id);
+  if (!colony) return false;
+  auto& q = colony->construction_queue;
+  if (index < 0 || index >= static_cast<int>(q.size())) return false;
+
+  if (refund_minerals) {
+    const auto& ord = q[static_cast<std::size_t>(index)];
+    if (ord.minerals_paid && !ord.installation_id.empty()) {
+      auto it = content_.installations.find(ord.installation_id);
+      if (it != content_.installations.end()) {
+        for (const auto& [mineral, cost] : it->second.build_costs) {
+          if (cost <= 0.0) continue;
+          colony->minerals[mineral] += cost;
+        }
+      }
+    }
+  }
+
+  q.erase(q.begin() + index);
+  return true;
+}
+
+bool Simulation::move_construction_order(Id colony_id, int from_index, int to_index) {
+  auto* colony = find_ptr(state_.colonies, colony_id);
+  if (!colony) return false;
+  auto& q = colony->construction_queue;
+  const int n = static_cast<int>(q.size());
+  if (from_index < 0 || from_index >= n) return false;
+
+  // Interpret to_index as the desired final index after the move.
+  // Allow callers to pass n (or larger) to mean "move to end".
+  to_index = std::max(0, std::min(to_index, n));
+  if (to_index >= n) to_index = n - 1;
+  if (from_index == to_index) return true;
+
+  InstallationBuildOrder moved = q[from_index];
+  q.erase(q.begin() + from_index);
+
+  to_index = std::max(0, std::min(to_index, static_cast<int>(q.size())));
+  q.insert(q.begin() + to_index, std::move(moved));
+  return true;
+}
+
+namespace {
+
+bool has_non_whitespace(const std::string& s) {
+  return std::any_of(s.begin(), s.end(), [](unsigned char c) { return !std::isspace(c); });
+}
+
+} // namespace
+
+bool Simulation::save_order_template(const std::string& name, const std::vector<Order>& orders,
+                                    bool overwrite, std::string* error) {
+  auto fail = [&](const std::string& msg) {
+    if (error) *error = msg;
+    return false;
+  };
+
+  if (!has_non_whitespace(name)) return fail("Template name cannot be empty");
+  if (orders.empty()) return fail("Template orders cannot be empty");
+
+  const bool exists = (state_.order_templates.find(name) != state_.order_templates.end());
+  if (exists && !overwrite) return fail("Template already exists");
+
+  state_.order_templates[name] = orders;
+  return true;
+}
+
+bool Simulation::delete_order_template(const std::string& name) {
+  return state_.order_templates.erase(name) > 0;
+}
+
+bool Simulation::rename_order_template(const std::string& old_name, const std::string& new_name,
+                                       std::string* error) {
+  auto fail = [&](const std::string& msg) {
+    if (error) *error = msg;
+    return false;
+  };
+
+  if (old_name == new_name) return true;
+  if (!has_non_whitespace(old_name)) return fail("Old name cannot be empty");
+  if (!has_non_whitespace(new_name)) return fail("New name cannot be empty");
+
+  auto it = state_.order_templates.find(old_name);
+  if (it == state_.order_templates.end()) return fail("Template not found");
+  if (state_.order_templates.find(new_name) != state_.order_templates.end()) {
+    return fail("A template with that name already exists");
+  }
+
+  state_.order_templates[new_name] = std::move(it->second);
+  state_.order_templates.erase(it);
+  return true;
+}
+
+const std::vector<Order>* Simulation::find_order_template(const std::string& name) const {
+  auto it = state_.order_templates.find(name);
+  if (it == state_.order_templates.end()) return nullptr;
+  return &it->second;
+}
+
+std::vector<std::string> Simulation::order_template_names() const {
+  std::vector<std::string> out;
+  out.reserve(state_.order_templates.size());
+  for (const auto& [k, _] : state_.order_templates) out.push_back(k);
+  std::sort(out.begin(), out.end());
+  return out;
+}
+
+bool Simulation::apply_order_template_to_ship(Id ship_id, const std::string& name, bool append) {
+  const auto* tmpl = find_order_template(name);
+  if (!tmpl) return false;
+  if (!find_ptr(state_.ships, ship_id)) return false;
+
+  if (!append) {
+    clear_orders(ship_id);
+  }
+
+  auto& so = state_.ship_orders[ship_id];
+  so.queue.insert(so.queue.end(), tmpl->begin(), tmpl->end());
+  return true;
+}
+
+bool Simulation::apply_order_template_to_fleet(Id fleet_id, const std::string& name, bool append) {
+  prune_fleets();
+  const auto* fl = find_ptr(state_.fleets, fleet_id);
+  if (!fl) return false;
+
+  bool ok = true;
+  for (Id sid : fl->ship_ids) {
+    if (!apply_order_template_to_ship(sid, name, append)) ok = false;
+  }
+  return ok;
+}
+
 Id Simulation::create_fleet(Id faction_id, const std::string& name, const std::vector<Id>& ship_ids,
                             std::string* error) {
   prune_fleets();
@@ -680,6 +1338,14 @@ bool Simulation::rename_fleet(Id fleet_id, const std::string& name) {
   return true;
 }
 
+bool Simulation::configure_fleet_formation(Id fleet_id, FleetFormation formation, double spacing_mkm) {
+  auto* fl = find_ptr(state_.fleets, fleet_id);
+  if (!fl) return false;
+  fl->formation = formation;
+  fl->formation_spacing_mkm = std::max(0.0, spacing_mkm);
+  return true;
+}
+
 Id Simulation::fleet_for_ship(Id ship_id) const {
   if (ship_id == kInvalidId) return kInvalidId;
   for (const auto& [fid, fl] : state_.fleets) {
@@ -759,9 +1425,61 @@ bool Simulation::issue_fleet_travel_to_system(Id fleet_id, Id target_system_id, 
   prune_fleets();
   const auto* fl = find_ptr(state_.fleets, fleet_id);
   if (!fl) return false;
+
+  if (!find_ptr(state_.systems, target_system_id)) return false;
+  if (fl->ship_ids.empty()) return false;
+
+  // Prefer routing once for the whole fleet so every ship takes the same hop sequence.
+  // If ships are not co-located (after their queued jumps), fall back to per-ship routing.
+  Id leader_id = fl->leader_ship_id;
+  const Ship* leader = (leader_id != kInvalidId) ? find_ptr(state_.ships, leader_id) : nullptr;
+  if (!leader) {
+    leader_id = kInvalidId;
+    for (Id sid : fl->ship_ids) {
+      if (const auto* sh = find_ptr(state_.ships, sid)) {
+        leader_id = sid;
+        leader = sh;
+        break;
+      }
+    }
+  }
+
+  if (!leader) return false;
+
+  const PredictedNavState leader_nav = predicted_nav_state_after_queued_jumps(state_, leader_id,
+                                                                              /*include_queued_jumps=*/true);
+  if (leader_nav.system_id == kInvalidId) return false;
+
+  bool colocated = true;
+  for (Id sid : fl->ship_ids) {
+    const PredictedNavState nav = predicted_nav_state_after_queued_jumps(state_, sid, /*include_queued_jumps=*/true);
+    if (nav.system_id != leader_nav.system_id) {
+      colocated = false;
+      break;
+    }
+  }
+
+  if (!colocated) {
+    bool any = false;
+    for (Id sid : fl->ship_ids) {
+      if (issue_travel_to_system(sid, target_system_id, restrict_to_discovered)) any = true;
+    }
+    return any;
+  }
+
+  if (leader_nav.system_id == target_system_id) return true; // no-op
+
+  const auto plan = compute_jump_route_plan(*this, leader_nav.system_id, leader_nav.position_mkm,
+                                            fl->faction_id, leader->speed_km_s, target_system_id,
+                                            restrict_to_discovered);
+  if (!plan) return false;
+
   bool any = false;
   for (Id sid : fl->ship_ids) {
-    if (issue_travel_to_system(sid, target_system_id, restrict_to_discovered)) any = true;
+    if (!find_ptr(state_.ships, sid)) continue;
+    auto& orders = state_.ship_orders[sid];
+    for (Id jid : plan->jump_ids) orders.queue.push_back(TravelViaJump{jid});
+    any = true;
   }
   return any;
 }
@@ -888,86 +1606,16 @@ bool Simulation::issue_travel_to_system(Id ship_id, Id target_system_id, bool re
   if (!ship) return false;
   if (!find_ptr(state_.systems, target_system_id)) return false;
 
-  auto predicted_system_after_queue = [&]() -> Id {
-    Id sys = ship->system_id;
-    auto it = state_.ship_orders.find(ship_id);
-    if (it == state_.ship_orders.end()) return sys;
+  const PredictedNavState nav = predicted_nav_state_after_queued_jumps(state_, ship_id, /*include_queued_jumps=*/true);
+  if (nav.system_id == kInvalidId) return false;
+  if (nav.system_id == target_system_id) return true; // no-op
 
-    for (const auto& ord : it->second.queue) {
-      if (!std::holds_alternative<TravelViaJump>(ord)) continue;
-      const Id jump_id = std::get<TravelViaJump>(ord).jump_point_id;
-      const auto* jp = find_ptr(state_.jump_points, jump_id);
-      if (!jp) continue;
-      if (jp->system_id != sys) continue;
-      if (jp->linked_jump_id == kInvalidId) continue;
-      const auto* dest = find_ptr(state_.jump_points, jp->linked_jump_id);
-      if (!dest) continue;
-      if (dest->system_id == kInvalidId) continue;
-      if (!find_ptr(state_.systems, dest->system_id)) continue;
-      sys = dest->system_id;
-    }
-    return sys;
-  };
+  const auto plan = compute_jump_route_plan(*this, nav.system_id, nav.position_mkm, ship->faction_id, ship->speed_km_s,
+                                            target_system_id, restrict_to_discovered);
+  if (!plan) return false;
 
-  const Id start = predicted_system_after_queue();
-  if (start == kInvalidId) return false;
-  if (start == target_system_id) return true; // no-op
-
-  auto allow_system = [&](Id sys_id) {
-    if (!restrict_to_discovered) return true;
-    return is_system_discovered_by_faction(ship->faction_id, sys_id);
-  };
-
-  if (restrict_to_discovered && !allow_system(target_system_id)) return false;
-
-  std::queue<Id> q;
-  std::unordered_map<Id, Id> prev_system;
-  std::unordered_map<Id, Id> prev_jump;
-
-  q.push(start);
-  prev_system[start] = kInvalidId;
-
-  while (!q.empty()) {
-    const Id cur = q.front();
-    q.pop();
-    if (cur == target_system_id) break;
-
-    const auto* sys = find_ptr(state_.systems, cur);
-    if (!sys) continue;
-
-    for (Id jid : sys->jump_points) {
-      const auto* jp = find_ptr(state_.jump_points, jid);
-      if (!jp) continue;
-      if (jp->linked_jump_id == kInvalidId) continue;
-
-      const auto* dest_jp = find_ptr(state_.jump_points, jp->linked_jump_id);
-      if (!dest_jp) continue;
-
-      const Id next_sys = dest_jp->system_id;
-      if (next_sys == kInvalidId) continue;
-      if (!find_ptr(state_.systems, next_sys)) continue;
-      if (restrict_to_discovered && !allow_system(next_sys)) continue;
-      if (prev_system.find(next_sys) != prev_system.end()) continue; 
-
-      prev_system[next_sys] = cur;
-      prev_jump[next_sys] = jid;
-      q.push(next_sys);
-    }
-  }
-
-  if (prev_system.find(target_system_id) == prev_system.end()) return false;
-
-  std::vector<Id> jumps;
-  for (Id cur = target_system_id; cur != start;) {
-    auto it_sys = prev_system.find(cur);
-    auto it_jump = prev_jump.find(cur);
-    if (it_sys == prev_system.end() || it_jump == prev_jump.end()) return false;
-    jumps.push_back(it_jump->second);
-    cur = it_sys->second;
-  }
-  std::reverse(jumps.begin(), jumps.end());
   auto& orders = state_.ship_orders[ship_id];
-  for (Id jid : jumps) orders.queue.push_back(TravelViaJump{jid});
+  for (Id jid : plan->jump_ids) orders.queue.push_back(TravelViaJump{jid});
   return true;
 }
 
@@ -1099,6 +1747,73 @@ bool Simulation::enqueue_build(Id colony_id, const std::string& design_id) {
   return true;
 }
 
+double Simulation::estimate_refit_tons(Id ship_id, const std::string& target_design_id) const {
+  const auto* ship = find_ptr(state_.ships, ship_id);
+  if (!ship) return 0.0;
+
+  const auto* target = find_design(target_design_id);
+  if (!target) return 0.0;
+
+  const double mult = std::max(0.0, cfg_.ship_refit_tons_multiplier);
+  return std::max(1.0, target->mass_tons * mult);
+}
+
+bool Simulation::enqueue_refit(Id colony_id, Id ship_id, const std::string& target_design_id, std::string* error) {
+  auto fail = [&](const std::string& msg) {
+    if (error) *error = msg;
+    return false;
+  };
+
+  auto* colony = find_ptr(state_.colonies, colony_id);
+  if (!colony) return fail("Colony not found");
+
+  auto* ship = find_ptr(state_.ships, ship_id);
+  if (!ship) return fail("Ship not found");
+
+  if (ship->faction_id != colony->faction_id) return fail("Ship does not belong to the colony faction");
+
+  const auto it_yard = colony->installations.find("shipyard");
+  const int yards = (it_yard != colony->installations.end()) ? it_yard->second : 0;
+  if (yards <= 0) return fail("Colony has no shipyard");
+
+  const auto* target = find_design(target_design_id);
+  if (!target) return fail("Unknown target design: " + target_design_id);
+  if (!is_design_buildable_for_faction(colony->faction_id, target_design_id)) return fail("Target design is not unlocked");
+
+  // Refit requires the ship to be docked at the colony at the time of queuing.
+  if (!is_ship_docked_at_colony(ship_id, colony_id)) return fail("Ship is not docked at the colony");
+
+  // Keep the prototype simple: refit ships must be detached from fleets.
+  if (fleet_for_ship(ship_id) != kInvalidId) return fail("Ship is assigned to a fleet (detach before refit)");
+
+  // Prevent duplicate queued refits for the same ship.
+  for (const auto& [_, c] : state_.colonies) {
+    for (const auto& bo : c.shipyard_queue) {
+      if (bo.refit_ship_id == ship_id) return fail("Ship already has a pending refit order");
+    }
+  }
+
+  BuildOrder bo;
+  bo.design_id = target_design_id;
+  bo.refit_ship_id = ship_id;
+  bo.tons_remaining = estimate_refit_tons(ship_id, target_design_id);
+  colony->shipyard_queue.push_back(bo);
+
+  // Log a helpful event for the player.
+  {
+    EventContext ctx;
+    ctx.faction_id = colony->faction_id;
+    ctx.system_id = ship->system_id;
+    ctx.ship_id = ship->id;
+    ctx.colony_id = colony->id;
+
+    std::string msg = "Shipyard refit queued: " + ship->name + " -> " + target->name + " at " + colony->name;
+    push_event(EventLevel::Info, EventCategory::Shipyard, std::move(msg), ctx);
+  }
+
+  return true;
+}
+
 bool Simulation::enqueue_installation_build(Id colony_id, const std::string& installation_id, int quantity) {
   auto* colony = find_ptr(state_.colonies, colony_id);
   if (!colony) return false;
@@ -1133,6 +1848,7 @@ void Simulation::tick_one_day() {
   tick_research();
   tick_shipyards();
   tick_construction();
+  tick_ai();
   tick_ships();
   tick_contacts();
   tick_combat();
@@ -1511,6 +2227,62 @@ void Simulation::tick_shipyards() {
 
     while (capacity_tons > 1e-9 && !colony.shipyard_queue.empty()) {
       auto& bo = colony.shipyard_queue.front();
+      const bool is_refit = bo.is_refit();
+
+      const auto* body = find_ptr(state_.bodies, colony.body_id);
+
+      // If this is a refit order, ensure the target ship exists and is docked.
+      // Refit orders are front-of-queue and will stall the shipyard until the ship arrives.
+      Ship* refit_ship = nullptr;
+      if (is_refit) {
+        if (!body) {
+          const std::string msg = "Shipyard refit stalled (missing colony body): " + colony.name;
+          nebula4x::log::error(msg);
+          EventContext ctx;
+          ctx.faction_id = colony.faction_id;
+          ctx.colony_id = colony.id;
+          push_event(EventLevel::Error, EventCategory::Shipyard, msg, ctx);
+          colony.shipyard_queue.erase(colony.shipyard_queue.begin());
+          continue;
+        }
+
+        refit_ship = find_ptr(state_.ships, bo.refit_ship_id);
+        if (!refit_ship) {
+          const std::string msg = "Shipyard refit target ship not found; dropping order at " + colony.name;
+          nebula4x::log::warn(msg);
+          EventContext ctx;
+          ctx.faction_id = colony.faction_id;
+          ctx.colony_id = colony.id;
+          push_event(EventLevel::Warn, EventCategory::Shipyard, msg, ctx);
+          colony.shipyard_queue.erase(colony.shipyard_queue.begin());
+          continue;
+        }
+
+        if (refit_ship->faction_id != colony.faction_id) {
+          const std::string msg = "Shipyard refit target ship faction mismatch; dropping order at " + colony.name;
+          nebula4x::log::warn(msg);
+          EventContext ctx;
+          ctx.faction_id = colony.faction_id;
+          ctx.colony_id = colony.id;
+          ctx.ship_id = refit_ship->id;
+          push_event(EventLevel::Warn, EventCategory::Shipyard, msg, ctx);
+          colony.shipyard_queue.erase(colony.shipyard_queue.begin());
+          continue;
+        }
+
+        if (!is_ship_docked_at_colony(refit_ship->id, colony.id)) {
+          // Stall until the ship arrives. (No event spam.)
+          break;
+        }
+
+        // Prototype drydock behavior: refitting ships are pinned to the colony body and cannot
+        // execute other queued orders while their refit is being processed.
+        refit_ship->position_mkm = body->position_mkm;
+        state_.ship_orders[refit_ship->id].queue.clear();
+        refit_ship->auto_explore = false;
+        refit_ship->auto_freight = false;
+      }
+
       double build_tons = std::min(capacity_tons, bo.tons_remaining);
 
       if (!costs_per_ton.empty()) {
@@ -1525,47 +2297,107 @@ void Simulation::tick_shipyards() {
 
       if (bo.tons_remaining > 1e-9) break;
 
-      const auto* design = find_design(bo.design_id);
-      if (!design) {
-          const std::string msg = std::string("Unknown design in build queue: ") + bo.design_id;
+      // --- Completion ---
+      if (is_refit) {
+        const auto* target = find_design(bo.design_id);
+        if (!target || !refit_ship) {
+          const std::string msg = std::string("Shipyard refit failed (unknown design or missing ship): ") + bo.design_id;
           nebula4x::log::warn(msg);
           EventContext ctx;
           ctx.faction_id = colony.faction_id;
           ctx.colony_id = colony.id;
+          if (refit_ship) ctx.ship_id = refit_ship->id;
           push_event(EventLevel::Warn, EventCategory::Shipyard, msg, ctx);
-      } else {
-        const auto* body = find_ptr(state_.bodies, colony.body_id);
-        if (!body) {
-            // log error
         } else {
-          const auto* sys = find_ptr(state_.systems, body->system_id);
-          if (!sys) {
-             // log error
-          } else {
-            Ship sh;
-            sh.id = allocate_id(state_);
-            sh.faction_id = colony.faction_id;
-            sh.system_id = body->system_id;
-            sh.design_id = bo.design_id;
-            sh.position_mkm = body->position_mkm;
-            apply_design_stats_to_ship(sh);
-            sh.name = design->name + " #" + std::to_string(sh.id);
-            state_.ships[sh.id] = sh;
-            state_.ship_orders[sh.id] = ShipOrders{};
-            state_.systems[sh.system_id].ships.push_back(sh.id);
+          // Apply the new design. Treat a completed refit as a full overhaul (fully repaired).
+          refit_ship->design_id = bo.design_id;
+          refit_ship->hp = std::max(1.0, target->max_hp);
+          apply_design_stats_to_ship(*refit_ship);
 
-            {
-              const std::string msg = "Built ship " + sh.name + " (" + sh.design_id + ") at " + colony.name;
-              nebula4x::log::info(msg);
-              EventContext ctx;
-              ctx.faction_id = colony.faction_id;
-              ctx.system_id = sh.system_id;
-              ctx.ship_id = sh.id;
-              ctx.colony_id = colony.id;
-              push_event(EventLevel::Info, EventCategory::Shipyard, msg, ctx);
+          if (body) refit_ship->position_mkm = body->position_mkm;
+
+          // If the refit reduces cargo capacity, move excess cargo back into colony stockpiles.
+          const double cap = std::max(0.0, target->cargo_tons);
+          double used = 0.0;
+          for (const auto& [_, tons] : refit_ship->cargo) used += std::max(0.0, tons);
+
+          if (used > cap + 1e-9) {
+            double excess = used - cap;
+            for (const auto& mineral : sorted_keys(refit_ship->cargo)) {
+              if (excess <= 1e-9) break;
+              auto it = refit_ship->cargo.find(mineral);
+              if (it == refit_ship->cargo.end()) continue;
+              const double have = std::max(0.0, it->second);
+              if (have <= 1e-9) continue;
+
+              const double move = std::min(have, excess);
+              it->second -= move;
+              colony.minerals[mineral] += move;
+              excess -= move;
+
+              if (it->second <= 1e-9) refit_ship->cargo.erase(it);
             }
           }
+
+          const std::string msg =
+              "Refit ship " + refit_ship->name + " -> " + target->name + " (" + refit_ship->design_id + ") at " + colony.name;
+          nebula4x::log::info(msg);
+          EventContext ctx;
+          ctx.faction_id = colony.faction_id;
+          ctx.system_id = refit_ship->system_id;
+          ctx.ship_id = refit_ship->id;
+          ctx.colony_id = colony.id;
+          push_event(EventLevel::Info, EventCategory::Shipyard, msg, ctx);
         }
+
+        colony.shipyard_queue.erase(colony.shipyard_queue.begin());
+        continue;
+      }
+
+      // Build new ship.
+      const auto* design = find_design(bo.design_id);
+      if (!design) {
+        const std::string msg = std::string("Unknown design in build queue: ") + bo.design_id;
+        nebula4x::log::warn(msg);
+        EventContext ctx;
+        ctx.faction_id = colony.faction_id;
+        ctx.colony_id = colony.id;
+        push_event(EventLevel::Warn, EventCategory::Shipyard, msg, ctx);
+      } else if (!body) {
+        const std::string msg = "Shipyard build failed (missing colony body): " + colony.name;
+        nebula4x::log::error(msg);
+        EventContext ctx;
+        ctx.faction_id = colony.faction_id;
+        ctx.colony_id = colony.id;
+        push_event(EventLevel::Error, EventCategory::Shipyard, msg, ctx);
+      } else if (auto* sys = find_ptr(state_.systems, body->system_id); !sys) {
+        const std::string msg = "Shipyard build failed (missing system): colony=" + colony.name;
+        nebula4x::log::error(msg);
+        EventContext ctx;
+        ctx.faction_id = colony.faction_id;
+        ctx.colony_id = colony.id;
+        push_event(EventLevel::Error, EventCategory::Shipyard, msg, ctx);
+      } else {
+        Ship sh;
+        sh.id = allocate_id(state_);
+        sh.faction_id = colony.faction_id;
+        sh.system_id = body->system_id;
+        sh.design_id = bo.design_id;
+        sh.position_mkm = body->position_mkm;
+        apply_design_stats_to_ship(sh);
+        sh.name = design->name + " #" + std::to_string(sh.id);
+        state_.ships[sh.id] = sh;
+        state_.ship_orders[sh.id] = ShipOrders{};
+        state_.systems[sh.system_id].ships.push_back(sh.id);
+
+        const std::string msg = "Built ship " + sh.name + " (" + sh.design_id + ") at " + colony.name;
+        nebula4x::log::info(msg);
+        EventContext ctx;
+        ctx.faction_id = colony.faction_id;
+        ctx.system_id = sh.system_id;
+        ctx.ship_id = sh.id;
+        ctx.colony_id = colony.id;
+        push_event(EventLevel::Info, EventCategory::Shipyard, msg, ctx);
       }
 
       colony.shipyard_queue.erase(colony.shipyard_queue.begin());
@@ -1579,6 +2411,7 @@ void Simulation::tick_construction() {
 
     Id colony_system_id = kInvalidId;
     if (auto* b = find_ptr(state_.bodies, colony.body_id)) colony_system_id = b->system_id;
+
     double cp_available = construction_points_per_day(colony);
     if (cp_available <= 1e-9) continue;
 
@@ -1599,33 +2432,49 @@ void Simulation::tick_construction() {
       }
     };
 
-    while (cp_available > 1e-9 && !colony.construction_queue.empty()) {
-      auto& ord = colony.construction_queue.front();
+    // Construction queue processing:
+    //
+    // Previous behavior was strictly "front-of-queue only" which meant a single
+    // unaffordable order (missing minerals) could block the entire queue forever.
+    //
+    // New behavior:
+    // - The sim will *skip* stalled orders (can't pay minerals) and continue trying
+    //   later orders in the same day. This prevents total queue lock-ups.
+    // - If construction points remain, the sim may also apply CP to multiple queued
+    //   orders in a single day (a simple form of parallelization).
+    //
+    // This keeps the model simple while making colony production far less brittle.
+    auto& q = colony.construction_queue;
 
-      if (ord.quantity_remaining <= 0) {
-        colony.construction_queue.erase(colony.construction_queue.begin());
-        continue;
-      }
+    int safety_steps = 0;
+    constexpr int kMaxSteps = 100000;
 
-      auto it_def = content_.installations.find(ord.installation_id);
-      if (it_def == content_.installations.end()) {
-        colony.construction_queue.erase(colony.construction_queue.begin());
-        continue;
-      }
-      const InstallationDef& def = it_def->second;
+    while (cp_available > 1e-9 && !q.empty() && safety_steps++ < kMaxSteps) {
+      bool progressed_any = false;
 
-      if (!ord.minerals_paid) {
-        if (!can_pay_minerals(def)) break;
-        pay_minerals(def);
-        ord.minerals_paid = true;
-        ord.cp_remaining = std::max(0.0, def.construction_cost);
+      for (std::size_t i = 0; i < q.size() && cp_available > 1e-9;) {
+        auto& ord = q[i];
 
-        if (ord.cp_remaining <= 1e-9) {
+        if (ord.quantity_remaining <= 0) {
+          q.erase(q.begin() + static_cast<std::ptrdiff_t>(i));
+          progressed_any = true;
+          continue;
+        }
+
+        auto it_def = content_.installations.find(ord.installation_id);
+        if (it_def == content_.installations.end()) {
+          q.erase(q.begin() + static_cast<std::ptrdiff_t>(i));
+          progressed_any = true;
+          continue;
+        }
+        const InstallationDef& def = it_def->second;
+
+        auto complete_one = [&]() {
           colony.installations[def.id] += 1;
           ord.quantity_remaining -= 1;
           ord.minerals_paid = false;
           ord.cp_remaining = 0.0;
-          
+
           const std::string msg = "Constructed " + def.name + " at " + colony.name;
           EventContext ctx;
           ctx.faction_id = colony.faction_id;
@@ -1633,36 +2482,609 @@ void Simulation::tick_construction() {
           ctx.colony_id = colony.id;
           push_event(EventLevel::Info, EventCategory::Construction, msg, ctx);
 
+          progressed_any = true;
+
           if (ord.quantity_remaining <= 0) {
-            colony.construction_queue.erase(colony.construction_queue.begin());
+            q.erase(q.begin() + static_cast<std::ptrdiff_t>(i));
+            return;
           }
+
+          // Keep i the same so we can immediately attempt the next unit of this
+          // same order in the same day (if we still have CP and minerals).
+        };
+
+        // If we haven't started the current unit, attempt to pay minerals.
+        if (!ord.minerals_paid) {
+          if (!can_pay_minerals(def)) {
+            // Stalled: skip this order for now (do not block the whole queue).
+            ++i;
+            continue;
+          }
+
+          pay_minerals(def);
+          ord.minerals_paid = true;
+          ord.cp_remaining = std::max(0.0, def.construction_cost);
+          progressed_any = true;
+
+          if (ord.cp_remaining <= 1e-9) {
+            // Instant build (0 CP cost).
+            complete_one();
+            continue;
+          }
+        } else {
+          // Defensive repair: if an in-progress unit was loaded with cp_remaining == 0
+          // but the definition has a CP cost, restore the remaining CP from the def.
+          if (ord.cp_remaining <= 1e-9 && def.construction_cost > 0.0) {
+            ord.cp_remaining = def.construction_cost;
+          }
+        }
+
+        // Spend CP on the in-progress unit.
+        if (ord.minerals_paid && ord.cp_remaining > 1e-9) {
+          const double spend = std::min(cp_available, ord.cp_remaining);
+          ord.cp_remaining -= spend;
+          cp_available -= spend;
+          progressed_any = true;
+
+          if (ord.cp_remaining <= 1e-9) {
+            complete_one();
+            continue;
+          }
+        }
+
+        ++i;
+      }
+
+      // If we made no progress in an entire scan of the queue, stop to avoid an
+      // infinite loop (e.g. all remaining orders are stalled on minerals).
+      if (!progressed_any) break;
+    }
+  }
+}
+
+
+void Simulation::tick_ai() {
+  // Economic planning for AI factions (research, construction, shipbuilding).
+  tick_ai_economy(*this);
+  const auto ship_ids = sorted_keys(state_.ships);
+  const auto faction_ids = sorted_keys(state_.factions);
+
+  auto orders_empty = [&](Id ship_id) -> bool {
+    auto it = state_.ship_orders.find(ship_id);
+    if (it == state_.ship_orders.end()) return true;
+    return it->second.queue.empty();
+  };
+
+  auto role_priority = [&](ShipRole r) -> int {
+    // Pirates like easy prey first.
+    switch (r) {
+      case ShipRole::Freighter: return 0;
+      case ShipRole::Surveyor: return 1;
+      case ShipRole::Combatant: return 2;
+      default: return 3;
+    }
+  };
+
+  auto issue_auto_explore = [&](Id ship_id) -> bool {
+    Ship* ship = find_ptr(state_.ships, ship_id);
+    if (!ship) return false;
+    if (!orders_empty(ship_id)) return false;
+    if (ship->system_id == kInvalidId) return false;
+    if (ship->speed_km_s <= 0.0) return false;
+
+    // Avoid fighting the fleet movement logic. Fleets should be controlled by fleet orders.
+    if (fleet_for_ship(ship_id) != kInvalidId) return false;
+
+    const Id fid = ship->faction_id;
+    const auto* sys = find_ptr(state_.systems, ship->system_id);
+    if (!sys) return false;
+
+    std::vector<Id> jps = sys->jump_points;
+    std::sort(jps.begin(), jps.end());
+
+    // If we have an undiscovered neighbor, jump now.
+    for (Id jp_id : jps) {
+      const JumpPoint* jp = find_ptr(state_.jump_points, jp_id);
+      if (!jp) continue;
+      const JumpPoint* other = find_ptr(state_.jump_points, jp->linked_jump_id);
+      if (!other) continue;
+      const Id dest_sys = other->system_id;
+      if (dest_sys == kInvalidId) continue;
+      if (!is_system_discovered_by_faction(fid, dest_sys)) {
+        issue_travel_via_jump(ship_id, jp_id);
+        return true;
+      }
+    }
+
+    // Otherwise, route to the nearest *discovered* frontier system (one jump away from an undiscovered neighbor).
+    std::unordered_set<Id> visited;
+    std::queue<Id> q;
+    visited.insert(ship->system_id);
+    q.push(ship->system_id);
+
+    Id frontier = kInvalidId;
+
+    while (!q.empty()) {
+      const Id cur = q.front();
+      q.pop();
+
+      const auto* cs = find_ptr(state_.systems, cur);
+      if (!cs) continue;
+
+      std::vector<Id> cs_jps = cs->jump_points;
+      std::sort(cs_jps.begin(), cs_jps.end());
+
+      bool is_frontier = false;
+      for (Id jp_id : cs_jps) {
+        const JumpPoint* jp = find_ptr(state_.jump_points, jp_id);
+        if (!jp) continue;
+        const JumpPoint* other = find_ptr(state_.jump_points, jp->linked_jump_id);
+        if (!other) continue;
+        const Id dest_sys = other->system_id;
+        if (dest_sys == kInvalidId) continue;
+        if (!is_system_discovered_by_faction(fid, dest_sys)) {
+          is_frontier = true;
+          break;
+        }
+      }
+
+      if (is_frontier) {
+        frontier = cur;
+        break;
+      }
+
+      for (Id jp_id : cs_jps) {
+        const JumpPoint* jp = find_ptr(state_.jump_points, jp_id);
+        if (!jp) continue;
+        const JumpPoint* other = find_ptr(state_.jump_points, jp->linked_jump_id);
+        if (!other) continue;
+        const Id dest_sys = other->system_id;
+        if (dest_sys == kInvalidId) continue;
+        if (!is_system_discovered_by_faction(fid, dest_sys)) continue;
+        if (visited.insert(dest_sys).second) q.push(dest_sys);
+      }
+    }
+
+    if (frontier != kInvalidId && frontier != ship->system_id) {
+      return issue_travel_to_system(ship_id, frontier, true);
+    }
+
+    return false;
+  };
+
+  // --- Ship-level automation: Auto-explore ---
+  for (Id sid : ship_ids) {
+    Ship* sh = find_ptr(state_.ships, sid);
+    if (!sh) continue;
+    if (!sh->auto_explore) continue;
+    if (sh->auto_freight) continue;  // mutually exclusive; auto-freight handled below
+    if (!orders_empty(sid)) continue;
+
+    (void)issue_auto_explore(sid);
+  }
+
+
+  // --- Ship-level automation: Auto-freight (mineral logistics) ---
+  auto cargo_used_tons = [](const Ship& s) {
+    double used = 0.0;
+    for (const auto& [_, tons] : s.cargo) used += std::max(0.0, tons);
+    return used;
+  };
+
+  // Group idle auto-freight ships by faction so we can avoid over-assigning the same minerals.
+  std::unordered_map<Id, std::vector<Id>> freight_ships_by_faction;
+  freight_ships_by_faction.reserve(faction_ids.size() * 2);
+
+  for (Id sid : ship_ids) {
+    Ship* sh = find_ptr(state_.ships, sid);
+    if (!sh) continue;
+    if (!sh->auto_freight) continue;
+    if (sh->auto_explore) continue;  // mutually exclusive; auto-explore handled above
+    if (!orders_empty(sid)) continue;
+    if (sh->system_id == kInvalidId) continue;
+    if (sh->speed_km_s <= 0.0) continue;
+
+    // Avoid fighting the fleet movement logic. Fleets should be controlled by fleet orders.
+    if (fleet_for_ship(sid) != kInvalidId) continue;
+
+    const auto* d = find_design(sh->design_id);
+    const double cap = d ? std::max(0.0, d->cargo_tons) : 0.0;
+    if (cap <= 1e-9) continue;
+
+    freight_ships_by_faction[sh->faction_id].push_back(sid);
+  }
+
+  auto estimate_eta_days_to_pos = [&](Id start_system_id, Vec2 start_pos_mkm, Id fid, double speed_km_s,
+                                     Id goal_system_id, Vec2 goal_pos_mkm) -> double {
+    if (speed_km_s <= 0.0) return std::numeric_limits<double>::infinity();
+    const double mkm_per_day = mkm_per_day_from_speed(speed_km_s, cfg_.seconds_per_day);
+    if (mkm_per_day <= 0.0) return std::numeric_limits<double>::infinity();
+
+    if (start_system_id == goal_system_id) {
+      return (goal_pos_mkm - start_pos_mkm).length() / mkm_per_day;
+    }
+
+    auto plan = compute_jump_route_plan(*this, start_system_id, start_pos_mkm, fid, speed_km_s, goal_system_id,
+                                     /*restrict_to_discovered=*/true);
+    if (!plan) return std::numeric_limits<double>::infinity();
+
+    double eta = plan->eta_days;
+
+    // Arrival position in the goal system is the entry jump point of the last hop.
+    Vec2 arrival = start_pos_mkm;
+    if (!plan->jump_ids.empty()) {
+      const Id last_exit = plan->jump_ids.back();
+      const JumpPoint* exit_jp = find_ptr(state_.jump_points, last_exit);
+      if (exit_jp && exit_jp->linked_jump_id != kInvalidId) {
+        if (const JumpPoint* entry_jp = find_ptr(state_.jump_points, exit_jp->linked_jump_id)) {
+          arrival = entry_jp->position_mkm;
+        }
+      }
+    }
+
+    eta += (goal_pos_mkm - arrival).length() / mkm_per_day;
+    return eta;
+  };
+
+  for (Id fid : faction_ids) {
+    auto it_auto = freight_ships_by_faction.find(fid);
+    if (it_auto == freight_ships_by_faction.end()) continue;
+
+    // Gather colonies for this faction and their body positions.
+    std::vector<Id> colony_ids;
+    colony_ids.reserve(state_.colonies.size());
+    std::unordered_map<Id, Id> colony_system;
+    std::unordered_map<Id, Vec2> colony_pos;
+    for (Id cid : sorted_keys(state_.colonies)) {
+      const Colony* c = find_ptr(state_.colonies, cid);
+      if (!c) continue;
+      if (c->faction_id != fid) continue;
+      const Body* b = find_ptr(state_.bodies, c->body_id);
+      if (!b) continue;
+      if (b->system_id == kInvalidId) continue;
+      colony_ids.push_back(cid);
+      colony_system[cid] = b->system_id;
+      colony_pos[cid] = b->position_mkm;
+    }
+
+    if (colony_ids.empty()) continue;
+
+    // Compute per-colony mineral reserves (to avoid starving the source colony's own queues),
+    // and compute mineral shortfalls that we want to relieve.
+    std::unordered_map<Id, std::unordered_map<std::string, double>> reserve_by_colony;
+    std::unordered_map<Id, std::unordered_map<std::string, double>> missing_by_colony;
+    const auto needs = logistics_needs_for_faction(fid);
+
+    for (const auto& n : needs) {
+      // Reserve: keep enough at the colony to satisfy the local target (one day shipyard throughput or one build unit).
+      double& r = reserve_by_colony[n.colony_id][n.mineral];
+      r = std::max(r, std::max(0.0, n.desired_tons));
+
+      const double missing = std::max(0.0, n.missing_tons);
+      if (missing > 1e-9) {
+        double& m = missing_by_colony[n.colony_id][n.mineral];
+        m = std::max(m, missing);
+      }
+    }
+
+    struct NeedAgg {
+      Id colony_id{kInvalidId};
+      std::string mineral;
+      double missing_tons{0.0};
+    };
+
+    std::vector<NeedAgg> need_list;
+    for (Id cid : colony_ids) {
+      auto it = missing_by_colony.find(cid);
+      if (it == missing_by_colony.end()) continue;
+      std::vector<std::string> minerals;
+      minerals.reserve(it->second.size());
+      for (const auto& [mineral, _] : it->second) minerals.push_back(mineral);
+      std::sort(minerals.begin(), minerals.end());
+      for (const auto& mineral : minerals) {
+        need_list.push_back(NeedAgg{cid, mineral, it->second[mineral]});
+      }
+    }
+
+    std::sort(need_list.begin(), need_list.end(), [](const NeedAgg& a, const NeedAgg& b) {
+      if (a.missing_tons != b.missing_tons) return a.missing_tons > b.missing_tons;
+      if (a.colony_id != b.colony_id) return a.colony_id < b.colony_id;
+      return a.mineral < b.mineral;
+    });
+
+    // Compute exportable minerals for each colony = stockpile - local reserve.
+    std::unordered_map<Id, std::unordered_map<std::string, double>> exportable_by_colony;
+    exportable_by_colony.reserve(colony_ids.size() * 2);
+    for (Id cid : colony_ids) {
+      const Colony* c = find_ptr(state_.colonies, cid);
+      if (!c) continue;
+      for (const auto& [mineral, have_raw] : c->minerals) {
+        const double have = std::max(0.0, have_raw);
+        double reserve = 0.0;
+        if (auto it_r = reserve_by_colony.find(cid); it_r != reserve_by_colony.end()) {
+          if (auto it_m = it_r->second.find(mineral); it_m != it_r->second.end()) reserve = std::max(0.0, it_m->second);
+        }
+        const double surplus = std::max(0.0, have - reserve);
+        if (surplus > 1e-9) {
+          exportable_by_colony[cid][mineral] = surplus;
+        }
+      }
+    }
+
+    auto auto_ships = it_auto->second;
+    std::sort(auto_ships.begin(), auto_ships.end());
+
+    for (Id sid : auto_ships) {
+      Ship* sh = find_ptr(state_.ships, sid);
+      if (!sh) continue;
+      if (!orders_empty(sid)) continue;
+      if (sh->system_id == kInvalidId) continue;
+
+      const auto* d = find_design(sh->design_id);
+      const double cap = d ? std::max(0.0, d->cargo_tons) : 0.0;
+      if (cap <= 1e-9) continue;
+
+      const double used = cargo_used_tons(*sh);
+      const double free = std::max(0.0, cap - used);
+
+      // 1) If we already have cargo, try to deliver it to the nearest colony that needs it.
+      bool assigned = false;
+      if (used > 1e-9 && !need_list.empty()) {
+        for (const auto& [mineral, tons_raw] : sh->cargo) {
+          const double tons = std::max(0.0, tons_raw);
+          if (tons <= 1e-9) continue;
+
+          int best_idx = -1;
+          double best_eta = std::numeric_limits<double>::infinity();
+          double best_missing = 0.0;
+
+          for (int i = 0; i < static_cast<int>(need_list.size()); ++i) {
+            if (need_list[i].missing_tons <= 1e-9) continue;
+            if (need_list[i].mineral != mineral) continue;
+
+            const Id dcid = need_list[i].colony_id;
+            auto it_sys = colony_system.find(dcid);
+            auto it_pos = colony_pos.find(dcid);
+            if (it_sys == colony_system.end() || it_pos == colony_pos.end()) continue;
+
+            const double eta = estimate_eta_days_to_pos(sh->system_id, sh->position_mkm, fid, sh->speed_km_s,
+                                                       it_sys->second, it_pos->second);
+
+            const double miss = need_list[i].missing_tons;
+            if (best_idx < 0 || eta < best_eta - 1e-9 ||
+                (std::abs(eta - best_eta) <= 1e-9 && (miss > best_missing + 1e-9 ||
+                                                     (std::abs(miss - best_missing) <= 1e-9 &&
+                                                      dcid < need_list[best_idx].colony_id)))) {
+              best_idx = i;
+              best_eta = eta;
+              best_missing = miss;
+            }
+          }
+
+          if (best_idx >= 0) {
+            const Id dest_cid = need_list[best_idx].colony_id;
+            const double amount = std::min(tons, need_list[best_idx].missing_tons);
+            if (amount > 1e-9 && issue_unload_mineral(sid, dest_cid, mineral, amount, /*restrict_to_discovered=*/true)) {
+              need_list[best_idx].missing_tons = std::max(0.0, need_list[best_idx].missing_tons - amount);
+              assigned = true;
+              break;
+            }
+          }
+        }
+      }
+      if (assigned) continue;
+
+      // 2) Otherwise, pick a source colony and a destination need.
+      if (free <= 1e-9) continue;
+      if (need_list.empty()) continue;
+
+      struct Choice {
+        Id source_colony{kInvalidId};
+        Id dest_colony{kInvalidId};
+        std::string mineral;
+        double amount{0.0};
+        double eta_total{std::numeric_limits<double>::infinity()};
+      } best;
+
+      for (const auto& need : need_list) {
+        if (need.missing_tons <= 1e-9) continue;
+        if (need.missing_tons < cfg_.auto_freight_min_transfer_tons) continue;
+
+        const Id dest_cid = need.colony_id;
+        auto it_dest_sys = colony_system.find(dest_cid);
+        auto it_dest_pos = colony_pos.find(dest_cid);
+        if (it_dest_sys == colony_system.end() || it_dest_pos == colony_pos.end()) continue;
+
+        for (Id scid : colony_ids) {
+          if (scid == dest_cid) continue;
+          auto it_exp_c = exportable_by_colony.find(scid);
+          if (it_exp_c == exportable_by_colony.end()) continue;
+          auto it_exp = it_exp_c->second.find(need.mineral);
+          if (it_exp == it_exp_c->second.end()) continue;
+
+          const double avail = std::max(0.0, it_exp->second);
+          if (avail <= 1e-9) continue;
+
+          const double take_cap = avail * std::clamp(cfg_.auto_freight_max_take_fraction_of_surplus, 0.0, 1.0);
+          const double amount = std::min({free, need.missing_tons, take_cap});
+          if (amount < cfg_.auto_freight_min_transfer_tons) continue;
+
+          auto it_src_sys = colony_system.find(scid);
+          auto it_src_pos = colony_pos.find(scid);
+          if (it_src_sys == colony_system.end() || it_src_pos == colony_pos.end()) continue;
+
+          const double eta1 = estimate_eta_days_to_pos(sh->system_id, sh->position_mkm, fid, sh->speed_km_s,
+                                                       it_src_sys->second, it_src_pos->second);
+          if (!std::isfinite(eta1)) continue;
+
+          const double eta2 = estimate_eta_days_to_pos(it_src_sys->second, it_src_pos->second, fid, sh->speed_km_s,
+                                                       it_dest_sys->second, it_dest_pos->second);
+          if (!std::isfinite(eta2)) continue;
+
+          const double eta_total = eta1 + eta2;
+
+          if (best.source_colony == kInvalidId || eta_total < best.eta_total - 1e-9 ||
+              (std::abs(eta_total - best.eta_total) <= 1e-9 && (amount > best.amount + 1e-9 ||
+                                                               (std::abs(amount - best.amount) <= 1e-9 &&
+                                                                (dest_cid < best.dest_colony ||
+                                                                 (dest_cid == best.dest_colony && scid < best.source_colony)))))) {
+            best.source_colony = scid;
+            best.dest_colony = dest_cid;
+            best.mineral = need.mineral;
+            best.amount = amount;
+            best.eta_total = eta_total;
+          }
+        }
+      }
+
+      if (best.source_colony != kInvalidId && best.dest_colony != kInvalidId &&
+          best.amount >= cfg_.auto_freight_min_transfer_tons) {
+        if (issue_load_mineral(sid, best.source_colony, best.mineral, best.amount, /*restrict_to_discovered=*/true)) {
+          if (!issue_unload_mineral(sid, best.dest_colony, best.mineral, best.amount, /*restrict_to_discovered=*/true)) {
+            // Safety: don't leave half-issued tasks in the queue.
+            (void)clear_orders(sid);
+          } else {
+            // Reduce local bookkeeping so later ships don't over-assign.
+            if (auto it = exportable_by_colony.find(best.source_colony); it != exportable_by_colony.end()) {
+              auto it2 = it->second.find(best.mineral);
+              if (it2 != it->second.end()) {
+                it2->second = std::max(0.0, it2->second - best.amount);
+              }
+            }
+            for (auto& need : need_list) {
+              if (need.colony_id == best.dest_colony && need.mineral == best.mineral) {
+                need.missing_tons = std::max(0.0, need.missing_tons - best.amount);
+                break;
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // --- Faction-level AI profiles ---
+  const int now = static_cast<int>(state_.date.days_since_epoch());
+  constexpr int kMaxChaseAgeDays = 60;
+
+  for (Id fid : faction_ids) {
+    Faction& fac = state_.factions.at(fid);
+
+    if (fac.control == FactionControl::Player) continue;
+    if (fac.control == FactionControl::AI_Passive) continue;
+
+    if (fac.control == FactionControl::AI_Explorer) {
+      for (Id sid : ship_ids) {
+        Ship* sh = find_ptr(state_.ships, sid);
+        if (!sh) continue;
+        if (sh->faction_id != fid) continue;
+        if (!orders_empty(sid)) continue;
+        if (sh->auto_explore) continue;  // already handled above
+        const auto* d = find_design(sh->design_id);
+        if (d && d->role != ShipRole::Surveyor) continue;
+        (void)issue_auto_explore(sid);
+      }
+      continue;
+    }
+
+    if (fac.control == FactionControl::AI_Pirate) {
+      for (Id sid : ship_ids) {
+        Ship* sh = find_ptr(state_.ships, sid);
+        if (!sh) continue;
+        if (sh->faction_id != fid) continue;
+        if (!orders_empty(sid)) continue;
+        if (sh->auto_explore) continue;  // allow manual override
+
+        // 1) If hostiles are currently detected in-system, attack the best target.
+        const auto hostiles = detected_hostile_ships_in_system(fid, sh->system_id);
+        if (!hostiles.empty()) {
+          Id best = kInvalidId;
+          int best_prio = 999;
+          double best_dist = 0.0;
+
+          for (Id tid : hostiles) {
+            const Ship* tgt = find_ptr(state_.ships, tid);
+            if (!tgt) continue;
+            const auto* td = find_design(tgt->design_id);
+            const ShipRole tr = td ? td->role : ShipRole::Unknown;
+            const int prio = role_priority(tr);
+            const double dist = (tgt->position_mkm - sh->position_mkm).length();
+
+            if (best == kInvalidId || prio < best_prio ||
+                (prio == best_prio && (dist < best_dist - 1e-9 ||
+                                       (std::abs(dist - best_dist) <= 1e-9 && tid < best)))) {
+              best = tid;
+              best_prio = prio;
+              best_dist = dist;
+            }
+          }
+
+          if (best != kInvalidId) {
+            (void)issue_attack_ship(sid, best, true);
+            continue;
+          }
+        }
+
+        // 2) Otherwise, chase a recent hostile contact (last known intel).
+        Id contact_target = kInvalidId;
+        int best_day = -1;
+        int best_prio = 999;
+
+        for (const auto& [_, c] : fac.ship_contacts) {
+          if (c.ship_id == kInvalidId) continue;
+          if (c.last_seen_faction_id == fid) continue;  // friendly
+          if (state_.ships.find(c.ship_id) == state_.ships.end()) continue;
+          const int age = now - c.last_seen_day;
+          if (age > kMaxChaseAgeDays) continue;
+          if (!is_system_discovered_by_faction(fid, c.system_id)) continue;
+
+          const auto* td = find_design(c.last_seen_design_id);
+          const ShipRole tr = td ? td->role : ShipRole::Unknown;
+          const int prio = role_priority(tr);
+
+          if (c.last_seen_day > best_day || (c.last_seen_day == best_day && prio < best_prio) ||
+              (c.last_seen_day == best_day && prio == best_prio && c.ship_id < contact_target)) {
+            contact_target = c.ship_id;
+            best_day = c.last_seen_day;
+            best_prio = prio;
+          }
+        }
+
+        if (contact_target != kInvalidId) {
+          (void)issue_attack_ship(sid, contact_target, true);
           continue;
         }
-      }
 
-      const double spend = std::min(cp_available, ord.cp_remaining);
-      ord.cp_remaining -= spend;
-      cp_available -= spend;
+        // 3) Roam: pick a jump point (prefer exploring undiscovered neighbors).
+        const auto* sys = find_ptr(state_.systems, sh->system_id);
+        if (!sys) continue;
 
-      if (ord.cp_remaining <= 1e-9) {
-        colony.installations[def.id] += 1;
-        ord.quantity_remaining -= 1;
-        ord.minerals_paid = false;
-        ord.cp_remaining = 0.0;
+        std::vector<Id> jps = sys->jump_points;
+        std::sort(jps.begin(), jps.end());
 
-        const std::string msg = "Constructed " + def.name + " at " + colony.name;
-        EventContext ctx;
-        ctx.faction_id = colony.faction_id;
-        ctx.system_id = colony_system_id;
-        ctx.colony_id = colony.id;
-        push_event(EventLevel::Info, EventCategory::Construction, msg, ctx);
+        Id chosen = kInvalidId;
+        Id fallback = kInvalidId;
+        for (Id jp_id : jps) {
+          const JumpPoint* jp = find_ptr(state_.jump_points, jp_id);
+          if (!jp) continue;
+          const JumpPoint* other = find_ptr(state_.jump_points, jp->linked_jump_id);
+          if (!other) continue;
+          const Id dest_sys = other->system_id;
+          if (dest_sys == kInvalidId) continue;
 
-        if (ord.quantity_remaining <= 0) {
-          colony.construction_queue.erase(colony.construction_queue.begin());
+          if (fallback == kInvalidId) fallback = jp_id;
+          if (!is_system_discovered_by_faction(fid, dest_sys)) {
+            chosen = jp_id;
+            break;
+          }
         }
-        continue;
+        if (chosen == kInvalidId) chosen = fallback;
+
+        if (chosen != kInvalidId) {
+          (void)issue_travel_via_jump(sid, chosen);
+        }
       }
-      break;
+      continue;
     }
   }
 }
@@ -1674,11 +3096,462 @@ void Simulation::tick_ships() {
     return used;
   };
 
+  const double arrive_eps = std::max(0.0, cfg_.arrival_epsilon_mkm);
+  const double dock_range = std::max(arrive_eps, cfg_.docking_range_mkm);
+
   const auto ship_ids = sorted_keys(state_.ships);
+
+  // --- Fleet cohesion prepass ---
+  //
+  // Fleets are intentionally lightweight in the data model, so we do a small
+  // amount of per-tick work here to make fleet-issued orders behave more like
+  // a coordinated group.
+  //
+  // 1) Speed matching: ships in the same fleet executing the same current
+  //    movement order will match the slowest ship.
+  // 2) Coordinated jump transits: ships in the same fleet attempting to transit
+  //    the same jump point in the same system will wait until all have arrived.
+  // 3) Formations: fleets may optionally offset per-ship targets for some
+  //    cohorts so that ships travel/attack in a loose formation instead of
+  //    piling onto the exact same coordinates.
+
+  std::unordered_map<Id, Id> ship_to_fleet;
+  ship_to_fleet.reserve(state_.ships.size() * 2);
+
+  if (!state_.fleets.empty()) {
+    const auto fleet_ids = sorted_keys(state_.fleets);
+    for (Id fid : fleet_ids) {
+      const auto* fl = find_ptr(state_.fleets, fid);
+      if (!fl) continue;
+      for (Id sid : fl->ship_ids) {
+        if (sid == kInvalidId) continue;
+        ship_to_fleet[sid] = fid;
+      }
+    }
+  }
+
+  enum class CohortKind : std::uint8_t {
+    MovePoint,
+    MoveBody,
+    OrbitBody,
+    Jump,
+    Attack,
+    Load,
+    Unload,
+    Transfer,
+    Scrap,
+  };
+
+  struct CohortKey {
+    Id fleet_id{kInvalidId};
+    Id system_id{kInvalidId};
+    CohortKind kind{CohortKind::MovePoint};
+    Id target_id{kInvalidId};
+    std::uint64_t x_bits{0};
+    std::uint64_t y_bits{0};
+
+    bool operator==(const CohortKey& o) const {
+      return fleet_id == o.fleet_id && system_id == o.system_id && kind == o.kind && target_id == o.target_id &&
+             x_bits == o.x_bits && y_bits == o.y_bits;
+    }
+  };
+
+  struct CohortKeyHash {
+    size_t operator()(const CohortKey& k) const {
+      // FNV-1a style mixing.
+      std::uint64_t h = 1469598103934665603ull;
+      auto mix = [&](std::uint64_t v) {
+        h ^= v;
+        h *= 1099511628211ull;
+      };
+      mix(k.fleet_id);
+      mix(k.system_id);
+      mix(static_cast<std::uint64_t>(k.kind));
+      mix(k.target_id);
+      mix(k.x_bits);
+      mix(k.y_bits);
+      return static_cast<size_t>(h);
+    }
+  };
+
+  auto double_bits = [](double v) -> std::uint64_t {
+    std::uint64_t out = 0;
+    std::memcpy(&out, &v, sizeof(out));
+    return out;
+  };
+
+  auto make_cohort_key = [&](Id fleet_id, Id system_id, const Order& ord) -> std::optional<CohortKey> {
+    if (fleet_id == kInvalidId) return std::nullopt;
+
+    CohortKey k;
+    k.fleet_id = fleet_id;
+    k.system_id = system_id;
+
+    if (std::holds_alternative<MoveToPoint>(ord)) {
+      k.kind = CohortKind::MovePoint;
+      const auto& o = std::get<MoveToPoint>(ord);
+      k.x_bits = double_bits(o.target_mkm.x);
+      k.y_bits = double_bits(o.target_mkm.y);
+      return k;
+    }
+    if (std::holds_alternative<MoveToBody>(ord)) {
+      k.kind = CohortKind::MoveBody;
+      k.target_id = std::get<MoveToBody>(ord).body_id;
+      return k;
+    }
+    if (std::holds_alternative<OrbitBody>(ord)) {
+      k.kind = CohortKind::OrbitBody;
+      k.target_id = std::get<OrbitBody>(ord).body_id;
+      return k;
+    }
+    if (std::holds_alternative<TravelViaJump>(ord)) {
+      k.kind = CohortKind::Jump;
+      k.target_id = std::get<TravelViaJump>(ord).jump_point_id;
+      return k;
+    }
+    if (std::holds_alternative<AttackShip>(ord)) {
+      k.kind = CohortKind::Attack;
+      k.target_id = std::get<AttackShip>(ord).target_ship_id;
+      return k;
+    }
+    if (std::holds_alternative<LoadMineral>(ord)) {
+      k.kind = CohortKind::Load;
+      k.target_id = std::get<LoadMineral>(ord).colony_id;
+      return k;
+    }
+    if (std::holds_alternative<UnloadMineral>(ord)) {
+      k.kind = CohortKind::Unload;
+      k.target_id = std::get<UnloadMineral>(ord).colony_id;
+      return k;
+    }
+    if (std::holds_alternative<TransferCargoToShip>(ord)) {
+      k.kind = CohortKind::Transfer;
+      k.target_id = std::get<TransferCargoToShip>(ord).target_ship_id;
+      return k;
+    }
+    if (std::holds_alternative<ScrapShip>(ord)) {
+      k.kind = CohortKind::Scrap;
+      k.target_id = std::get<ScrapShip>(ord).colony_id;
+      return k;
+    }
+
+    return std::nullopt;
+  };
+
+  std::unordered_map<CohortKey, double, CohortKeyHash> cohort_min_speed_km_s;
+
+  if (cfg_.fleet_speed_matching && !ship_to_fleet.empty()) {
+    cohort_min_speed_km_s.reserve(state_.ships.size() * 2);
+
+    for (Id ship_id : ship_ids) {
+      const auto* sh = find_ptr(state_.ships, ship_id);
+      if (!sh) continue;
+
+      const auto it_fleet = ship_to_fleet.find(ship_id);
+      if (it_fleet == ship_to_fleet.end()) continue;
+
+      const auto it_orders = state_.ship_orders.find(ship_id);
+      if (it_orders == state_.ship_orders.end()) continue;
+
+      const ShipOrders& so = it_orders->second;
+      const Order* ord_ptr = nullptr;
+      if (!so.queue.empty()) {
+        ord_ptr = &so.queue.front();
+      } else if (so.repeat && !so.repeat_template.empty()) {
+        // Mirror the main tick loop behaviour where empty queues are refilled
+        // from the repeat template.
+        ord_ptr = &so.repeat_template.front();
+      } else {
+        continue;
+      }
+
+      const Order& ord = *ord_ptr;
+      if (std::holds_alternative<WaitDays>(ord)) continue;
+
+      const auto key_opt = make_cohort_key(it_fleet->second, sh->system_id, ord);
+      if (!key_opt) continue;
+
+      const CohortKey key = *key_opt;
+      auto it_min = cohort_min_speed_km_s.find(key);
+      if (it_min == cohort_min_speed_km_s.end()) {
+        cohort_min_speed_km_s.emplace(key, sh->speed_km_s);
+      } else {
+        it_min->second = std::min(it_min->second, sh->speed_km_s);
+      }
+    }
+  }
+
+  struct JumpGroupKey {
+    Id fleet_id{kInvalidId};
+    Id jump_id{kInvalidId};
+    Id system_id{kInvalidId};
+
+    bool operator==(const JumpGroupKey& o) const {
+      return fleet_id == o.fleet_id && jump_id == o.jump_id && system_id == o.system_id;
+    }
+  };
+
+  struct JumpGroupKeyHash {
+    size_t operator()(const JumpGroupKey& k) const {
+      std::uint64_t h = 1469598103934665603ull;
+      auto mix = [&](std::uint64_t v) {
+        h ^= v;
+        h *= 1099511628211ull;
+      };
+      mix(k.fleet_id);
+      mix(k.jump_id);
+      mix(k.system_id);
+      return static_cast<size_t>(h);
+    }
+  };
+
+  struct JumpGroupState {
+    int count{0};
+    bool valid{false};
+    bool ready{false};
+    Vec2 jp_pos{0.0, 0.0};
+  };
+
+  std::unordered_map<JumpGroupKey, JumpGroupState, JumpGroupKeyHash> jump_group_state;
+
+  if (cfg_.fleet_coordinated_jumps && !ship_to_fleet.empty()) {
+    std::unordered_map<JumpGroupKey, std::vector<Id>, JumpGroupKeyHash> group_members;
+    group_members.reserve(state_.fleets.size() * 2);
+
+    for (Id ship_id : ship_ids) {
+      const auto* sh = find_ptr(state_.ships, ship_id);
+      if (!sh) continue;
+
+      const auto it_fleet = ship_to_fleet.find(ship_id);
+      if (it_fleet == ship_to_fleet.end()) continue;
+
+      const auto it_orders = state_.ship_orders.find(ship_id);
+      if (it_orders == state_.ship_orders.end()) continue;
+
+      const ShipOrders& so = it_orders->second;
+      const Order* ord_ptr = nullptr;
+      if (!so.queue.empty()) {
+        ord_ptr = &so.queue.front();
+      } else if (so.repeat && !so.repeat_template.empty()) {
+        ord_ptr = &so.repeat_template.front();
+      } else {
+        continue;
+      }
+
+      const Order& ord = *ord_ptr;
+      if (!std::holds_alternative<TravelViaJump>(ord)) continue;
+
+      const Id jump_id = std::get<TravelViaJump>(ord).jump_point_id;
+      if (jump_id == kInvalidId) continue;
+
+      JumpGroupKey key;
+      key.fleet_id = it_fleet->second;
+      key.jump_id = jump_id;
+      key.system_id = sh->system_id;
+      group_members[key].push_back(ship_id);
+    }
+
+    jump_group_state.reserve(group_members.size() * 2);
+
+    for (auto& [key, members] : group_members) {
+      JumpGroupState st;
+      st.count = static_cast<int>(members.size());
+
+      const auto* jp = find_ptr(state_.jump_points, key.jump_id);
+      if (jp && jp->system_id == key.system_id) {
+        st.valid = true;
+        st.jp_pos = jp->position_mkm;
+        if (st.count > 1) {
+          bool ready = true;
+          for (Id sid : members) {
+            const auto* s2 = find_ptr(state_.ships, sid);
+            if (!s2) {
+              ready = false;
+              break;
+            }
+            const double dist = (s2->position_mkm - st.jp_pos).length();
+            if (dist > dock_range + 1e-9) {
+              ready = false;
+              break;
+            }
+          }
+          st.ready = ready;
+        }
+      }
+
+      jump_group_state.emplace(key, st);
+    }
+  }
+
+  // Fleet formation offsets (optional).
+  //
+  // This is intentionally lightweight: we only compute offsets for cohorts
+  // where a formation makes sense (currently: move-to-point and attack).
+  std::unordered_map<Id, Vec2> formation_offset_mkm;
+  if (cfg_.fleet_formations && !ship_to_fleet.empty()) {
+    std::unordered_map<CohortKey, std::vector<Id>, CohortKeyHash> cohorts;
+    cohorts.reserve(state_.fleets.size() * 2);
+
+    for (Id ship_id : ship_ids) {
+      const auto* sh = find_ptr(state_.ships, ship_id);
+      if (!sh) continue;
+
+      const auto it_fleet = ship_to_fleet.find(ship_id);
+      if (it_fleet == ship_to_fleet.end()) continue;
+
+      const auto* fl = find_ptr(state_.fleets, it_fleet->second);
+      if (!fl) continue;
+      if (fl->formation == FleetFormation::None) continue;
+      if (fl->formation_spacing_mkm <= 0.0) continue;
+
+      const auto it_orders = state_.ship_orders.find(ship_id);
+      if (it_orders == state_.ship_orders.end()) continue;
+
+      const ShipOrders& so = it_orders->second;
+      const Order* ord_ptr = nullptr;
+      if (!so.queue.empty()) {
+        ord_ptr = &so.queue.front();
+      } else if (so.repeat && !so.repeat_template.empty()) {
+        ord_ptr = &so.repeat_template.front();
+      } else {
+        continue;
+      }
+
+      const Order& ord = *ord_ptr;
+      if (std::holds_alternative<WaitDays>(ord)) continue;
+
+      const auto key_opt = make_cohort_key(it_fleet->second, sh->system_id, ord);
+      if (!key_opt) continue;
+      const CohortKey key = *key_opt;
+      if (key.kind != CohortKind::MovePoint && key.kind != CohortKind::Attack) continue;
+
+      cohorts[key].push_back(ship_id);
+    }
+
+    formation_offset_mkm.reserve(state_.ships.size() * 2);
+
+    auto bits_to_double = [](std::uint64_t bits) -> double {
+      double out = 0.0;
+      std::memcpy(&out, &bits, sizeof(out));
+      return out;
+    };
+
+    for (auto& [key, members] : cohorts) {
+      if (members.size() < 2) continue;
+      std::sort(members.begin(), members.end());
+      members.erase(std::unique(members.begin(), members.end()), members.end());
+      if (members.size() < 2) continue;
+
+      const auto* fl = find_ptr(state_.fleets, key.fleet_id);
+      if (!fl) continue;
+      if (fl->formation == FleetFormation::None) continue;
+
+      const double spacing = std::max(0.0, fl->formation_spacing_mkm);
+      if (spacing <= 0.0) continue;
+
+      Id leader_id = fl->leader_ship_id;
+      if (leader_id == kInvalidId || std::find(members.begin(), members.end(), leader_id) == members.end()) {
+        leader_id = members.front();
+      }
+
+      const auto* leader = find_ptr(state_.ships, leader_id);
+      if (!leader) continue;
+      const Vec2 leader_pos = leader->position_mkm;
+
+      Vec2 raw_target = leader_pos + Vec2{1.0, 0.0};
+      if (key.kind == CohortKind::MovePoint) {
+        raw_target = Vec2{bits_to_double(key.x_bits), bits_to_double(key.y_bits)};
+      } else if (key.kind == CohortKind::Attack) {
+        const Id target_ship_id = key.target_id;
+        const bool detected = is_ship_detected_by_faction(leader->faction_id, target_ship_id);
+        if (detected) {
+          if (const auto* tgt = find_ptr(state_.ships, target_ship_id)) raw_target = tgt->position_mkm;
+        } else {
+          const Order* lord_ptr = nullptr;
+          if (auto itso = state_.ship_orders.find(leader_id); itso != state_.ship_orders.end()) {
+            const ShipOrders& so = itso->second;
+            if (!so.queue.empty()) {
+              lord_ptr = &so.queue.front();
+            } else if (so.repeat && !so.repeat_template.empty()) {
+              lord_ptr = &so.repeat_template.front();
+            }
+          }
+          if (lord_ptr && std::holds_alternative<AttackShip>(*lord_ptr)) {
+            const auto& ao = std::get<AttackShip>(*lord_ptr);
+            if (ao.has_last_known) raw_target = ao.last_known_position_mkm;
+          }
+        }
+      }
+
+      Vec2 forward = raw_target - leader_pos;
+      const double flen = forward.length();
+      if (flen < 1e-9) {
+        forward = Vec2{1.0, 0.0};
+      } else {
+        forward = forward * (1.0 / flen);
+      }
+      const Vec2 right{-forward.y, forward.x};
+
+      auto world_from_local = [&](double x_right, double y_forward) -> Vec2 {
+        return right * x_right + forward * y_forward;
+      };
+
+      formation_offset_mkm[leader_id] = Vec2{0.0, 0.0};
+
+      std::vector<Id> followers = members;
+      followers.erase(std::remove(followers.begin(), followers.end(), leader_id), followers.end());
+
+      const std::size_t m = followers.size();
+      if (m == 0) continue;
+
+      for (std::size_t i = 0; i < m; ++i) {
+        const Id sid = followers[i];
+        Vec2 off{0.0, 0.0};
+
+        switch (fl->formation) {
+          case FleetFormation::LineAbreast: {
+            const int ring = static_cast<int>(i / 2) + 1;
+            const int sign = ((i % 2) == 0) ? 1 : -1;
+            off = world_from_local(static_cast<double>(sign * ring) * spacing, 0.0);
+            break;
+          }
+          case FleetFormation::Column: {
+            off = world_from_local(0.0, -static_cast<double>(i + 1) * spacing);
+            break;
+          }
+          case FleetFormation::Wedge: {
+            const int layer = static_cast<int>(i / 2) + 1;
+            const int sign = ((i % 2) == 0) ? 1 : -1;
+            off = world_from_local(static_cast<double>(sign * layer) * spacing, -static_cast<double>(layer) * spacing);
+            break;
+          }
+          case FleetFormation::Ring: {
+            const double angle = kTwoPi * (static_cast<double>(i) / static_cast<double>(m));
+            const double radius = std::max(spacing, (static_cast<double>(m) * spacing) / kTwoPi);
+            off = world_from_local(std::cos(angle) * radius, std::sin(angle) * radius);
+            break;
+          }
+          case FleetFormation::None:
+          default: {
+            off = Vec2{0.0, 0.0};
+            break;
+          }
+        }
+
+        formation_offset_mkm[sid] = off;
+      }
+    }
+  }
+
   for (Id ship_id : ship_ids) {
     auto it_ship = state_.ships.find(ship_id);
     if (it_ship == state_.ships.end()) continue;
     auto& ship = it_ship->second;
+
+    const Id fleet_id = [&]() -> Id {
+      const auto it_fleet = ship_to_fleet.find(ship_id);
+      return (it_fleet != ship_to_fleet.end()) ? it_fleet->second : kInvalidId;
+    }();
 
     auto it = state_.ship_orders.find(ship_id);
     if (it == state_.ship_orders.end()) continue;
@@ -1762,6 +3635,12 @@ void Simulation::tick_ships() {
       }
 
       attack_has_contact = is_ship_detected_by_faction(ship.faction_id, target_id);
+      // An explicit AttackShip order acts as a de-facto declaration of hostilities if needed.
+      if (attack_has_contact && !are_factions_hostile(ship.faction_id, tgt->faction_id)) {
+        set_diplomatic_status(ship.faction_id, tgt->faction_id, DiplomacyStatus::Hostile, /*reciprocal=*/true,
+                             /*push_event_on_change=*/true);
+      }
+
 
       if (attack_has_contact) {
         target = tgt->position_mkm;
@@ -1828,6 +3707,17 @@ void Simulation::tick_ships() {
       target = body->position_mkm;
     }
 
+    // Fleet formation: optionally offset the movement/attack target.
+    if (cfg_.fleet_formations && fleet_id != kInvalidId && !formation_offset_mkm.empty()) {
+      const bool can_offset = std::holds_alternative<MoveToPoint>(q.front()) ||
+                              std::holds_alternative<AttackShip>(q.front());
+      if (can_offset) {
+        if (auto itoff = formation_offset_mkm.find(ship_id); itoff != formation_offset_mkm.end()) {
+          target = target + itoff->second;
+        }
+      }
+    }
+
     const Vec2 delta = target - ship.position_mkm;
     const double dist = delta.length();
 
@@ -1837,8 +3727,24 @@ void Simulation::tick_ships() {
     const bool is_orbit = std::holds_alternative<OrbitBody>(q.front());
     const bool is_scrap = std::holds_alternative<ScrapShip>(q.front());
 
-    const double arrive_eps = std::max(0.0, cfg_.arrival_epsilon_mkm);
-    const double dock_range = std::max(arrive_eps, cfg_.docking_range_mkm);
+    // Fleet jump coordination: if multiple ships in the same fleet are trying to
+    // transit the same jump point in the same system, we can optionally hold the
+    // transit until all of them have arrived.
+    bool is_coordinated_jump_group = false;
+    bool allow_jump_transit = true;
+    if (is_jump && cfg_.fleet_coordinated_jumps && fleet_id != kInvalidId && !jump_group_state.empty()) {
+      const Id jump_id = std::get<TravelViaJump>(q.front()).jump_point_id;
+      JumpGroupKey key;
+      key.fleet_id = fleet_id;
+      key.jump_id = jump_id;
+      key.system_id = ship.system_id;
+
+      const auto itjg = jump_group_state.find(key);
+      if (itjg != jump_group_state.end() && itjg->second.valid && itjg->second.count > 1) {
+        is_coordinated_jump_group = true;
+        allow_jump_transit = itjg->second.ready;
+      }
+    }
 
     auto do_cargo_transfer = [&]() -> double {
       // mode 0=load from col, 1=unload to col, 2=transfer to ship
@@ -2109,8 +4015,10 @@ void Simulation::tick_ships() {
 
     if (is_jump && dist <= dock_range) {
       ship.position_mkm = target;
-      transit_jump();
-      q.erase(q.begin());
+      if (!is_coordinated_jump_group || allow_jump_transit) {
+        transit_jump();
+        q.erase(q.begin());
+      }
       continue;
     }
 
@@ -2127,7 +4035,20 @@ void Simulation::tick_ships() {
       }
     }
 
-    const double max_step = mkm_per_day_from_speed(ship.speed_km_s, cfg_.seconds_per_day);
+    // Fleet speed matching: for ships in the same fleet with the same current
+    // movement order, cap speed to the slowest ship in that cohort.
+    double effective_speed_km_s = ship.speed_km_s;
+    if (cfg_.fleet_speed_matching && fleet_id != kInvalidId && !cohort_min_speed_km_s.empty()) {
+      const auto key_opt = make_cohort_key(fleet_id, ship.system_id, q.front());
+      if (key_opt) {
+        const auto it_min = cohort_min_speed_km_s.find(*key_opt);
+        if (it_min != cohort_min_speed_km_s.end()) {
+          effective_speed_km_s = std::min(effective_speed_km_s, it_min->second);
+        }
+      }
+    }
+
+    const double max_step = mkm_per_day_from_speed(effective_speed_km_s, cfg_.seconds_per_day);
     if (max_step <= 0.0) continue;
 
     double step = max_step;
@@ -2140,8 +4061,10 @@ void Simulation::tick_ships() {
       ship.position_mkm = target;
 
       if (is_jump) {
-        transit_jump();
-        q.erase(q.begin());
+        if (!is_coordinated_jump_group || allow_jump_transit) {
+          transit_jump();
+          q.erase(q.begin());
+        }
       } else if (is_attack) {
         if (!attack_has_contact) q.erase(q.begin());
       } else if (is_cargo_op) {
@@ -2169,7 +4092,7 @@ void Simulation::tick_combat() {
   std::unordered_map<Id, double> incoming_damage;
   std::unordered_map<Id, std::vector<Id>> attackers_for_target;
 
-  auto is_hostile = [&](const Ship& a, const Ship& b) { return a.faction_id != b.faction_id; };
+  auto is_hostile = [&](const Ship& a, const Ship& b) { return are_factions_hostile(a.faction_id, b.faction_id); };
 
   const auto ship_ids = sorted_keys(state_.ships);
 

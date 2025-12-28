@@ -9,6 +9,7 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include <unordered_set>
 #include <utility>
 
 #include "nebula4x/core/serialization.h"
@@ -109,6 +110,34 @@ const char* event_category_label(EventCategory c) {
   return "General";
 }
 
+const char* diplomacy_status_label(DiplomacyStatus s) {
+  switch (s) {
+    case DiplomacyStatus::Friendly: return "Friendly";
+    case DiplomacyStatus::Neutral: return "Neutral";
+    case DiplomacyStatus::Hostile: return "Hostile";
+  }
+  return "Hostile";
+}
+
+// UI combo ordering: Hostile, Neutral, Friendly.
+int diplomacy_status_to_combo_idx(DiplomacyStatus s) {
+  switch (s) {
+    case DiplomacyStatus::Hostile: return 0;
+    case DiplomacyStatus::Neutral: return 1;
+    case DiplomacyStatus::Friendly: return 2;
+  }
+  return 0;
+}
+
+DiplomacyStatus diplomacy_status_from_combo_idx(int idx) {
+  switch (idx) {
+    case 1: return DiplomacyStatus::Neutral;
+    case 2: return DiplomacyStatus::Friendly;
+    default: return DiplomacyStatus::Hostile;
+  }
+}
+
+
 std::vector<std::string> sorted_all_design_ids(const Simulation& sim) {
   std::vector<std::string> ids;
   ids.reserve(sim.content().designs.size() + sim.state().custom_designs.size());
@@ -161,6 +190,16 @@ std::vector<std::pair<Id, std::string>> sorted_colonies(const GameState& s) {
   out.reserve(s.colonies.size());
   for (const auto& [id, c] : s.colonies) {
     out.push_back({id, c.name + " (" + std::to_string(static_cast<unsigned long long>(id)) + ")"});
+  }
+  std::sort(out.begin(), out.end(), [](auto& a, auto& b) { return a.second < b.second; });
+  return out;
+}
+
+std::vector<std::pair<Id, std::string>> sorted_fleets(const GameState& s) {
+  std::vector<std::pair<Id, std::string>> out;
+  out.reserve(s.fleets.size());
+  for (const auto& [id, fl] : s.fleets) {
+    out.push_back({id, fl.name + " (" + std::to_string(static_cast<unsigned long long>(id)) + ")"});
   }
   std::sort(out.begin(), out.end(), [](auto& a, auto& b) { return a.second < b.second; });
   return out;
@@ -477,13 +516,62 @@ void draw_left_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sele
     const auto* fac = find_ptr(sim.state().factions, sh->faction_id);
     const std::string fac_name = fac ? fac->name : std::string("Faction ") + std::to_string(sh->faction_id);
 
-    char label[256];
-    std::snprintf(label, sizeof(label), "%s  (HP %.0f)  [%s]##%llu", sh->name.c_str(), sh->hp, fac_name.c_str(),
-                  static_cast<unsigned long long>(sh->id));
+    const Id fleet_id = sim.fleet_for_ship(sid);
+    const auto* fl = (fleet_id != kInvalidId) ? find_ptr(sim.state().fleets, fleet_id) : nullptr;
 
-    if (ImGui::Selectable(label, selected_ship == sid)) {
+    std::string label = sh->name;
+    if (fl) label += " <" + fl->name + ">";
+    label += "  (HP " + std::to_string(static_cast<int>(sh->hp)) + ")  [" + fac_name + "]##" +
+             std::to_string(static_cast<unsigned long long>(sh->id));
+
+    if (ImGui::Selectable(label.c_str(), selected_ship == sid)) {
       selected_ship = sid;
+      ui.selected_fleet_id = fleet_id;
     }
+  }
+
+
+  ImGui::Separator();
+  ImGui::Text("Fleets (in system)");
+  bool any_fleets = false;
+  for (const auto& [fid, fl] : sim.state().fleets) {
+    // Fog-of-war: only show fleets belonging to the view faction.
+    if (ui.fog_of_war && viewer_faction_id != kInvalidId && fl.faction_id != viewer_faction_id) {
+      continue;
+    }
+
+    int in_sys = 0;
+    for (Id sid : fl.ship_ids) {
+      const auto* sh = find_ptr(sim.state().ships, sid);
+      if (sh && sh->system_id == sys->id) ++in_sys;
+    }
+    if (in_sys == 0) continue;
+
+    any_fleets = true;
+    std::string label = fl.name + " (" + std::to_string(in_sys) + "/" + std::to_string((int)fl.ship_ids.size()) + ")";
+    label += "##fleet_" + std::to_string(static_cast<unsigned long long>(fid));
+
+    if (ImGui::Selectable(label.c_str(), ui.selected_fleet_id == fid)) {
+      ui.selected_fleet_id = fid;
+
+      // Prefer selecting the leader ship if it's in this system.
+      Id pick_ship = fl.leader_ship_id;
+      const auto* leader = (pick_ship != kInvalidId) ? find_ptr(sim.state().ships, pick_ship) : nullptr;
+      if (!leader || leader->system_id != sys->id) {
+        pick_ship = kInvalidId;
+        for (Id sid : fl.ship_ids) {
+          const auto* sh = find_ptr(sim.state().ships, sid);
+          if (sh && sh->system_id == sys->id) {
+            pick_ship = sid;
+            break;
+          }
+        }
+      }
+      if (pick_ship != kInvalidId) selected_ship = pick_ship;
+    }
+  }
+  if (!any_fleets) {
+    ImGui::TextDisabled("(none)");
   }
 
   ImGui::Separator();
@@ -570,20 +658,231 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
           ImGui::TextDisabled("Design definition missing: %s", sh->design_id.c_str());
         }
 
+
+        // --- Fleet (membership / quick actions) ---
+        const Id ship_fleet_id = sim.fleet_for_ship(sh->id);
+        const Fleet* ship_fleet = (ship_fleet_id != kInvalidId) ? find_ptr(s.fleets, ship_fleet_id) : nullptr;
+
         ImGui::Separator();
-        ImGui::Text("Orders");
-        auto oit = s.ship_orders.find(selected_ship);
-        if (oit == s.ship_orders.end() || oit->second.queue.empty()) {
+        ImGui::Text("Fleet");
+        if (!ship_fleet) {
           ImGui::TextDisabled("(none)");
+
+          static Id last_ship_for_new_fleet = kInvalidId;
+          static char new_fleet_name[128] = "New Fleet";
+          static std::string fleet_action_status;
+
+          if (last_ship_for_new_fleet != sh->id) {
+            std::snprintf(new_fleet_name, sizeof(new_fleet_name), "%s Fleet", sh->name.c_str());
+            last_ship_for_new_fleet = sh->id;
+          }
+
+          ImGui::InputText("New fleet name", new_fleet_name, IM_ARRAYSIZE(new_fleet_name));
+          if (ImGui::SmallButton("Create fleet from this ship")) {
+            std::string err;
+            const Id fid = sim.create_fleet(sh->faction_id, new_fleet_name, {sh->id}, &err);
+            if (fid != kInvalidId) {
+              ui.selected_fleet_id = fid;
+              fleet_action_status = "Created fleet.";
+            } else {
+              fleet_action_status = err.empty() ? "Create fleet failed." : err;
+            }
+          }
+
+          if (ui.selected_fleet_id != kInvalidId) {
+            const Fleet* tgt = find_ptr(s.fleets, ui.selected_fleet_id);
+            if (tgt && tgt->faction_id == sh->faction_id) {
+              ImGui::SameLine();
+              if (ImGui::SmallButton("Add to selected fleet")) {
+                std::string err;
+                if (sim.add_ship_to_fleet(tgt->id, sh->id, &err)) {
+                  fleet_action_status = "Added to fleet.";
+                } else {
+                  fleet_action_status = err.empty() ? "Add to fleet failed." : err;
+                }
+              }
+            }
+          }
+
+          if (!fleet_action_status.empty()) {
+            ImGui::TextWrapped("%s", fleet_action_status.c_str());
+          }
         } else {
-          int idx = 0;
-          for (const auto& o : oit->second.queue) {
-            ImGui::BulletText("%d) %s", idx++, order_to_string(o).c_str());
+          ImGui::Text("%s  (%d ships)", ship_fleet->name.c_str(), (int)ship_fleet->ship_ids.size());
+          const Ship* leader =
+              (ship_fleet->leader_ship_id != kInvalidId) ? find_ptr(s.ships, ship_fleet->leader_ship_id) : nullptr;
+          ImGui::TextDisabled("Leader: %s", leader ? leader->name.c_str() : "(none)");
+
+          if (ImGui::SmallButton("Select fleet")) {
+            ui.selected_fleet_id = ship_fleet->id;
+          }
+
+          ImGui::SameLine();
+          if (ImGui::SmallButton("Set as leader")) {
+            sim.set_fleet_leader(ship_fleet->id, sh->id);
+          }
+
+          ImGui::SameLine();
+          const Id fid = ship_fleet->id;
+          if (ImGui::SmallButton("Remove from fleet")) {
+            sim.remove_ship_from_fleet(fid, sh->id);
+            if (ui.selected_fleet_id == fid && !find_ptr(s.fleets, fid)) {
+              ui.selected_fleet_id = kInvalidId;
+            }
           }
         }
 
-        const bool repeat_on = (oit != s.ship_orders.end()) ? oit->second.repeat : false;
-        const int repeat_len = (oit != s.ship_orders.end()) ? static_cast<int>(oit->second.repeat_template.size()) : 0;
+        ImGui::Separator();
+        ImGui::Text("Automation");
+
+        const bool in_fleet = (ship_fleet != nullptr);
+        if (in_fleet) ImGui::BeginDisabled();
+        if (ImGui::Checkbox("Auto-explore when idle", &sh->auto_explore)) {
+          if (sh->auto_explore) sh->auto_freight = false;
+        }
+        if (ImGui::IsItemHovered()) {
+          ImGui::SetTooltip(
+              "When enabled, this ship will automatically travel to the nearest frontier system\n"
+              "and jump into undiscovered systems whenever it has no queued orders.");
+        }
+
+        const bool can_auto_freight = (d && d->cargo_tons > 0.0);
+        if (!can_auto_freight) ImGui::BeginDisabled();
+        if (ImGui::Checkbox("Auto-freight minerals when idle", &sh->auto_freight)) {
+          if (sh->auto_freight) sh->auto_explore = false;
+        }
+        if (ImGui::IsItemHovered()) {
+          ImGui::SetTooltip(
+              "When enabled, this ship will automatically haul minerals between your colonies\n"
+              "to relieve shipyard/construction stalls (only when the ship has no queued orders).");
+        }
+        if (!can_auto_freight) {
+          ImGui::EndDisabled();
+          ImGui::SameLine();
+          ImGui::TextDisabled("(requires a cargo hold)");
+        }
+
+        if (in_fleet) {
+          ImGui::EndDisabled();
+          ImGui::SameLine();
+          ImGui::TextDisabled("(disabled while in a fleet)");
+        }
+
+        ImGui::Separator();
+        ImGui::Text("Orders");
+        auto* ship_orders = find_ptr(s.ship_orders, selected_ship);
+        const bool has_orders = (ship_orders && !ship_orders->queue.empty());
+
+        // Editable queue view (drag-and-drop reorder, duplicate/delete, etc.)
+        if (!has_orders) {
+          ImGui::TextDisabled("(none)");
+        } else {
+          int delete_idx = -1;
+          int dup_idx = -1;
+          int move_from = -1;
+          int move_to = -1;
+
+          auto& q = ship_orders->queue;
+
+          ImGui::TextDisabled("Drag+drop to reorder. Tip: if repeat is ON, edits do not update the repeat template unless you sync it.");
+
+          const ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
+                                        ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_Resizable;
+          if (ImGui::BeginTable("ship_orders_table", 4, flags)) {
+            ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, 24.0f);
+            ImGui::TableSetupColumn("Order", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("Move", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+            ImGui::TableSetupColumn("Edit", ImGuiTableColumnFlags_WidthFixed, 90.0f);
+            ImGui::TableHeadersRow();
+
+            for (int i = 0; i < static_cast<int>(q.size()); ++i) {
+              ImGui::TableNextRow();
+
+              ImGui::TableSetColumnIndex(0);
+              ImGui::Text("%d", i);
+
+              ImGui::TableSetColumnIndex(1);
+              const std::string ord_str = order_to_string(q[static_cast<std::size_t>(i)]);
+              const std::string row_id = "##ship_order_row_" + std::to_string(static_cast<unsigned long long>(i));
+              ImGui::Selectable((ord_str + row_id).c_str(), false, ImGuiSelectableFlags_SpanAllColumns);
+
+              if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
+                ImGui::SetDragDropPayload("N4X_SHIP_ORDER_IDX", &i, sizeof(int));
+                ImGui::Text("Move: %s", ord_str.c_str());
+                ImGui::EndDragDropSource();
+              }
+
+              if (ImGui::BeginDragDropTarget()) {
+                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("N4X_SHIP_ORDER_IDX")) {
+                  if (payload && payload->DataSize == sizeof(int)) {
+                    const int src = *static_cast<const int*>(payload->Data);
+                    move_from = src;
+                    move_to = i;
+                  }
+                }
+                ImGui::EndDragDropTarget();
+              }
+
+              ImGui::TableSetColumnIndex(2);
+              const bool can_up = (i > 0);
+              const bool can_down = (i + 1 < static_cast<int>(q.size()));
+              if (!can_up) ImGui::BeginDisabled();
+              if (ImGui::SmallButton(("Up##ship_order_up_" + std::to_string(static_cast<unsigned long long>(i))).c_str())) {
+                move_from = i;
+                move_to = i - 1;
+              }
+              if (!can_up) ImGui::EndDisabled();
+
+              ImGui::SameLine();
+              if (!can_down) ImGui::BeginDisabled();
+              if (ImGui::SmallButton(("Dn##ship_order_dn_" + std::to_string(static_cast<unsigned long long>(i))).c_str())) {
+                move_from = i;
+                move_to = i + 1;
+              }
+              if (!can_down) ImGui::EndDisabled();
+
+              ImGui::TableSetColumnIndex(3);
+              if (ImGui::SmallButton(("Dup##ship_order_dup_" + std::to_string(static_cast<unsigned long long>(i))).c_str())) {
+                dup_idx = i;
+              }
+              ImGui::SameLine();
+              if (ImGui::SmallButton(("Del##ship_order_del_" + std::to_string(static_cast<unsigned long long>(i))).c_str())) {
+                delete_idx = i;
+              }
+            }
+
+            // Extra drop target at end: move to end of queue.
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(1);
+            ImGui::TextDisabled("Drop here to move to end");
+            if (ImGui::BeginDragDropTarget()) {
+              if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("N4X_SHIP_ORDER_IDX")) {
+                if (payload && payload->DataSize == sizeof(int)) {
+                  const int src = *static_cast<const int*>(payload->Data);
+                  move_from = src;
+                  move_to = static_cast<int>(q.size()); // Simulation clamps to end.
+                }
+              }
+              ImGui::EndDragDropTarget();
+            }
+
+            ImGui::EndTable();
+          }
+
+          // Apply edits after rendering to avoid iterator invalidation mid-loop.
+          if (dup_idx >= 0) {
+            sim.duplicate_queued_order(selected_ship, dup_idx);
+          }
+          if (delete_idx >= 0) {
+            sim.delete_queued_order(selected_ship, delete_idx);
+          }
+          if (move_from >= 0 && move_to >= 0) {
+            sim.move_queued_order(selected_ship, move_from, move_to);
+          }
+        }
+
+        const bool repeat_on = ship_orders ? ship_orders->repeat : false;
+        const int repeat_len = ship_orders ? static_cast<int>(ship_orders->repeat_template.size()) : 0;
         if (repeat_on) {
           ImGui::Text("Repeat: ON  (template %d orders)", repeat_len);
         } else {
@@ -616,6 +915,133 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
         ImGui::SameLine();
         if (ImGui::SmallButton("Clear orders")) {
           sim.clear_orders(selected_ship);
+        }
+
+        // --- Order template library ---
+        ImGui::Spacing();
+        if (ImGui::CollapsingHeader("Order Templates", ImGuiTreeNodeFlags_DefaultOpen)) {
+          // Persist UI selections between frames.
+          static std::string selected_template;
+          static char save_name_buf[128] = "";
+          static char rename_buf[128] = "";
+          static bool overwrite_existing = false;
+          static bool append_when_applying = true;
+          static bool confirm_delete = false;
+          static std::string status;
+
+          const auto names = sim.order_template_names();
+
+          auto exists = [&](const std::string& nm) {
+            return std::find(names.begin(), names.end(), nm) != names.end();
+          };
+
+          if (!names.empty()) {
+            if (selected_template.empty() || !exists(selected_template)) {
+              selected_template = names.front();
+              std::snprintf(rename_buf, sizeof(rename_buf), "%s", selected_template.c_str());
+            }
+          } else {
+            selected_template.clear();
+          }
+
+          const char* label = selected_template.empty() ? "(none)" : selected_template.c_str();
+          if (ImGui::BeginCombo("Template##order_template_pick", label)) {
+            if (ImGui::Selectable("(none)", selected_template.empty())) {
+              selected_template.clear();
+            }
+            for (const auto& nm : names) {
+              const bool sel = (selected_template == nm);
+              if (ImGui::Selectable((nm + "##tmpl_sel_" + nm).c_str(), sel)) {
+                selected_template = nm;
+                std::snprintf(rename_buf, sizeof(rename_buf), "%s", selected_template.c_str());
+                confirm_delete = false;
+              }
+            }
+            ImGui::EndCombo();
+          }
+
+          ImGui::Checkbox("Append when applying", &append_when_applying);
+
+          const bool can_apply = !selected_template.empty();
+          if (!can_apply) ImGui::BeginDisabled();
+          if (ImGui::SmallButton("Apply to this ship")) {
+            if (!sim.apply_order_template_to_ship(selected_ship, selected_template, append_when_applying)) {
+              status = "Apply failed (missing template or ship).";
+            } else {
+              status = "Applied template to ship.";
+            }
+          }
+          if (!can_apply) ImGui::EndDisabled();
+
+          if (ui.selected_fleet_id != kInvalidId) {
+            ImGui::SameLine();
+            const bool has_fleet = (find_ptr(s.fleets, ui.selected_fleet_id) != nullptr);
+            const bool can_apply_fleet = can_apply && has_fleet;
+            if (!can_apply_fleet) ImGui::BeginDisabled();
+            if (ImGui::SmallButton("Apply to selected fleet")) {
+              if (!sim.apply_order_template_to_fleet(ui.selected_fleet_id, selected_template, append_when_applying)) {
+                status = "Apply to fleet failed (missing template or fleet).";
+              } else {
+                status = "Applied template to fleet.";
+              }
+            }
+            if (!can_apply_fleet) ImGui::EndDisabled();
+          }
+
+          ImGui::Spacing();
+          ImGui::InputText("Save name##tmpl_save", save_name_buf, IM_ARRAYSIZE(save_name_buf));
+          ImGui::Checkbox("Overwrite existing##tmpl_overwrite", &overwrite_existing);
+
+          const bool can_save = ship_orders && !ship_orders->queue.empty();
+          if (!can_save) ImGui::BeginDisabled();
+          if (ImGui::SmallButton("Save current queue as template")) {
+            std::string err;
+            if (!ship_orders || ship_orders->queue.empty()) {
+              status = "No queued orders to save.";
+            } else if (sim.save_order_template(save_name_buf, ship_orders->queue, overwrite_existing, &err)) {
+              status = std::string("Saved template: ") + save_name_buf;
+              selected_template = save_name_buf;
+              std::snprintf(rename_buf, sizeof(rename_buf), "%s", selected_template.c_str());
+              confirm_delete = false;
+            } else {
+              status = err.empty() ? "Save failed." : err;
+            }
+          }
+          if (!can_save) ImGui::EndDisabled();
+
+          ImGui::Spacing();
+          if (selected_template.empty()) {
+            ImGui::TextDisabled("Select a template to rename/delete.");
+          } else {
+            ImGui::InputText("Rename to##tmpl_rename", rename_buf, IM_ARRAYSIZE(rename_buf));
+
+            if (ImGui::SmallButton("Rename selected")) {
+              std::string err;
+              if (sim.rename_order_template(selected_template, rename_buf, &err)) {
+                status = "Renamed template.";
+                selected_template = rename_buf;
+                confirm_delete = false;
+              } else {
+                status = err.empty() ? "Rename failed." : err;
+              }
+            }
+
+            ImGui::SameLine();
+            ImGui::Checkbox("Confirm delete##tmpl_confirm", &confirm_delete);
+            ImGui::SameLine();
+            if (!confirm_delete) ImGui::BeginDisabled();
+            if (ImGui::SmallButton("Delete##tmpl_delete")) {
+              sim.delete_order_template(selected_template);
+              status = "Deleted template.";
+              selected_template.clear();
+              confirm_delete = false;
+            }
+            if (!confirm_delete) ImGui::EndDisabled();
+          }
+
+          if (!status.empty()) {
+            ImGui::TextWrapped("%s", status.c_str());
+          }
         }
 
         ImGui::Separator();
@@ -887,6 +1313,379 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
       }
     }
 
+    // --- Fleet tab ---
+    if (ImGui::BeginTabItem("Fleet")) {
+      // Keep selection valid.
+      if (ui.selected_fleet_id != kInvalidId && !find_ptr(s.fleets, ui.selected_fleet_id)) {
+        ui.selected_fleet_id = kInvalidId;
+      }
+
+      static std::string fleet_status;
+
+      // Fleet selector
+      const Fleet* selected_fleet = (ui.selected_fleet_id != kInvalidId) ? find_ptr(s.fleets, ui.selected_fleet_id) : nullptr;
+      const char* fleet_label = selected_fleet ? selected_fleet->name.c_str() : "(none)";
+      if (ImGui::BeginCombo("Selected fleet", fleet_label)) {
+        if (ImGui::Selectable("(none)", ui.selected_fleet_id == kInvalidId)) {
+          ui.selected_fleet_id = kInvalidId;
+        }
+
+        const auto fleet_list = sorted_fleets(s);
+        for (const auto& [fid, _] : fleet_list) {
+          const auto* fl = find_ptr(s.fleets, fid);
+          if (!fl) continue;
+          std::string item = fl->name + " (" + std::to_string((int)fl->ship_ids.size()) + ")";
+          const bool is_sel = (ui.selected_fleet_id == fid);
+          if (ImGui::Selectable((item + "##fleet_pick_" + std::to_string(static_cast<unsigned long long>(fid))).c_str(), is_sel)) {
+            ui.selected_fleet_id = fid;
+            // Focus on leader if present
+            if (fl->leader_ship_id != kInvalidId) {
+              if (const auto* leader = find_ptr(s.ships, fl->leader_ship_id)) {
+                selected_ship = leader->id;
+                s.selected_system = leader->system_id;
+              }
+            }
+          }
+        }
+        ImGui::EndCombo();
+      }
+
+      // --- Create fleet ---
+      ImGui::Separator();
+      ImGui::Text("Create fleet");
+      static char create_name[128] = "New Fleet";
+      static Id create_faction_id = kInvalidId;
+      static bool include_selected_ship = true;
+      static bool include_unassigned_in_system = false;
+
+      // Default faction: selected ship -> viewer faction -> first faction
+      if (create_faction_id == kInvalidId) {
+        if (selected_ship != kInvalidId) {
+          if (const auto* sh = find_ptr(s.ships, selected_ship)) create_faction_id = sh->faction_id;
+        }
+        if (create_faction_id == kInvalidId) create_faction_id = ui.viewer_faction_id;
+        if (create_faction_id == kInvalidId && !factions.empty()) create_faction_id = factions.front().first;
+      }
+
+      const auto* create_fac = find_ptr(s.factions, create_faction_id);
+      const char* create_fac_label = create_fac ? create_fac->name.c_str() : "(none)";
+      if (ImGui::BeginCombo("Faction##fleet_create_faction", create_fac_label)) {
+        for (const auto& [fid, nm] : factions) {
+          const bool sel = (create_faction_id == fid);
+          if (ImGui::Selectable((nm + "##fleet_create_fac_" + std::to_string(static_cast<unsigned long long>(fid))).c_str(), sel)) {
+            create_faction_id = fid;
+          }
+        }
+        ImGui::EndCombo();
+      }
+
+      ImGui::InputText("Name##fleet_create_name", create_name, IM_ARRAYSIZE(create_name));
+      ImGui::Checkbox("Include selected ship", &include_selected_ship);
+      ImGui::Checkbox("Include unassigned ships in current system", &include_unassigned_in_system);
+
+      if (ImGui::SmallButton("Create fleet")) {
+        std::vector<Id> members;
+
+        if (include_selected_ship && selected_ship != kInvalidId) {
+          if (const auto* sh = find_ptr(s.ships, selected_ship)) {
+            if (sh->faction_id == create_faction_id) members.push_back(sh->id);
+          }
+        }
+
+        if (include_unassigned_in_system) {
+          const auto* sys = (s.selected_system != kInvalidId) ? find_ptr(s.systems, s.selected_system) : nullptr;
+          if (sys) {
+            for (Id sid : sys->ships) {
+              const auto* sh = find_ptr(s.ships, sid);
+              if (!sh) continue;
+              if (sh->faction_id != create_faction_id) continue;
+              if (sim.fleet_for_ship(sid) != kInvalidId) continue;
+              if (std::find(members.begin(), members.end(), sid) == members.end()) members.push_back(sid);
+            }
+          }
+        }
+
+        if (members.empty()) {
+          fleet_status = "No eligible ships selected for new fleet.";
+        } else {
+          std::string err;
+          const Id fid = sim.create_fleet(create_faction_id, create_name, members, &err);
+          if (fid != kInvalidId) {
+            ui.selected_fleet_id = fid;
+            fleet_status = "Created fleet.";
+          } else {
+            fleet_status = err.empty() ? "Create fleet failed." : err;
+          }
+        }
+      }
+
+      if (!fleet_status.empty()) {
+        ImGui::TextWrapped("%s", fleet_status.c_str());
+      }
+
+      // Refresh selected_fleet pointer after create/disband operations.
+      selected_fleet = (ui.selected_fleet_id != kInvalidId) ? find_ptr(s.fleets, ui.selected_fleet_id) : nullptr;
+      if (!selected_fleet) {
+        ImGui::Separator();
+        ImGui::TextDisabled("No fleet selected.");
+        ImGui::EndTabItem();
+      } else {
+        const auto* fac = find_ptr(s.factions, selected_fleet->faction_id);
+        const Ship* leader =
+            (selected_fleet->leader_ship_id != kInvalidId) ? find_ptr(s.ships, selected_fleet->leader_ship_id) : nullptr;
+
+        // --- Fleet details ---
+        ImGui::Separator();
+        ImGui::Text("Details");
+        ImGui::Text("Faction: %s", fac ? fac->name.c_str() : "(unknown)");
+        ImGui::Text("Ships: %d", (int)selected_fleet->ship_ids.size());
+
+        static Id rename_for = kInvalidId;
+        static char rename_buf[128] = "";
+        if (rename_for != selected_fleet->id) {
+          std::snprintf(rename_buf, sizeof(rename_buf), "%s", selected_fleet->name.c_str());
+          rename_for = selected_fleet->id;
+        }
+
+        ImGui::InputText("Name##fleet_rename", rename_buf, IM_ARRAYSIZE(rename_buf));
+        if (ImGui::SmallButton("Rename")) {
+          if (sim.rename_fleet(selected_fleet->id, rename_buf)) {
+            fleet_status = "Renamed fleet.";
+          } else {
+            fleet_status = "Rename failed (empty name?).";
+          }
+        }
+
+        const char* leader_label = leader ? leader->name.c_str() : "(none)";
+        if (ImGui::BeginCombo("Leader##fleet_leader", leader_label)) {
+          for (Id sid : selected_fleet->ship_ids) {
+            const auto* sh = find_ptr(s.ships, sid);
+            if (!sh) continue;
+            const bool sel = (selected_fleet->leader_ship_id == sid);
+            std::string item = sh->name + "##leader_pick_" + std::to_string(static_cast<unsigned long long>(sid));
+            if (ImGui::Selectable(item.c_str(), sel)) {
+              sim.set_fleet_leader(selected_fleet->id, sid);
+            }
+          }
+          ImGui::EndCombo();
+        }
+
+        // --- Formation configuration ---
+        ImGui::Separator();
+        ImGui::Text("Formation");
+        {
+          const char* kFormationNames[] = {
+              "None",
+              "Line Abreast",
+              "Column",
+              "Wedge",
+              "Ring",
+          };
+          int formation_idx = static_cast<int>(selected_fleet->formation);
+          if (formation_idx < 0 || formation_idx >= static_cast<int>(IM_ARRAYSIZE(kFormationNames))) formation_idx = 0;
+          if (ImGui::Combo("Type##fleet_formation", &formation_idx, kFormationNames, IM_ARRAYSIZE(kFormationNames))) {
+            sim.configure_fleet_formation(selected_fleet->id, static_cast<FleetFormation>(formation_idx),
+                                          selected_fleet->formation_spacing_mkm);
+          }
+
+          double spacing = selected_fleet->formation_spacing_mkm;
+          if (ImGui::InputDouble("Spacing mkm##fleet_formation_spacing", &spacing, 0.25, 1.0, "%.2f")) {
+            spacing = std::max(0.0, spacing);
+            sim.configure_fleet_formation(selected_fleet->id, selected_fleet->formation, spacing);
+          }
+          ImGui::TextDisabled("Applied as a target offset for MoveToPoint + AttackShip orders.");
+        }
+
+        // --- Membership management ---
+        ImGui::Separator();
+        ImGui::Text("Members");
+        Id remove_ship_id = kInvalidId;
+        for (Id sid : selected_fleet->ship_ids) {
+          const auto* sh = find_ptr(s.ships, sid);
+          if (!sh) continue;
+
+          std::string row = sh->name + "##fleet_member_" + std::to_string(static_cast<unsigned long long>(sid));
+          if (ImGui::Selectable(row.c_str(), selected_ship == sid)) {
+            selected_ship = sid;
+            s.selected_system = sh->system_id;
+          }
+          ImGui::SameLine();
+          if (ImGui::SmallButton(("Remove##fleet_rm_" + std::to_string(static_cast<unsigned long long>(sid))).c_str())) {
+            remove_ship_id = sid;
+          }
+        }
+        if (remove_ship_id != kInvalidId) {
+          const Id fid = selected_fleet->id;
+          sim.remove_ship_from_fleet(fid, remove_ship_id);
+          if (!find_ptr(s.fleets, fid)) {
+            ui.selected_fleet_id = kInvalidId;
+          }
+        }
+
+        ImGui::Spacing();
+        if (selected_ship != kInvalidId) {
+          const auto* sh = find_ptr(s.ships, selected_ship);
+          if (sh && sh->faction_id == selected_fleet->faction_id) {
+            if (ImGui::SmallButton("Add selected ship##fleet_add_selected")) {
+              std::string err;
+              if (sim.add_ship_to_fleet(selected_fleet->id, sh->id, &err)) {
+                fleet_status = "Added ship to fleet.";
+              } else {
+                fleet_status = err.empty() ? "Add ship failed." : err;
+              }
+            }
+          }
+        }
+
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Disband fleet")) {
+          const Id fid = selected_fleet->id;
+          sim.disband_fleet(fid);
+          ui.selected_fleet_id = kInvalidId;
+          fleet_status = "Disbanded fleet.";
+        }
+
+        // --- Orders ---
+        ImGui::Separator();
+        ImGui::Text("Orders");
+        ImGui::TextDisabled("Tip: Ctrl+click on the System Map or Ctrl+Right click on the Galaxy Map routes the fleet.");
+
+        if (ImGui::SmallButton("Clear fleet orders")) {
+          sim.clear_fleet_orders(selected_fleet->id);
+        }
+
+        ImGui::Spacing();
+        static int wait_days = 5;
+        ImGui::InputInt("Wait days##fleet_wait", &wait_days);
+        wait_days = std::max(1, wait_days);
+        if (ImGui::SmallButton("Issue Wait")) {
+          sim.issue_fleet_wait_days(selected_fleet->id, wait_days);
+        }
+
+        ImGui::Spacing();
+        static double move_x = 0.0;
+        static double move_y = 0.0;
+        ImGui::InputDouble("X mkm##fleet_move_x", &move_x);
+        ImGui::InputDouble("Y mkm##fleet_move_y", &move_y);
+        if (ImGui::SmallButton("Move to point")) {
+          sim.issue_fleet_move_to_point(selected_fleet->id, Vec2{move_x, move_y});
+        }
+
+        // Move / orbit body in selected system
+        const auto* sys = (s.selected_system != kInvalidId) ? find_ptr(s.systems, s.selected_system) : nullptr;
+        if (sys) {
+          static Id body_target = kInvalidId;
+          const Body* bt = (body_target != kInvalidId) ? find_ptr(s.bodies, body_target) : nullptr;
+          const char* body_label = bt ? bt->name.c_str() : "(select body)";
+          if (ImGui::BeginCombo("Body##fleet_body", body_label)) {
+            for (Id bid : sys->bodies) {
+              const auto* b = find_ptr(s.bodies, bid);
+              if (!b) continue;
+              const bool sel = (body_target == bid);
+              std::string item = b->name + "##fleet_body_" + std::to_string(static_cast<unsigned long long>(bid));
+              if (ImGui::Selectable(item.c_str(), sel)) {
+                body_target = bid;
+              }
+            }
+            ImGui::EndCombo();
+          }
+
+          if (body_target != kInvalidId) {
+            if (ImGui::SmallButton("Move to body")) {
+              sim.issue_fleet_move_to_body(selected_fleet->id, body_target, ui.fog_of_war);
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Orbit body")) {
+              sim.issue_fleet_orbit_body(selected_fleet->id, body_target, ui.fog_of_war);
+            }
+          }
+        }
+
+        // Travel to system
+        {
+          const auto systems = sorted_systems(s);
+          static Id target_system = kInvalidId;
+          const auto* tsys = (target_system != kInvalidId) ? find_ptr(s.systems, target_system) : nullptr;
+          const char* sys_label = tsys ? tsys->name.c_str() : "(select system)";
+          if (ImGui::BeginCombo("Travel to system##fleet_travel_sys", sys_label)) {
+            for (const auto& [sid, nm] : systems) {
+              const bool sel = (target_system == sid);
+              if (ImGui::Selectable((nm + "##fleet_travel_" + std::to_string(static_cast<unsigned long long>(sid))).c_str(), sel)) {
+                target_system = sid;
+              }
+            }
+            ImGui::EndCombo();
+          }
+
+          if (target_system != kInvalidId) {
+            if (ImGui::SmallButton("Travel")) {
+              if (!sim.issue_fleet_travel_to_system(selected_fleet->id, target_system, ui.fog_of_war)) {
+                fleet_status = "No known jump route to that system.";
+              }
+            }
+          }
+        }
+
+        // Combat quick actions
+        {
+          Id combat_system = leader ? leader->system_id : kInvalidId;
+          if (combat_system != kInvalidId) {
+            std::vector<Id> hostiles;
+            if (ui.fog_of_war) {
+              hostiles = sim.detected_hostile_ships_in_system(selected_fleet->faction_id, combat_system);
+            } else {
+              const auto* csys = find_ptr(s.systems, combat_system);
+              if (csys) {
+                for (Id sid : csys->ships) {
+                  const auto* sh = find_ptr(s.ships, sid);
+                  if (sh && sh->faction_id != selected_fleet->faction_id &&
+                      sim.are_factions_hostile(selected_fleet->faction_id, sh->faction_id))
+                    hostiles.push_back(sid);
+                }
+              }
+            }
+
+            ImGui::Spacing();
+            ImGui::Text("Combat");
+            if (hostiles.empty()) {
+              ImGui::TextDisabled("(no hostiles)");
+            } else {
+              for (Id hid : hostiles) {
+                const auto* other = find_ptr(s.ships, hid);
+                if (!other) continue;
+                ImGui::BulletText("%s (HP %.0f)", other->name.c_str(), other->hp);
+                ImGui::SameLine();
+                if (ImGui::SmallButton(("Attack##fleet_attack_" + std::to_string(static_cast<unsigned long long>(hid))).c_str())) {
+                  sim.issue_fleet_attack_ship(selected_fleet->id, hid, ui.fog_of_war);
+                }
+              }
+            }
+          }
+        }
+
+        // Cargo: load/unload from selected colony
+        if (selected_colony != kInvalidId) {
+          ImGui::Spacing();
+          ImGui::Text("Cargo (selected colony)");
+          static char mineral_name[64] = "Duranium";
+          static double mineral_tons = 100.0;
+          ImGui::InputText("Mineral##fleet_mineral", mineral_name, IM_ARRAYSIZE(mineral_name));
+          ImGui::InputDouble("Tons##fleet_mineral_tons", &mineral_tons);
+          mineral_tons = std::max(0.0, mineral_tons);
+
+          if (ImGui::SmallButton("Load")) {
+            sim.issue_fleet_load_mineral(selected_fleet->id, selected_colony, mineral_name, mineral_tons, ui.fog_of_war);
+          }
+          ImGui::SameLine();
+          if (ImGui::SmallButton("Unload")) {
+            sim.issue_fleet_unload_mineral(selected_fleet->id, selected_colony, mineral_name, mineral_tons, ui.fog_of_war);
+          }
+        }
+
+        ImGui::EndTabItem();
+      }
+    }
+
     // --- Colony tab ---
     if (ImGui::BeginTabItem("Colony")) {
       if (selected_colony == kInvalidId) {
@@ -920,46 +1719,145 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
         const double cp_per_day = sim.construction_points_per_day(*colony);
         ImGui::Text("Construction Points/day: %.1f", cp_per_day);
 
-        if (colony->construction_queue.empty()) {
-          ImGui::TextDisabled("Queue empty");
-        } else {
-          for (const auto& ord : colony->construction_queue) {
-            const auto it = sim.content().installations.find(ord.installation_id);
-            const InstallationDef* def = (it == sim.content().installations.end()) ? nullptr : &it->second;
-            const std::string nm = def ? def->name : ord.installation_id;
+if (colony->construction_queue.empty()) {
+  ImGui::TextDisabled("Queue empty");
+} else {
+  int delete_idx = -1;
+  int move_from = -1;
+  int move_to = -1;
 
-            ImGui::BulletText("%s x%d", nm.c_str(), ord.quantity_remaining);
+  ImGui::TextDisabled("Drag+drop to reorder. Stalled orders (missing minerals) no longer block later orders.");
 
-            // Status line / progress bar
-            if (ord.minerals_paid && def && def->construction_cost > 0.0) {
-              const double done = def->construction_cost - ord.cp_remaining;
-              const float frac = static_cast<float>(std::clamp(done / def->construction_cost, 0.0, 1.0));
-              ImGui::Indent();
-              ImGui::ProgressBar(frac, ImVec2(-1, 0),
-                                 (std::to_string(static_cast<int>(done)) + " / " +
-                                  std::to_string(static_cast<int>(def->construction_cost)) + " CP")
-                                     .c_str());
-              ImGui::Unindent();
-            } else if (!ord.minerals_paid && def && !def->build_costs.empty()) {
-              // Hint if we can't currently start due to minerals.
-              std::string missing;
-              for (const auto& [mineral, cost] : def->build_costs) {
-                if (cost <= 0.0) continue;
-                const auto it2 = colony->minerals.find(mineral);
-                const double have = (it2 == colony->minerals.end()) ? 0.0 : it2->second;
-                if (have + 1e-9 < cost) {
-                  missing = mineral;
-                  break;
-                }
-              }
-              if (!missing.empty()) {
-                ImGui::Indent();
-                ImGui::TextDisabled("Status: STALLED (need %s)", missing.c_str());
-                ImGui::Unindent();
-              }
-            }
+  const ImGuiTableFlags qflags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
+                                 ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_Resizable;
+  if (ImGui::BeginTable("construction_queue_table", 6, qflags)) {
+    ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, 24.0f);
+    ImGui::TableSetupColumn("Order", ImGuiTableColumnFlags_WidthStretch);
+    ImGui::TableSetupColumn("Qty", ImGuiTableColumnFlags_WidthFixed, 42.0f);
+    ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthStretch);
+    ImGui::TableSetupColumn("Move", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+    ImGui::TableSetupColumn("Edit", ImGuiTableColumnFlags_WidthFixed, 60.0f);
+    ImGui::TableHeadersRow();
+
+    auto missing_mineral_for = [&](const InstallationDef& def) -> std::string {
+      for (const auto& [mineral, cost] : def.build_costs) {
+        if (cost <= 0.0) continue;
+        const auto it2 = colony->minerals.find(mineral);
+        const double have = (it2 == colony->minerals.end()) ? 0.0 : it2->second;
+        if (have + 1e-9 < cost) return mineral;
+      }
+      return {};
+    };
+
+    for (int i = 0; i < static_cast<int>(colony->construction_queue.size()); ++i) {
+      const auto& ord = colony->construction_queue[static_cast<std::size_t>(i)];
+      const auto it = sim.content().installations.find(ord.installation_id);
+      const InstallationDef* def = (it == sim.content().installations.end()) ? nullptr : &it->second;
+      const std::string nm = def ? def->name : ord.installation_id;
+
+      ImGui::TableNextRow();
+
+      ImGui::TableSetColumnIndex(0);
+      ImGui::Text("%d", i);
+
+      ImGui::TableSetColumnIndex(1);
+      const std::string row_id = "##construction_row_" + std::to_string(static_cast<unsigned long long>(i));
+      ImGui::Selectable((nm + row_id).c_str(), false, ImGuiSelectableFlags_SpanAllColumns);
+
+      if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
+        ImGui::SetDragDropPayload("N4X_CONSTRUCTION_ORDER_IDX", &i, sizeof(int));
+        ImGui::Text("Move: %s", nm.c_str());
+        ImGui::EndDragDropSource();
+      }
+      if (ImGui::BeginDragDropTarget()) {
+        if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("N4X_CONSTRUCTION_ORDER_IDX")) {
+          if (payload && payload->DataSize == sizeof(int)) {
+            const int src = *static_cast<const int*>(payload->Data);
+            move_from = src;
+            move_to = i;
           }
         }
+        ImGui::EndDragDropTarget();
+      }
+
+      ImGui::TableSetColumnIndex(2);
+      ImGui::Text("%d", ord.quantity_remaining);
+
+      ImGui::TableSetColumnIndex(3);
+      if (!def) {
+        ImGui::TextDisabled("(unknown installation)");
+      } else if (ord.minerals_paid && def->construction_cost > 0.0) {
+        const double done = def->construction_cost - ord.cp_remaining;
+        const float frac = static_cast<float>(std::clamp(done / def->construction_cost, 0.0, 1.0));
+        ImGui::ProgressBar(frac, ImVec2(-1, 0),
+                           (std::to_string(static_cast<int>(done)) + " / " +
+                            std::to_string(static_cast<int>(def->construction_cost)) + " CP")
+                               .c_str());
+      } else if (!ord.minerals_paid && !def->build_costs.empty()) {
+        const std::string missing = missing_mineral_for(*def);
+        if (!missing.empty()) {
+          ImGui::TextDisabled("STALLED (need %s)", missing.c_str());
+        } else {
+          ImGui::TextDisabled("Ready");
+        }
+      } else if (ord.minerals_paid) {
+        ImGui::TextDisabled("In progress");
+      } else {
+        ImGui::TextDisabled("Waiting");
+      }
+
+      ImGui::TableSetColumnIndex(4);
+      const bool can_up = (i > 0);
+      const bool can_down = (i + 1 < static_cast<int>(colony->construction_queue.size()));
+      if (!can_up) ImGui::BeginDisabled();
+      if (ImGui::SmallButton(("Up##const_up_" + std::to_string(static_cast<unsigned long long>(i))).c_str())) {
+        move_from = i;
+        move_to = i - 1;
+      }
+      if (!can_up) ImGui::EndDisabled();
+
+      ImGui::SameLine();
+      if (!can_down) ImGui::BeginDisabled();
+      if (ImGui::SmallButton(("Dn##const_dn_" + std::to_string(static_cast<unsigned long long>(i))).c_str())) {
+        move_from = i;
+        move_to = i + 1;
+      }
+      if (!can_down) ImGui::EndDisabled();
+
+      ImGui::TableSetColumnIndex(5);
+      if (ImGui::SmallButton(("Del##const_del_" + std::to_string(static_cast<unsigned long long>(i))).c_str())) {
+        delete_idx = i;
+      }
+      if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Delete this build order. If minerals were already paid for the current unit, they will be refunded.");
+      }
+    }
+
+    // Extra drop target at end: move to end.
+    ImGui::TableNextRow();
+    ImGui::TableSetColumnIndex(1);
+    ImGui::TextDisabled("Drop here to move to end");
+    if (ImGui::BeginDragDropTarget()) {
+      if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("N4X_CONSTRUCTION_ORDER_IDX")) {
+        if (payload && payload->DataSize == sizeof(int)) {
+          const int src = *static_cast<const int*>(payload->Data);
+          move_from = src;
+          move_to = static_cast<int>(colony->construction_queue.size());
+        }
+      }
+      ImGui::EndDragDropTarget();
+    }
+
+    ImGui::EndTable();
+  }
+
+  if (delete_idx >= 0) {
+    sim.delete_construction_order(colony->id, delete_idx, true);
+  }
+  if (move_from >= 0 && move_to >= 0) {
+    sim.move_construction_order(colony->id, move_from, move_to);
+  }
+}
 
         // Enqueue new construction
         const auto* fac_for_colony = find_ptr(s.factions, colony->faction_id);
@@ -1048,49 +1946,187 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
             ImGui::TextDisabled("Build costs: (free / not configured)");
           }
 
-          if (colony->shipyard_queue.empty()) {
-            ImGui::TextDisabled("Queue empty");
-          } else {
-            for (const auto& bo : colony->shipyard_queue) {
-              const auto* d = sim.find_design(bo.design_id);
-              const std::string nm = d ? d->name : bo.design_id;
-              ImGui::BulletText("%s (%.1f tons remaining)", nm.c_str(), bo.tons_remaining);
+const int shipyard_count = it_yard->second;
+const double build_rate_tpd =
+    (shipyard_def && shipyard_def->build_rate_tons_per_day > 0.0)
+        ? shipyard_def->build_rate_tons_per_day * static_cast<double>(shipyard_count)
+        : 0.0;
 
-              if (shipyard_def && !shipyard_def->build_costs_per_ton.empty()) {
-                // Remaining mineral costs for this order.
-                std::string cost_line;
-                for (const auto& [mineral, cost_per_ton] : shipyard_def->build_costs_per_ton) {
-                  if (cost_per_ton <= 0.0) continue;
-                  const double remaining = bo.tons_remaining * cost_per_ton;
-                  if (!cost_line.empty()) cost_line += ", ";
-                  char buf[64];
-                  std::snprintf(buf, sizeof(buf), "%.1f", remaining);
-                  cost_line += mineral + " " + buf;
-                }
+if (colony->shipyard_queue.empty()) {
+  ImGui::TextDisabled("Queue empty");
+} else {
+  int delete_idx = -1;
+  int move_from = -1;
+  int move_to = -1;
 
-                if (!cost_line.empty()) {
-                  ImGui::Indent();
-                  ImGui::TextDisabled("Remaining cost: %s", cost_line.c_str());
+  ImGui::TextDisabled("Drag+drop to reorder.");
 
-                  // Simple stall hint: if any required mineral is at 0, the build cannot progress.
-                  std::string missing;
-                  for (const auto& [mineral, cost_per_ton] : shipyard_def->build_costs_per_ton) {
-                    if (cost_per_ton <= 0.0) continue;
-                    const auto it = colony->minerals.find(mineral);
-                    const double have = (it == colony->minerals.end()) ? 0.0 : it->second;
-                    if (have <= 1e-9) {
-                      missing = mineral;
-                      break;
-                    }
-                  }
-                  if (!missing.empty()) {
-                    ImGui::TextDisabled("Status: STALLED (need %s)", missing.c_str());
-                  }
-                  ImGui::Unindent();
-                }
-              }
+  const ImGuiTableFlags qflags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
+                                 ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_Resizable;
+  if (ImGui::BeginTable("shipyard_queue_table", 6, qflags)) {
+    ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, 24.0f);
+    ImGui::TableSetupColumn("Order", ImGuiTableColumnFlags_WidthStretch);
+    ImGui::TableSetupColumn("Remaining", ImGuiTableColumnFlags_WidthFixed, 120.0f);
+    ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthStretch);
+    ImGui::TableSetupColumn("Move", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+    ImGui::TableSetupColumn("Edit", ImGuiTableColumnFlags_WidthFixed, 60.0f);
+    ImGui::TableHeadersRow();
+
+    for (int i = 0; i < static_cast<int>(colony->shipyard_queue.size()); ++i) {
+      const auto& bo = colony->shipyard_queue[static_cast<std::size_t>(i)];
+      const bool is_refit = (bo.refit_ship_id != kInvalidId);
+      const Ship* refit_ship = is_refit ? find_ptr(st.ships, bo.refit_ship_id) : nullptr;
+
+      const auto* d = sim.find_design(bo.design_id);
+      const std::string design_nm = d ? d->name : bo.design_id;
+
+      std::string nm = design_nm;
+      if (is_refit) {
+        const std::string ship_nm =
+            refit_ship ? refit_ship->name : ("Ship #" + std::to_string(static_cast<int>(bo.refit_ship_id)));
+        nm = "REFIT: " + ship_nm + " -> " + design_nm;
+      }
+
+      ImGui::TableNextRow();
+
+      ImGui::TableSetColumnIndex(0);
+      ImGui::Text("%d", i);
+
+      ImGui::TableSetColumnIndex(1);
+      const std::string row_id = "##shipyard_row_" + std::to_string(static_cast<unsigned long long>(i));
+      ImGui::Selectable((nm + row_id).c_str(), false, ImGuiSelectableFlags_SpanAllColumns);
+
+      if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
+        ImGui::SetDragDropPayload("N4X_SHIPYARD_ORDER_IDX", &i, sizeof(int));
+        ImGui::Text("Move: %s", nm.c_str());
+        ImGui::EndDragDropSource();
+      }
+      if (ImGui::BeginDragDropTarget()) {
+        if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("N4X_SHIPYARD_ORDER_IDX")) {
+          if (payload && payload->DataSize == sizeof(int)) {
+            const int src = *static_cast<const int*>(payload->Data);
+            move_from = src;
+            move_to = i;
+          }
+        }
+        ImGui::EndDragDropTarget();
+      }
+
+      ImGui::TableSetColumnIndex(2);
+      ImGui::Text("%.1f tons", bo.tons_remaining);
+
+      ImGui::TableSetColumnIndex(3);
+
+      // Stalls that are specific to refits.
+      std::string stall_reason;
+      if (is_refit) {
+        if (!refit_ship) {
+          stall_reason = "ship missing";
+        } else if (!sim.is_ship_docked_at_colony(refit_ship->id, colony->id)) {
+          stall_reason = "ship not docked";
+        }
+      }
+
+      if (build_rate_tpd > 1e-9 && stall_reason.empty()) {
+        const double eta = bo.tons_remaining / build_rate_tpd;
+        ImGui::TextDisabled("ETA: %.0f days", eta);
+      } else if (!stall_reason.empty()) {
+        ImGui::TextDisabled("ETA: (stalled)");
+      } else {
+        ImGui::TextDisabled("ETA: (unknown)");
+      }
+
+      if (shipyard_def && !shipyard_def->build_costs_per_ton.empty()) {
+        // Remaining mineral costs for this order.
+        std::string cost_line;
+        for (const auto& [mineral, cost_per_ton] : shipyard_def->build_costs_per_ton) {
+          if (cost_per_ton <= 0.0) continue;
+          const double remaining = bo.tons_remaining * cost_per_ton;
+          if (!cost_line.empty()) cost_line += ", ";
+          char buf[64];
+          std::snprintf(buf, sizeof(buf), "%.1f", remaining);
+          cost_line += mineral + " " + buf;
+        }
+        if (!cost_line.empty()) {
+          ImGui::TextDisabled("Remaining: %s", cost_line.c_str());
+        }
+
+        if (stall_reason.empty()) {
+          // Simple stall hint: if any required mineral is at 0, the shipyard cannot progress.
+          std::string missing;
+          for (const auto& [mineral, cost_per_ton] : shipyard_def->build_costs_per_ton) {
+            if (cost_per_ton <= 0.0) continue;
+            const auto it = colony->minerals.find(mineral);
+            const double have = (it == colony->minerals.end()) ? 0.0 : it->second;
+            if (have <= 1e-9) {
+              missing = mineral;
+              break;
             }
           }
+          if (!missing.empty()) {
+            stall_reason = "need " + missing;
+          }
+        }
+      }
+
+      if (!stall_reason.empty()) {
+        ImGui::TextDisabled("STALLED (%s)", stall_reason.c_str());
+      }
+
+      ImGui::TableSetColumnIndex(4);
+      const bool can_up = (i > 0);
+      const bool can_down = (i + 1 < static_cast<int>(colony->shipyard_queue.size()));
+      if (!can_up) ImGui::BeginDisabled();
+      if (ImGui::SmallButton(("Up##yard_up_" + std::to_string(static_cast<unsigned long long>(i))).c_str())) {
+        move_from = i;
+        move_to = i - 1;
+      }
+      if (!can_up) ImGui::EndDisabled();
+
+      ImGui::SameLine();
+      if (!can_down) ImGui::BeginDisabled();
+      if (ImGui::SmallButton(("Dn##yard_dn_" + std::to_string(static_cast<unsigned long long>(i))).c_str())) {
+        move_from = i;
+        move_to = i + 1;
+      }
+      if (!can_down) ImGui::EndDisabled();
+
+      ImGui::TableSetColumnIndex(5);
+      if (ImGui::SmallButton(("Del##yard_del_" + std::to_string(static_cast<unsigned long long>(i))).c_str())) {
+        delete_idx = i;
+      }
+      if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Delete this ship build order. No refunds (prototype).");
+      }
+    }
+
+    // Extra drop target at end: move to end.
+    ImGui::TableNextRow();
+    ImGui::TableSetColumnIndex(1);
+    ImGui::TextDisabled("Drop here to move to end");
+    if (ImGui::BeginDragDropTarget()) {
+      if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("N4X_SHIPYARD_ORDER_IDX")) {
+        if (payload && payload->DataSize == sizeof(int)) {
+          const int src = *static_cast<const int*>(payload->Data);
+          move_from = src;
+          move_to = static_cast<int>(colony->shipyard_queue.size());
+        }
+      }
+      ImGui::EndDragDropTarget();
+    }
+
+    ImGui::EndTable();
+  }
+
+  if (delete_idx >= 0) {
+    sim.delete_shipyard_order(colony->id, delete_idx);
+  }
+  if (move_from >= 0 && move_to >= 0) {
+    sim.move_shipyard_order(colony->id, move_from, move_to);
+  }
+}
+
+
 
           static int selected_design_idx = 0;
           const auto ids = sorted_buildable_design_ids(sim, colony->faction_id);
@@ -1105,12 +2141,232 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
             }
           }
 
+          ImGui::SeparatorText("Refit ship");
+
+          // Candidate ships: owned, docked here, not in fleets, not already queued for refit.
+          std::unordered_set<Id> already_refitting;
+          for (const auto& bo : colony->shipyard_queue) {
+            if (bo.refit_ship_id != kInvalidId) already_refitting.insert(bo.refit_ship_id);
+          }
+
+          std::vector<Id> docked_ships;
+          if (const auto* body = find_ptr(st.bodies, colony->body_id)) {
+            if (const auto* sys = find_ptr(st.systems, body->system_id)) {
+              for (Id sid : sys->ships) {
+                const Ship* sh = find_ptr(st.ships, sid);
+                if (!sh) continue;
+                if (sh->faction_id != colony->faction_id) continue;
+                if (already_refitting.count(sid)) continue;
+                if (sim.fleet_for_ship(sid) != kInvalidId) continue;
+                if (!sim.is_ship_docked_at_colony(sid, colony->id)) continue;
+                docked_ships.push_back(sid);
+              }
+            }
+          }
+          std::sort(docked_ships.begin(), docked_ships.end());
+
+          static int refit_ship_sel = 0;
+          static int refit_design_sel = 0;
+          static std::string refit_status;
+
+          if (docked_ships.empty()) {
+            ImGui::TextDisabled("No eligible ships docked here (must be detached from fleets).");
+          } else if (ids.empty()) {
+            ImGui::TextDisabled("No buildable designs available.");
+          } else {
+            refit_ship_sel = std::clamp(refit_ship_sel, 0, static_cast<int>(docked_ships.size()) - 1);
+            refit_design_sel = std::clamp(refit_design_sel, 0, static_cast<int>(ids.size()) - 1);
+
+            // Ship label list
+            std::vector<std::string> ship_label_storage;
+            std::vector<const char*> ship_labels;
+            ship_label_storage.reserve(docked_ships.size());
+            ship_labels.reserve(docked_ships.size());
+            for (Id sid : docked_ships) {
+              const Ship* sh = find_ptr(st.ships, sid);
+              ship_label_storage.push_back((sh ? sh->name : std::string("Ship ") + std::to_string((int)sid)) + "##" +
+                                           std::to_string((int)sid));
+            }
+            for (const auto& s2 : ship_label_storage) ship_labels.push_back(s2.c_str());
+
+            // Design label list (reuse ids already built for the build enqueue combo)
+            std::vector<const char*> design_labels;
+            design_labels.reserve(ids.size());
+            for (const auto& id : ids) design_labels.push_back(id.c_str());
+
+            ImGui::Combo("Ship", &refit_ship_sel, ship_labels.data(), static_cast<int>(ship_labels.size()));
+            ImGui::Combo("Target design", &refit_design_sel, design_labels.data(), static_cast<int>(design_labels.size()));
+
+            const Id chosen_ship = docked_ships[refit_ship_sel];
+            const std::string chosen_design = ids[refit_design_sel];
+
+            const double work_tons = sim.estimate_refit_tons(chosen_ship, chosen_design);
+            if (build_rate_tpd > 1e-9 && work_tons > 0.0) {
+              ImGui::TextDisabled("Work: %.1f tons (multiplier %.2f)  |  Base ETA: %.0f days",
+                                  work_tons, sim.cfg().ship_refit_tons_multiplier, work_tons / build_rate_tpd);
+            } else if (work_tons > 0.0) {
+              ImGui::TextDisabled("Work: %.1f tons (multiplier %.2f)", work_tons, sim.cfg().ship_refit_tons_multiplier);
+            }
+
+            if (ImGui::Button("Enqueue refit")) {
+              std::string err;
+              if (sim.enqueue_refit(colony->id, chosen_ship, chosen_design, &err)) {
+                refit_status = "Queued refit.";
+              } else {
+                refit_status = "Failed: " + err;
+              }
+            }
+            if (!refit_status.empty()) {
+              ImGui::TextDisabled("%s", refit_status.c_str());
+            }
+          }
+
           ImGui::EndTabItem();
         }
       } else {
         ImGui::TextDisabled("Selected colony no longer exists");
         ImGui::EndTabItem();
       }
+    }
+
+
+    // --- Logistics tab ---
+    if (ImGui::BeginTabItem("Logistics")) {
+      if (!selected_faction) {
+        ImGui::TextDisabled("No faction selected.");
+      } else {
+        ImGui::SeparatorText("Auto-freight");
+        ImGui::TextWrapped(
+            "Enable Auto-freight on cargo ships to have them automatically haul minerals between your colonies "
+            "whenever they are idle. Auto-freight tries to relieve mineral shortages that stall shipyards or "
+            "unpaid construction orders.");
+
+        if (ImGui::Button("Enable auto-freight for all freighters")) {
+          for (auto& [sid, ship] : st.ships) {
+            if (ship.faction_id != selected_faction_id) continue;
+            const auto* d = sim.find_design(ship.design_id);
+            if (!d || d->cargo_tons <= 0.0) continue;
+            if (sim.fleet_for_ship(sid) != kInvalidId) continue;
+            ship.auto_freight = true;
+            ship.auto_explore = false;
+          }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Disable auto-freight for this faction")) {
+          for (auto& [sid, ship] : st.ships) {
+            if (ship.faction_id != selected_faction_id) continue;
+            ship.auto_freight = false;
+          }
+        }
+
+        ImGui::SeparatorText("Colony mineral shortfalls");
+        const auto needs = sim.logistics_needs_for_faction(selected_faction_id);
+        struct NeedRow {
+          Id colony_id{kInvalidId};
+          std::string mineral;
+          double missing{0.0};
+          std::string reason;
+        };
+        std::vector<NeedRow> rows;
+        rows.reserve(needs.size());
+        for (const auto& n : needs) {
+          if (n.missing_tons <= 1e-9) continue;
+          std::string reason = (n.kind == LogisticsNeedKind::Shipyard) ? "Shipyard" : "Construction";
+          if (n.kind == LogisticsNeedKind::Construction && !n.context_id.empty()) reason += (":" + n.context_id);
+          rows.push_back(NeedRow{n.colony_id, n.mineral, n.missing_tons, reason});
+        }
+        std::sort(rows.begin(), rows.end(), [](const NeedRow& a, const NeedRow& b) {
+          if (a.missing != b.missing) return a.missing > b.missing;
+          if (a.colony_id != b.colony_id) return a.colony_id < b.colony_id;
+          return a.mineral < b.mineral;
+        });
+
+        if (rows.empty()) {
+          ImGui::TextDisabled("No mineral shortfalls detected.");
+        } else if (ImGui::BeginTable("##logistics_needs", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingStretchProp)) {
+          ImGui::TableSetupColumn("Colony");
+          ImGui::TableSetupColumn("Mineral");
+          ImGui::TableSetupColumn("Missing (t)");
+          ImGui::TableSetupColumn("Reason");
+          ImGui::TableHeadersRow();
+
+          for (const auto& r : rows) {
+            const Colony* c = find_ptr(st.colonies, r.colony_id);
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            if (c) {
+              ImGui::TextUnformatted(c->name.c_str());
+            } else {
+              ImGui::Text("Colony %d", (int)r.colony_id);
+            }
+            ImGui::TableSetColumnIndex(1);
+            ImGui::TextUnformatted(r.mineral.c_str());
+            ImGui::TableSetColumnIndex(2);
+            ImGui::Text("%.1f", r.missing);
+            ImGui::TableSetColumnIndex(3);
+            ImGui::TextUnformatted(r.reason.c_str());
+          }
+          ImGui::EndTable();
+        }
+
+        ImGui::SeparatorText("Auto-freight ships");
+        std::vector<Id> ship_ids_sorted;
+        ship_ids_sorted.reserve(st.ships.size());
+        for (const auto& [sid, _] : st.ships) ship_ids_sorted.push_back(sid);
+        std::sort(ship_ids_sorted.begin(), ship_ids_sorted.end());
+
+        int shown = 0;
+        if (ImGui::BeginTable("##logistics_ships", 5, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingStretchProp)) {
+          ImGui::TableSetupColumn("Ship");
+          ImGui::TableSetupColumn("System");
+          ImGui::TableSetupColumn("Next order");
+          ImGui::TableSetupColumn("Cargo");
+          ImGui::TableSetupColumn("Notes");
+          ImGui::TableHeadersRow();
+
+          for (Id sid : ship_ids_sorted) {
+            const Ship* sh = find_ptr(st.ships, sid);
+            if (!sh) continue;
+            if (sh->faction_id != selected_faction_id) continue;
+            if (!sh->auto_freight) continue;
+
+            const auto* d = sim.find_design(sh->design_id);
+            const double cap = d ? std::max(0.0, d->cargo_tons) : 0.0;
+            double used = 0.0;
+            for (const auto& [_, tons] : sh->cargo) used += std::max(0.0, tons);
+
+            const StarSystem* sys = find_ptr(st.systems, sh->system_id);
+            const bool in_fleet = (sim.fleet_for_ship(sid) != kInvalidId);
+
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::TextUnformatted(sh->name.c_str());
+            ImGui::TableSetColumnIndex(1);
+            ImGui::TextUnformatted(sys ? sys->name.c_str() : "?");
+            ImGui::TableSetColumnIndex(2);
+            if (sh->order_queue.empty()) {
+              ImGui::TextDisabled("Idle");
+            } else {
+              const std::string s = order_to_string(sh->order_queue.front());
+              ImGui::TextUnformatted(s.c_str());
+            }
+            ImGui::TableSetColumnIndex(3);
+            if (cap > 0.0) {
+              ImGui::Text("%.1f / %.1f", used, cap);
+            } else {
+              ImGui::TextDisabled("-");
+            }
+            ImGui::TableSetColumnIndex(4);
+            if (in_fleet) {
+              ImGui::TextDisabled("In fleet (no auto tasks)");
+            }
+            ++shown;
+          }
+          ImGui::EndTable();
+        }
+        if (shown == 0) ImGui::TextDisabled("No ships have Auto-freight enabled.");
+      }
+      ImGui::EndTabItem();
     }
 
     // --- Research tab ---
@@ -1127,6 +2383,38 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
 
         ImGui::Separator();
         ImGui::Text("Research Points (bank): %.1f", selected_faction->research_points);
+
+        // Faction control / AI profile.
+        {
+          const char* labels[] = {"Player (Manual)", "AI (Passive)", "AI (Explorer)", "AI (Pirate Raiders)"};
+          auto to_idx = [](FactionControl c) {
+            switch (c) {
+              case FactionControl::Player: return 0;
+              case FactionControl::AI_Passive: return 1;
+              case FactionControl::AI_Explorer: return 2;
+              case FactionControl::AI_Pirate: return 3;
+            }
+            return 0;
+          };
+          auto from_idx = [](int idx) {
+            switch (idx) {
+              case 1: return FactionControl::AI_Passive;
+              case 2: return FactionControl::AI_Explorer;
+              case 3: return FactionControl::AI_Pirate;
+              default: return FactionControl::Player;
+            }
+          };
+
+          int control_idx = to_idx(selected_faction->control);
+          if (ImGui::Combo("Control", &control_idx, labels, IM_ARRAYSIZE(labels))) {
+            selected_faction->control = from_idx(control_idx);
+          }
+          if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "AI profiles generate orders for idle ships.\n"
+                "Ships with queued orders are left alone.");
+          }
+        }
 
         // Active
         if (!selected_faction->active_research_id.empty()) {
@@ -1212,6 +2500,90 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
 
         ImGui::EndTabItem();
       }
+    }
+
+
+    // --- Diplomacy tab ---
+    if (ImGui::BeginTabItem("Diplomacy")) {
+      if (factions.empty() || !selected_faction) {
+        ImGui::TextDisabled("No factions available");
+      } else {
+        ImGui::Text("Faction");
+        std::vector<const char*> fac_labels;
+        fac_labels.reserve(factions.size());
+        for (const auto& p : factions) fac_labels.push_back(p.second.c_str());
+        ImGui::Combo("##faction_diplomacy", &faction_combo_idx, fac_labels.data(), static_cast<int>(fac_labels.size()));
+
+        ImGui::Separator();
+        ImGui::TextWrapped(
+            "Diplomatic stances are currently used as simple rules-of-engagement: ships will only auto-engage "
+            "factions they consider Hostile. Issuing an Attack order against a non-hostile faction will automatically "
+            "set the relationship to Hostile once contact is confirmed.");
+
+        static bool reciprocal = true;
+        ImGui::Checkbox("Reciprocal edits (set both directions)", &reciprocal);
+
+        if (ImGui::Button("Set all to Neutral")) {
+          for (const auto& [fid, _] : factions) {
+            if (fid == selected_faction_id) continue;
+            sim.set_diplomatic_status(selected_faction_id, fid, DiplomacyStatus::Neutral, reciprocal,
+                                      /*push_event=*/true);
+          }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Set all to Friendly")) {
+          for (const auto& [fid, _] : factions) {
+            if (fid == selected_faction_id) continue;
+            sim.set_diplomatic_status(selected_faction_id, fid, DiplomacyStatus::Friendly, reciprocal,
+                                      /*push_event=*/true);
+          }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Reset all to Hostile (clear overrides)")) {
+          for (const auto& [fid, _] : factions) {
+            if (fid == selected_faction_id) continue;
+            sim.set_diplomatic_status(selected_faction_id, fid, DiplomacyStatus::Hostile, reciprocal,
+                                      /*push_event=*/true);
+          }
+        }
+
+        ImGui::Spacing();
+
+        const ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingStretchProp;
+        if (ImGui::BeginTable("##diplomacy_table", 3, flags)) {
+          ImGui::TableSetupColumn("Other faction");
+          ImGui::TableSetupColumn("Your stance");
+          ImGui::TableSetupColumn("Their stance");
+          ImGui::TableHeadersRow();
+
+          const char* opts[] = {"Hostile", "Neutral", "Friendly"};
+
+          for (const auto& [other_id, other_name] : factions) {
+            if (other_id == selected_faction_id) continue;
+            const DiplomacyStatus out_st = sim.diplomatic_status(selected_faction_id, other_id);
+            const DiplomacyStatus in_st = sim.diplomatic_status(other_id, selected_faction_id);
+
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::TextUnformatted(other_name.c_str());
+
+            ImGui::TableSetColumnIndex(1);
+            int combo_idx = diplomacy_status_to_combo_idx(out_st);
+            const std::string combo_id = "##dip_" + std::to_string(static_cast<unsigned long long>(selected_faction_id)) +
+                                         "_" + std::to_string(static_cast<unsigned long long>(other_id));
+            if (ImGui::Combo(combo_id.c_str(), &combo_idx, opts, IM_ARRAYSIZE(opts))) {
+              sim.set_diplomatic_status(selected_faction_id, other_id, diplomacy_status_from_combo_idx(combo_idx),
+                                        reciprocal, /*push_event=*/true);
+            }
+
+            ImGui::TableSetColumnIndex(2);
+            ImGui::TextUnformatted(diplomacy_status_label(in_st));
+          }
+
+          ImGui::EndTable();
+        }
+      }
+      ImGui::EndTabItem();
     }
 
     // --- Ship design tab ---
@@ -1472,10 +2844,21 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
                   }
 
                   ImGui::SameLine();
-                  const char* btn = detected_now ? "Attack" : "Intercept";
-                  if (ImGui::SmallButton((std::string(btn) + "##" + std::to_string(r.c.ship_id)).c_str())) {
+                  bool hostile = true;
+                  std::string btn;
+                  if (!detected_now) {
+                    btn = "Intercept";
+                  } else {
+                    hostile = sim.are_factions_hostile(viewer->id, r.c.last_seen_faction_id);
+                    btn = hostile ? "Attack" : "Declare War + Attack";
+                  }
+                  if (ImGui::SmallButton((btn + "##" + std::to_string(r.c.ship_id)).c_str())) {
                     // If not currently detected, this will issue an intercept based on the stored contact snapshot.
                     sim.issue_attack_ship(selected_ship, r.c.ship_id, ui.fog_of_war);
+                  }
+                  if (detected_now && !hostile && ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip(
+                        "This target is not currently Hostile. Issuing an Attack will automatically set the stance to Hostile once contact is confirmed.");
                   }
                 }
               }

@@ -1,26 +1,116 @@
 {
-  "version": 1,
+  "version": 2,
   "techs": [
     {
       "id": "chemistry_1",
       "name": "Industrial Chemistry",
       "cost": 500,
       "prereqs": [],
-      "effects": [{"type": "unlock_installation", "value": "automated_mine"}]
+      "effects": [
+        {
+          "type": "unlock_installation",
+          "value": "automated_mine"
+        }
+      ]
     },
     {
       "id": "nuclear_1",
       "name": "Compact Fission Reactors",
       "cost": 800,
-      "prereqs": ["chemistry_1"],
-      "effects": [{"type": "unlock_component", "value": "reactor_mk1"}]
+      "prereqs": [
+        "chemistry_1"
+      ],
+      "effects": [
+        {
+          "type": "unlock_component",
+          "value": "reactor_mk1"
+        }
+      ]
     },
     {
       "id": "propulsion_1",
       "name": "Ion Propulsion",
       "cost": 900,
-      "prereqs": ["nuclear_1"],
-      "effects": [{"type": "unlock_component", "value": "engine_ion_mk1"}]
+      "prereqs": [
+        "nuclear_1"
+      ],
+      "effects": [
+        {
+          "type": "unlock_component",
+          "value": "engine_ion_mk1"
+        }
+      ]
+    },
+    {
+      "id": "sensors_1",
+      "name": "Improved Sensors",
+      "cost": 600,
+      "prereqs": [
+        "chemistry_1"
+      ],
+      "effects": [
+        {
+          "type": "unlock_component",
+          "value": "sensor_mk2"
+        }
+      ]
+    },
+    {
+      "id": "armor_1",
+      "name": "Composite Armor",
+      "cost": 650,
+      "prereqs": [
+        "chemistry_1"
+      ],
+      "effects": [
+        {
+          "type": "unlock_component",
+          "value": "armor_mk2"
+        }
+      ]
+    },
+    {
+      "id": "weapons_1",
+      "name": "Improved Lasers",
+      "cost": 700,
+      "prereqs": [
+        "nuclear_1"
+      ],
+      "effects": [
+        {
+          "type": "unlock_component",
+          "value": "laser_mk2"
+        }
+      ]
+    },
+    {
+      "id": "reactors_2",
+      "name": "Reactor Miniaturization",
+      "cost": 1200,
+      "prereqs": [
+        "nuclear_1"
+      ],
+      "effects": [
+        {
+          "type": "unlock_component",
+          "value": "reactor_mk2"
+        }
+      ]
+    },
+    {
+      "id": "propulsion_2",
+      "name": "Advanced Ion Propulsion",
+      "cost": 1400,
+      "prereqs": [
+        "propulsion_1",
+        "reactors_2"
+      ],
+      "effects": [
+        {
+          "type": "unlock_component",
+          "value": "engine_ion_mk2"
+        }
+      ]
     }
   ]
 }

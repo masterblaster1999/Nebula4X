@@ -11,7 +11,8 @@ Nebula4X is an **open-source, turn-based space 4X** prototype in **C++20**, insp
 ### Core simulation (`nebula4x_core`)
 
 - Star systems, orbital bodies, ships, colonies, minerals, installations
-- **Fleets**: persistent ship groups (same-faction) for bulk order issuing (no formation logic yet)
+- **Fleets**: persistent ship groups (same-faction) for bulk order issuing + basic formation/cohesion logic
+- **Faction AI profiles**: optional basic AI can generate orders for idle ships (pirate raiders / explorers)
 - **Cargo holds** on ships + mineral transfer orders (prototype logistics)
 - Day-based turn advancement
 - Colony **population growth/decline** (simple, configurable)
@@ -25,9 +26,11 @@ Nebula4X is an **open-source, turn-based space 4X** prototype in **C++20**, insp
   - **attack ship** (simple targeting)
   - **wait days** (simple scheduling)
   - **load/unload minerals** (prototype cargo logistics)
+  - **auto-freight minerals when idle** (optional ship automation; routes supplies from surplus colonies to stalled queues)
   - **ship-to-ship cargo transfer**
   - **scrap ship** (decommission at a colony; refunds some minerals)
   - **repeat orders** (optional looping of a ship's queue for trade routes/patrols)
+  - **order templates** (saved library of named order queues you can apply to ships/fleets)
 - **Jump points + multi-system state**
 - **Sensors + intel**: in-system detection + last-known contact snapshots (saved)
 - **Exploration**: factions track discovered star systems; entering a new system reveals it
@@ -46,16 +49,25 @@ Nebula4X is an **open-source, turn-based space 4X** prototype in **C++20**, insp
 
 - Galaxy map (multi-system view)
 - **Right click a system in the galaxy map** to auto-route the selected ship via jump points (**Shift queues**)
+- **Ctrl+Right click a system in the galaxy map** to auto-route the selected fleet (**Shift queues**)
 - System map (pan/zoom)
+- **Ctrl+Left click in the system map** to issue move/jump/body orders to the selected fleet (**Shift queues**)
 - Ship list + selection (shows HP, faction)
 - **Fog-of-war** toggle (hides undetected hostiles and undiscovered systems)
 - **Contacts tab**: recently seen hostiles + quick actions
+- **Diplomacy tab**: view/edit faction stances (Hostile / Neutral / Friendly) that gate auto-engagement
+  - issuing an **Attack** order against a non-hostile faction will automatically set the stance to **Hostile** once contact is confirmed
 - **Log tab**: view/filter/clear the saved event log; copy visible entries; export CSV/JSON
 - **Jump point markers on the system map**
 - **Ship tab**: quick orders (move, jump travel, attack) + cargo load/unload
+  - **Automation**: optional *Auto-explore when idle* toggle (seeks frontier + jumps into undiscovered systems)
+  - **Automation**: optional *Auto-freight minerals when idle* toggle (hauls minerals to relieve shipyard/construction stalls)
+  - **Order queue editor**: drag+drop reorder, duplicate/delete
+  - **Order templates library**: save/apply/rename/delete; apply to ship or selected fleet
+- **Fleet tab**: create/rename/disband fleets; add/remove ships; set leader; issue bulk fleet orders (move/orbit/travel/attack/load/unload)
   - toggle **repeat orders** for simple looping routes
 - **Colony tab**: manage shipyard queue + build installations via construction queue
-- **Research tab**: choose projects, queue, see progress
+- **Research tab**: choose projects, queue, see progress; set faction control/AI profile
 - **Design tab**: build custom ship designs from unlocked components
 
 ### CLI (`nebula4x_cli`)

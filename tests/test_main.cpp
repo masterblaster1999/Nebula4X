@@ -3,6 +3,9 @@
 int test_date();
 int test_simulation();
 int test_serialization();
+int test_auto_freight();
+int test_refit();
+int test_diplomacy();
 int test_auto_routing();
 int test_order_repeat();
 int test_determinism();
@@ -20,18 +23,23 @@ int test_population_growth();
 int test_combat_events();
 int test_ship_repairs();
 int test_fleets();
+int test_ai_economy();
 
 int main() {
   int fails = 0;
   fails += test_date();
   fails += test_simulation();
   fails += test_serialization();
+  fails += test_auto_freight();
+  fails += test_refit();
+  fails += test_diplomacy();
   fails += test_auto_routing();
   fails += test_order_repeat();
   fails += test_determinism();
   fails += test_event_export();
   fails += test_content_validation();
   fails += test_random_scenario();
+  fails += test_ai_economy();
   fails += test_file_io();
   fails += test_json_unicode();
   fails += test_json_bom();

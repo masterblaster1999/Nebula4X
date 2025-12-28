@@ -42,6 +42,19 @@ int test_serialization() {
 
   nebula4x::Simulation sim(std::move(content), nebula4x::SimConfig{});
 
+  // Toggle some non-default fields to validate schema round-trip.
+  nebula4x::Id probe_ship = nebula4x::kInvalidId;
+  if (!sim.state().ships.empty()) {
+    probe_ship = sim.state().ships.begin()->first;
+    sim.state().ships[probe_ship].auto_explore = true;
+    sim.state().ships[probe_ship].auto_freight = true;
+  }
+  for (auto& [_, f] : sim.state().factions) {
+    if (f.name == "Pirate Raiders") {
+      f.control = nebula4x::FactionControl::AI_Pirate;
+    }
+  }
+
   // 1) Round-trip serialization should preserve basic counts.
   const std::string json_text = nebula4x::serialize_game_to_json(sim.state());
   const auto loaded = nebula4x::deserialize_game_from_json(json_text);
@@ -50,6 +63,24 @@ int test_serialization() {
   N4X_ASSERT(loaded.bodies.size() == sim.state().bodies.size());
   N4X_ASSERT(loaded.ships.size() == sim.state().ships.size());
   N4X_ASSERT(loaded.colonies.size() == sim.state().colonies.size());
+  N4X_ASSERT(loaded.factions.size() == sim.state().factions.size());
+
+
+  if (probe_ship != nebula4x::kInvalidId) {
+    const auto it = loaded.ships.find(probe_ship);
+    N4X_ASSERT(it != loaded.ships.end());
+    N4X_ASSERT(it->second.auto_explore == true);
+    N4X_ASSERT(it->second.auto_freight == true);
+  }
+
+  bool found_pirates = false;
+  for (const auto& [_, f] : loaded.factions) {
+    if (f.name == "Pirate Raiders") {
+      found_pirates = true;
+      N4X_ASSERT(f.control == nebula4x::FactionControl::AI_Pirate);
+    }
+  }
+  N4X_ASSERT(found_pirates);
 
   // 2) Backwards compatibility: "shipyard_queue" should be optional.
   nebula4x::json::Value root = nebula4x::json::parse(json_text);
@@ -153,6 +184,31 @@ int test_serialization() {
     N4X_ASSERT(itso != loaded_bad.ship_orders.end());
     // Unknown order should be dropped.
     N4X_ASSERT(itso->second.queue.empty());
+  }
+
+  // 6) Order templates should round-trip in saves.
+  {
+    N4X_ASSERT(!sim.state().ships.empty());
+    const nebula4x::Id ship_id = sim.state().ships.begin()->first;
+
+    // Ensure a non-empty queue.
+    sim.clear_orders(ship_id);
+    N4X_ASSERT(sim.issue_wait_days(ship_id, 3));
+    N4X_ASSERT(sim.issue_move_to_point(ship_id, nebula4x::Vec2{1.0, 2.0}));
+
+    const auto itso = sim.state().ship_orders.find(ship_id);
+    N4X_ASSERT(itso != sim.state().ship_orders.end());
+    N4X_ASSERT(!itso->second.queue.empty());
+
+    std::string err;
+    N4X_ASSERT(sim.save_order_template("TestTemplate", itso->second.queue, true, &err));
+
+    const std::string json_with_templates = nebula4x::serialize_game_to_json(sim.state());
+    const auto loaded_with_templates = nebula4x::deserialize_game_from_json(json_with_templates);
+
+    const auto ittpl = loaded_with_templates.order_templates.find("TestTemplate");
+    N4X_ASSERT(ittpl != loaded_with_templates.order_templates.end());
+    N4X_ASSERT(ittpl->second.size() == itso->second.queue.size());
   }
 
   return 0;

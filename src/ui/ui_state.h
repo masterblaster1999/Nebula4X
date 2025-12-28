@@ -13,6 +13,10 @@ struct UIState {
   // If a ship is selected, its faction typically overrides this.
   Id viewer_faction_id{kInvalidId};
 
+  // Currently selected fleet (UI convenience).
+  // Not persisted in saves.
+  Id selected_fleet_id{kInvalidId};
+
   bool fog_of_war{false};
   bool show_selected_sensor_range{true};
   bool show_contact_markers{true};

@@ -14,7 +14,7 @@ using json::Array;
 using json::Object;
 using json::Value;
 
-constexpr int kCurrentSaveVersion = 13;
+constexpr int kCurrentSaveVersion = 18;
 
 template <typename Map>
 std::vector<typename Map::key_type> sorted_keys(const Map& m) {
@@ -79,6 +79,60 @@ ShipRole ship_role_from_string(const std::string& s) {
   if (s == "surveyor") return ShipRole::Surveyor;
   if (s == "combatant") return ShipRole::Combatant;
   return ShipRole::Unknown;
+}
+
+
+std::string faction_control_to_string(FactionControl c) {
+  switch (c) {
+    case FactionControl::Player: return "player";
+    case FactionControl::AI_Passive: return "ai_passive";
+    case FactionControl::AI_Explorer: return "ai_explorer";
+    case FactionControl::AI_Pirate: return "ai_pirate";
+  }
+  return "player";
+}
+
+FactionControl faction_control_from_string(const std::string& s) {
+  if (s == "ai_passive" || s == "passive") return FactionControl::AI_Passive;
+  if (s == "ai_explorer" || s == "explorer") return FactionControl::AI_Explorer;
+  if (s == "ai_pirate" || s == "pirate") return FactionControl::AI_Pirate;
+  return FactionControl::Player;
+}
+
+std::string diplomacy_status_to_string(DiplomacyStatus s) {
+  switch (s) {
+    case DiplomacyStatus::Friendly: return "friendly";
+    case DiplomacyStatus::Neutral: return "neutral";
+    case DiplomacyStatus::Hostile: return "hostile";
+  }
+  return "hostile";
+}
+
+DiplomacyStatus diplomacy_status_from_string(const std::string& s) {
+  if (s == "friendly" || s == "friend" || s == "ally" || s == "allied") return DiplomacyStatus::Friendly;
+  if (s == "neutral" || s == "non_hostile") return DiplomacyStatus::Neutral;
+  if (s == "hostile" || s == "enemy") return DiplomacyStatus::Hostile;
+  // Backward compat / safe default: unknown strings are treated as hostile.
+  return DiplomacyStatus::Hostile;
+}
+
+const char* fleet_formation_to_string(FleetFormation f) {
+  switch (f) {
+    case FleetFormation::None: return "none";
+    case FleetFormation::LineAbreast: return "line";
+    case FleetFormation::Column: return "column";
+    case FleetFormation::Wedge: return "wedge";
+    case FleetFormation::Ring: return "ring";
+  }
+  return "none";
+}
+
+FleetFormation fleet_formation_from_string(const std::string& s) {
+  if (s == "line") return FleetFormation::LineAbreast;
+  if (s == "column") return FleetFormation::Column;
+  if (s == "wedge") return FleetFormation::Wedge;
+  if (s == "ring") return FleetFormation::Ring;
+  return FleetFormation::None;
 }
 
 const char* event_level_to_string(EventLevel l) {
@@ -377,6 +431,8 @@ std::string serialize_game_to_json(const GameState& s) {
     o["system_id"] = static_cast<double>(sh.system_id);
     o["position_mkm"] = vec2_to_json(sh.position_mkm);
     o["design_id"] = sh.design_id;
+    o["auto_explore"] = sh.auto_explore;
+    o["auto_freight"] = sh.auto_freight;
     o["speed_km_s"] = sh.speed_km_s;
     o["hp"] = sh.hp;
     o["cargo"] = map_string_double_to_json(sh.cargo);
@@ -403,6 +459,9 @@ std::string serialize_game_to_json(const GameState& s) {
       Object qo;
       qo["design_id"] = bo.design_id;
       qo["tons_remaining"] = bo.tons_remaining;
+      if (bo.refit_ship_id != kInvalidId) {
+        qo["refit_ship_id"] = static_cast<double>(bo.refit_ship_id);
+      }
       q.push_back(qo);
     }
     o["shipyard_queue"] = q;
@@ -430,6 +489,7 @@ std::string serialize_game_to_json(const GameState& s) {
     Object o;
     o["id"] = static_cast<double>(id);
     o["name"] = f.name;
+    o["control"] = faction_control_to_string(f.control);
     o["research_points"] = f.research_points;
     o["active_research_id"] = f.active_research_id;
     o["active_research_progress"] = f.active_research_progress;
@@ -437,6 +497,19 @@ std::string serialize_game_to_json(const GameState& s) {
     o["known_techs"] = string_vector_to_json(sorted_unique_copy(f.known_techs));
     o["unlocked_components"] = string_vector_to_json(sorted_unique_copy(f.unlocked_components));
     o["unlocked_installations"] = string_vector_to_json(sorted_unique_copy(f.unlocked_installations));
+
+    // Diplomatic relations (optional; omitted when empty or default-hostile).
+    if (!f.relations.empty()) {
+      Object rel;
+      for (const auto& [other_id, status] : f.relations) {
+        if (other_id == kInvalidId || other_id == f.id) continue;
+        // Hostile is the implicit default; don't write it out to keep saves tidy.
+        if (status == DiplomacyStatus::Hostile) continue;
+        rel[std::to_string(static_cast<unsigned long long>(other_id))] = diplomacy_status_to_string(status);
+      }
+      if (!rel.empty()) o["relations"] = rel;
+    }
+
 
     Array discovered_systems;
     const auto disc = sorted_unique_copy(f.discovered_systems);
@@ -474,6 +547,9 @@ std::string serialize_game_to_json(const GameState& s) {
     o["faction_id"] = static_cast<double>(f.faction_id);
     o["leader_ship_id"] = static_cast<double>(f.leader_ship_id);
 
+    o["formation"] = std::string(fleet_formation_to_string(f.formation));
+    o["formation_spacing_mkm"] = f.formation_spacing_mkm;
+
     auto ships = f.ship_ids;
     std::sort(ships.begin(), ships.end());
     ships.erase(std::unique(ships.begin(), ships.end()), ships.end());
@@ -506,6 +582,23 @@ std::string serialize_game_to_json(const GameState& s) {
     designs.push_back(o);
   }
   root["custom_designs"] = designs;
+
+  // Player order templates
+  Array templates;
+  templates.reserve(s.order_templates.size());
+  for (const auto& name : sorted_keys(s.order_templates)) {
+    const auto& orders = s.order_templates.at(name);
+    Object o;
+    o["name"] = name;
+
+    Array q;
+    q.reserve(orders.size());
+    for (const auto& ord : orders) q.push_back(order_to_json(ord));
+    o["orders"] = q;
+
+    templates.push_back(o);
+  }
+  root["order_templates"] = templates;
 
   // Orders
   Array ship_orders;
@@ -640,6 +733,8 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     sh.system_id = static_cast<Id>(o.at("system_id").int_value());
     sh.position_mkm = vec2_from_json(o.at("position_mkm"));
     sh.design_id = o.at("design_id").string_value();
+    if (auto it = o.find("auto_explore"); it != o.end()) sh.auto_explore = it->second.bool_value(false);
+    if (auto it = o.find("auto_freight"); it != o.end()) sh.auto_freight = it->second.bool_value(false);
     sh.speed_km_s = o.at("speed_km_s").number_value(0.0);
     sh.hp = o.at("hp").number_value(0.0);
     if (auto it = o.find("cargo"); it != o.end()) sh.cargo = map_string_double_from_json(it->second);
@@ -664,6 +759,9 @@ GameState deserialize_game_from_json(const std::string& json_text) {
         BuildOrder bo;
         bo.design_id = qo.at("design_id").string_value();
         bo.tons_remaining = qo.at("tons_remaining").number_value();
+        if (auto it = qo.find("refit_ship_id"); it != qo.end()) {
+          bo.refit_ship_id = static_cast<Id>(it->second.int_value(kInvalidId));
+        }
         c.shipyard_queue.push_back(bo);
       }
     }
@@ -689,6 +787,9 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     Faction f;
     f.id = static_cast<Id>(o.at("id").int_value());
     f.name = o.at("name").string_value();
+    if (auto it = o.find("control"); it != o.end()) {
+      f.control = faction_control_from_string(it->second.string_value("player"));
+    }
     f.research_points = o.at("research_points").number_value(0.0);
 
     if (auto it = o.find("active_research_id"); it != o.end()) f.active_research_id = it->second.string_value();
@@ -699,6 +800,40 @@ GameState deserialize_game_from_json(const std::string& json_text) {
 
     if (auto it = o.find("unlocked_components"); it != o.end()) f.unlocked_components = string_vector_from_json(it->second);
     if (auto it = o.find("unlocked_installations"); it != o.end()) f.unlocked_installations = string_vector_from_json(it->second);
+
+    // Diplomatic relations (optional in saves; if missing, default stance is Hostile).
+    if (auto it = o.find("relations"); it != o.end()) {
+      if (it->second.is_object()) {
+        for (const auto& [k, v] : it->second.object()) {
+          Id other = kInvalidId;
+          try {
+            other = static_cast<Id>(std::stoull(k));
+          } catch (...) {
+            continue;
+          }
+          if (other == kInvalidId || other == f.id) continue;
+          const DiplomacyStatus ds = diplomacy_status_from_string(v.string_value("hostile"));
+          if (ds == DiplomacyStatus::Hostile) continue;
+          f.relations[other] = ds;
+        }
+      } else if (it->second.is_array()) {
+        // Also accept an array-of-objects format:
+        //   [{"faction_id": 2, "status": "neutral"}, ...]
+        for (const auto& rv : it->second.array()) {
+          if (!rv.is_object()) continue;
+          const auto& ro = rv.object();
+          auto itid = ro.find("faction_id");
+          if (itid == ro.end()) continue;
+          const Id other = static_cast<Id>(itid->second.int_value(kInvalidId));
+          if (other == kInvalidId || other == f.id) continue;
+          const std::string st = (ro.find("status") != ro.end()) ? ro.at("status").string_value("hostile") : std::string("hostile");
+          const DiplomacyStatus ds = diplomacy_status_from_string(st);
+          if (ds == DiplomacyStatus::Hostile) continue;
+          f.relations[other] = ds;
+        }
+      }
+    }
+
 
     if (auto it = o.find("discovered_systems"); it != o.end()) {
       for (const auto& sv : it->second.array()) {
@@ -749,6 +884,13 @@ GameState deserialize_game_from_json(const std::string& json_text) {
           }
         }
 
+        if (auto itf = o.find("formation"); itf != o.end()) {
+          fl.formation = fleet_formation_from_string(itf->second.string_value("none"));
+        }
+        if (auto its = o.find("formation_spacing_mkm"); its != o.end()) {
+          fl.formation_spacing_mkm = std::max(0.0, its->second.number_value(1.0));
+        }
+
         s.fleets[fl.id] = std::move(fl);
       }
     }
@@ -771,6 +913,59 @@ GameState deserialize_game_from_json(const std::string& json_text) {
       d.weapon_damage = o.at("weapon_damage").number_value(0.0);
       d.weapon_range_mkm = o.at("weapon_range_mkm").number_value(0.0);
       s.custom_designs[d.id] = d;
+    }
+  }
+
+  // Player order templates
+  if (auto it = root.find("order_templates"); it != root.end()) {
+    if (!it->second.is_array()) {
+      log::warn("Save load: 'order_templates' is not an array; ignoring");
+    } else {
+      std::size_t dropped = 0;
+      std::size_t detail_logs = 0;
+      constexpr std::size_t kMaxDetailLogs = 8;
+
+      for (const auto& tv : it->second.array()) {
+        if (!tv.is_object()) {
+          dropped += 1;
+          continue;
+        }
+
+        const auto& o = tv.object();
+        const std::string name = (o.find("name") != o.end()) ? o.at("name").string_value() : std::string();
+        if (name.empty()) {
+          dropped += 1;
+          continue;
+        }
+
+        std::vector<Order> orders;
+        if (auto ito = o.find("orders"); ito != o.end()) {
+          if (!ito->second.is_array()) {
+            dropped += 1;
+          } else {
+            for (const auto& qv : ito->second.array()) {
+              try {
+                orders.push_back(order_from_json(qv));
+              } catch (const std::exception& e) {
+                dropped += 1;
+                if (detail_logs < kMaxDetailLogs) {
+                  detail_logs += 1;
+                  log::warn(std::string("Save load: dropped invalid order in template '") + name + "': " + e.what());
+                }
+              }
+            }
+          }
+        }
+
+        if (!orders.empty()) {
+          s.order_templates[name] = std::move(orders);
+        }
+      }
+
+      if (dropped > 0) {
+        log::warn("Save load: dropped " + std::to_string(static_cast<unsigned long long>(dropped)) +
+                  " invalid order template entries");
+      }
     }
   }
 
