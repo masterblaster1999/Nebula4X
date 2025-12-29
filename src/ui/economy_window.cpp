@@ -31,6 +31,13 @@ std::vector<typename Map::key_type> sorted_keys(const Map& m) {
   return keys;
 }
 
+// ImGui expects UTF-8 in `const char*`, but C++20 `u8"..."` literals are `const char8_t*`.
+// This helper bridges the type gap without changing the underlying byte sequence.
+inline const char* u8_cstr(const char8_t* s) {
+  return reinterpret_cast<const char*>(s);
+}
+
+
 bool case_insensitive_contains(const std::string& haystack, const char* needle_cstr) {
   if (!needle_cstr) return true;
   if (needle_cstr[0] == '\0') return true;
@@ -693,11 +700,11 @@ void draw_economy_window(Simulation& sim, UIState& ui, Id& selected_colony, Id& 
               }
 
               std::string prefix;
-              if (known) prefix = u8"✓ ";
-              else if (active) prefix = u8"▶ ";
-              else if (queued) prefix = u8"⏳ ";
-              else if (prereqs_met) prefix = u8"• ";
-              else prefix = u8"  ";
+              if (known) prefix = u8_cstr(u8"✓ ");
+              else if (active) prefix = u8_cstr(u8"▶ ");
+              else if (queued) prefix = u8_cstr(u8"⏳ ");
+              else if (prereqs_met) prefix = u8_cstr(u8"• ");
+              else prefix = "  ";
 
               const bool sel = (selected_tech == tid);
 

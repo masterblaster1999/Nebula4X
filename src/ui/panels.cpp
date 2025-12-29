@@ -2465,8 +2465,8 @@ if (colony->shipyard_queue.empty()) {
           }
 
           std::vector<Id> docked_ships;
-          if (const auto* body = find_ptr(s.bodies, colony->body_id)) {
-            if (const auto* sys = find_ptr(s.systems, body->system_id)) {
+          if (const auto* colony_body = find_ptr(s.bodies, colony->body_id)) {
+            if (const auto* sys = find_ptr(s.systems, colony_body->system_id)) {
               for (Id sid : sys->ships) {
                 const Ship* sh = find_ptr(s.ships, sid);
                 if (!sh) continue;
@@ -3573,24 +3573,8 @@ if (colony->shipyard_queue.empty()) {
 
         // Power budget (prototype).
         {
-          const double gen = std::max(0.0, d->power_generation);
-          const double use = std::max(0.0, d->power_use_total);
-          if (gen > 0.0 || use > 0.0) {
-            if (use <= gen + 1e-9) {
-              ImGui::Text("Power: %.1f gen / %.1f use", gen, use);
-            } else {
-              ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f),
-                                  "Power: %.1f gen / %.1f use (DEFICIT %.1f)", gen, use, use - gen);
-            }
-          } else {
-            ImGui::TextDisabled("Power: (none)");
-          }
-        }
-
-        // Power budget (prototype).
-        {
-          const double gen = preview.power_generation;
-          const double use = preview.power_use_total;
+          const double gen = std::max(0.0, preview.power_generation);
+          const double use = std::max(0.0, preview.power_use_total);
           if (gen > 0.0 || use > 0.0) {
             if (use <= gen + 1e-9) {
               ImGui::Text("Power: %.1f gen / %.1f use", gen, use);
@@ -4244,7 +4228,7 @@ void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_colony, Id
       r.pop = c.population_millions;
       r.cp_day = sim.construction_points_per_day(c);
       if (auto it = c.minerals.find("Fuel"); it != c.minerals.end()) r.fuel = it->second;
-      r.shipyards = static_cast<int>(c.shipyards.size());
+      if (auto it = c.installations.find("shipyard"); it != c.installations.end()) r.shipyards = it->second;
       rows.push_back(std::move(r));
     }
 
