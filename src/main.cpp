@@ -16,8 +16,11 @@
 #endif
 
 #include <string>
+#include <vector>
+#include <cstdlib>
 
 #include <algorithm>
+#include <cctype>
 
 #include <imgui.h>
 #include <imgui_impl_sdl2.h>
@@ -29,12 +32,48 @@
 #include "nebula4x/core/tech.h"
 #include "ui/app.h"
 
+namespace {
+
+std::string trim_copy(const std::string& s) {
+  size_t a = 0;
+  while (a < s.size() && std::isspace(static_cast<unsigned char>(s[a]))) ++a;
+  size_t b = s.size();
+  while (b > a && std::isspace(static_cast<unsigned char>(s[b - 1]))) --b;
+  return s.substr(a, b - a);
+}
+
+std::vector<std::string> split_env_paths(const char* env_value) {
+  std::vector<std::string> out;
+  if (!env_value) return out;
+
+  std::string cur;
+  for (const char ch : std::string(env_value)) {
+    if (ch == ';' || ch == ',') {
+      const std::string t = trim_copy(cur);
+      if (!t.empty()) out.push_back(t);
+      cur.clear();
+    } else {
+      cur.push_back(ch);
+    }
+  }
+  const std::string t = trim_copy(cur);
+  if (!t.empty()) out.push_back(t);
+  return out;
+}
+
+} // namespace
+
 int main(int /*argc*/, char** /*argv*/) {
   try {
     nebula4x::log::set_level(nebula4x::log::Level::Info);
 
-    auto content = nebula4x::load_content_db_from_file("data/blueprints/starting_blueprints.json");
-    content.techs = nebula4x::load_tech_db_from_file("data/tech/tech_tree.json");
+    std::vector<std::string> content_paths = split_env_paths(std::getenv("NEBULA4X_CONTENT"));
+    if (content_paths.empty()) content_paths.push_back("data/blueprints/starting_blueprints.json");
+    std::vector<std::string> tech_paths = split_env_paths(std::getenv("NEBULA4X_TECH"));
+    if (tech_paths.empty()) tech_paths.push_back("data/tech/tech_tree.json");
+
+    auto content = nebula4x::load_content_db_from_files(content_paths);
+    content.techs = nebula4x::load_tech_db_from_files(tech_paths);
 
     nebula4x::Simulation sim(std::move(content), nebula4x::SimConfig{});
     nebula4x::ui::App app(std::move(sim));

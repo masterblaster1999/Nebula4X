@@ -1,11 +1,13 @@
 #include "nebula4x/core/state_validation.h"
 
 #include <algorithm>
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <sstream>
 #include <string>
 #include <type_traits>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <variant>
@@ -25,6 +27,24 @@ std::string join(Parts&&... parts) {
 }
 
 unsigned long long id_u64(Id id) { return static_cast<unsigned long long>(id); }
+
+// Many core containers are stored as std::unordered_map for convenience.
+// Iteration order of unordered_map is not specified, so relying on it can
+// introduce cross-platform nondeterminism.
+template <typename Map>
+std::vector<typename Map::key_type> sorted_keys(const Map& m) {
+  std::vector<typename Map::key_type> out;
+  out.reserve(m.size());
+  for (const auto& kv : m) out.push_back(kv.first);
+  std::sort(out.begin(), out.end());
+  return out;
+}
+
+template <typename T>
+void sort_unique(std::vector<T>& v) {
+  std::sort(v.begin(), v.end());
+  v.erase(std::unique(v.begin(), v.end()), v.end());
+}
 
 bool design_exists(const GameState& s, const ContentDB& content, const std::string& id) {
   if (id.empty()) return false;
@@ -356,6 +376,104 @@ std::vector<std::string> validate_game_state(const GameState& s, const ContentDB
     validate_order_list(so.repeat_template, "repeat_template");
   }
 
+  // --- Order templates ---
+  // Templates are saved as raw Order lists and can be applied to any ship.
+  // Validate references so corrupted/hand-edited saves can't crash order execution.
+  for (const auto& [tmpl_name, list] : s.order_templates) {
+    if (tmpl_name.empty()) {
+      push(errors, "order_templates contains an empty template name key");
+    }
+    if (list.empty()) {
+      push(errors, join("Order template '", tmpl_name, "' is empty"));
+      continue;
+    }
+
+    for (std::size_t i = 0; i < list.size(); ++i) {
+      const Order& ord_any = list[i];
+      std::visit(
+          [&](const auto& ord) {
+            using T = std::decay_t<decltype(ord)>;
+
+            auto prefix = [&]() {
+              return join("Order template '", tmpl_name, "'[", i, "] ");
+            };
+
+            if constexpr (std::is_same_v<T, MoveToBody>) {
+              if (ord.body_id == kInvalidId) {
+                push(errors, prefix() + "MoveToBody has invalid body_id");
+              } else if (!has_body(ord.body_id)) {
+                push(errors, prefix() + join("MoveToBody references missing body_id ", id_u64(ord.body_id)));
+              }
+            } else if constexpr (std::is_same_v<T, ColonizeBody>) {
+              if (ord.body_id == kInvalidId) {
+                push(errors, prefix() + "ColonizeBody has invalid body_id");
+              } else if (!has_body(ord.body_id)) {
+                push(errors, prefix() + join("ColonizeBody references missing body_id ", id_u64(ord.body_id)));
+              }
+            } else if constexpr (std::is_same_v<T, TravelViaJump>) {
+              if (ord.jump_point_id == kInvalidId) {
+                push(errors, prefix() + "TravelViaJump has invalid jump_point_id");
+              } else if (!has_jump(ord.jump_point_id)) {
+                push(errors,
+                     prefix() + join("TravelViaJump references missing jump_point_id ", id_u64(ord.jump_point_id)));
+              }
+            } else if constexpr (std::is_same_v<T, AttackShip>) {
+              if (ord.target_ship_id == kInvalidId) {
+                push(errors, prefix() + "AttackShip has invalid target_ship_id");
+              } else if (!has_ship(ord.target_ship_id)) {
+                push(errors,
+                     prefix() + join("AttackShip references missing target_ship_id ", id_u64(ord.target_ship_id)));
+              }
+            } else if constexpr (std::is_same_v<T, WaitDays>) {
+              if (ord.days_remaining < 0) {
+                push(errors, prefix() + join("WaitDays has negative days_remaining ", ord.days_remaining));
+              }
+            } else if constexpr (std::is_same_v<T, LoadMineral>) {
+              if (ord.colony_id == kInvalidId) {
+                push(errors, prefix() + "LoadMineral has invalid colony_id");
+              } else if (!has_colony(ord.colony_id)) {
+                push(errors, prefix() + join("LoadMineral references missing colony_id ", id_u64(ord.colony_id)));
+              }
+            } else if constexpr (std::is_same_v<T, UnloadMineral>) {
+              if (ord.colony_id == kInvalidId) {
+                push(errors, prefix() + "UnloadMineral has invalid colony_id");
+              } else if (!has_colony(ord.colony_id)) {
+                push(errors, prefix() + join("UnloadMineral references missing colony_id ", id_u64(ord.colony_id)));
+              }
+            } else if constexpr (std::is_same_v<T, OrbitBody>) {
+              if (ord.body_id == kInvalidId) {
+                push(errors, prefix() + "OrbitBody has invalid body_id");
+              } else if (!has_body(ord.body_id)) {
+                push(errors, prefix() + join("OrbitBody references missing body_id ", id_u64(ord.body_id)));
+              }
+              if (ord.duration_days < -1) {
+                push(errors, prefix() + join("OrbitBody has invalid duration_days ", ord.duration_days));
+              }
+            } else if constexpr (std::is_same_v<T, TransferCargoToShip>) {
+              if (ord.target_ship_id == kInvalidId) {
+                push(errors, prefix() + "TransferCargoToShip has invalid target_ship_id");
+              } else if (!has_ship(ord.target_ship_id)) {
+                push(errors,
+                     prefix() + join("TransferCargoToShip references missing target_ship_id ",
+                                     id_u64(ord.target_ship_id)));
+              }
+            } else if constexpr (std::is_same_v<T, ScrapShip>) {
+              if (ord.colony_id == kInvalidId) {
+                push(errors, prefix() + "ScrapShip has invalid colony_id");
+              } else if (!has_colony(ord.colony_id)) {
+                push(errors, prefix() + join("ScrapShip references missing colony_id ", id_u64(ord.colony_id)));
+              }
+            } else if constexpr (std::is_same_v<T, MoveToPoint>) {
+              // No ids.
+            } else {
+              // If a new Order type is added but not handled here, catch it in validation.
+              push(errors, prefix() + "Unknown order type");
+            }
+          },
+          ord_any);
+    }
+  }
+
   // --- Colonies ---
   std::unordered_set<Id> colony_body_ids;
   for (const auto& [cid, c] : s.colonies) {
@@ -631,6 +749,740 @@ std::vector<std::string> validate_game_state(const GameState& s, const ContentDB
 
   std::sort(errors.begin(), errors.end());
   return errors;
+}
+
+FixReport fix_game_state(GameState& s, const ContentDB* content) {
+  FixReport report;
+
+  auto note = [&](std::string msg) {
+    report.changes += 1;
+    report.actions.push_back(std::move(msg));
+  };
+
+  auto has_system = [&](Id id) { return s.systems.find(id) != s.systems.end(); };
+  auto has_body = [&](Id id) { return s.bodies.find(id) != s.bodies.end(); };
+  auto has_jump = [&](Id id) { return s.jump_points.find(id) != s.jump_points.end(); };
+  auto has_ship = [&](Id id) { return s.ships.find(id) != s.ships.end(); };
+  auto has_colony = [&](Id id) { return s.colonies.find(id) != s.colonies.end(); };
+  auto has_faction = [&](Id id) { return s.factions.find(id) != s.factions.end(); };
+
+  // --- Fix map key/id mismatches ---
+  for (auto& [id, sys] : s.systems) {
+    if (sys.id != id) {
+      note(join("Fix: StarSystem id mismatch: key=", id_u64(id), " value.id=", id_u64(sys.id)));
+      sys.id = id;
+    }
+  }
+  for (auto& [id, b] : s.bodies) {
+    if (b.id != id) {
+      note(join("Fix: Body id mismatch: key=", id_u64(id), " value.id=", id_u64(b.id)));
+      b.id = id;
+    }
+  }
+  for (auto& [id, jp] : s.jump_points) {
+    if (jp.id != id) {
+      note(join("Fix: JumpPoint id mismatch: key=", id_u64(id), " value.id=", id_u64(jp.id)));
+      jp.id = id;
+    }
+  }
+  for (auto& [id, sh] : s.ships) {
+    if (sh.id != id) {
+      note(join("Fix: Ship id mismatch: key=", id_u64(id), " value.id=", id_u64(sh.id)));
+      sh.id = id;
+    }
+  }
+  for (auto& [id, c] : s.colonies) {
+    if (c.id != id) {
+      note(join("Fix: Colony id mismatch: key=", id_u64(id), " value.id=", id_u64(c.id)));
+      c.id = id;
+    }
+  }
+  for (auto& [id, f] : s.factions) {
+    if (f.id != id) {
+      note(join("Fix: Faction id mismatch: key=", id_u64(id), " value.id=", id_u64(f.id)));
+      f.id = id;
+    }
+  }
+  for (auto& [id, fl] : s.fleets) {
+    if (fl.id != id) {
+      note(join("Fix: Fleet id mismatch: key=", id_u64(id), " value.id=", id_u64(fl.id)));
+      fl.id = id;
+    }
+  }
+
+  // --- Choose deterministic fallbacks ---
+  const Id first_system = (!s.systems.empty()) ? sorted_keys(s.systems).front() : kInvalidId;
+  if (s.selected_system == kInvalidId || !has_system(s.selected_system)) {
+    if (first_system != kInvalidId) {
+      note(join("Fix: selected_system was invalid (", id_u64(s.selected_system), "); set to ", id_u64(first_system)));
+      s.selected_system = first_system;
+    }
+  }
+  const Id fallback_system = (has_system(s.selected_system)) ? s.selected_system : first_system;
+
+  const Id first_faction = (!s.factions.empty()) ? sorted_keys(s.factions).front() : kInvalidId;
+
+  auto pick_fallback_design = [&]() -> std::string {
+    if (!content) return {};
+
+    // Prefer a well-known "starter" id if present, otherwise choose the first
+    // lexicographic design id from content.
+    static const char* kPreferred[] = {
+        "starting_freighter",
+        "starting_surveyor",
+        "starting_fighter",
+        "starter_freighter",
+        "starter_surveyor",
+        "starter_fighter",
+    };
+    for (const char* id : kPreferred) {
+      if (content->designs.find(id) != content->designs.end()) return std::string(id);
+    }
+
+    if (!content->designs.empty()) {
+      auto ids = sorted_keys(content->designs);
+      return ids.front();
+    }
+
+    return {};
+  };
+  const std::string fallback_design = pick_fallback_design();
+
+  // --- Normalize per-entity system/faction references + basic numeric sanity ---
+  for (auto& [bid, b] : s.bodies) {
+    if (b.system_id == kInvalidId || !has_system(b.system_id)) {
+      if (fallback_system != kInvalidId) {
+        note(join("Fix: Body ", id_u64(bid), " had unknown system_id ", id_u64(b.system_id), "; set to ",
+                  id_u64(fallback_system)));
+        b.system_id = fallback_system;
+      }
+    }
+
+    // Parent relationships must point to an existing body in the same system.
+    if (b.parent_body_id != kInvalidId) {
+      if (b.parent_body_id == bid || !has_body(b.parent_body_id) || s.bodies.at(b.parent_body_id).system_id != b.system_id) {
+        note(join("Fix: Body ", id_u64(bid), " had invalid parent_body_id ", id_u64(b.parent_body_id), "; cleared"));
+        b.parent_body_id = kInvalidId;
+      }
+    }
+
+    for (auto it = b.mineral_deposits.begin(); it != b.mineral_deposits.end();) {
+      if (it->first.empty()) {
+        note(join("Fix: Body ", id_u64(bid), " had empty mineral_deposits key; removed"));
+        it = b.mineral_deposits.erase(it);
+        continue;
+      }
+      if (!std::isfinite(it->second) || it->second < 0.0) {
+        const double old = it->second;
+        it->second = std::max(0.0, std::isfinite(it->second) ? it->second : 0.0);
+        note(join("Fix: Body ", id_u64(bid), " mineral_deposits['", it->first, "'] clamped ", old, " -> ", it->second));
+      }
+      ++it;
+    }
+  }
+
+  for (auto& [jid, jp] : s.jump_points) {
+    if (jp.system_id == kInvalidId || !has_system(jp.system_id)) {
+      if (fallback_system != kInvalidId) {
+        note(join("Fix: JumpPoint ", id_u64(jid), " had unknown system_id ", id_u64(jp.system_id), "; set to ",
+                  id_u64(fallback_system)));
+        jp.system_id = fallback_system;
+      }
+    }
+
+    if (jp.linked_jump_id == jid) {
+      note(join("Fix: JumpPoint ", id_u64(jid), " linked to itself; cleared linked_jump_id"));
+      jp.linked_jump_id = kInvalidId;
+    }
+    if (jp.linked_jump_id != kInvalidId && !has_jump(jp.linked_jump_id)) {
+      note(join("Fix: JumpPoint ", id_u64(jid), " linked_jump_id ", id_u64(jp.linked_jump_id), " missing; cleared"));
+      jp.linked_jump_id = kInvalidId;
+    }
+  }
+
+  for (auto& [sid, sh] : s.ships) {
+    if (sh.system_id == kInvalidId || !has_system(sh.system_id)) {
+      if (fallback_system != kInvalidId) {
+        note(join("Fix: Ship ", id_u64(sid), " had unknown system_id ", id_u64(sh.system_id), "; set to ",
+                  id_u64(fallback_system)));
+        sh.system_id = fallback_system;
+      }
+    }
+    if (sh.faction_id == kInvalidId || !has_faction(sh.faction_id)) {
+      if (first_faction != kInvalidId) {
+        note(join("Fix: Ship ", id_u64(sid), " had unknown faction_id ", id_u64(sh.faction_id), "; set to ",
+                  id_u64(first_faction)));
+        sh.faction_id = first_faction;
+      }
+    }
+
+    if (content && !design_exists(s, *content, sh.design_id)) {
+      if (!fallback_design.empty()) {
+        note(join("Fix: Ship ", id_u64(sid), " had unknown design_id '", sh.design_id, "'; set to '", fallback_design,
+                  "'"));
+        sh.design_id = fallback_design;
+      }
+    }
+  }
+
+  // --- Colonies ---
+  // Remove colonies that point at missing bodies, and ensure body_id uniqueness.
+  {
+    std::unordered_map<Id, Id> body_owner;
+    body_owner.reserve(s.colonies.size() * 2);
+    for (Id cid : sorted_keys(s.colonies)) {
+      auto it = s.colonies.find(cid);
+      if (it == s.colonies.end()) continue;
+      Colony& c = it->second;
+
+      if (c.body_id == kInvalidId || !has_body(c.body_id)) {
+        note(join("Fix: Removed Colony ", id_u64(cid), " ('", c.name, "') missing body_id ", id_u64(c.body_id)));
+        s.colonies.erase(it);
+        continue;
+      }
+
+      auto [own_it, inserted] = body_owner.insert({c.body_id, cid});
+      if (!inserted) {
+        note(join("Fix: Removed duplicate Colony ", id_u64(cid), " ('", c.name, "') sharing body_id ",
+                  id_u64(c.body_id), " with colony ", id_u64(own_it->second)));
+        s.colonies.erase(it);
+        continue;
+      }
+
+      if (c.faction_id == kInvalidId || !has_faction(c.faction_id)) {
+        if (first_faction != kInvalidId) {
+          note(join("Fix: Colony ", id_u64(cid), " had unknown faction_id ", id_u64(c.faction_id), "; set to ",
+                    id_u64(first_faction)));
+          c.faction_id = first_faction;
+        }
+      }
+
+      // Clamp mineral stockpiles/reserves.
+      for (auto it2 = c.minerals.begin(); it2 != c.minerals.end();) {
+        if (it2->first.empty()) {
+          note(join("Fix: Colony ", id_u64(cid), " had empty mineral key in minerals; removed"));
+          it2 = c.minerals.erase(it2);
+          continue;
+        }
+        if (!std::isfinite(it2->second) || it2->second < 0.0) {
+          const double old = it2->second;
+          it2->second = std::max(0.0, std::isfinite(it2->second) ? it2->second : 0.0);
+          note(join("Fix: Colony ", id_u64(cid), " minerals['", it2->first, "'] clamped ", old, " -> ", it2->second));
+        }
+        ++it2;
+      }
+      for (auto it2 = c.mineral_reserves.begin(); it2 != c.mineral_reserves.end();) {
+        if (it2->first.empty()) {
+          note(join("Fix: Colony ", id_u64(cid), " had empty mineral key in mineral_reserves; removed"));
+          it2 = c.mineral_reserves.erase(it2);
+          continue;
+        }
+        if (!std::isfinite(it2->second) || it2->second < 0.0) {
+          const double old = it2->second;
+          it2->second = std::max(0.0, std::isfinite(it2->second) ? it2->second : 0.0);
+          note(join("Fix: Colony ", id_u64(cid), " mineral_reserves['", it2->first, "'] clamped ", old, " -> ",
+                    it2->second));
+        }
+        ++it2;
+      }
+
+      if (content) {
+        // Installations: remove unknown ids and clamp negative counts.
+        for (auto it3 = c.installations.begin(); it3 != c.installations.end();) {
+          const std::string& inst_id = it3->first;
+          const int count = it3->second;
+          if (inst_id.empty() || !installation_exists(*content, inst_id)) {
+            note(join("Fix: Colony ", id_u64(cid), " removed unknown installation id '", inst_id, "'"));
+            it3 = c.installations.erase(it3);
+            continue;
+          }
+          if (count < 0) {
+            note(join("Fix: Colony ", id_u64(cid), " installation '", inst_id, "' count clamped ", count, " -> 0"));
+            it3->second = 0;
+          }
+          if (it3->second == 0) {
+            it3 = c.installations.erase(it3);
+            continue;
+          }
+          ++it3;
+        }
+
+        // Shipyard queue: drop entries with unknown designs.
+        for (std::size_t i = 0; i < c.shipyard_queue.size();) {
+          const auto& bo = c.shipyard_queue[i];
+          if (bo.design_id.empty() || !design_exists(s, *content, bo.design_id)) {
+            note(join("Fix: Colony ", id_u64(cid), " dropped shipyard_queue entry with unknown design_id '",
+                      bo.design_id, "'"));
+            c.shipyard_queue.erase(c.shipyard_queue.begin() + static_cast<long>(i));
+            continue;
+          }
+          if (!std::isfinite(bo.tons_remaining) || bo.tons_remaining < 0.0) {
+            const double old = bo.tons_remaining;
+            c.shipyard_queue[i].tons_remaining = std::max(0.0, std::isfinite(old) ? old : 0.0);
+            note(join("Fix: Colony ", id_u64(cid), " shipyard_queue tons_remaining clamped ", old, " -> ",
+                      c.shipyard_queue[i].tons_remaining));
+          }
+          ++i;
+        }
+
+        // Construction queue: drop entries with unknown installations and clamp negatives.
+        for (std::size_t i = 0; i < c.construction_queue.size();) {
+          auto& io = c.construction_queue[i];
+          if (io.installation_id.empty() || !installation_exists(*content, io.installation_id)) {
+            note(join("Fix: Colony ", id_u64(cid), " dropped construction_queue entry with unknown installation_id '",
+                      io.installation_id, "'"));
+            c.construction_queue.erase(c.construction_queue.begin() + static_cast<long>(i));
+            continue;
+          }
+          if (io.quantity_remaining < 0) {
+            note(join("Fix: Colony ", id_u64(cid), " construction_queue quantity_remaining clamped ",
+                      io.quantity_remaining, " -> 0"));
+            io.quantity_remaining = 0;
+          }
+          if (!std::isfinite(io.cp_remaining) || io.cp_remaining < 0.0) {
+            const double old = io.cp_remaining;
+            io.cp_remaining = std::max(0.0, std::isfinite(old) ? old : 0.0);
+            note(join("Fix: Colony ", id_u64(cid), " construction_queue cp_remaining clamped ", old, " -> ",
+                      io.cp_remaining));
+          }
+          if (io.quantity_remaining == 0) {
+            c.construction_queue.erase(c.construction_queue.begin() + static_cast<long>(i));
+            continue;
+          }
+          ++i;
+        }
+      }
+    }
+  }
+
+  // --- Jump point reciprocity ---
+  // First, opportunistically repair one-way links when the target has no link.
+  {
+    const auto jp_ids = sorted_keys(s.jump_points);
+    for (Id id : jp_ids) {
+      auto it = s.jump_points.find(id);
+      if (it == s.jump_points.end()) continue;
+      JumpPoint& jp = it->second;
+      if (jp.linked_jump_id == kInvalidId) continue;
+      auto it2 = s.jump_points.find(jp.linked_jump_id);
+      if (it2 == s.jump_points.end()) {
+        jp.linked_jump_id = kInvalidId;
+        continue;
+      }
+      if (it2->second.linked_jump_id == kInvalidId) {
+        it2->second.linked_jump_id = id;
+        note(join("Fix: JumpPoint ", id_u64(jp.linked_jump_id), " linked back to ", id_u64(id)));
+      }
+    }
+
+    // Then, drop any remaining non-reciprocal links.
+    for (Id id : jp_ids) {
+      auto it = s.jump_points.find(id);
+      if (it == s.jump_points.end()) continue;
+      JumpPoint& jp = it->second;
+      if (jp.linked_jump_id == kInvalidId) continue;
+
+      auto it2 = s.jump_points.find(jp.linked_jump_id);
+      if (it2 == s.jump_points.end() || it2->second.linked_jump_id != id) {
+        note(join("Fix: JumpPoint ", id_u64(id), " had non-reciprocal link to ", id_u64(jp.linked_jump_id), "; cleared"));
+        jp.linked_jump_id = kInvalidId;
+      }
+    }
+  }
+
+  // --- Fleets ---
+  {
+    std::unordered_map<Id, Id> ship_to_fleet;
+    ship_to_fleet.reserve(s.ships.size() * 2);
+
+    for (Id fid : sorted_keys(s.fleets)) {
+      auto it = s.fleets.find(fid);
+      if (it == s.fleets.end()) continue;
+      Fleet& fl = it->second;
+
+      // Prune ship ids.
+      std::vector<Id> kept;
+      kept.reserve(fl.ship_ids.size());
+      std::unordered_set<Id> seen;
+      seen.reserve(fl.ship_ids.size() * 2);
+
+      for (Id sid : fl.ship_ids) {
+        if (sid == kInvalidId) {
+          note(join("Fix: Fleet ", id_u64(fid), " removed kInvalidId from ship_ids"));
+          continue;
+        }
+        if (!has_ship(sid)) {
+          note(join("Fix: Fleet ", id_u64(fid), " removed missing ship_id ", id_u64(sid)));
+          continue;
+        }
+        if (!seen.insert(sid).second) {
+          note(join("Fix: Fleet ", id_u64(fid), " removed duplicate ship_id ", id_u64(sid)));
+          continue;
+        }
+        kept.push_back(sid);
+      }
+
+      fl.ship_ids = std::move(kept);
+      sort_unique(fl.ship_ids);
+
+      if (fl.ship_ids.empty()) {
+        note(join("Fix: Removed empty Fleet ", id_u64(fid), " ('", fl.name, "')"));
+        s.fleets.erase(it);
+        continue;
+      }
+
+      // Fix faction_id: if invalid, infer from the first ship.
+      if (fl.faction_id == kInvalidId || !has_faction(fl.faction_id)) {
+        const Id inferred = s.ships.at(fl.ship_ids.front()).faction_id;
+        if (inferred != kInvalidId && has_faction(inferred)) {
+          note(join("Fix: Fleet ", id_u64(fid), " had invalid faction_id ", id_u64(fl.faction_id), "; set to ",
+                    id_u64(inferred)));
+          fl.faction_id = inferred;
+        } else if (first_faction != kInvalidId) {
+          note(join("Fix: Fleet ", id_u64(fid), " had invalid faction_id ", id_u64(fl.faction_id), "; set to ",
+                    id_u64(first_faction)));
+          fl.faction_id = first_faction;
+        }
+      }
+
+      // Remove ships that don't match the fleet's faction.
+      {
+        std::vector<Id> filtered;
+        filtered.reserve(fl.ship_ids.size());
+        for (Id sid : fl.ship_ids) {
+          if (!has_ship(sid)) continue;
+          const Id sf = s.ships.at(sid).faction_id;
+          if (fl.faction_id != kInvalidId && sf != fl.faction_id) {
+            note(join("Fix: Fleet ", id_u64(fid), " removed ship ", id_u64(sid), " faction mismatch"));
+            continue;
+          }
+          filtered.push_back(sid);
+        }
+        fl.ship_ids = std::move(filtered);
+        sort_unique(fl.ship_ids);
+      }
+
+      if (fl.ship_ids.empty()) {
+        note(join("Fix: Removed Fleet ", id_u64(fid), " after pruning mismatched ships"));
+        s.fleets.erase(fid);
+        continue;
+      }
+
+      // Ensure ships appear in at most one fleet (keep lowest fleet id).
+      {
+        std::vector<Id> filtered;
+        filtered.reserve(fl.ship_ids.size());
+        for (Id sid : fl.ship_ids) {
+          auto [it_sf, inserted] = ship_to_fleet.insert({sid, fid});
+          if (!inserted && it_sf->second != fid) {
+            note(join("Fix: Removed ship ", id_u64(sid), " from Fleet ", id_u64(fid),
+                      " (already in Fleet ", id_u64(it_sf->second), ")"));
+            continue;
+          }
+          filtered.push_back(sid);
+        }
+        fl.ship_ids = std::move(filtered);
+        sort_unique(fl.ship_ids);
+      }
+
+      if (fl.ship_ids.empty()) {
+        note(join("Fix: Removed Fleet ", id_u64(fid), " after resolving multi-fleet ships"));
+        s.fleets.erase(fid);
+        continue;
+      }
+
+      if (fl.leader_ship_id == kInvalidId || std::find(fl.ship_ids.begin(), fl.ship_ids.end(), fl.leader_ship_id) == fl.ship_ids.end()) {
+        const Id new_leader = fl.ship_ids.front();
+        note(join("Fix: Fleet ", id_u64(fid), " leader_ship_id set to ", id_u64(new_leader)));
+        fl.leader_ship_id = new_leader;
+      }
+    }
+  }
+
+  // --- Ship orders + templates ---
+  auto fix_order_list = [&](std::vector<Order>& list, Id self_ship_id, const char* list_name, const std::string& owner) {
+    std::vector<Order> out;
+    out.reserve(list.size());
+
+    auto drop = [&](std::size_t idx, const char* why) {
+      note(join("Fix: ", owner, " ", list_name, "[", idx, "] dropped: ", why));
+    };
+
+    for (std::size_t i = 0; i < list.size(); ++i) {
+      Order ord_any = list[i];
+      bool keep = true;
+      std::visit(
+          [&](auto& ord) {
+            using T = std::decay_t<decltype(ord)>;
+            if constexpr (std::is_same_v<T, MoveToBody>) {
+              if (ord.body_id == kInvalidId || !has_body(ord.body_id)) {
+                keep = false;
+                drop(i, "MoveToBody invalid body_id");
+              }
+            } else if constexpr (std::is_same_v<T, ColonizeBody>) {
+              if (ord.body_id == kInvalidId || !has_body(ord.body_id)) {
+                keep = false;
+                drop(i, "ColonizeBody invalid body_id");
+              }
+            } else if constexpr (std::is_same_v<T, TravelViaJump>) {
+              if (ord.jump_point_id == kInvalidId || !has_jump(ord.jump_point_id)) {
+                keep = false;
+                drop(i, "TravelViaJump invalid jump_point_id");
+              }
+            } else if constexpr (std::is_same_v<T, AttackShip>) {
+              if (ord.target_ship_id == kInvalidId || !has_ship(ord.target_ship_id) ||
+                  (self_ship_id != kInvalidId && ord.target_ship_id == self_ship_id)) {
+                keep = false;
+                drop(i, "AttackShip invalid target_ship_id");
+              }
+            } else if constexpr (std::is_same_v<T, WaitDays>) {
+              if (ord.days_remaining < 0) {
+                note(join("Fix: ", owner, " ", list_name, "[", i, "] WaitDays clamped ", ord.days_remaining,
+                          " -> 0"));
+                ord.days_remaining = 0;
+              }
+            } else if constexpr (std::is_same_v<T, LoadMineral>) {
+              if (ord.colony_id == kInvalidId || !has_colony(ord.colony_id)) {
+                keep = false;
+                drop(i, "LoadMineral invalid colony_id");
+              }
+            } else if constexpr (std::is_same_v<T, UnloadMineral>) {
+              if (ord.colony_id == kInvalidId || !has_colony(ord.colony_id)) {
+                keep = false;
+                drop(i, "UnloadMineral invalid colony_id");
+              }
+            } else if constexpr (std::is_same_v<T, OrbitBody>) {
+              if (ord.body_id == kInvalidId || !has_body(ord.body_id)) {
+                keep = false;
+                drop(i, "OrbitBody invalid body_id");
+              }
+              if (ord.duration_days < -1) {
+                note(join("Fix: ", owner, " ", list_name, "[", i, "] OrbitBody duration clamped ", ord.duration_days,
+                          " -> -1"));
+                ord.duration_days = -1;
+              }
+            } else if constexpr (std::is_same_v<T, TransferCargoToShip>) {
+              if (ord.target_ship_id == kInvalidId || !has_ship(ord.target_ship_id) ||
+                  (self_ship_id != kInvalidId && ord.target_ship_id == self_ship_id)) {
+                keep = false;
+                drop(i, "TransferCargoToShip invalid target_ship_id");
+              }
+            } else if constexpr (std::is_same_v<T, ScrapShip>) {
+              if (ord.colony_id == kInvalidId || !has_colony(ord.colony_id)) {
+                keep = false;
+                drop(i, "ScrapShip invalid colony_id");
+              }
+            } else if constexpr (std::is_same_v<T, MoveToPoint>) {
+              // ok
+            } else {
+              keep = false;
+              drop(i, "Unknown order type");
+            }
+          },
+          ord_any);
+
+      if (keep) out.push_back(std::move(ord_any));
+    }
+
+    list = std::move(out);
+  };
+
+  for (auto it = s.ship_orders.begin(); it != s.ship_orders.end();) {
+    const Id sid = it->first;
+    if (!has_ship(sid)) {
+      note(join("Fix: Removed ship_orders entry for missing ship ", id_u64(sid)));
+      it = s.ship_orders.erase(it);
+      continue;
+    }
+    ShipOrders& so = it->second;
+    fix_order_list(so.queue, sid, "order_queue", join("Ship ", id_u64(sid)));
+    fix_order_list(so.repeat_template, sid, "repeat_template", join("Ship ", id_u64(sid)));
+    ++it;
+  }
+
+  for (auto it = s.order_templates.begin(); it != s.order_templates.end();) {
+    const std::string name = it->first;
+    if (name.empty() || it->second.empty()) {
+      note(join("Fix: Removed empty order template '", name, "'"));
+      it = s.order_templates.erase(it);
+      continue;
+    }
+    fix_order_list(it->second, kInvalidId, "orders", join("Template '", name, "'"));
+    if (it->second.empty()) {
+      note(join("Fix: Removed order template '", name, "' after dropping invalid orders"));
+      it = s.order_templates.erase(it);
+      continue;
+    }
+    ++it;
+  }
+
+  // --- Factions ---
+  for (auto& [fid, f] : s.factions) {
+    // discovered systems: remove missing + duplicates.
+    {
+      std::vector<Id> cleaned;
+      cleaned.reserve(f.discovered_systems.size());
+      for (Id sid : f.discovered_systems) {
+        if (sid == kInvalidId || !has_system(sid)) {
+          note(join("Fix: Faction ", id_u64(fid), " removed invalid discovered_system ", id_u64(sid)));
+          continue;
+        }
+        cleaned.push_back(sid);
+      }
+      sort_unique(cleaned);
+      f.discovered_systems = std::move(cleaned);
+    }
+
+    // contacts: drop entries for missing ships; fix ids + system_id.
+    for (auto it = f.ship_contacts.begin(); it != f.ship_contacts.end();) {
+      const Id sid = it->first;
+      Contact& c = it->second;
+
+      if (!has_ship(sid)) {
+        note(join("Fix: Faction ", id_u64(fid), " removed contact for missing ship ", id_u64(sid)));
+        it = f.ship_contacts.erase(it);
+        continue;
+      }
+      if (c.ship_id != sid) {
+        note(join("Fix: Faction ", id_u64(fid), " contact.ship_id set to key ", id_u64(sid)));
+        c.ship_id = sid;
+      }
+      if (c.system_id == kInvalidId || !has_system(c.system_id)) {
+        const Id sys = s.ships.at(sid).system_id;
+        const Id fixed = (has_system(sys)) ? sys : fallback_system;
+        note(join("Fix: Faction ", id_u64(fid), " contact.system_id set to ", id_u64(fixed)));
+        c.system_id = fixed;
+      }
+      ++it;
+    }
+
+    if (content) {
+      if (!f.active_research_id.empty() && !tech_exists(*content, f.active_research_id)) {
+        note(join("Fix: Faction ", id_u64(fid), " cleared unknown active_research_id '", f.active_research_id, "'"));
+        f.active_research_id.clear();
+        f.active_research_progress = 0.0;
+      }
+
+      auto prune_string_list = [&](std::vector<std::string>& v, const char* what,
+                                   auto exists_fn) {
+        std::vector<std::string> out;
+        out.reserve(v.size());
+        for (const auto& x : v) {
+          if (x.empty() || !exists_fn(x)) {
+            note(join("Fix: Faction ", id_u64(fid), " removed unknown ", what, " '", x, "'"));
+            continue;
+          }
+          out.push_back(x);
+        }
+        std::sort(out.begin(), out.end());
+        out.erase(std::unique(out.begin(), out.end()), out.end());
+        v = std::move(out);
+      };
+
+      prune_string_list(f.research_queue, "research tech", [&](const std::string& x) { return tech_exists(*content, x); });
+      prune_string_list(f.known_techs, "known tech", [&](const std::string& x) { return tech_exists(*content, x); });
+      prune_string_list(f.unlocked_components, "component", [&](const std::string& x) { return component_exists(*content, x); });
+      prune_string_list(f.unlocked_installations, "installation", [&](const std::string& x) { return installation_exists(*content, x); });
+    }
+  }
+
+  // --- Events ---
+  {
+    std::uint64_t max_seq = 0;
+    for (const auto& e : s.events) {
+      if (e.seq > max_seq) max_seq = e.seq;
+    }
+
+    std::unordered_set<std::uint64_t> seen;
+    seen.reserve(s.events.size() * 2);
+
+    std::uint64_t next_seq = std::max<std::uint64_t>(1, std::max<std::uint64_t>(s.next_event_seq, max_seq + 1));
+
+    for (std::size_t i = 0; i < s.events.size(); ++i) {
+      auto& e = s.events[i];
+      if (e.seq == 0 || !seen.insert(e.seq).second) {
+        const std::uint64_t old = e.seq;
+        e.seq = next_seq++;
+        note(join("Fix: events[", i, "] seq reassigned ", old, " -> ", e.seq));
+      }
+      if (e.seq > max_seq) max_seq = e.seq;
+
+      if (e.faction_id != kInvalidId && !has_faction(e.faction_id)) {
+        note(join("Fix: events[", i, "] cleared missing faction_id ", id_u64(e.faction_id)));
+        e.faction_id = kInvalidId;
+      }
+      if (e.faction_id2 != kInvalidId && !has_faction(e.faction_id2)) {
+        note(join("Fix: events[", i, "] cleared missing faction_id2 ", id_u64(e.faction_id2)));
+        e.faction_id2 = kInvalidId;
+      }
+      if (e.system_id != kInvalidId && !has_system(e.system_id)) {
+        note(join("Fix: events[", i, "] cleared missing system_id ", id_u64(e.system_id)));
+        e.system_id = kInvalidId;
+      }
+      if (e.ship_id != kInvalidId && !has_ship(e.ship_id)) {
+        note(join("Fix: events[", i, "] cleared missing ship_id ", id_u64(e.ship_id)));
+        e.ship_id = kInvalidId;
+      }
+      if (e.colony_id != kInvalidId && !has_colony(e.colony_id)) {
+        note(join("Fix: events[", i, "] cleared missing colony_id ", id_u64(e.colony_id)));
+        e.colony_id = kInvalidId;
+      }
+    }
+
+    if (s.next_event_seq == 0 || s.next_event_seq <= max_seq) {
+      const std::uint64_t old = s.next_event_seq;
+      s.next_event_seq = max_seq + 1;
+      note(join("Fix: next_event_seq set ", old, " -> ", s.next_event_seq));
+    }
+  }
+
+  // --- Rebuild system indices (bodies/ships/jump_points) ---
+  for (auto& [sys_id, sys] : s.systems) {
+    sys.bodies.clear();
+    sys.ships.clear();
+    sys.jump_points.clear();
+  }
+  for (const auto& [bid, b] : s.bodies) {
+    if (b.system_id != kInvalidId && has_system(b.system_id)) {
+      s.systems.at(b.system_id).bodies.push_back(bid);
+    }
+  }
+  for (const auto& [sid, sh] : s.ships) {
+    if (sh.system_id != kInvalidId && has_system(sh.system_id)) {
+      s.systems.at(sh.system_id).ships.push_back(sid);
+    }
+  }
+  for (const auto& [jid, jp] : s.jump_points) {
+    if (jp.system_id != kInvalidId && has_system(jp.system_id)) {
+      s.systems.at(jp.system_id).jump_points.push_back(jid);
+    }
+  }
+  for (auto& [sys_id, sys] : s.systems) {
+    sort_unique(sys.bodies);
+    sort_unique(sys.ships);
+    sort_unique(sys.jump_points);
+  }
+
+  // --- Fix next_id ---
+  Id max_id = 0;
+  auto bump_max = [&](Id id) {
+    if (id != kInvalidId && id > max_id) max_id = id;
+  };
+  for (const auto& [id, _] : s.systems) bump_max(id);
+  for (const auto& [id, _] : s.bodies) bump_max(id);
+  for (const auto& [id, _] : s.jump_points) bump_max(id);
+  for (const auto& [id, _] : s.ships) bump_max(id);
+  for (const auto& [id, _] : s.colonies) bump_max(id);
+  for (const auto& [id, _] : s.factions) bump_max(id);
+  for (const auto& [id, _] : s.fleets) bump_max(id);
+
+  if (s.next_id == kInvalidId || s.next_id <= max_id) {
+    const Id old = s.next_id;
+    s.next_id = max_id + 1;
+    note(join("Fix: next_id set ", id_u64(old), " -> ", id_u64(s.next_id)));
+  }
+
+  return report;
 }
 
 } // namespace nebula4x

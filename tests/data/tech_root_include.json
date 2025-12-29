@@ -1,0 +1,3 @@
+{
+  "include": ["tech_base.json", "tech_mod.json"]
+}

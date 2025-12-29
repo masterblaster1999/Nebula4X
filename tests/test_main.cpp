@@ -11,6 +11,8 @@ int test_order_repeat();
 int test_determinism();
 int test_event_export();
 int test_content_validation();
+int test_content_overlays();
+int test_spatial_index();
 int test_random_scenario();
 int test_file_io();
 int test_json_unicode();
@@ -28,6 +30,7 @@ int test_ai_economy();
 int test_research_planner();
 int test_mineral_deposits();
 int test_power_system();
+int test_digests();
 
 int main() {
   int fails = 0;
@@ -42,11 +45,14 @@ int main() {
   fails += test_determinism();
   fails += test_event_export();
   fails += test_content_validation();
+  fails += test_content_overlays();
+  fails += test_spatial_index();
   fails += test_random_scenario();
   fails += test_ai_economy();
   fails += test_research_planner();
   fails += test_mineral_deposits();
   fails += test_power_system();
+  fails += test_digests();
   fails += test_file_io();
   fails += test_json_unicode();
   fails += test_json_bom();

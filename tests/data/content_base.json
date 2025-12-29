@@ -1,0 +1,36 @@
+{
+  "components": {
+    "engine_test": {
+      "name": "Engine Test",
+      "type": "engine",
+      "mass_tons": 10,
+      "speed_km_s": 5
+    },
+    "cargo_test": {
+      "name": "Cargo Test",
+      "type": "cargo",
+      "mass_tons": 5,
+      "cargo_tons": 100
+    },
+    "sensor_test": {
+      "name": "Sensor Test",
+      "type": "sensor",
+      "mass_tons": 1,
+      "sensor_range_mkm": 123
+    }
+  },
+  "installations": {
+    "mine_test": {
+      "name": "Mine Test",
+      "produces": { "Duranium": 1 }
+    }
+  },
+  "designs": [
+    {
+      "id": "ship_test",
+      "name": "Ship Test",
+      "role": "surveyor",
+      "components": ["engine_test", "cargo_test"]
+    }
+  ]
+}

@@ -2,6 +2,7 @@
 
 #include <imgui.h>
 
+#include <cstdint>
 #include <algorithm>
 #include <cmath>
 #include <optional>
@@ -203,19 +204,69 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   }
 
   // --- Route preview (hover target) ---
+  // Planning routes can be expensive, especially when called every frame while hovering.
+  // Cache the preview route until the relevant inputs change.
+  struct RoutePreviewCacheKey {
+    Id hovered_system{kInvalidId};
+    Id selected_ship{kInvalidId};
+    Id selected_fleet{kInvalidId};
+    bool fleet_mode{false};
+    bool restrict_to_discovered{false};
+    bool from_queue{false};
+    std::int64_t sim_day{0};
+
+    bool operator==(const RoutePreviewCacheKey& o) const {
+      return hovered_system == o.hovered_system && selected_ship == o.selected_ship &&
+             selected_fleet == o.selected_fleet && fleet_mode == o.fleet_mode &&
+             restrict_to_discovered == o.restrict_to_discovered && from_queue == o.from_queue &&
+             sim_day == o.sim_day;
+    }
+  };
+
+  struct RoutePreviewCache {
+    bool valid{false};
+    RoutePreviewCacheKey key{};
+    bool is_fleet{false};
+    std::optional<JumpRoutePlan> route{};
+  };
+
+  static RoutePreviewCache route_cache;
+
   std::optional<JumpRoutePlan> preview_route;
   bool preview_is_fleet = false;
   bool preview_from_queue = false;
   if (hovered && hovered_system != kInvalidId) {
     const bool restrict = ui.fog_of_war;
-    preview_from_queue = ImGui::GetIO().KeyShift;
+    const bool from_queue = ImGui::GetIO().KeyShift;
     const bool fleet_mode = (ImGui::GetIO().KeyCtrl && selected_fleet != nullptr);
-    if (fleet_mode) {
-      preview_is_fleet = true;
-      preview_route = sim.plan_jump_route_for_fleet(selected_fleet->id, hovered_system, restrict, preview_from_queue);
-    } else if (selected_ship != kInvalidId) {
-      preview_route = sim.plan_jump_route_for_ship(selected_ship, hovered_system, restrict, preview_from_queue);
+    const std::int64_t sim_day = s.date.days_since_epoch();
+
+    RoutePreviewCacheKey key;
+    key.hovered_system = hovered_system;
+    key.selected_ship = fleet_mode ? kInvalidId : selected_ship;
+    key.selected_fleet = fleet_mode ? selected_fleet->id : kInvalidId;
+    key.fleet_mode = fleet_mode;
+    key.restrict_to_discovered = restrict;
+    key.from_queue = from_queue;
+    key.sim_day = sim_day;
+
+    if (!route_cache.valid || !(route_cache.key == key)) {
+      route_cache.valid = true;
+      route_cache.key = key;
+      route_cache.is_fleet = fleet_mode;
+      route_cache.route.reset();
+
+      if (fleet_mode) {
+        route_cache.route =
+            sim.plan_jump_route_for_fleet(selected_fleet->id, hovered_system, restrict, from_queue);
+      } else if (selected_ship != kInvalidId) {
+        route_cache.route = sim.plan_jump_route_for_ship(selected_ship, hovered_system, restrict, from_queue);
+      }
     }
+
+    preview_route = route_cache.route;
+    preview_is_fleet = route_cache.is_fleet;
+    preview_from_queue = from_queue;
   }
 
   if (preview_route && preview_route->systems.size() >= 2) {

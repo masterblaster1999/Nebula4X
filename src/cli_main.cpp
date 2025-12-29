@@ -14,8 +14,10 @@
 #include "nebula4x/core/tech.h"
 #include "nebula4x/util/file_io.h"
 #include "nebula4x/util/event_export.h"
+#include "nebula4x/util/digest.h"
 #include "nebula4x/util/save_diff.h"
 #include "nebula4x/util/state_export.h"
+#include "nebula4x/util/timeline_export.h"
 #include "nebula4x/util/tech_export.h"
 #include "nebula4x/util/json.h"
 #include "nebula4x/util/log.h"
@@ -40,6 +42,15 @@ std::string get_str_arg(int argc, char** argv, const std::string& key, const std
   }
   return def;
 }
+
+std::vector<std::string> get_multi_str_args(int argc, char** argv, const std::string& key) {
+  std::vector<std::string> out;
+  for (int i = 1; i < argc - 1; ++i) {
+    if (argv[i] == key) out.push_back(argv[i + 1]);
+  }
+  return out;
+}
+
 
 
 bool get_two_str_args(int argc, char** argv, const std::string& key, std::string& out_a, std::string& out_b) {
@@ -322,15 +333,24 @@ void print_usage(const char* exe) {
   std::cout << "  --scenario NAME  Starting scenario when not loading (sol|random, default: sol)\n";
   std::cout << "  --seed N         RNG seed for random scenario (default: 1)\n";
   std::cout << "  --systems N      Number of systems for random scenario (default: 12)\n";
-  std::cout << "  --content PATH   Content blueprints JSON (default: data/blueprints/starting_blueprints.json)\n";
-  std::cout << "  --tech PATH      Tech tree JSON (default: data/tech/tech_tree.json)\n";
+  std::cout << "  --content PATH   Content blueprints JSON (repeatable; later overrides earlier; default: data/blueprints/starting_blueprints.json)\n";
+  std::cout << "                 Files may use top-level include/includes to compose overlays\n";
+  std::cout << "  --tech PATH      Tech tree JSON (repeatable; later overrides earlier; default: data/tech/tech_tree.json)\n";
+  std::cout << "                 Files may use top-level include/includes to compose overlays\n";
   std::cout << "  --load PATH      Load a save JSON before advancing\n";
   std::cout << "  --save PATH      Save state JSON after advancing\n";
   std::cout << "  --format-save    Load + re-save (canonicalize JSON) without advancing\n";
+  std::cout << "  --fix-save       Attempt to repair common save integrity issues (requires --load and --save or --dump)\n";
   std::cout << "  --diff-saves A B Compare two save JSON files and print a structural diff\n";
   std::cout << "  --diff-saves-json PATH  (optional) Also emit a JSON diff report (PATH can be '-' for stdout)\n";
+  std::cout << "  --diff-saves-jsonpatch PATH  (optional) Also emit an RFC 6902 JSON Patch (PATH can be '-' for stdout)\n";
+  std::cout << "  --apply-save-patch SAVE PATCH  Apply an RFC 6902 JSON Patch to SAVE\n";
+  std::cout << "  --apply-save-patch-out PATH   (optional) Output path for the patched save (PATH can be '-' for stdout; default: -)\n";
   std::cout << "  --validate-content  Validate content + tech files and exit\n";
   std::cout << "  --validate-save     Validate loaded/new game state and exit\n";
+  std::cout << "  --digest         Print stable content/state digests (useful for bug reports)\n";
+  std::cout << "    --digest-no-events  Exclude the persistent SimEvent log from the state digest\n";
+  std::cout << "    --digest-no-ui      Exclude UI-only fields (selected system) from the state digest\n";
   std::cout << "  --dump           Print the resulting save JSON to stdout\n";
   std::cout << "  --quiet          Suppress non-essential summary/status output (useful for scripts)\n";
   std::cout << "  --list-factions  Print faction ids and names, then exit\n";
@@ -345,6 +365,9 @@ void print_usage(const char* exe) {
   std::cout << "  --export-bodies-json PATH   Export bodies state to JSON (PATH can be '-' for stdout)\n";
   std::cout << "  --export-tech-tree-json PATH Export tech tree definitions to JSON (PATH can be '-' for stdout)\n";
   std::cout << "  --export-tech-tree-dot PATH  Export tech tree graph to Graphviz DOT (PATH can be '-' for stdout)\n";
+  std::cout << "  --export-timeline-jsonl PATH Export a daily timeline (counts, economy totals, digests) to JSONL/NDJSON (PATH can be '-' for stdout)\n";
+  std::cout << "    --timeline-mineral NAME    (repeatable) Limit timeline mineral/cargo maps to NAME\n";
+  std::cout << "    --timeline-include-cargo   Include per-faction ship cargo totals in timeline output\n";
   std::cout << "  --plan-research FACTION TECH  Print a prereq-ordered research plan for FACTION -> TECH\n";
   std::cout << "  --plan-research-json PATH     (optional) Export the plan as JSON (PATH can be '-' for stdout)\n";
   std::cout << "  --dump-events    Print the persistent simulation event log to stdout\n";
@@ -387,11 +410,14 @@ int main(int argc, char** argv) {
     //   --diff-saves A B
     //   --diff-saves A B --diff-saves-json OUT.json
     //   --diff-saves A B --diff-saves-json -   (JSON to stdout; human diff to stderr unless --quiet)
+    //   --diff-saves A B --diff-saves-jsonpatch OUT.patch.json
+    //   --diff-saves A B --diff-saves-jsonpatch -   (patch to stdout; human diff to stderr unless --quiet)
     std::string diff_a;
     std::string diff_b;
     const bool diff_saves = get_two_str_args(argc, argv, "--diff-saves", diff_a, diff_b);
     const bool diff_flag = has_flag(argc, argv, "--diff-saves");
     const std::string diff_json_path = get_str_arg(argc, argv, "--diff-saves-json", "");
+    const std::string diff_patch_path = get_str_arg(argc, argv, "--diff-saves-jsonpatch", "");
 
     if (diff_flag && !diff_saves) {
       std::cerr << "--diff-saves requires two paths: --diff-saves A B\n\n";
@@ -401,6 +427,12 @@ int main(int argc, char** argv) {
 
     if (diff_saves) {
       const bool json_to_stdout = (!diff_json_path.empty() && diff_json_path == "-");
+      const bool patch_to_stdout = (!diff_patch_path.empty() && diff_patch_path == "-");
+      if (json_to_stdout && patch_to_stdout) {
+        std::cerr << "--diff-saves-json and --diff-saves-jsonpatch cannot both write to stdout ('-')\n";
+        return 2;
+      }
+
       const auto a_state = nebula4x::deserialize_game_from_json(nebula4x::read_text_file(diff_a));
       const auto b_state = nebula4x::deserialize_game_from_json(nebula4x::read_text_file(diff_b));
       const std::string a_canon = nebula4x::serialize_game_to_json(a_state);
@@ -418,9 +450,65 @@ int main(int argc, char** argv) {
         }
       }
 
+      if (!diff_patch_path.empty()) {
+        const std::string patch = nebula4x::diff_saves_to_json_patch(a_canon, b_canon);
+        if (diff_patch_path == "-") {
+          std::cout << patch;
+        } else {
+          nebula4x::write_text_file(diff_patch_path, patch);
+          if (!quiet) {
+            std::cout << "JSON Patch written to " << diff_patch_path << "\n";
+          }
+        }
+      }
+
       if (!quiet) {
-        std::ostream& out = json_to_stdout ? std::cerr : std::cout;
+        const bool machine_to_stdout = json_to_stdout || patch_to_stdout;
+        std::ostream& out = machine_to_stdout ? std::cerr : std::cout;
         out << nebula4x::diff_saves_to_text(a_canon, b_canon);
+      }
+      return 0;
+    }
+
+    // Save patch apply utility:
+    //   --apply-save-patch SAVE.json PATCH.json
+    //   --apply-save-patch SAVE.json PATCH.json --apply-save-patch-out OUT.json
+    //   --apply-save-patch SAVE.json PATCH.json --apply-save-patch-out -  (save to stdout; info to stderr unless --quiet)
+    std::string apply_save_path;
+    std::string apply_patch_path;
+    const bool apply_save_patch = get_two_str_args(argc, argv, "--apply-save-patch", apply_save_path, apply_patch_path);
+    const bool apply_save_patch_flag = has_flag(argc, argv, "--apply-save-patch");
+    const std::string apply_out_path = get_str_arg(argc, argv, "--apply-save-patch-out", "-");
+
+    if (apply_save_patch_flag && !apply_save_patch) {
+      std::cerr << "--apply-save-patch requires two paths: --apply-save-patch SAVE PATCH\n\n";
+      print_usage(argv[0]);
+      return 2;
+    }
+
+    if (apply_save_patch) {
+      const bool out_to_stdout = (apply_out_path == "-");
+      const auto base_state = nebula4x::deserialize_game_from_json(nebula4x::read_text_file(apply_save_path));
+      const std::string base_canon = nebula4x::serialize_game_to_json(base_state);
+
+      const std::string patch_json = nebula4x::read_text_file(apply_patch_path);
+      const std::string patched_json = nebula4x::apply_json_patch(base_canon, patch_json);
+
+      // Validate the patched document is still a valid Nebula4X save.
+      const auto patched_state = nebula4x::deserialize_game_from_json(patched_json);
+      const std::string patched_canon = nebula4x::serialize_game_to_json(patched_state);
+
+      if (out_to_stdout) {
+        std::cout << patched_canon;
+      } else {
+        nebula4x::write_text_file(apply_out_path, patched_canon);
+        if (!quiet) {
+          std::cout << "Patched save written to " << apply_out_path << "\n";
+        }
+      }
+
+      if (!quiet && out_to_stdout) {
+        std::cerr << "Patched save written to stdout\n";
       }
       return 0;
     }
@@ -431,8 +519,10 @@ int main(int argc, char** argv) {
     const std::string scenario = get_str_arg(argc, argv, "--scenario", "sol");
     const int seed = get_int_arg(argc, argv, "--seed", 1);
     const int systems = get_int_arg(argc, argv, "--systems", 12);
-    const std::string content_path = get_str_arg(argc, argv, "--content", "data/blueprints/starting_blueprints.json");
-    const std::string tech_path = get_str_arg(argc, argv, "--tech", "data/tech/tech_tree.json");
+    std::vector<std::string> content_paths = get_multi_str_args(argc, argv, "--content");
+    if (content_paths.empty()) content_paths.push_back("data/blueprints/starting_blueprints.json");
+    std::vector<std::string> tech_paths = get_multi_str_args(argc, argv, "--tech");
+    if (tech_paths.empty()) tech_paths.push_back("data/tech/tech_tree.json");
     const std::string load_path = get_str_arg(argc, argv, "--load", "");
     const std::string save_path = get_str_arg(argc, argv, "--save", "");
     const std::string export_events_csv_path = get_str_arg(argc, argv, "--export-events-csv", "");
@@ -446,6 +536,18 @@ int main(int argc, char** argv) {
     const std::string export_bodies_json_path = get_str_arg(argc, argv, "--export-bodies-json", "");
     const std::string export_tech_tree_json_path = get_str_arg(argc, argv, "--export-tech-tree-json", "");
     const std::string export_tech_tree_dot_path = get_str_arg(argc, argv, "--export-tech-tree-dot", "");
+    const std::string export_timeline_jsonl_path = get_str_arg(argc, argv, "--export-timeline-jsonl", "");
+
+    const bool print_digests = has_flag(argc, argv, "--digest");
+    const bool digest_no_events = has_flag(argc, argv, "--digest-no-events");
+    const bool digest_no_ui = has_flag(argc, argv, "--digest-no-ui");
+
+    nebula4x::TimelineExportOptions timeline_opt;
+    timeline_opt.include_minerals = true;
+    timeline_opt.include_ship_cargo = has_flag(argc, argv, "--timeline-include-cargo");
+    timeline_opt.mineral_filter = get_multi_str_args(argc, argv, "--timeline-mineral");
+    timeline_opt.digest.include_events = !digest_no_events;
+    timeline_opt.digest.include_ui_state = !digest_no_ui;
 
     std::string plan_faction_raw;
     std::string plan_tech_raw;
@@ -477,6 +579,7 @@ int main(int argc, char** argv) {
         (!export_bodies_json_path.empty() && export_bodies_json_path == "-") ||
         (!export_tech_tree_json_path.empty() && export_tech_tree_json_path == "-") ||
         (!export_tech_tree_dot_path.empty() && export_tech_tree_dot_path == "-") ||
+        (!export_timeline_jsonl_path.empty() && export_timeline_jsonl_path == "-") ||
         (!plan_research_json_path.empty() && plan_research_json_path == "-");
 
     const bool list_factions = has_flag(argc, argv, "--list-factions");
@@ -487,6 +590,7 @@ int main(int argc, char** argv) {
     const bool list_colonies = has_flag(argc, argv, "--list-colonies");
 
     const bool format_save = has_flag(argc, argv, "--format-save");
+    const bool fix_save = has_flag(argc, argv, "--fix-save");
     const bool validate_content = has_flag(argc, argv, "--validate-content");
     const bool validate_save = has_flag(argc, argv, "--validate-save");
 
@@ -506,8 +610,16 @@ int main(int argc, char** argv) {
       return 0;
     }
 
-    auto content = nebula4x::load_content_db_from_file(content_path);
-    content.techs = nebula4x::load_tech_db_from_file(tech_path);
+    if (fix_save) {
+      if (load_path.empty() || (save_path.empty() && !has_flag(argc, argv, "--dump"))) {
+        std::cerr << "--fix-save requires --load and either --save or --dump\n\n";
+        print_usage(argv[0]);
+        return 2;
+      }
+    }
+
+    auto content = nebula4x::load_content_db_from_files(content_paths);
+    content.techs = nebula4x::load_tech_db_from_files(tech_paths);
 
     if (validate_content) {
       const auto errors = nebula4x::validate_content_db(content);
@@ -537,6 +649,56 @@ int main(int argc, char** argv) {
         print_usage(argv[0]);
         return 2;
       }
+    }
+
+    if (fix_save) {
+      const bool dump_json = has_flag(argc, argv, "--dump");
+      std::ostream& info = dump_json ? std::cerr : (script_stdout ? std::cerr : std::cout);
+
+      const auto report = nebula4x::fix_game_state(sim.state(), &sim.content());
+      const auto errors = nebula4x::validate_game_state(sim.state(), &sim.content());
+
+      if (!quiet) {
+        info << "Applied state fixer: " << report.changes << " change(s)";
+        if (!errors.empty()) {
+          info << " (validation still failing)";
+        }
+        info << "\n";
+
+        const std::size_t max_lines = 100;
+        const std::size_t n = std::min<std::size_t>(max_lines, report.actions.size());
+        for (std::size_t i = 0; i < n; ++i) {
+          info << "  - " << report.actions[i] << "\n";
+        }
+        if (report.actions.size() > max_lines) {
+          info << "  ... (" << (report.actions.size() - max_lines) << " more)\n";
+        }
+
+        if (!errors.empty()) {
+          info << "\nState validation failed after fix (" << errors.size() << " error(s)):\n";
+          const std::size_t max_err = 50;
+          const std::size_t ecount = std::min<std::size_t>(max_err, errors.size());
+          for (std::size_t i = 0; i < ecount; ++i) {
+            info << "  - " << errors[i] << "\n";
+          }
+          if (errors.size() > max_err) {
+            info << "  ... (" << (errors.size() - max_err) << " more)\n";
+          }
+        }
+      }
+
+      if (!save_path.empty()) {
+        nebula4x::write_text_file(save_path, nebula4x::serialize_game_to_json(sim.state()));
+        if (!quiet) {
+          info << "\nWrote fixed save to " << save_path << "\n";
+        }
+      }
+
+      if (dump_json) {
+        std::cout << "\n--- JSON ---\n" << nebula4x::serialize_game_to_json(sim.state()) << "\n";
+      }
+
+      return errors.empty() ? 0 : 1;
     }
 
 
@@ -698,6 +860,26 @@ int main(int argc, char** argv) {
       return 0;
     }
 
+    const bool export_timeline_jsonl = !export_timeline_jsonl_path.empty();
+
+    std::uint64_t content_digest = 0;
+    if (export_timeline_jsonl || print_digests) {
+      content_digest = nebula4x::digest_content_db64(sim.content());
+    }
+
+    std::vector<nebula4x::TimelineSnapshot> timeline;
+    std::uint64_t prev_next_event_seq = sim.state().next_event_seq;
+    if (export_timeline_jsonl) {
+      int reserve_days = until_event ? until_event_days : days;
+      if (reserve_days < 0) reserve_days = 0;
+      timeline.reserve(static_cast<std::size_t>(reserve_days) + 1);
+
+      // Initial snapshot: new_events == 0
+      timeline.push_back(nebula4x::compute_timeline_snapshot(
+          sim.state(), sim.content(), content_digest, sim.state().next_event_seq, timeline_opt));
+      prev_next_event_seq = sim.state().next_event_seq;
+    }
+
     nebula4x::AdvanceUntilEventResult until_res{};
     if (until_event) {
       if (until_event_days <= 0) {
@@ -774,9 +956,36 @@ int main(int argc, char** argv) {
 
       stop.message_contains = get_str_arg(argc, argv, "--events-contains", "");
 
-      until_res = sim.advance_until_event(until_event_days, stop);
+      if (export_timeline_jsonl) {
+        // Step day-by-day so we can emit a snapshot per day.
+        for (int i = 0; i < until_event_days; ++i) {
+          const auto day_res = sim.advance_until_event(1, stop);
+          until_res.days_advanced += day_res.days_advanced;
+          if (day_res.hit) {
+            until_res.hit = true;
+            until_res.event = day_res.event;
+          }
+
+          timeline.push_back(nebula4x::compute_timeline_snapshot(
+              sim.state(), sim.content(), content_digest, prev_next_event_seq, timeline_opt));
+          prev_next_event_seq = sim.state().next_event_seq;
+
+          if (day_res.hit) break;
+        }
+      } else {
+        until_res = sim.advance_until_event(until_event_days, stop);
+      }
     } else {
-      sim.advance_days(days);
+      if (export_timeline_jsonl) {
+        for (int i = 0; i < days; ++i) {
+          sim.advance_days(1);
+          timeline.push_back(nebula4x::compute_timeline_snapshot(
+              sim.state(), sim.content(), content_digest, prev_next_event_seq, timeline_opt));
+          prev_next_event_seq = sim.state().next_event_seq;
+        }
+      } else {
+        sim.advance_days(days);
+      }
     }
 
     const auto& s = sim.state();
@@ -812,6 +1021,14 @@ int main(int argc, char** argv) {
       }
     }
 
+    if (print_digests) {
+      std::ostream& out = script_stdout ? std::cerr : std::cout;
+      out << "content_digest " << nebula4x::digest64_to_hex(content_digest) << "\n";
+      out << "state_digest "
+          << nebula4x::digest64_to_hex(nebula4x::digest_game_state64(sim.state(), timeline_opt.digest))
+          << "\n";
+    }
+
     const bool dump_events = has_flag(argc, argv, "--dump-events");
     const bool export_events_csv = !export_events_csv_path.empty();
     const bool export_events_json = !export_events_json_path.empty();
@@ -830,7 +1047,7 @@ int main(int argc, char** argv) {
     if (dump_events || export_events_csv || export_events_json || export_events_jsonl || events_summary ||
         events_summary_json || events_summary_csv || export_ships_json || export_colonies_json || export_fleets_json ||
         export_bodies_json ||
-        export_tech_tree_json || export_tech_tree_dot || plan_research || export_plan_json) {
+        export_tech_tree_json || export_tech_tree_dot || export_timeline_jsonl || plan_research || export_plan_json) {
       // Prevent ambiguous script output.
       {
         int stdout_exports = 0;
@@ -845,6 +1062,7 @@ int main(int argc, char** argv) {
         if (export_bodies_json && export_bodies_json_path == "-") ++stdout_exports;
         if (export_tech_tree_json && export_tech_tree_json_path == "-") ++stdout_exports;
         if (export_tech_tree_dot && export_tech_tree_dot_path == "-") ++stdout_exports;
+        if (export_timeline_jsonl && export_timeline_jsonl_path == "-") ++stdout_exports;
         if (export_plan_json && plan_research_json_path == "-") ++stdout_exports;
         if (stdout_exports > 1) {
           std::cerr << "Multiple machine-readable outputs set to '-' (stdout). Choose at most one.\n";
@@ -1288,6 +1506,25 @@ if (events_summary_csv) {
       }
     }
 
+    if (export_timeline_jsonl) {
+      try {
+        const std::string jsonl_text = nebula4x::timeline_snapshots_to_jsonl(timeline);
+        if (export_timeline_jsonl_path == "-") {
+          // Explicit stdout export for scripting.
+          std::cout << jsonl_text;
+        } else {
+          nebula4x::write_text_file(export_timeline_jsonl_path, jsonl_text);
+          if (!quiet) {
+            std::ostream& info = script_stdout ? std::cerr : std::cout;
+            info << "\nWrote timeline JSONL to " << export_timeline_jsonl_path << "\n";
+          }
+        }
+      } catch (const std::exception& e) {
+        std::cerr << "Failed to export timeline JSONL: " << e.what() << "\n";
+        return 1;
+      }
+    }
+
     if (export_ships_json) {
       try {
         const std::string json_text = nebula4x::ships_to_json(s, &sim.content());
@@ -1361,6 +1598,20 @@ if (events_summary_csv) {
       } catch (const std::exception& e) {
         std::cerr << "Failed to export bodies JSON: " << e.what() << "\n";
         return 1;
+      }
+
+      // --- Timeline exports (state/time-series) ---
+      if (export_timeline_jsonl) {
+        const std::string out = nebula4x::timeline_snapshots_to_jsonl(timeline);
+        if (export_timeline_jsonl_path == "-") {
+          std::cout << out;
+        } else {
+          nebula4x::write_text_file(export_timeline_jsonl_path, out);
+          if (!quiet) {
+            std::ostream& info = script_stdout ? std::cerr : std::cout;
+            info << "Wrote timeline JSONL to " << export_timeline_jsonl_path << "\n";
+          }
+        }
       }
     }
 

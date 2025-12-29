@@ -1,0 +1,14 @@
+{
+  "components": {
+    "engine_test": {
+      "speed_km_s": 9
+    }
+  },
+  "designs": [
+    {
+      "id": "ship_test",
+      "components_add": ["sensor_test"],
+      "components_remove": ["cargo_test"]
+    }
+  ]
+}

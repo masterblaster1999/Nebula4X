@@ -29,6 +29,8 @@ target_sources(nebula4x_core
     src/core/research_planner.cpp
     src/core/scenario.cpp
     src/core/simulation.cpp
+    src/core/simulation_tick_ships.cpp
+    src/core/simulation_tick_combat.cpp
   src/core/ai_economy.cpp
     src/core/serialization.cpp
     src/core/tech.cpp
@@ -40,6 +42,8 @@ target_sources(nebula4x_core
     src/util/state_export.cpp
     src/util/strings.cpp
     src/util/save_diff.cpp
+    src/util/digest.cpp
+    src/util/timeline_export.cpp
     src/util/tech_export.cpp
 )
 
@@ -160,6 +164,7 @@ if(NEBULA4X_BUILD_TESTS)
     tests/test_research_planner.cpp
     tests/test_mineral_deposits.cpp
     tests/test_power_system.cpp
+    tests/test_digests.cpp
   tests/test_refit.cpp
     tests/test_diplomacy.cpp
     tests/test_auto_routing.cpp
@@ -167,6 +172,8 @@ if(NEBULA4X_BUILD_TESTS)
     tests/test_determinism.cpp
     tests/test_event_export.cpp
     tests/test_content_validation.cpp
+    tests/test_content_overlays.cpp
+    tests/test_spatial_index.cpp
     tests/test_random_scenario.cpp
     tests/test_file_io.cpp
     tests/test_json_unicode.cpp

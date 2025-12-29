@@ -162,5 +162,66 @@ int test_state_validation() {
     N4X_ASSERT(has_scrap_missing_colony);
   }
 
+  // Fixer: should be able to repair a variety of common integrity problems and
+  // yield a state that validates successfully.
+  {
+    auto st = nebula4x::make_sol_scenario();
+    N4X_ASSERT(!st.systems.empty());
+    N4X_ASSERT(!st.factions.empty());
+    N4X_ASSERT(!st.ships.empty());
+
+    const auto ship_id = st.ships.begin()->first;
+    const auto sys_id = st.systems.begin()->first;
+
+    // Corrupt a few invariants.
+    st.selected_system = static_cast<nebula4x::Id>(999999);
+    st.next_id = 1;
+    st.next_event_seq = 1;
+
+    st.systems[sys_id].ships.push_back(static_cast<nebula4x::Id>(999999));
+    st.ships[ship_id].system_id = static_cast<nebula4x::Id>(999999);
+    st.ships[ship_id].design_id = "definitely_not_a_design";
+
+    st.ship_orders[static_cast<nebula4x::Id>(999999)] = nebula4x::ShipOrders{};
+    st.ship_orders[ship_id].queue.push_back(nebula4x::MoveToBody{static_cast<nebula4x::Id>(999999)});
+
+    // Add an invalid fleet (id mismatch, bad faction, missing/duplicate ships).
+    {
+      nebula4x::Fleet fl;
+      fl.id = static_cast<nebula4x::Id>(999997); // intentionally mismatched
+      fl.name = "Bad Fleet";
+      fl.faction_id = static_cast<nebula4x::Id>(999999);
+      fl.leader_ship_id = static_cast<nebula4x::Id>(999999);
+      fl.ship_ids = {ship_id, ship_id, static_cast<nebula4x::Id>(999999)};
+      st.fleets[static_cast<nebula4x::Id>(999998)] = fl;
+    }
+
+    // Add a broken event.
+    {
+      nebula4x::SimEvent ev;
+      ev.seq = 0;
+      ev.day = st.date.days_since_epoch();
+      ev.level = nebula4x::EventLevel::Info;
+      ev.category = nebula4x::EventCategory::General;
+      ev.system_id = static_cast<nebula4x::Id>(999999);
+      ev.ship_id = static_cast<nebula4x::Id>(999999);
+      ev.message = "Test";
+      st.events.push_back(ev);
+    }
+
+    const auto before = nebula4x::validate_game_state(st, &content);
+    N4X_ASSERT(!before.empty());
+
+    const auto report = nebula4x::fix_game_state(st, &content);
+    N4X_ASSERT(report.changes > 0);
+
+    const auto after = nebula4x::validate_game_state(st, &content);
+    if (!after.empty()) {
+      std::cerr << "State validation still failing after fix_game_state():\n";
+      for (const auto& e : after) std::cerr << "  - " << e << "\n";
+      return 1;
+    }
+  }
+
   return 0;
 }

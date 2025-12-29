@@ -1,0 +1,6 @@
+{
+  "techs": [
+    { "id": "t0", "name": "Tech 0", "cost": 50, "prereqs": [], "effects": [] },
+    { "id": "t2", "cost": 250, "prereqs_add": ["t0"] }
+  ]
+}

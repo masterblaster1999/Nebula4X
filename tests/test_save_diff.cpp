@@ -51,5 +51,54 @@ int test_save_diff() {
     N4X_ASSERT(saw_c);
   }
 
+  // RFC 6902 JSON Patch roundtrip: diff -> apply -> equals.
+  {
+    const std::string patch = nebula4x::diff_saves_to_json_patch(a, b, nebula4x::JsonPatchOptions{.indent = 0});
+    const std::string applied = nebula4x::apply_json_patch(a, patch, nebula4x::JsonPatchApplyOptions{.indent = 0});
+
+    const auto canon_applied = nebula4x::json::stringify(nebula4x::json::parse(applied), 0);
+    const auto canon_b = nebula4x::json::stringify(nebula4x::json::parse(b), 0);
+    N4X_ASSERT(canon_applied == canon_b);
+  }
+
+  // Array removal ordering: removals must be emitted from end->front to keep indices valid.
+  {
+    const std::string a2 = "{\"arr\":[1,2,3]}";
+    const std::string b2 = "{\"arr\":[1]}";
+    const std::string patch = nebula4x::diff_saves_to_json_patch(a2, b2, nebula4x::JsonPatchOptions{.indent = 0});
+    const auto pv = nebula4x::json::parse(patch);
+    N4X_ASSERT(pv.is_array());
+    const auto& ops = pv.array();
+
+    // Expect: remove /arr/2 then remove /arr/1 (order matters).
+    bool saw_remove_2_then_1 = false;
+    if (ops.size() >= 2 && ops[0].is_object() && ops[1].is_object()) {
+      const auto& o0 = ops[0].object();
+      const auto& o1 = ops[1].object();
+      const std::string op0 = o0.at("op").string_value();
+      const std::string p0 = o0.at("path").string_value();
+      const std::string op1 = o1.at("op").string_value();
+      const std::string p1 = o1.at("path").string_value();
+      saw_remove_2_then_1 = (op0 == "remove" && p0 == "/arr/2" && op1 == "remove" && p1 == "/arr/1");
+    }
+    N4X_ASSERT(saw_remove_2_then_1);
+
+    const std::string applied = nebula4x::apply_json_patch(a2, patch, nebula4x::JsonPatchApplyOptions{.indent = 0});
+    const auto canon_applied = nebula4x::json::stringify(nebula4x::json::parse(applied), 0);
+    const auto canon_b2 = nebula4x::json::stringify(nebula4x::json::parse(b2), 0);
+    N4X_ASSERT(canon_applied == canon_b2);
+  }
+
+  // JSON Pointer escaping.
+  {
+    const std::string a3 = "{\"x/y\":{\"~t\":1}}";
+    const std::string b3 = "{\"x/y\":{\"~t\":2}}";
+    const std::string patch = nebula4x::diff_saves_to_json_patch(a3, b3, nebula4x::JsonPatchOptions{.indent = 0});
+    const std::string applied = nebula4x::apply_json_patch(a3, patch, nebula4x::JsonPatchApplyOptions{.indent = 0});
+    const auto canon_applied = nebula4x::json::stringify(nebula4x::json::parse(applied), 0);
+    const auto canon_b3 = nebula4x::json::stringify(nebula4x::json::parse(b3), 0);
+    N4X_ASSERT(canon_applied == canon_b3);
+  }
+
   return 0;
 }

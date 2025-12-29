@@ -1,7 +1,10 @@
 #pragma once
 
+#include <cstdint>
+#include <list>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "nebula4x/core/game_state.h"
@@ -510,6 +513,68 @@ bool move_construction_order(Id colony_id, int from_index, int to_index);
 
   void push_event(EventLevel level, std::string message);
   void push_event(EventLevel level, EventCategory category, std::string message, EventContext ctx = {});
+// --- Jump route planning cache (performance) ---
+// Route planning can be called frequently from the UI (hover previews) and from AI logistics.
+// Cache successful plans for the current simulation day to avoid repeated Dijkstra runs.
+struct JumpRouteCacheKey {
+  Id start_system_id{kInvalidId};
+  std::uint64_t start_pos_x_bits{0};
+  std::uint64_t start_pos_y_bits{0};
+  Id faction_id{kInvalidId};
+  Id target_system_id{kInvalidId};
+  bool restrict_to_discovered{false};
+
+  bool operator==(const JumpRouteCacheKey& o) const {
+    return start_system_id == o.start_system_id &&
+           start_pos_x_bits == o.start_pos_x_bits &&
+           start_pos_y_bits == o.start_pos_y_bits &&
+           faction_id == o.faction_id &&
+           target_system_id == o.target_system_id &&
+           restrict_to_discovered == o.restrict_to_discovered;
+  }
+};
+
+struct JumpRouteCacheKeyHash {
+  std::size_t operator()(const JumpRouteCacheKey& k) const {
+    std::size_t h = 0;
+    auto mix = [](std::size_t& seed, std::size_t v) {
+      seed ^= v + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
+    };
+    mix(h, std::hash<Id>()(k.start_system_id));
+    mix(h, std::hash<std::uint64_t>()(k.start_pos_x_bits));
+    mix(h, std::hash<std::uint64_t>()(k.start_pos_y_bits));
+    mix(h, std::hash<Id>()(k.faction_id));
+    mix(h, std::hash<Id>()(k.target_system_id));
+    mix(h, std::hash<bool>()(k.restrict_to_discovered));
+    return h;
+  }
+};
+
+struct JumpRouteCacheEntry {
+  JumpRoutePlan plan;
+  std::list<JumpRouteCacheKey>::iterator lru_it;
+};
+
+using JumpRouteCacheMap = std::unordered_map<JumpRouteCacheKey, JumpRouteCacheEntry, JumpRouteCacheKeyHash>;
+
+std::optional<JumpRoutePlan> plan_jump_route_cached(Id start_system_id, Vec2 start_pos_mkm, Id faction_id,
+                                                   double speed_km_s, Id target_system_id,
+                                                   bool restrict_to_discovered) const;
+
+void ensure_jump_route_cache_current() const;
+void invalidate_jump_route_cache() const;
+void touch_jump_route_cache_entry(JumpRouteCacheMap::iterator it) const;
+
+static constexpr std::size_t kJumpRouteCacheCapacity = 256;
+mutable bool jump_route_cache_day_valid_{false};
+mutable std::int64_t jump_route_cache_day_{0};
+
+mutable std::list<JumpRouteCacheKey> jump_route_cache_lru_;
+mutable JumpRouteCacheMap jump_route_cache_;
+mutable std::uint64_t jump_route_cache_hits_{0};
+mutable std::uint64_t jump_route_cache_misses_{0};
+
+
 
   ContentDB content_;
   SimConfig cfg_;
