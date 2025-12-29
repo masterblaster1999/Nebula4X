@@ -17,6 +17,23 @@ struct MoveToBody {
   Id body_id{kInvalidId};
 };
 
+// Establish a new colony on an (uncolonized) body.
+//
+// Notes:
+// - This behaves like a MoveToBody order until the ship arrives in docking range,
+//   at which point the colony is created and the colonizer ship is removed.
+// - The ship must have a non-zero colony capacity (provided by a colony module
+//   component).
+// - Any cargo carried by the ship is transferred to the new colony as starting
+//   stockpile.
+struct ColonizeBody {
+  Id body_id{kInvalidId};
+
+  // Optional: if empty, the simulation will pick a default name based on the
+  // target body.
+  std::string colony_name;
+};
+
 // Station-keep with a body for a duration.
 //
 // duration_days:
@@ -86,6 +103,7 @@ struct ScrapShip {
 
 using Order = std::variant<MoveToPoint,
                            MoveToBody,
+                           ColonizeBody,
                            OrbitBody,
                            TravelViaJump,
                            AttackShip,

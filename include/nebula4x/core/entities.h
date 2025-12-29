@@ -16,7 +16,7 @@ enum class BodyType { Star, Planet, Moon, Asteroid, GasGiant };
 
 enum class ShipRole { Freighter, Surveyor, Combatant, Unknown };
 
-enum class ComponentType { Engine, Cargo, Sensor, Reactor, Weapon, Armor, Unknown };
+enum class ComponentType { Engine, Cargo, Sensor, Reactor, Weapon, Armor, Shield, ColonyModule, Unknown };
 
 // Prototype AI / control flags.
 //
@@ -76,10 +76,13 @@ struct ComponentDef {
   double speed_km_s{0.0};          // engine
   double cargo_tons{0.0};          // cargo
   double sensor_range_mkm{0.0};    // sensor
+  double colony_capacity_millions{0.0}; // colony module
   double power{0.0};               // reactor
   double weapon_damage{0.0};       // weapon (damage per day)
   double weapon_range_mkm{0.0};    // weapon
   double hp_bonus{0.0};            // armor
+  double shield_hp{0.0};           // shield (max shield points)
+  double shield_regen_per_day{0.0}; // shield (regen per day)
 };
 
 // A ship design is essentially a named list of components + derived stats.
@@ -94,7 +97,10 @@ struct ShipDesign {
   double speed_km_s{0.0};
   double cargo_tons{0.0};
   double sensor_range_mkm{0.0};
+  double colony_capacity_millions{0.0};
   double max_hp{0.0};
+  double max_shields{0.0};
+  double shield_regen_per_day{0.0};
   double weapon_damage{0.0};
   double weapon_range_mkm{0.0};
 };
@@ -162,6 +168,11 @@ struct Ship {
 
   // Combat state.
   double hp{0.0};
+  // Shield state (if the design has shields).
+  //
+  // A value < 0 indicates \"uninitialized\" (e.g. loaded from an older save) and
+  // will be initialized to the design max when design stats are applied.
+  double shields{-1.0};
 };
 
 struct BuildOrder {

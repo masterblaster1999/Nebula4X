@@ -87,6 +87,8 @@ const char* component_type_label(ComponentType t) {
     case ComponentType::Reactor: return "Reactor";
     case ComponentType::Weapon: return "Weapon";
     case ComponentType::Armor: return "Armor";
+    case ComponentType::Shield: return "Shield";
+    case ComponentType::ColonyModule: return "Colony Module";
     default: return "Unknown";
   }
 }
@@ -225,9 +227,12 @@ ShipDesign derive_preview_design(const ContentDB& c, ShipDesign d) {
   double speed = 0.0;
   double cargo = 0.0;
   double sensor = 0.0;
+  double colony_cap = 0.0;
   double weapon_damage = 0.0;
   double weapon_range = 0.0;
   double hp_bonus = 0.0;
+  double max_shields = 0.0;
+  double shield_regen = 0.0;
 
   for (const auto& cid : d.components) {
     auto it = c.components.find(cid);
@@ -237,19 +242,28 @@ ShipDesign derive_preview_design(const ContentDB& c, ShipDesign d) {
     speed = std::max(speed, comp.speed_km_s);
     cargo += comp.cargo_tons;
     sensor = std::max(sensor, comp.sensor_range_mkm);
+    colony_cap += comp.colony_capacity_millions;
     if (comp.type == ComponentType::Weapon) {
       weapon_damage += comp.weapon_damage;
       weapon_range = std::max(weapon_range, comp.weapon_range_mkm);
     }
     hp_bonus += comp.hp_bonus;
+
+    if (comp.type == ComponentType::Shield) {
+      max_shields += comp.shield_hp;
+      shield_regen += comp.shield_regen_per_day;
+    }
   }
 
   d.mass_tons = mass;
   d.speed_km_s = speed;
   d.cargo_tons = cargo;
   d.sensor_range_mkm = sensor;
+  d.colony_capacity_millions = colony_cap;
   d.weapon_damage = weapon_damage;
   d.weapon_range_mkm = weapon_range;
+  d.max_shields = max_shields;
+  d.shield_regen_per_day = shield_regen;
   d.max_hp = std::max(1.0, mass * 2.0 + hp_bonus);
   return d;
 }
@@ -650,9 +664,20 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
         if (d) {
           ImGui::Text("Design: %s (%s)", d->name.c_str(), ship_role_label(d->role));
           ImGui::Text("Mass: %.0f t", d->mass_tons);
+          if (d->max_shields > 0.0) {
+            ImGui::Text("Shields: %.0f / %.0f (+%.1f/day)", std::max(0.0, sh->shields), d->max_shields,
+                        d->shield_regen_per_day);
+          } else {
+            ImGui::TextDisabled("Shields: (none)");
+          }
           ImGui::Text("HP: %.0f / %.0f", sh->hp, d->max_hp);
           ImGui::Text("Cargo: %.0f / %.0f t", cargo_used_tons, d->cargo_tons);
           ImGui::Text("Sensor: %.0f mkm", d->sensor_range_mkm);
+          if (d->colony_capacity_millions > 0.0) {
+            ImGui::Text("Colony capacity: %.0f M", d->colony_capacity_millions);
+          } else {
+            ImGui::TextDisabled("Colony capacity: (none)");
+          }
           if (d->weapon_damage > 0.0) {
             ImGui::Text("Weapons: %.1f dmg/day  (Range %.1f mkm)", d->weapon_damage, d->weapon_range_mkm);
           } else {
@@ -2629,10 +2654,18 @@ if (colony->shipyard_queue.empty()) {
             ImGui::Text("Mass: %.0f t", d->mass_tons);
             ImGui::Text("Speed: %.1f km/s", d->speed_km_s);
             ImGui::Text("HP: %.0f", d->max_hp);
+            if (d->max_shields > 0.0) {
+              ImGui::Text("Shields: %.0f (+%.1f/day)", d->max_shields, d->shield_regen_per_day);
+            } else {
+              ImGui::TextDisabled("Shields: (none)");
+            }
             // A design isn't carrying cargo; only an instantiated ship has a cargo manifes.
             const double cargo_used_tons = 0.0;
             ImGui::Text("Cargo: %.0f / %.0f t", cargo_used_tons, d->cargo_tons);
             ImGui::Text("Sensor: %.0f mkm", d->sensor_range_mkm);
+            if (d->colony_capacity_millions > 0.0) {
+              ImGui::Text("Colony capacity: %.0f M", d->colony_capacity_millions);
+            }
             if (d->weapon_damage > 0.0) ImGui::Text("Weapons: %.1f (range %.1f)", d->weapon_damage, d->weapon_range_mkm);
           }
         }
@@ -2743,10 +2776,12 @@ if (colony->shipyard_queue.empty()) {
               case ComponentType::Engine: return 0;
               case ComponentType::Reactor: return 1;
               case ComponentType::Cargo: return 2;
-              case ComponentType::Sensor: return 3;
-              case ComponentType::Weapon: return 4;
-              case ComponentType::Armor: return 5;
-              default: return 6;
+              case ComponentType::ColonyModule: return 3;
+              case ComponentType::Sensor: return 4;
+              case ComponentType::Weapon: return 5;
+              case ComponentType::Armor: return 6;
+              case ComponentType::Shield: return 7;
+              default: return 99;
             }
           };
 
@@ -2794,7 +2829,7 @@ if (colony->shipyard_queue.empty()) {
         ImGui::Text("Add component");
 
         static int comp_filter = 0; // 0=All
-        const char* filters[] = {"All", "Engine", "Cargo", "Sensor", "Reactor", "Weapon", "Armor"};
+        const char* filters[] = {"All", "Engine", "Cargo", "Sensor", "Reactor", "Weapon", "Armor", "Shield", "Colony Module"};
         ImGui::Combo("Filter", &comp_filter, filters, IM_ARRAYSIZE(filters));
 
         static char comp_search[64] = "";
@@ -2821,6 +2856,8 @@ if (colony->shipyard_queue.empty()) {
                 : (comp_filter == 4) ? ComponentType::Reactor
                 : (comp_filter == 5) ? ComponentType::Weapon
                 : (comp_filter == 6) ? ComponentType::Armor
+                : (comp_filter == 7) ? ComponentType::Shield
+                : (comp_filter == 8) ? ComponentType::ColonyModule
                                     : ComponentType::Unknown;
             if (cdef.type != desired) continue;
           }
@@ -2860,8 +2897,13 @@ if (colony->shipyard_queue.empty()) {
               if (c.power > 0.0) ImGui::TextDisabled("Power: %.1f", c.power);
               if (c.cargo_tons > 0.0) ImGui::TextDisabled("Cargo: %.0f t", c.cargo_tons);
               if (c.sensor_range_mkm > 0.0) ImGui::TextDisabled("Sensor: %.0f mkm", c.sensor_range_mkm);
+              if (c.colony_capacity_millions > 0.0)
+                ImGui::TextDisabled("Colony capacity: %.0f M", c.colony_capacity_millions);
               if (c.weapon_damage > 0.0) ImGui::TextDisabled("Weapon: %.1f (range %.1f)", c.weapon_damage, c.weapon_range_mkm);
               if (c.hp_bonus > 0.0) ImGui::TextDisabled("HP bonus: %.0f", c.hp_bonus);
+              if (c.shield_hp > 0.0) {
+                ImGui::TextDisabled("Shield: %.0f (+%.1f/day)", c.shield_hp, c.shield_regen_per_day);
+              }
             }
           }
 
@@ -2883,8 +2925,15 @@ if (colony->shipyard_queue.empty()) {
         ImGui::Text("Mass: %.0f t", preview.mass_tons);
         ImGui::Text("Speed: %.1f km/s", preview.speed_km_s);
         ImGui::Text("HP: %.0f", preview.max_hp);
+        if (preview.max_shields > 0.0) {
+          ImGui::Text("Shields: %.0f (+%.1f/day)", preview.max_shields, preview.shield_regen_per_day);
+        } else {
+          ImGui::TextDisabled("Shields: (none)");
+        }
         ImGui::Text("Cargo: %.0f t", preview.cargo_tons);
         ImGui::Text("Sensor: %.0f mkm", preview.sensor_range_mkm);
+        if (preview.colony_capacity_millions > 0.0)
+          ImGui::Text("Colony capacity: %.0f M", preview.colony_capacity_millions);
         if (preview.weapon_damage > 0.0) ImGui::Text("Weapons: %.1f (range %.1f)", preview.weapon_damage, preview.weapon_range_mkm);
 
         if (ImGui::Button("Save custom design")) {

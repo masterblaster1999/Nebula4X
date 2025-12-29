@@ -653,12 +653,22 @@ void Simulation::apply_design_stats_to_ship(Ship& ship) {
   if (!d) {
     ship.speed_km_s = 0.0;
     if (ship.hp <= 0.0) ship.hp = 1.0;
+    ship.shields = 0.0;
     return;
   }
 
   ship.speed_km_s = d->speed_km_s;
   if (ship.hp <= 0.0) ship.hp = d->max_hp;
   ship.hp = std::clamp(ship.hp, 0.0, d->max_hp);
+
+  const double max_sh = std::max(0.0, d->max_shields);
+  if (max_sh <= 1e-9) {
+    ship.shields = 0.0;
+  } else {
+    // Initialize shields for older saves / newly created ships.
+    if (ship.shields < 0.0) ship.shields = max_sh;
+    ship.shields = std::clamp(ship.shields, 0.0, max_sh);
+  }
 }
 
 bool Simulation::upsert_custom_design(ShipDesign design, std::string* error) {
@@ -677,9 +687,12 @@ bool Simulation::upsert_custom_design(ShipDesign design, std::string* error) {
   double speed = 0.0;
   double cargo = 0.0;
   double sensor = 0.0;
+  double colony_cap = 0.0;
   double weapon_damage = 0.0;
   double weapon_range = 0.0;
   double hp_bonus = 0.0;
+  double max_shields = 0.0;
+  double shield_regen = 0.0;
 
   for (const auto& cid : design.components) {
     auto it = content_.components.find(cid);
@@ -690,6 +703,7 @@ bool Simulation::upsert_custom_design(ShipDesign design, std::string* error) {
     speed = std::max(speed, c.speed_km_s);
     cargo += c.cargo_tons;
     sensor = std::max(sensor, c.sensor_range_mkm);
+    colony_cap += c.colony_capacity_millions;
 
     if (c.type == ComponentType::Weapon) {
       weapon_damage += c.weapon_damage;
@@ -697,14 +711,22 @@ bool Simulation::upsert_custom_design(ShipDesign design, std::string* error) {
     }
 
     hp_bonus += c.hp_bonus;
+
+    if (c.type == ComponentType::Shield) {
+      max_shields += c.shield_hp;
+      shield_regen += c.shield_regen_per_day;
+    }
   }
 
   design.mass_tons = mass;
   design.speed_km_s = speed;
   design.cargo_tons = cargo;
   design.sensor_range_mkm = sensor;
+  design.colony_capacity_millions = colony_cap;
   design.weapon_damage = weapon_damage;
   design.weapon_range_mkm = weapon_range;
+  design.max_shields = max_shields;
+  design.shield_regen_per_day = shield_regen;
   design.max_hp = std::max(1.0, mass * 2.0 + hp_bonus);
 
   state_.custom_designs[design.id] = std::move(design);
@@ -1575,6 +1597,22 @@ bool Simulation::issue_move_to_body(Id ship_id, Id body_id, bool restrict_to_dis
   return true;
 }
 
+bool Simulation::issue_colonize_body(Id ship_id, Id body_id, const std::string& colony_name,
+                                    bool restrict_to_discovered) {
+  const auto* body = find_ptr(state_.bodies, body_id);
+  if (!body) return false;
+
+  // Route across the jump network if needed.
+  if (!issue_travel_to_system(ship_id, body->system_id, restrict_to_discovered)) return false;
+
+  auto& q = state_.ship_orders[ship_id].queue;
+  ColonizeBody ord;
+  ord.body_id = body_id;
+  ord.colony_name = colony_name;
+  q.push_back(std::move(ord));
+  return true;
+}
+
 bool Simulation::issue_orbit_body(Id ship_id, Id body_id, int duration_days, bool restrict_to_discovered) {
   auto* ship = find_ptr(state_.ships, ship_id);
   if (!ship) return false;
@@ -1851,6 +1889,7 @@ void Simulation::tick_one_day() {
   tick_ai();
   tick_ships();
   tick_contacts();
+  tick_shields();
   tick_combat();
   tick_repairs();
 }
@@ -2023,6 +2062,34 @@ void Simulation::tick_contacts() {
 
       push_event(EventLevel::Info, EventCategory::Intel, msg, ctx);
     }
+  }
+}
+
+void Simulation::tick_shields() {
+  const auto ship_ids = sorted_keys(state_.ships);
+  for (Id sid : ship_ids) {
+    auto* sh = find_ptr(state_.ships, sid);
+    if (!sh) continue;
+    if (sh->hp <= 0.0) continue;
+
+    const auto* d = find_design(sh->design_id);
+    if (!d) {
+      // If we can't resolve the design, keep shields at 0 to avoid NaNs.
+      sh->shields = 0.0;
+      continue;
+    }
+
+    const double max_sh = std::max(0.0, d->max_shields);
+    if (max_sh <= 1e-9) {
+      sh->shields = 0.0;
+      continue;
+    }
+
+    // Initialize shields for older saves / freshly spawned ships.
+    if (sh->shields < 0.0) sh->shields = max_sh;
+
+    const double regen = std::max(0.0, d->shield_regen_per_day);
+    sh->shields = std::clamp(sh->shields + regen, 0.0, max_sh);
   }
 }
 
@@ -3199,6 +3266,11 @@ void Simulation::tick_ships() {
       k.target_id = std::get<MoveToBody>(ord).body_id;
       return k;
     }
+    if (std::holds_alternative<ColonizeBody>(ord)) {
+      k.kind = CohortKind::MoveBody;
+      k.target_id = std::get<ColonizeBody>(ord).body_id;
+      return k;
+    }
     if (std::holds_alternative<OrbitBody>(ord)) {
       k.kind = CohortKind::OrbitBody;
       k.target_id = std::get<OrbitBody>(ord).body_id;
@@ -3608,6 +3680,19 @@ void Simulation::tick_ships() {
         continue;
       }
       target = body->position_mkm;
+    } else if (std::holds_alternative<ColonizeBody>(q.front())) {
+      const auto& ord = std::get<ColonizeBody>(q.front());
+      const Id body_id = ord.body_id;
+      const auto* body = find_ptr(state_.bodies, body_id);
+      if (!body) {
+        q.erase(q.begin());
+        continue;
+      }
+      if (body->system_id != ship.system_id) {
+        q.erase(q.begin());
+        continue;
+      }
+      target = body->position_mkm;
     } else if (std::holds_alternative<OrbitBody>(q.front())) {
       auto& ord = std::get<OrbitBody>(q.front());
       const Id body_id = ord.body_id;
@@ -3723,7 +3808,9 @@ void Simulation::tick_ships() {
 
     const bool is_attack = std::holds_alternative<AttackShip>(q.front());
     const bool is_jump = std::holds_alternative<TravelViaJump>(q.front());
-    const bool is_body = std::holds_alternative<MoveToBody>(q.front());
+    const bool is_move_body = std::holds_alternative<MoveToBody>(q.front());
+    const bool is_colonize = std::holds_alternative<ColonizeBody>(q.front());
+    const bool is_body = is_move_body || is_colonize;
     const bool is_orbit = std::holds_alternative<OrbitBody>(q.front());
     const bool is_scrap = std::holds_alternative<ScrapShip>(q.front());
 
@@ -3952,7 +4039,133 @@ void Simulation::tick_ships() {
       continue;
     }
 
-    if (is_body && dist <= dock_range) {
+    if (is_colonize && dist <= dock_range) {
+      ship.position_mkm = target;
+
+      const ColonizeBody ord = std::get<ColonizeBody>(q.front()); // copy (we may erase the ship)
+      q.erase(q.begin());
+
+      const auto* body = find_ptr(state_.bodies, ord.body_id);
+      if (!body || body->system_id != ship.system_id) {
+        continue;
+      }
+
+      const bool colonizable = (body->type == BodyType::Planet || body->type == BodyType::Moon ||
+                                body->type == BodyType::Asteroid);
+      if (!colonizable) {
+        EventContext ctx;
+        ctx.faction_id = ship.faction_id;
+        ctx.system_id = ship.system_id;
+        ctx.ship_id = ship_id;
+        push_event(EventLevel::Warn, EventCategory::Exploration,
+                  "Colonization failed: target body is not colonizable: " + body->name, ctx);
+        continue;
+      }
+
+      // Ensure the body is not already colonized.
+      Id existing_colony_id = kInvalidId;
+      std::string existing_colony_name;
+      for (const auto& [cid, col] : state_.colonies) {
+        if (col.body_id == body->id) {
+          existing_colony_id = cid;
+          existing_colony_name = col.name;
+          break;
+        }
+      }
+      if (existing_colony_id != kInvalidId) {
+        EventContext ctx;
+        ctx.faction_id = ship.faction_id;
+        ctx.system_id = ship.system_id;
+        ctx.ship_id = ship_id;
+        ctx.colony_id = existing_colony_id;
+        push_event(EventLevel::Info, EventCategory::Exploration,
+                  "Colonization aborted: " + body->name + " already has a colony (" + existing_colony_name + ")", ctx);
+        continue;
+      }
+
+      {
+        const Ship ship_snapshot = ship;
+        const ShipDesign* d = find_design(ship_snapshot.design_id);
+        const double cap = d ? d->colony_capacity_millions : 0.0;
+        if (cap <= 1e-9) {
+          EventContext ctx;
+          ctx.faction_id = ship_snapshot.faction_id;
+          ctx.system_id = ship_snapshot.system_id;
+          ctx.ship_id = ship_snapshot.id;
+          push_event(EventLevel::Warn, EventCategory::Exploration,
+                    "Colonization failed: ship has no colony module capacity: " + ship_snapshot.name, ctx);
+          continue;
+        }
+
+        // Choose a unique colony name.
+        auto name_exists = [&](const std::string& n) {
+          for (const auto& [_, c] : state_.colonies) {
+            if (c.name == n) return true;
+          }
+          return false;
+        };
+        const std::string base_name = !ord.colony_name.empty() ? ord.colony_name : (body->name + " Colony");
+        std::string final_name = base_name;
+        for (int suffix = 2; name_exists(final_name); ++suffix) {
+          final_name = base_name + " (" + std::to_string(suffix) + ")";
+        }
+
+        Colony new_col;
+        new_col.id = allocate_id(state_);
+        new_col.name = final_name;
+        new_col.faction_id = ship_snapshot.faction_id;
+        new_col.body_id = body->id;
+        new_col.population_millions = cap;
+
+        // Transfer all carried cargo minerals to the new colony.
+        for (const auto& [mineral, tons] : ship_snapshot.cargo) {
+          if (tons > 1e-9) new_col.minerals[mineral] += tons;
+        }
+
+        state_.colonies[new_col.id] = new_col;
+
+        // Ensure the faction has this system discovered.
+        if (auto* fac = find_ptr(state_.factions, ship_snapshot.faction_id)) {
+          push_unique(fac->discovered_systems, body->system_id);
+        }
+
+        // Remove the ship from the system list.
+        if (auto* sys = find_ptr(state_.systems, ship_snapshot.system_id)) {
+          sys->ships.erase(std::remove(sys->ships.begin(), sys->ships.end(), ship_id), sys->ships.end());
+        }
+
+        // Remove ship orders, contacts, and the ship itself.
+        state_.ship_orders.erase(ship_id);
+        state_.ships.erase(ship_id);
+
+        // Keep fleet membership consistent.
+        remove_ship_from_fleets(ship_id);
+
+        for (auto& [_, fac] : state_.factions) {
+          fac.ship_contacts.erase(ship_id);
+        }
+
+        // Record event.
+        {
+          std::ostringstream ss;
+          ss.setf(std::ios::fixed);
+          ss.precision(0);
+          ss << cap;
+          const std::string msg = "Colony established: " + final_name + " on " + body->name +
+                                  " (population " + ss.str() + "M)";
+          EventContext ctx;
+          ctx.faction_id = new_col.faction_id;
+          ctx.system_id = ship_snapshot.system_id;
+          ctx.ship_id = ship_snapshot.id;
+          ctx.colony_id = new_col.id;
+          push_event(EventLevel::Info, EventCategory::Exploration, msg, ctx);
+        }
+      }
+
+      continue;
+    }
+
+    if (is_move_body && dist <= dock_range) {
       ship.position_mkm = target;
       q.erase(q.begin());
       continue;
@@ -4160,11 +4373,37 @@ void Simulation::tick_combat() {
   std::vector<Id> destroyed;
   destroyed.reserve(incoming_damage.size());
 
+  // Track how much damage was absorbed by shields vs applied to hull.
+  std::unordered_map<Id, double> shield_damage;
+  std::unordered_map<Id, double> hull_damage;
+  std::unordered_map<Id, double> pre_hp;
+  std::unordered_map<Id, double> pre_shields;
+  shield_damage.reserve(incoming_damage.size());
+  hull_damage.reserve(incoming_damage.size());
+  pre_hp.reserve(incoming_damage.size());
+  pre_shields.reserve(incoming_damage.size());
+
   for (Id tid : sorted_keys(incoming_damage)) {
     const double dmg = incoming_damage[tid];
     auto* tgt = find_ptr(state_.ships, tid);
     if (!tgt) continue;
-    tgt->hp -= dmg;
+
+    pre_hp[tid] = tgt->hp;
+    pre_shields[tid] = std::max(0.0, tgt->shields);
+
+    double remaining = dmg;
+    double absorbed = 0.0;
+    if (tgt->shields > 0.0 && remaining > 0.0) {
+      absorbed = std::min(tgt->shields, remaining);
+      tgt->shields -= absorbed;
+      remaining -= absorbed;
+    }
+    if (tgt->shields < 0.0) tgt->shields = 0.0;
+
+    shield_damage[tid] = absorbed;
+    hull_damage[tid] = remaining;
+
+    tgt->hp -= remaining;
     if (tgt->hp <= 0.0) destroyed.push_back(tid);
   }
 
@@ -4176,25 +4415,38 @@ void Simulation::tick_combat() {
     const double warn_frac = std::clamp(cfg_.combat_damage_event_warn_remaining_fraction, 0.0, 1.0);
 
     for (Id tid : sorted_keys(incoming_damage)) {
-      const double dmg = incoming_damage[tid];
-      if (dmg <= 1e-12) continue;
+      if (incoming_damage[tid] <= 1e-12) continue;
 
       const auto* tgt = find_ptr(state_.ships, tid);
       if (!tgt) continue;
       if (tgt->hp <= 0.0) continue; // handled by destruction log
 
+      const double sh_dmg = (shield_damage.find(tid) != shield_damage.end()) ? shield_damage.at(tid) : 0.0;
+      const double hull_dmg = (hull_damage.find(tid) != hull_damage.end()) ? hull_damage.at(tid) : 0.0;
+      if (sh_dmg <= 1e-12 && hull_dmg <= 1e-12) continue;
+
       const auto* sys = find_ptr(state_.systems, tgt->system_id);
       const std::string sys_name = sys ? sys->name : std::string("(unknown)");
 
-      // Use design max HP when available; otherwise approximate from pre-damage HP.
-      const double pre_hp = tgt->hp + dmg;
-      double max_hp = std::max(1.0, pre_hp);
+      // Use design max stats when available; otherwise approximate from pre-damage values.
+      double max_hp = std::max(1.0, pre_hp.find(tid) != pre_hp.end() ? pre_hp.at(tid) : tgt->hp);
+      double max_sh = std::max(0.0, pre_shields.find(tid) != pre_shields.end() ? pre_shields.at(tid) : 0.0);
       if (const auto* d = find_design(tgt->design_id)) {
         if (d->max_hp > 1e-9) max_hp = d->max_hp;
+        max_sh = std::max(0.0, d->max_shields);
       }
 
-      const double frac = dmg / std::max(1e-9, max_hp);
-      if (dmg + 1e-12 < min_abs && frac + 1e-12 < min_frac) continue;
+      // Threshold on either hull damage or (if no hull damage) shield damage.
+      double abs_metric = 0.0;
+      double frac_metric = 0.0;
+      if (hull_dmg > 1e-12) {
+        abs_metric = hull_dmg;
+        frac_metric = hull_dmg / std::max(1e-9, max_hp);
+      } else {
+        abs_metric = sh_dmg;
+        frac_metric = (max_sh > 1e-9) ? (sh_dmg / std::max(1e-9, max_sh)) : 1.0;
+      }
+      if (abs_metric + 1e-12 < min_abs && frac_metric + 1e-12 < min_frac) continue;
 
       // Summarize attackers for context.
       Id attacker_ship_id = kInvalidId;
@@ -4224,8 +4476,22 @@ void Simulation::tick_combat() {
       ctx.system_id = tgt->system_id;
       ctx.ship_id = tid;
 
-      std::string msg = "Ship damaged: " + tgt->name;
-      msg += " took " + fmt1(dmg) + " dmg (HP " + fmt1(std::max(0.0, tgt->hp)) + "/" + fmt1(max_hp) + ")";
+      std::string msg;
+      if (hull_dmg > 1e-12) {
+        msg = "Ship damaged: " + tgt->name;
+        msg += " took " + fmt1(hull_dmg) + " hull";
+        if (sh_dmg > 1e-12) msg += " + " + fmt1(sh_dmg) + " shield";
+        msg += " dmg";
+      } else {
+        msg = "Shields hit: " + tgt->name;
+        msg += " took " + fmt1(sh_dmg) + " dmg";
+      }
+
+      msg += " (";
+      if (max_sh > 1e-9) {
+        msg += "Shields " + fmt1(std::max(0.0, tgt->shields)) + "/" + fmt1(max_sh) + ", ";
+      }
+      msg += "HP " + fmt1(std::max(0.0, tgt->hp)) + "/" + fmt1(max_hp) + ")";
       msg += " in " + sys_name;
 
       if (attacker_ship_id != kInvalidId) {
@@ -4236,7 +4502,12 @@ void Simulation::tick_combat() {
         msg += ")";
       }
 
-      const double remaining_frac = std::clamp(tgt->hp / std::max(1e-9, max_hp), 0.0, 1.0);
+      const double hp_frac = std::clamp(tgt->hp / std::max(1e-9, max_hp), 0.0, 1.0);
+      double sh_frac = 1.0;
+      if (max_sh > 1e-9) {
+        sh_frac = std::clamp(tgt->shields / std::max(1e-9, max_sh), 0.0, 1.0);
+      }
+      const double remaining_frac = std::min(hp_frac, sh_frac);
       const EventLevel lvl = (remaining_frac <= warn_frac) ? EventLevel::Warn : EventLevel::Info;
       push_event(lvl, EventCategory::Combat, msg, ctx);
     }

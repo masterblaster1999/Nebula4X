@@ -1,5 +1,5 @@
 {
-  "version": 5,
+  "version": 6,
   "components": {
     "engine_chem_mk1": {
       "name": "Chemical Engine Mk.I",
@@ -18,6 +18,13 @@
       "type": "cargo",
       "mass_tons": 20,
       "cargo_tons": 500
+    },
+    "colony_module_mk1": {
+      "name": "Colony Module Mk.I",
+      "type": "colony_module",
+      "mass_tons": 80,
+      "colony_capacity_millions": 250,
+      "hp_bonus": 25
     },
     "sensor_mk1": {
       "name": "Active Sensor",
@@ -63,6 +70,20 @@
       "mass_tons": 30,
       "hp_bonus": 70
     },
+    "shield_mk1": {
+      "name": "Deflector Shield Mk.I",
+      "type": "shield",
+      "mass_tons": 40,
+      "shield_hp": 60,
+      "shield_regen_per_day": 6
+    },
+    "shield_mk2": {
+      "name": "Deflector Shield Mk.II",
+      "type": "shield",
+      "mass_tons": 55,
+      "shield_hp": 100,
+      "shield_regen_per_day": 8
+    },
     "reactor_mk2": {
       "name": "Reactor Mk2",
       "type": "reactor",
@@ -88,6 +109,17 @@
       ]
     },
     {
+      "id": "colony_ship_mk1",
+      "name": "Colony Ship Mk1",
+      "role": "freighter",
+      "components": [
+        "engine_chem_mk1",
+        "cargo_mk1",
+        "cargo_mk1",
+        "colony_module_mk1"
+      ]
+    },
+    {
       "id": "surveyor_beta",
       "name": "Surveyor Beta",
       "role": "surveyor",
@@ -104,6 +136,19 @@
         "engine_chem_mk1",
         "sensor_mk1",
         "laser_mk1",
+        "armor_mk1"
+      ]
+    },
+    {
+      "id": "escort_delta",
+      "name": "Escort Delta (Shielded)",
+      "role": "combatant",
+      "components": [
+        "engine_ion_mk1",
+        "reactor_mk1",
+        "sensor_mk2",
+        "laser_mk2",
+        "shield_mk1",
         "armor_mk1"
       ]
     },

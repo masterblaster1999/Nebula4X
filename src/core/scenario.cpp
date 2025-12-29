@@ -32,7 +32,7 @@ GameState make_sol_scenario() {
     f.name = "Terran Union";
     f.research_points = 0.0;
     f.known_techs = {"chemistry_1"};
-    f.research_queue = {"nuclear_1", "propulsion_1"};
+    f.research_queue = {"nuclear_1", "propulsion_1", "colonization_1"};
     s.factions[terrans] = f;
   }
 
@@ -297,7 +297,7 @@ GameState make_random_scenario(std::uint32_t seed, int num_systems) {
     f.name = "Terran Union";
     f.research_points = 0.0;
     f.known_techs = {"chemistry_1"};
-    f.research_queue = {"nuclear_1", "propulsion_1"};
+    f.research_queue = {"nuclear_1", "propulsion_1", "colonization_1"};
     s.factions[terrans] = f;
   }
 

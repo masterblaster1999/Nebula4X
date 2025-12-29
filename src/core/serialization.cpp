@@ -14,7 +14,7 @@ using json::Array;
 using json::Object;
 using json::Value;
 
-constexpr int kCurrentSaveVersion = 18;
+constexpr int kCurrentSaveVersion = 21;
 
 template <typename Map>
 std::vector<typename Map::key_type> sorted_keys(const Map& m) {
@@ -186,6 +186,10 @@ Value order_to_json(const Order& order) {
         } else if constexpr (std::is_same_v<T, MoveToBody>) {
           obj["type"] = std::string("move_to_body");
           obj["body_id"] = static_cast<double>(o.body_id);
+        } else if constexpr (std::is_same_v<T, ColonizeBody>) {
+          obj["type"] = std::string("colonize_body");
+          obj["body_id"] = static_cast<double>(o.body_id);
+          if (!o.colony_name.empty()) obj["colony_name"] = o.colony_name;
         } else if constexpr (std::is_same_v<T, OrbitBody>) {
           obj["type"] = std::string("orbit_body");
           obj["body_id"] = static_cast<double>(o.body_id);
@@ -239,6 +243,12 @@ Order order_from_json(const Value& v) {
     MoveToBody m;
     m.body_id = static_cast<Id>(o.at("body_id").int_value());
     return m;
+  }
+  if (type == "colonize_body") {
+    ColonizeBody c;
+    c.body_id = static_cast<Id>(o.at("body_id").int_value());
+    if (auto itn = o.find("colony_name"); itn != o.end()) c.colony_name = itn->second.string_value();
+    return c;
   }
   if (type == "orbit_body") {
     OrbitBody m;
@@ -435,6 +445,7 @@ std::string serialize_game_to_json(const GameState& s) {
     o["auto_freight"] = sh.auto_freight;
     o["speed_km_s"] = sh.speed_km_s;
     o["hp"] = sh.hp;
+    o["shields"] = sh.shields;
     o["cargo"] = map_string_double_to_json(sh.cargo);
     ships.push_back(o);
   }
@@ -576,7 +587,10 @@ std::string serialize_game_to_json(const GameState& s) {
     o["speed_km_s"] = d.speed_km_s;
     o["cargo_tons"] = d.cargo_tons;
     o["sensor_range_mkm"] = d.sensor_range_mkm;
+    o["colony_capacity_millions"] = d.colony_capacity_millions;
     o["max_hp"] = d.max_hp;
+    o["max_shields"] = d.max_shields;
+    o["shield_regen_per_day"] = d.shield_regen_per_day;
     o["weapon_damage"] = d.weapon_damage;
     o["weapon_range_mkm"] = d.weapon_range_mkm;
     designs.push_back(o);
@@ -737,6 +751,7 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     if (auto it = o.find("auto_freight"); it != o.end()) sh.auto_freight = it->second.bool_value(false);
     sh.speed_km_s = o.at("speed_km_s").number_value(0.0);
     sh.hp = o.at("hp").number_value(0.0);
+    if (auto it = o.find("shields"); it != o.end()) sh.shields = it->second.number_value(-1.0);
     if (auto it = o.find("cargo"); it != o.end()) sh.cargo = map_string_double_from_json(it->second);
     s.ships[sh.id] = sh;
   }
@@ -909,7 +924,14 @@ GameState deserialize_game_from_json(const std::string& json_text) {
       d.speed_km_s = o.at("speed_km_s").number_value(0.0);
       d.cargo_tons = o.at("cargo_tons").number_value(0.0);
       d.sensor_range_mkm = o.at("sensor_range_mkm").number_value(0.0);
+      if (auto itcc = o.find("colony_capacity_millions"); itcc != o.end()) {
+        d.colony_capacity_millions = itcc->second.number_value(0.0);
+      }
       d.max_hp = o.at("max_hp").number_value(0.0);
+      if (auto itms = o.find("max_shields"); itms != o.end()) d.max_shields = itms->second.number_value(0.0);
+      if (auto itsr = o.find("shield_regen_per_day"); itsr != o.end()) {
+        d.shield_regen_per_day = itsr->second.number_value(0.0);
+      }
       d.weapon_damage = o.at("weapon_damage").number_value(0.0);
       d.weapon_range_mkm = o.at("weapon_range_mkm").number_value(0.0);
       s.custom_designs[d.id] = d;

@@ -150,6 +150,7 @@ if(NEBULA4X_BUILD_TESTS)
     tests/test_main.cpp
     tests/test_date.cpp
     tests/test_simulation.cpp
+    tests/test_colonization.cpp
     tests/test_serialization.cpp
     tests/test_auto_freight.cpp
   tests/test_ai_economy.cpp
@@ -170,6 +171,7 @@ if(NEBULA4X_BUILD_TESTS)
     tests/test_state_export.cpp
     tests/test_fleets.cpp
     tests/test_combat_events.cpp
+    tests/test_shields.cpp
     tests/test_population_growth.cpp
     tests/test_ship_repairs.cpp
   )

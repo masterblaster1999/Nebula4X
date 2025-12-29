@@ -23,6 +23,8 @@ ComponentType parse_component_type(const std::string& s) {
   if (s == "reactor") return ComponentType::Reactor;
   if (s == "weapon") return ComponentType::Weapon;
   if (s == "armor") return ComponentType::Armor;
+  if (s == "shield") return ComponentType::Shield;
+  if (s == "colony_module" || s == "colony") return ComponentType::ColonyModule;
   return ComponentType::Unknown;
 }
 
@@ -58,6 +60,11 @@ ContentDB load_content_db_from_file(const std::string& path) {
       if (const auto* v_range = find_key(cj, "range_mkm")) c.sensor_range_mkm = v_range->number_value(0.0);
       if (const auto* v_sensor = find_key(cj, "sensor_range_mkm")) c.sensor_range_mkm = v_sensor->number_value(c.sensor_range_mkm);
 
+      // Optional: colony module seeding capacity.
+      if (const auto* v_col = find_key(cj, "colony_capacity_millions")) {
+        c.colony_capacity_millions = v_col->number_value(0.0);
+      }
+
       if (const auto* v_pow = find_key(cj, "power")) c.power = v_pow->number_value(0.0);
 
       if (const auto* v_dmg = find_key(cj, "damage")) c.weapon_damage = v_dmg->number_value(0.0);
@@ -70,6 +77,18 @@ ContentDB load_content_db_from_file(const std::string& path) {
       }
 
       if (const auto* v_hp = find_key(cj, "hp_bonus")) c.hp_bonus = v_hp->number_value(0.0);
+
+      // Optional: shields.
+      if (const auto* v_sh = find_key(cj, "shield_hp")) c.shield_hp = v_sh->number_value(0.0);
+      if (const auto* v_sh2 = find_key(cj, "shield")) {
+        // Allow shorthand "shield" for capacity in some content.
+        if (c.shield_hp <= 0.0) c.shield_hp = v_sh2->number_value(0.0);
+      }
+      if (const auto* v_sr = find_key(cj, "shield_regen_per_day")) c.shield_regen_per_day = v_sr->number_value(0.0);
+      if (const auto* v_sr2 = find_key(cj, "shield_regen")) {
+        // Allow shorthand "shield_regen".
+        if (c.shield_regen_per_day <= 0.0) c.shield_regen_per_day = v_sr2->number_value(0.0);
+      }
 
       db.components[c.id] = c;
     }
@@ -149,9 +168,12 @@ ContentDB load_content_db_from_file(const std::string& path) {
       double speed = 0.0;
       double cargo = 0.0;
       double sensor = 0.0;
+      double colony_cap = 0.0;
       double weapon_damage = 0.0;
       double weapon_range = 0.0;
       double hp_bonus = 0.0;
+      double max_shields = 0.0;
+      double shield_regen = 0.0;
 
       for (const auto& cid : d.components) {
         auto cit = db.components.find(cid);
@@ -162,6 +184,7 @@ ContentDB load_content_db_from_file(const std::string& path) {
         speed = std::max(speed, c.speed_km_s);
         cargo += c.cargo_tons;
         sensor = std::max(sensor, c.sensor_range_mkm);
+        colony_cap += c.colony_capacity_millions;
 
         if (c.type == ComponentType::Weapon) {
           weapon_damage += c.weapon_damage;
@@ -169,14 +192,23 @@ ContentDB load_content_db_from_file(const std::string& path) {
         }
 
         hp_bonus += c.hp_bonus;
+
+        if (c.type == ComponentType::Shield) {
+          max_shields += c.shield_hp;
+          shield_regen += c.shield_regen_per_day;
+        }
       }
 
       d.mass_tons = mass;
       d.speed_km_s = speed;
       d.cargo_tons = cargo;
       d.sensor_range_mkm = sensor;
+      d.colony_capacity_millions = colony_cap;
       d.weapon_damage = weapon_damage;
       d.weapon_range_mkm = weapon_range;
+
+      d.max_shields = max_shields;
+      d.shield_regen_per_day = shield_regen;
 
       // Very rough survivability model for the prototype.
       // (Later you can split this into armor/structure/etc.)

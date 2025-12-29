@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "techs": [
     {
       "id": "chemistry_1",
@@ -10,6 +10,20 @@
         {
           "type": "unlock_installation",
           "value": "automated_mine"
+        }
+      ]
+    },
+    {
+      "id": "colonization_1",
+      "name": "Colony Modules",
+      "cost": 1000,
+      "prereqs": [
+        "chemistry_1"
+      ],
+      "effects": [
+        {
+          "type": "unlock_component",
+          "value": "colony_module_mk1"
         }
       ]
     },
@@ -109,6 +123,35 @@
         {
           "type": "unlock_component",
           "value": "engine_ion_mk2"
+        }
+      ]
+    },
+    {
+      "id": "shields_1",
+      "name": "Deflector Shields",
+      "cost": 800,
+      "prereqs": [
+        "nuclear_1"
+      ],
+      "effects": [
+        {
+          "type": "unlock_component",
+          "value": "shield_mk1"
+        }
+      ]
+    },
+    {
+      "id": "shields_2",
+      "name": "Improved Shield Generators",
+      "cost": 1400,
+      "prereqs": [
+        "shields_1",
+        "reactors_2"
+      ],
+      "effects": [
+        {
+          "type": "unlock_component",
+          "value": "shield_mk2"
         }
       ]
     }

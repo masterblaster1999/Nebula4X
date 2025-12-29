@@ -112,11 +112,15 @@ std::string ships_to_json(const GameState& state, const ContentDB* content) {
 
     obj["speed_km_s"] = sh.speed_km_s;
     obj["hp"] = sh.hp;
+    obj["shields"] = std::max(0.0, sh.shields);
 
     obj["design_mass_tons"] = d ? d->mass_tons : 0.0;
     obj["design_cargo_tons"] = d ? d->cargo_tons : 0.0;
     obj["design_sensor_range_mkm"] = d ? d->sensor_range_mkm : 0.0;
+    obj["design_colony_capacity_millions"] = d ? d->colony_capacity_millions : 0.0;
     obj["design_max_hp"] = d ? d->max_hp : 0.0;
+    obj["design_max_shields"] = d ? d->max_shields : 0.0;
+    obj["design_shield_regen_per_day"] = d ? d->shield_regen_per_day : 0.0;
     obj["design_weapon_damage"] = d ? d->weapon_damage : 0.0;
     obj["design_weapon_range_mkm"] = d ? d->weapon_range_mkm : 0.0;
 

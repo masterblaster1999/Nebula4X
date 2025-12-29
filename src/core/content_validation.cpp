@@ -43,6 +43,9 @@ std::vector<std::string> validate_content_db(const ContentDB& db) {
       push(errors, join("Component '", key, "' has invalid cargo_tons: ", c.cargo_tons));
     if (!is_non_negative(c.sensor_range_mkm))
       push(errors, join("Component '", key, "' has invalid sensor_range_mkm: ", c.sensor_range_mkm));
+    if (!is_non_negative(c.colony_capacity_millions))
+      push(errors,
+           join("Component '", key, "' has invalid colony_capacity_millions: ", c.colony_capacity_millions));
     if (!is_non_negative(c.power))
       push(errors, join("Component '", key, "' has invalid power: ", c.power));
     if (!is_non_negative(c.weapon_damage))
@@ -51,6 +54,11 @@ std::vector<std::string> validate_content_db(const ContentDB& db) {
       push(errors, join("Component '", key, "' has invalid weapon_range_mkm: ", c.weapon_range_mkm));
     if (!is_non_negative(c.hp_bonus))
       push(errors, join("Component '", key, "' has invalid hp_bonus: ", c.hp_bonus));
+    if (!is_non_negative(c.shield_hp))
+      push(errors, join("Component '", key, "' has invalid shield_hp: ", c.shield_hp));
+    if (!is_non_negative(c.shield_regen_per_day))
+      push(errors,
+           join("Component '", key, "' has invalid shield_regen_per_day: ", c.shield_regen_per_day));
   }
 
   // --- Designs ---
@@ -78,8 +86,16 @@ std::vector<std::string> validate_content_db(const ContentDB& db) {
       push(errors, join("Design '", key, "' has invalid cargo_tons: ", d.cargo_tons));
     if (!is_non_negative(d.sensor_range_mkm))
       push(errors, join("Design '", key, "' has invalid sensor_range_mkm: ", d.sensor_range_mkm));
+    if (!is_non_negative(d.colony_capacity_millions))
+      push(errors,
+           join("Design '", key, "' has invalid colony_capacity_millions: ", d.colony_capacity_millions));
     if (!is_non_negative(d.max_hp) || d.max_hp <= 0.0)
       push(errors, join("Design '", key, "' has invalid max_hp: ", d.max_hp));
+    if (!is_non_negative(d.max_shields))
+      push(errors, join("Design '", key, "' has invalid max_shields: ", d.max_shields));
+    if (!is_non_negative(d.shield_regen_per_day))
+      push(errors,
+           join("Design '", key, "' has invalid shield_regen_per_day: ", d.shield_regen_per_day));
     if (!is_non_negative(d.weapon_damage))
       push(errors, join("Design '", key, "' has invalid weapon_damage: ", d.weapon_damage));
     if (!is_non_negative(d.weapon_range_mkm))

@@ -243,6 +243,12 @@ std::vector<std::string> validate_game_state(const GameState& s, const ContentDB
                 } else if (!has_body(ord.body_id)) {
                   push(errors, prefix() + join("MoveToBody references missing body_id ", id_u64(ord.body_id)));
                 }
+              } else if constexpr (std::is_same_v<T, ColonizeBody>) {
+                if (ord.body_id == kInvalidId) {
+                  push(errors, prefix() + "ColonizeBody has invalid body_id");
+                } else if (!has_body(ord.body_id)) {
+                  push(errors, prefix() + join("ColonizeBody references missing body_id ", id_u64(ord.body_id)));
+                }
               } else if constexpr (std::is_same_v<T, TravelViaJump>) {
                 if (ord.jump_point_id == kInvalidId) {
                   push(errors, prefix() + "TravelViaJump has invalid jump_point_id");
@@ -316,7 +322,15 @@ std::vector<std::string> validate_game_state(const GameState& s, const ContentDB
   }
 
   // --- Colonies ---
+  std::unordered_set<Id> colony_body_ids;
   for (const auto& [cid, c] : s.colonies) {
+    if (c.body_id != kInvalidId) {
+      if (!colony_body_ids.insert(c.body_id).second) {
+        push(errors,
+             join("Multiple colonies share the same body_id ", id_u64(c.body_id), " (example: colony ", id_u64(cid),
+                  " '", c.name, "')"));
+      }
+    }
     if (c.body_id == kInvalidId || !has_body(c.body_id)) {
       push(errors,
            join("Colony ", id_u64(cid), " ('", c.name, "') references missing body_id ", id_u64(c.body_id)));

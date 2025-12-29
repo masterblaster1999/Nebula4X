@@ -14,6 +14,10 @@ std::string order_to_string(const Order& order) {
           ss << "MoveToPoint(" << o.target_mkm.x << ", " << o.target_mkm.y << ")";
         } else if constexpr (std::is_same_v<T, MoveToBody>) {
           ss << "MoveToBody(id=" << o.body_id << ")";
+        } else if constexpr (std::is_same_v<T, ColonizeBody>) {
+          ss << "ColonizeBody(body_id=" << o.body_id;
+          if (!o.colony_name.empty()) ss << ", name=\"" << o.colony_name << "\"";
+          ss << ")";
         } else if constexpr (std::is_same_v<T, OrbitBody>) {
           ss << "OrbitBody(id=" << o.body_id;
           ss << ", days=" << o.duration_days;

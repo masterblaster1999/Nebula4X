@@ -213,6 +213,7 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   // Interaction: left click issues an order for the selected ship.
   // Ctrl + left click issues an order for the selected fleet (if any).
   // - Click near a body: MoveToBody
+  //   - Alt + click near a body: ColonizeBody
   // - Click near a jump point: TravelViaJump
   // - Otherwise: MoveToPoint
   // Holding Shift will *queue* the order; otherwise it replaces the current queue.
@@ -279,7 +280,11 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
           if (fleet_mode) {
             sim.issue_fleet_move_to_body(selected_fleet->id, picked_body, ui.fog_of_war);
           } else {
-            sim.issue_move_to_body(selected_ship, picked_body);
+            if (ImGui::GetIO().KeyAlt) {
+              sim.issue_colonize_body(selected_ship, picked_body, "", ui.fog_of_war);
+            } else {
+              sim.issue_move_to_body(selected_ship, picked_body, ui.fog_of_war);
+            }
           }
         } else {
           const Vec2 world = to_world(mp, center, scale, zoom, pan);
@@ -300,6 +305,7 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   ImGui::BulletText("Mouse wheel: zoom");
   ImGui::BulletText("Middle drag: pan");
   ImGui::BulletText("Left click: issue order to ship (Shift queues)");
+  ImGui::BulletText("Alt+Left click body: colonize (colony ship required)");
   ImGui::BulletText("Ctrl+Left click: issue order to fleet");
   ImGui::BulletText("Click body: move-to-body");
   ImGui::BulletText("Click jump point: travel via jump");

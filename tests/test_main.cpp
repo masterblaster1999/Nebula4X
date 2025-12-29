@@ -21,6 +21,7 @@ int test_save_diff();
 int test_state_export();
 int test_population_growth();
 int test_combat_events();
+int test_shields();
 int test_ship_repairs();
 int test_fleets();
 int test_ai_economy();
@@ -50,6 +51,7 @@ int main() {
   fails += test_fleets();
   fails += test_population_growth();
   fails += test_combat_events();
+  fails += test_shields();
   fails += test_ship_repairs();
 
   if (fails == 0) {

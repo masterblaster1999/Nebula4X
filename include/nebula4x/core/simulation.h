@@ -345,6 +345,16 @@ class Simulation {
   // When restrict_to_discovered is true, jump routing will only traverse
   // systems discovered by the ship's faction.
   bool issue_move_to_body(Id ship_id, Id body_id, bool restrict_to_discovered = false);
+
+  // Establish a new colony on the target body.
+  //
+  // If the body is in another system, the simulation will enqueue the necessary
+  // TravelViaJump orders automatically (same behavior as issue_move_to_body).
+  //
+  // colony_name is optional; if empty, a default name will be derived from the
+  // body name at execution time.
+  bool issue_colonize_body(Id ship_id, Id body_id, const std::string& colony_name = {},
+                           bool restrict_to_discovered = false);
   
   // Station keep with a body for a duration (-1 for indefinite).
   // Unlike MoveToBody, this keeps updating the ship's position to match the body's orbit.
@@ -483,6 +493,7 @@ bool move_construction_order(Id colony_id, int from_index, int to_index);
   void tick_ai();
   void tick_ships();
   void tick_contacts();
+  void tick_shields();
   void tick_combat();
   void tick_repairs();
 
