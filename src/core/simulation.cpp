@@ -1968,14 +1968,54 @@ bool Simulation::enqueue_installation_build(Id colony_id, const std::string& ins
 
 void Simulation::recompute_body_positions() {
   const double t = static_cast<double>(state_.date.days_since_epoch());
-  for (auto& [_, b] : state_.bodies) {
-    if (b.orbit_radius_mkm <= 1e-9) {
-      b.position_mkm = {0.0, 0.0};
-      continue;
+
+  // Bodies may orbit other bodies (e.g., moons). Compute absolute positions in a
+  // parent-first manner, but remain robust to unordered_map iteration order.
+  std::unordered_map<Id, Vec2> cache;
+  cache.reserve(state_.bodies.size() * 2);
+
+  std::unordered_set<Id> visiting;
+  visiting.reserve(state_.bodies.size());
+
+  const auto compute_pos = [&](Id id, const auto& self) -> Vec2 {
+    if (id == kInvalidId) return {0.0, 0.0};
+
+    if (auto it = cache.find(id); it != cache.end()) return it->second;
+
+    auto itb = state_.bodies.find(id);
+    if (itb == state_.bodies.end()) return {0.0, 0.0};
+
+    Body& b = itb->second;
+
+    // Break accidental cycles gracefully (treat as orbiting system origin).
+    if (!visiting.insert(id).second) {
+      cache[id] = {0.0, 0.0};
+      return {0.0, 0.0};
     }
-    const double period = std::max(1.0, b.orbit_period_days);
-    const double theta = b.orbit_phase_radians + kTwoPi * (t / period);
-    b.position_mkm = {b.orbit_radius_mkm * std::cos(theta), b.orbit_radius_mkm * std::sin(theta)};
+
+    // Orbit center: either system origin or a parent body's current position.
+    Vec2 center{0.0, 0.0};
+    if (b.parent_body_id != kInvalidId && b.parent_body_id != id) {
+      const Body* parent = find_ptr(state_.bodies, b.parent_body_id);
+      if (parent && parent->system_id == b.system_id) {
+        center = self(b.parent_body_id, self);
+      }
+    }
+
+    Vec2 pos = center;
+    if (b.orbit_radius_mkm > 1e-9) {
+      const double period = std::max(1.0, b.orbit_period_days);
+      const double theta = b.orbit_phase_radians + kTwoPi * (t / period);
+      pos = center + Vec2{b.orbit_radius_mkm * std::cos(theta), b.orbit_radius_mkm * std::sin(theta)};
+    }
+
+    cache[id] = pos;
+    visiting.erase(id);
+    return pos;
+  };
+
+  for (auto& [id, b] : state_.bodies) {
+    b.position_mkm = compute_pos(id, compute_pos);
   }
 }
 

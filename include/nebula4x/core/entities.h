@@ -68,12 +68,27 @@ struct Body {
   // - If a mineral is present with value <= 0, that deposit is depleted.
   std::unordered_map<std::string, double> mineral_deposits;
 
-  // Simple circular orbit around the system origin.
+  // Orbital mechanics (prototype).
+  //
+  // - If parent_body_id == kInvalidId, this body orbits the system origin.
+  // - Otherwise, it orbits the referenced parent body (which must be in the same system).
+  Id parent_body_id{kInvalidId};
+
+  // Simple circular orbit around the parent (or system origin).
   double orbit_radius_mkm{0.0};     // million km
   double orbit_period_days{0.0};    // days
   double orbit_phase_radians{0.0};  // starting angle
 
-  // Cached position for current sim date.
+  // Optional physical metadata (procedural generation / UI).
+  //
+  // These values are not currently used by core simulation mechanics.
+  double mass_solar{0.0};        // stars: solar masses
+  double luminosity_solar{0.0};  // stars: solar luminosities
+  double mass_earths{0.0};       // planets/moons/asteroids: Earth masses
+  double radius_km{0.0};         // approximate radius (km)
+  double surface_temp_k{0.0};    // approximate equilibrium temperature (K)
+
+  // Cached position for current sim date (absolute, after applying parent orbits).
   Vec2 position_mkm{0.0, 0.0};
 };
 

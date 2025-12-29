@@ -469,6 +469,17 @@ std::string bodies_to_json(const GameState& state) {
     obj["orbit_phase_radians"] = b.orbit_phase_radians;
     obj["position_mkm"] = vec2_to_object(b.position_mkm);
 
+    if (b.parent_body_id != kInvalidId) {
+      obj["parent_body_id"] = static_cast<double>(b.parent_body_id);
+      obj["parent_body"] = body_name(state, b.parent_body_id);
+    }
+
+    if (b.mass_solar > 0.0) obj["mass_solar"] = b.mass_solar;
+    if (b.luminosity_solar > 0.0) obj["luminosity_solar"] = b.luminosity_solar;
+    if (b.mass_earths > 0.0) obj["mass_earths"] = b.mass_earths;
+    if (b.radius_km > 0.0) obj["radius_km"] = b.radius_km;
+    if (b.surface_temp_k > 0.0) obj["surface_temp_k"] = b.surface_temp_k;
+
     if (!b.mineral_deposits.empty()) {
       json::Object dep_obj;
       for (const auto& mineral : sorted_keys(b.mineral_deposits)) {

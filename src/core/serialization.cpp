@@ -14,7 +14,7 @@ using json::Array;
 using json::Object;
 using json::Value;
 
-constexpr int kCurrentSaveVersion = 25;
+constexpr int kCurrentSaveVersion = 26;
 
 template <typename Map>
 std::vector<typename Map::key_type> sorted_keys(const Map& m) {
@@ -407,6 +407,12 @@ std::string serialize_game_to_json(const GameState& s) {
     o["name"] = b.name;
     o["type"] = body_type_to_string(b.type);
     o["system_id"] = static_cast<double>(b.system_id);
+    if (b.parent_body_id != kInvalidId) o["parent_body_id"] = static_cast<double>(b.parent_body_id);
+    if (b.mass_solar > 0.0) o["mass_solar"] = b.mass_solar;
+    if (b.luminosity_solar > 0.0) o["luminosity_solar"] = b.luminosity_solar;
+    if (b.mass_earths > 0.0) o["mass_earths"] = b.mass_earths;
+    if (b.radius_km > 0.0) o["radius_km"] = b.radius_km;
+    if (b.surface_temp_k > 0.0) o["surface_temp_k"] = b.surface_temp_k;
     o["orbit_radius_mkm"] = b.orbit_radius_mkm;
     o["orbit_period_days"] = b.orbit_period_days;
     o["orbit_phase_radians"] = b.orbit_phase_radians;
@@ -732,6 +738,14 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     b.name = o.at("name").string_value();
     b.type = body_type_from_string(o.at("type").string_value());
     b.system_id = static_cast<Id>(o.at("system_id").int_value());
+    if (auto it = o.find("parent_body_id"); it != o.end()) {
+      b.parent_body_id = static_cast<Id>(it->second.int_value(kInvalidId));
+    }
+    if (auto it = o.find("mass_solar"); it != o.end()) b.mass_solar = it->second.number_value(0.0);
+    if (auto it = o.find("luminosity_solar"); it != o.end()) b.luminosity_solar = it->second.number_value(0.0);
+    if (auto it = o.find("mass_earths"); it != o.end()) b.mass_earths = it->second.number_value(0.0);
+    if (auto it = o.find("radius_km"); it != o.end()) b.radius_km = it->second.number_value(0.0);
+    if (auto it = o.find("surface_temp_k"); it != o.end()) b.surface_temp_k = it->second.number_value(0.0);
     b.orbit_radius_mkm = o.at("orbit_radius_mkm").number_value();
     b.orbit_period_days = o.at("orbit_period_days").number_value();
     b.orbit_phase_radians = o.at("orbit_phase_radians").number_value();

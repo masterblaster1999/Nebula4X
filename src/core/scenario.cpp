@@ -1,8 +1,10 @@
 #include "nebula4x/core/scenario.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <random>
 #include <string>
 #include <unordered_set>
@@ -22,6 +24,7 @@ GameState make_sol_scenario() {
   // v12: adds SimEvent::seq + GameState::next_event_seq (monotonic event ids).
   // v22: adds Body::mineral_deposits (finite mining / depletion).
   // v23: adds ship fuel tanks + fuel consumption (logistics).
+  // v26: adds hierarchical orbits (Body::parent_body_id) + optional physical metadata.
   // New games should start at the current save schema version.
   s.save_version = GameState{}.save_version;
   s.date = Date::from_ymd(2200, 1, 1);
@@ -278,9 +281,18 @@ namespace {
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kTwoPi = 2.0 * kPi;
 
+// Astronomical unit in million km (mkm). This matches the Sol scenario where Earth is ~149.6 mkm.
+constexpr double kAu_mkm = 149.6;
+
+// Uniform random in [0, 1).
+double rand_unit(std::mt19937& rng) {
+  // generate_canonical is deterministic for a given engine sequence and avoids
+  // some implementation differences between libstdc++'s distribution types.
+  return std::generate_canonical<double, 32>(rng);
+}
+
 double rand_real(std::mt19937& rng, double lo, double hi) {
-  std::uniform_real_distribution<double> dist(lo, hi);
-  return dist(rng);
+  return lo + (hi - lo) * rand_unit(rng);
 }
 
 int rand_int(std::mt19937& rng, int lo, int hi) {
@@ -288,11 +300,194 @@ int rand_int(std::mt19937& rng, int lo, int hi) {
   return dist(rng);
 }
 
+// Simple Box-Muller normal sampler (deterministic given rand_unit()).
+double rand_normal(std::mt19937& rng, double mean, double stddev) {
+  const double u1 = std::max(1e-12, rand_unit(rng));
+  const double u2 = rand_unit(rng);
+  const double z0 = std::sqrt(-2.0 * std::log(u1)) * std::cos(kTwoPi * u2);
+  return mean + z0 * stddev;
+}
+
 // Hash an undirected (a,b) pair into a single integer.
 std::uint64_t edge_key(int a, int b) {
   const auto lo = static_cast<std::uint32_t>(std::min(a, b));
   const auto hi = static_cast<std::uint32_t>(std::max(a, b));
   return (static_cast<std::uint64_t>(lo) << 32) | static_cast<std::uint64_t>(hi);
+}
+
+char ascii_lower(char c) {
+  if (c >= 'A' && c <= 'Z') return static_cast<char>(c - 'A' + 'a');
+  return c;
+}
+
+char ascii_upper(char c) {
+  if (c >= 'a' && c <= 'z') return static_cast<char>(c - 'a' + 'A');
+  return c;
+}
+
+std::string capitalize(std::string s) {
+  if (s.empty()) return s;
+  s[0] = ascii_upper(s[0]);
+  for (std::size_t i = 1; i < s.size(); ++i) s[i] = ascii_lower(s[i]);
+  return s;
+}
+
+std::string to_roman(int n) {
+  // Enough for our generator (we cap major bodies).
+  static const char* kRomans[] = {"",  "I",  "II",  "III",  "IV",  "V",  "VI",  "VII",  "VIII",  "IX",  "X",
+                                  "XI", "XII", "XIII", "XIV", "XV", "XVI", "XVII", "XVIII", "XIX", "XX"};
+  if (n >= 0 && n <= 20) return kRomans[n];
+  return std::to_string(n);
+}
+
+double clamp01(double x) { return std::clamp(x, 0.0, 1.0); }
+
+double rand_log_uniform(std::mt19937& rng, double lo, double hi) {
+  const double l = std::log(std::max(1e-12, lo));
+  const double h = std::log(std::max(1e-12, hi));
+  return std::exp(rand_real(rng, l, h));
+}
+
+std::string generate_system_name(std::mt19937& rng, std::unordered_set<std::string>& used) {
+  // Small syllable-based name generator. The goal is "varied and pronounceable"
+  // rather than resembling any specific language.
+  static const std::array<const char*, 24> kLead = {
+      "al", "an", "ar", "bel", "cor", "da", "el", "en", "fa", "gar", "hal", "ir",
+      "ja", "kel", "lor", "mar", "nar", "or", "pra", "sel", "tor", "ul", "vor", "zen",
+  };
+  static const std::array<const char*, 18> kMid = {
+      "a", "e", "i", "o", "u", "ae", "ai", "ia", "io", "oa", "oi", "ou", "ua", "ui", "au", "eo", "uu", "ei",
+  };
+  static const std::array<const char*, 28> kTail = {
+      "dor", "nus", "lia", "reon", "tara", "vex", "mond", "phor", "tis", "dine", "ron", "rix", "vara", "loth",
+      "mir", "gai", "dax", "tris", "gorn", "lune", "bor", "kesh", "ther", "vorn", "mere", "veil", "cai", "zen",
+  };
+
+  for (int attempt = 0; attempt < 1000; ++attempt) {
+    const int parts = rand_int(rng, 2, 3);
+    std::string raw;
+    raw.reserve(12);
+    raw += kLead[static_cast<std::size_t>(rand_int(rng, 0, static_cast<int>(kLead.size()) - 1))];
+    raw += kMid[static_cast<std::size_t>(rand_int(rng, 0, static_cast<int>(kMid.size()) - 1))];
+    raw += kTail[static_cast<std::size_t>(rand_int(rng, 0, static_cast<int>(kTail.size()) - 1))];
+    if (parts == 3) {
+      raw += kMid[static_cast<std::size_t>(rand_int(rng, 0, static_cast<int>(kMid.size()) - 1))];
+      raw += kTail[static_cast<std::size_t>(rand_int(rng, 0, static_cast<int>(kTail.size()) - 1))];
+    }
+
+    std::string name = capitalize(raw);
+    if (name.size() < 4 || name.size() > 14) continue;
+    if (used.insert(name).second) return name;
+  }
+
+  // Fallback: deterministic-ish name.
+  std::string fb = "System" + std::to_string(used.size() + 1);
+  used.insert(fb);
+  return fb;
+}
+
+struct StarParams {
+  char spectral{'G'};
+  double mass_solar{1.0};
+  double luminosity_solar{1.0};
+  double temp_k{5778.0};
+  double radius_km{696340.0};
+  double metallicity{1.0};
+  double binary_prob{0.15};
+};
+
+double main_sequence_luminosity(double mass_solar) {
+  // Very rough piecewise approximation.
+  if (mass_solar < 0.43) return 0.23 * std::pow(mass_solar, 2.3);
+  if (mass_solar < 2.0) return std::pow(mass_solar, 4.0);
+  if (mass_solar < 20.0) return 1.5 * std::pow(mass_solar, 3.5);
+  return 32000.0 * mass_solar;
+}
+
+StarParams sample_star(std::mt19937& rng) {
+  struct Band {
+    char spectral;
+    double weight;
+    double m_lo, m_hi;
+    double t_lo, t_hi;
+    double binary_prob;
+  };
+
+  // We bias toward lower-mass stars for interesting-but-playable system sizes.
+  static const std::array<Band, 5> kBands = {{
+      {'M', 0.52, 0.15, 0.60, 2400.0, 3900.0, 0.10},
+      {'K', 0.22, 0.60, 0.85, 3900.0, 5200.0, 0.18},
+      {'G', 0.16, 0.85, 1.15, 5200.0, 6000.0, 0.22},
+      {'F', 0.08, 1.15, 1.45, 6000.0, 7500.0, 0.28},
+      {'A', 0.02, 1.45, 2.10, 7500.0, 10000.0, 0.35},
+  }};
+
+  const double u = rand_unit(rng);
+  double acc = 0.0;
+  Band b = kBands.back();
+  for (const auto& band : kBands) {
+    acc += band.weight;
+    if (u <= acc) {
+      b = band;
+      break;
+    }
+  }
+
+  StarParams sp;
+  sp.spectral = b.spectral;
+  sp.mass_solar = rand_real(rng, b.m_lo, b.m_hi);
+  sp.temp_k = rand_real(rng, b.t_lo, b.t_hi);
+  sp.luminosity_solar = std::max(0.001, main_sequence_luminosity(sp.mass_solar));
+  sp.radius_km = 696340.0 * std::pow(std::max(0.05, sp.mass_solar), 0.8);
+
+  // Metallicity: centered on 1.0 with modest spread.
+  sp.metallicity = std::clamp(rand_normal(rng, 1.0, 0.18), 0.55, 1.55);
+
+  sp.binary_prob = b.binary_prob;
+  return sp;
+}
+
+double kepler_period_days(double a_au, double star_mass_solar) {
+  // P(years) = sqrt(a^3 / M)
+  const double years = std::sqrt(std::max(0.0, a_au * a_au * a_au) / std::max(0.05, star_mass_solar));
+  return std::max(1.0, years * 365.25);
+}
+
+double equilibrium_temp_k(double luminosity_solar, double dist_au, double albedo) {
+  // Very rough blackbody equilibrium temperature.
+  // 278K at 1 AU around 1 Lsun, adjusted by albedo.
+  const double l = std::max(0.001, luminosity_solar);
+  const double d = std::max(0.05, dist_au);
+  const double a = std::clamp(albedo, 0.0, 0.95);
+  const double t = 278.0 * std::pow(l, 0.25) / std::sqrt(d) * std::pow(1.0 - a, 0.25);
+  return std::clamp(t, 30.0, 2000.0);
+}
+
+double sample_albedo(std::mt19937& rng, BodyType type) {
+  switch (type) {
+    case BodyType::GasGiant:
+      return rand_real(rng, 0.30, 0.65);
+    case BodyType::Asteroid:
+      return rand_real(rng, 0.02, 0.18);
+    case BodyType::Moon:
+      return rand_real(rng, 0.05, 0.28);
+    case BodyType::Planet:
+    default:
+      return rand_real(rng, 0.10, 0.45);
+  }
+}
+
+double rocky_radius_km(double mass_earths) {
+  // Mass-radius relation for rocky planets (very rough).
+  const double m = std::max(1e-6, mass_earths);
+  return 6371.0 * std::pow(m, 0.27);
+}
+
+double gas_radius_km(double mass_earths) {
+  // Gas giants have a fairly weak mass-radius relation in this regime.
+  const double m = std::clamp(mass_earths, 10.0, 400.0);
+  const double r_earth = std::clamp(6.0 + 6.0 * std::pow(m / 318.0, 0.15), 5.0, 14.0);
+  return 6371.0 * r_earth;
 }
 
 } // namespace
@@ -304,8 +499,10 @@ GameState make_random_scenario(std::uint32_t seed, int num_systems) {
   // v9: adds ShipOrders repeat fields (repeat + repeat_template).
   // v10: adds persistent GameState::events (simulation event log).
   // v11: adds structured event fields (category + context ids).
+  // v12: adds repeat_count_remaining to ShipOrders for finite repeats.
   // v22: adds Body::mineral_deposits (finite mining / depletion).
   // v23: adds ship fuel tanks + fuel consumption (logistics).
+  // v26: adds hierarchical orbits (Body::parent_body_id) + optional physical metadata.
   // New games should start at the current save schema version.
   s.save_version = GameState{}.save_version;
   s.date = Date::from_ymd(2200, 1, 1);
@@ -338,114 +535,417 @@ GameState make_random_scenario(std::uint32_t seed, int num_systems) {
     s.factions[pirates] = f;
   }
 
-  struct SysInfo {
-    Id id{kInvalidId};
-    std::string name;
-    Id star_body{kInvalidId};
-    std::vector<Id> planet_bodies;
-  };
-
-  std::vector<SysInfo> systems;
-  systems.reserve(static_cast<std::size_t>(num_systems));
-
-  auto add_body = [&](Id system_id, const std::string& name, BodyType type, double radius_mkm, double period_days,
-                      double phase) {
+  // --- Helpers ---
+  auto add_body = [&](Id system_id, Id parent_body_id, const std::string& name, BodyType type, double radius_mkm,
+                      double period_days, double phase_radians) -> Id {
     const Id id = allocate_id(s);
     Body b;
     b.id = id;
     b.name = name;
     b.type = type;
     b.system_id = system_id;
+    b.parent_body_id = parent_body_id;
     b.orbit_radius_mkm = radius_mkm;
     b.orbit_period_days = period_days;
-    b.orbit_phase_radians = phase;
+    b.orbit_phase_radians = phase_radians;
     s.bodies[id] = b;
     s.systems[system_id].bodies.push_back(id);
     return id;
   };
 
-  // --- Systems + bodies ---
-  // Galaxy layout is arbitrary units; spread systems in a loose disc.
-  const double spread = std::max(3.0, std::sqrt(static_cast<double>(num_systems)) * 2.5);
+  auto seed_deposits = [&](Id body_id, double duranium_tons, double neutronium_tons) {
+    auto& b = s.bodies.at(body_id);
+    b.mineral_deposits["Duranium"] = std::max(0.0, duranium_tons);
+    b.mineral_deposits["Neutronium"] = std::max(0.0, neutronium_tons);
+  };
 
+  auto seed_basic_deposits = [&](Id body_id, BodyType type, double orbit_au, double metallicity, double richness) {
+    // Baselines tuned for "prototype fun" rather than strict realism.
+    double base_dur = 6.0e5;
+    double base_neu = 6.0e4;
+
+    switch (type) {
+      case BodyType::GasGiant:
+        base_dur = 3.5e5;
+        base_neu = 4.5e4;
+        break;
+      case BodyType::Moon:
+        base_dur = 2.5e5;
+        base_neu = 2.5e4;
+        break;
+      case BodyType::Asteroid:
+        base_dur = 4.5e5;
+        base_neu = 4.0e4;
+        break;
+      case BodyType::Planet:
+      default:
+        base_dur = 6.0e5;
+        base_neu = 6.0e4;
+        break;
+    }
+
+    // Outer bodies trend slightly richer.
+    const double dist_factor = 0.85 + 0.35 * clamp01(orbit_au / 6.0);
+
+    double dur = base_dur * metallicity * dist_factor * rand_log_uniform(rng, 0.55, 1.85) * richness;
+    double neu = base_neu * metallicity * dist_factor * rand_log_uniform(rng, 0.55, 1.85) * richness;
+
+    // Occasionally generate "bonanza" asteroids.
+    if (type == BodyType::Asteroid && rand_unit(rng) < 0.12) {
+      const double boost = rand_real(rng, 3.0, 8.0);
+      dur *= boost;
+      neu *= boost;
+    }
+
+    seed_deposits(body_id, dur, neu);
+  };
+
+  struct SysInfo {
+    Id id{kInvalidId};
+    std::string name;
+    Vec2 galaxy_pos{0.0, 0.0};
+
+    Id primary_star{kInvalidId};
+    Id preferred_colony_body{kInvalidId};
+    Id first_planet{kInvalidId};
+
+    double star_mass_solar{1.0};
+    double star_luminosity_solar{1.0};
+    double metallicity{1.0};
+
+    double max_orbit_extent_mkm{0.0};
+
+    std::vector<Id> planet_bodies;
+  };
+
+  std::vector<SysInfo> systems;
+  systems.reserve(static_cast<std::size_t>(num_systems));
+
+  // --- Galaxy layout ---
+  // Spiral-ish disc with a mild core concentration and minimum separation to avoid overlaps.
+  const double galaxy_radius = std::max(3.0, std::sqrt(static_cast<double>(num_systems)) * 3.6);
+  const int spiral_arms = 4;
+  const double arm_tightness = 1.25;
+  const double arm_spread = 0.28;
+  const double core_fraction = 0.18;
+  const double core_radius = galaxy_radius * 0.25;
+  const double min_sep = std::max(0.55, galaxy_radius / (std::sqrt(static_cast<double>(num_systems)) * 2.25));
+
+  std::vector<Vec2> placed;
+  placed.reserve(static_cast<std::size_t>(num_systems));
+
+  std::unordered_set<std::string> used_names;
+  used_names.reserve(static_cast<std::size_t>(num_systems) * 2);
+
+  const auto sample_system_pos = [&](int i) -> Vec2 {
+    if (i == 0) return {0.0, 0.0};
+
+    for (int attempt = 0; attempt < 600; ++attempt) {
+      Vec2 p{0.0, 0.0};
+
+      if (rand_unit(rng) < core_fraction) {
+        // Dense core.
+        const double r = core_radius * std::sqrt(rand_unit(rng));
+        const double a = rand_real(rng, 0.0, kTwoPi);
+        p = {r * std::cos(a), r * std::sin(a)};
+      } else {
+        // Spiral arms: choose a radius, then "pull" angle toward an arm with some noise.
+        const double r = galaxy_radius * std::sqrt(rand_unit(rng));
+        const int arm = rand_int(rng, 0, spiral_arms - 1);
+        const double arm_base = static_cast<double>(arm) * (kTwoPi / static_cast<double>(spiral_arms));
+        const double theta = arm_base + arm_tightness * std::log(1.0 + r) + rand_normal(rng, 0.0, arm_spread);
+
+        // Perpendicular jitter grows slightly with radius.
+        const double j = (0.35 + 0.65 * (r / galaxy_radius));
+        const double rr = std::max(0.0, r + rand_normal(rng, 0.0, arm_spread * 0.55 * j));
+        const double tt = theta + rand_normal(rng, 0.0, arm_spread * 0.35 * j);
+        p = {rr * std::cos(tt), rr * std::sin(tt)};
+      }
+
+      bool ok = true;
+      for (const Vec2& q : placed) {
+        if ((p - q).length() < min_sep) {
+          ok = false;
+          break;
+        }
+      }
+      if (ok) return p;
+    }
+
+    // Fallback: random disc.
+    const double r = galaxy_radius * std::sqrt(rand_unit(rng));
+    const double a = rand_real(rng, 0.0, kTwoPi);
+    return {r * std::cos(a), r * std::sin(a)};
+  };
+
+  // --- Systems + bodies ---
   for (int i = 0; i < num_systems; ++i) {
     const Id sys_id = allocate_id(s);
 
     StarSystem sys;
     sys.id = sys_id;
-    sys.name = "System " + std::to_string(i + 1);
-    sys.galaxy_pos = {rand_real(rng, -spread, spread), rand_real(rng, -spread, spread)};
+    sys.name = generate_system_name(rng, used_names);
+    sys.galaxy_pos = sample_system_pos(i);
     s.systems[sys_id] = sys;
+    placed.push_back(sys.galaxy_pos);
 
     SysInfo info;
     info.id = sys_id;
     info.name = sys.name;
+    info.galaxy_pos = sys.galaxy_pos;
 
-    // Star (anchor at origin)
-    info.star_body = add_body(sys_id, sys.name + " Star", BodyType::Star, 0.0, 1.0, 0.0);
+    const StarParams sp = sample_star(rng);
+    info.star_mass_solar = sp.mass_solar;
+    info.star_luminosity_solar = sp.luminosity_solar;
+    info.metallicity = sp.metallicity;
 
-    // Planets
-    const int planet_count = rand_int(rng, 1, 4);
-    for (int p = 0; p < planet_count; ++p) {
-      const bool gas = rand_real(rng, 0.0, 1.0) < 0.20;
-      const BodyType type = gas ? BodyType::GasGiant : BodyType::Planet;
-
-      // Simple increasing orbits with some jitter.
-      const double base_radius = 60.0 + static_cast<double>(p) * 70.0;
-      const double radius = std::max(10.0, base_radius + rand_real(rng, -12.0, 12.0));
-
-      // Roughly scale period with radius (not physically accurate, just "feels" right).
-      const double base_period = 120.0 + static_cast<double>(p) * 260.0;
-      const double period = std::max(20.0, base_period + rand_real(rng, -25.0, 25.0));
-
-      double phase = rand_real(rng, 0.0, kTwoPi);
-      // Keep the very first planet of the first system at a stable place so ships can spawn there.
-      if (i == 0 && p == 0) phase = 0.0;
-
-      const std::string pname = info.name + " " + std::to_string(p + 1);
-      const Id pid = add_body(sys_id, pname, type, radius, period, phase);
-
-      // --- Mineral deposits (finite mining) ---
-      // Seed a basic pair of deposits for early-game logistics: Duranium + Neutronium.
-      // Values are in tons and are intentionally generous for the homeworld so the
-      // prototype doesn't immediately stall.
-      {
-        auto& b = s.bodies.at(pid);
-        double dur = rand_real(rng, 2.0e5, 2.0e6);
-        double neu = rand_real(rng, 2.0e4, 2.0e5);
-        if (gas) {
-          dur *= 0.6;
-          neu *= 0.8;
-        }
-        if (i == 0 && p == 0) {
-          dur *= 2.0;
-          neu *= 2.0;
-        }
-        if (i == num_systems - 1 && p == 0) {
-          dur *= 1.5;
-          neu *= 1.5;
-        }
-        b.mineral_deposits["Duranium"] = std::max(0.0, dur);
-        b.mineral_deposits["Neutronium"] = std::max(0.0, neu);
-      }
-      info.planet_bodies.push_back(pid);
+    // Star (anchor at origin).
+    {
+      const std::string star_name = sys.name + " Star (" + std::string(1, sp.spectral) + ")";
+      info.primary_star = add_body(sys_id, kInvalidId, star_name, BodyType::Star, 0.0, 1.0, 0.0);
+      auto& b = s.bodies.at(info.primary_star);
+      b.mass_solar = sp.mass_solar;
+      b.luminosity_solar = sp.luminosity_solar;
+      b.radius_km = sp.radius_km;
+      b.surface_temp_k = sp.temp_k;
     }
 
+    double max_extent_mkm = 0.0;
+
+    // Occasionally generate a secondary star.
+    if (rand_unit(rng) < sp.binary_prob) {
+      const double mass2 = sp.mass_solar * rand_real(rng, 0.25, 0.90);
+      const double lum2 = std::max(0.001, main_sequence_luminosity(mass2));
+      const double temp2 = std::clamp(2600.0 + 4200.0 * std::sqrt(std::max(0.05, mass2)), 2400.0, 11000.0);
+
+      // Keep separations playable (roughly 0.3–2.5 AU).
+      const double sep_mkm = rand_real(rng, 40.0, 380.0);
+      const double sep_au = sep_mkm / kAu_mkm;
+
+      const double period = kepler_period_days(sep_au, sp.mass_solar + mass2);
+      const double phase = rand_real(rng, 0.0, kTwoPi);
+
+      const Id sec_id = add_body(sys_id, info.primary_star, sys.name + " B", BodyType::Star, sep_mkm, period, phase);
+      auto& b = s.bodies.at(sec_id);
+      b.mass_solar = mass2;
+      b.luminosity_solar = lum2;
+      b.radius_km = 696340.0 * std::pow(std::max(0.05, mass2), 0.8);
+      b.surface_temp_k = temp2;
+
+      max_extent_mkm = std::max(max_extent_mkm, sep_mkm);
+    }
+
+    // Planetary orbits (in AU).
+    const double hz_au = std::sqrt(std::max(0.001, sp.luminosity_solar));
+    const double inner_au = std::max(0.15, hz_au * rand_real(rng, 0.25, 0.55));
+    const double outer_au = std::clamp(hz_au * rand_real(rng, 6.0, 10.0), 2.0, 8.0);
+
+    std::vector<double> orbits_au;
+    orbits_au.reserve(12);
+
+    double a = inner_au;
+    const int max_major = rand_int(rng, 4, 9);
+    for (int p = 0; p < max_major && a <= outer_au; ++p) {
+      orbits_au.push_back(a);
+      a *= rand_real(rng, 1.35, 1.85);
+    }
+    if (orbits_au.empty()) orbits_au.push_back(hz_au);
+
+    const double snow_au = 2.7 * hz_au;
+
+    // Optional asteroid belt: pick an orbit near the snow line.
+    int belt_index = -1;
+    if (static_cast<int>(orbits_au.size()) >= 4 && rand_unit(rng) < 0.45) {
+      const double target = std::clamp(snow_au, orbits_au.front(), orbits_au.back());
+      double best = 1e9;
+      for (int idx = 0; idx < static_cast<int>(orbits_au.size()); ++idx) {
+        const double d = std::abs(orbits_au[idx] - target);
+        if (d < best) {
+          best = d;
+          belt_index = idx;
+        }
+      }
+      // Avoid belts as the innermost orbit (keeps early colonization less cluttered).
+      if (belt_index == 0) belt_index = -1;
+    }
+
+    // For the home system, force the orbit closest to the habitable zone to be a rocky planet.
+    int forced_home_idx = -1;
+    if (i == 0) {
+      double best = 1e9;
+      for (int idx = 0; idx < static_cast<int>(orbits_au.size()); ++idx) {
+        const double d = std::abs(orbits_au[idx] - hz_au);
+        if (d < best) {
+          best = d;
+          forced_home_idx = idx;
+        }
+      }
+      if (forced_home_idx == belt_index) belt_index = -1;
+    }
+
+    int planet_counter = 0;
+    double best_hab_score = std::numeric_limits<double>::infinity();
+    Id best_hab_id = kInvalidId;
+
+    for (int idx = 0; idx < static_cast<int>(orbits_au.size()); ++idx) {
+      const double orbit_au = orbits_au[idx];
+      const double orbit_mkm = orbit_au * kAu_mkm;
+      const double period_days = kepler_period_days(orbit_au, sp.mass_solar);
+
+      // Asteroid belt.
+      if (idx == belt_index) {
+        const int asteroids = rand_int(rng, 4, 8);
+        for (int aidx = 0; aidx < asteroids; ++aidx) {
+          const double rr = std::max(5.0, orbit_mkm + rand_normal(rng, 0.0, std::max(0.8, orbit_mkm * 0.012)));
+          const double ph = rand_real(rng, 0.0, kTwoPi);
+          const double pd = kepler_period_days(rr / kAu_mkm, sp.mass_solar);
+
+          const std::string aname =
+              sys.name + " Belt " + to_roman(planet_counter + 1) + "-" + std::to_string(aidx + 1);
+          const Id aid = add_body(sys_id, kInvalidId, aname, BodyType::Asteroid, rr, pd, ph);
+
+          auto& b = s.bodies.at(aid);
+          b.radius_km = rand_real(rng, 30.0, 350.0);
+          b.surface_temp_k = equilibrium_temp_k(sp.luminosity_solar, rr / kAu_mkm, sample_albedo(rng, BodyType::Asteroid));
+          seed_basic_deposits(aid, BodyType::Asteroid, rr / kAu_mkm, sp.metallicity, 1.0);
+
+          max_extent_mkm = std::max(max_extent_mkm, rr);
+        }
+        continue;
+      }
+
+      ++planet_counter;
+
+      // Gas giant probability ramps up beyond the snow line.
+      const double beyond = (orbit_au <= snow_au) ? 0.0 : clamp01((orbit_au - snow_au) / std::max(0.25, outer_au - snow_au));
+      double gas_prob = 0.04 + 0.30 * beyond;
+      gas_prob *= std::clamp(0.75 + 0.45 * (sp.metallicity - 1.0), 0.45, 1.55);
+
+      bool is_gas = rand_unit(rng) < gas_prob;
+      if (idx == forced_home_idx) is_gas = false;
+
+      const BodyType type = is_gas ? BodyType::GasGiant : BodyType::Planet;
+
+      double phase = rand_real(rng, 0.0, kTwoPi);
+      if (idx == forced_home_idx) phase = 0.0;
+
+      const std::string pname = sys.name + " " + to_roman(planet_counter);
+      const Id pid = add_body(sys_id, kInvalidId, pname, type, orbit_mkm, period_days, phase);
+      info.planet_bodies.push_back(pid);
+      if (info.first_planet == kInvalidId) info.first_planet = pid;
+
+      auto& pb = s.bodies.at(pid);
+      if (type == BodyType::GasGiant) {
+        pb.mass_earths = rand_log_uniform(rng, 15.0, 320.0);
+        pb.radius_km = gas_radius_km(pb.mass_earths);
+      } else {
+        pb.mass_earths = rand_log_uniform(rng, 0.20, 5.0);
+        pb.radius_km = rocky_radius_km(pb.mass_earths);
+      }
+      pb.surface_temp_k = equilibrium_temp_k(sp.luminosity_solar, orbit_au, sample_albedo(rng, type));
+
+      // Mineral deposits.
+      const double richness = (idx == forced_home_idx) ? 2.1 : 1.0;
+      seed_basic_deposits(pid, type, orbit_au, sp.metallicity, richness);
+
+      // Habitable-ish scoring for colony candidates.
+      if (type == BodyType::Planet) {
+        const double t = pb.surface_temp_k;
+        if (t >= 250.0 && t <= 330.0) {
+          const double score = std::abs(t - 288.0) + 8.0 * std::abs(orbit_au - hz_au);
+          if (score < best_hab_score) {
+            best_hab_score = score;
+            best_hab_id = pid;
+          }
+        }
+      }
+
+      max_extent_mkm = std::max(max_extent_mkm, orbit_mkm);
+
+      // Moons.
+      int moon_count = 0;
+      if (type == BodyType::GasGiant) {
+        moon_count = rand_int(rng, 0, 3);
+        if (rand_unit(rng) < 0.15) moon_count = std::min(5, moon_count + 2);
+      } else if (rand_unit(rng) < 0.18) {
+        moon_count = rand_int(rng, 1, 2);
+      }
+
+      for (int mi = 0; mi < moon_count; ++mi) {
+        const double mr = rand_log_uniform(rng, 0.20, 3.5);
+        const double mp = rand_real(rng, 2.0, 60.0);
+        const double ph = rand_real(rng, 0.0, kTwoPi);
+
+        const std::string mname = pname + "-" + static_cast<char>('a' + mi);
+        const Id mid = add_body(sys_id, pid, mname, BodyType::Moon, mr, mp, ph);
+
+        auto& mb = s.bodies.at(mid);
+        // Scale moon masses a bit with the parent.
+        const double moon_hi = (type == BodyType::GasGiant) ? 0.25 : 0.08;
+        mb.mass_earths = rand_log_uniform(rng, 0.001, moon_hi);
+        mb.radius_km = rocky_radius_km(mb.mass_earths);
+        mb.surface_temp_k = equilibrium_temp_k(sp.luminosity_solar, orbit_au, sample_albedo(rng, BodyType::Moon));
+        seed_basic_deposits(mid, BodyType::Moon, orbit_au, sp.metallicity, 0.9);
+
+        max_extent_mkm = std::max(max_extent_mkm, orbit_mkm + mr);
+      }
+    }
+
+    // Colony candidate selection for this system.
+    if (best_hab_id != kInvalidId) {
+      info.preferred_colony_body = best_hab_id;
+    } else if (info.first_planet != kInvalidId) {
+      info.preferred_colony_body = info.first_planet;
+    } else {
+      info.preferred_colony_body = info.primary_star;
+    }
+
+    info.max_orbit_extent_mkm = max_extent_mkm;
     systems.push_back(std::move(info));
   }
 
+  // --- Start positions ---
   const Id home_system = systems.front().id;
-  const Id pirate_system = (systems.size() > 1) ? systems.back().id : home_system;
+
+  // Pick a pirate system farthest from the home system (if possible).
+  int pirate_idx = 0;
+  if (num_systems > 1) {
+    double best = -1.0;
+    for (int i = 1; i < num_systems; ++i) {
+      const double d = (systems[static_cast<std::size_t>(i)].galaxy_pos - systems.front().galaxy_pos).length();
+      if (d > best) {
+        best = d;
+        pirate_idx = i;
+      }
+    }
+  }
+  const Id pirate_system = systems[static_cast<std::size_t>(pirate_idx)].id;
+
   s.selected_system = home_system;
 
   // Seed initial discovery: each faction knows its start system.
   s.factions[terrans].discovered_systems = {home_system};
   s.factions[pirates].discovered_systems = {pirate_system};
 
+  // Ensure the homeworld is stable and generous.
+  Id homeworld_body = systems.front().preferred_colony_body;
+  if (homeworld_body == kInvalidId) homeworld_body = systems.front().primary_star;
+
+  if (auto* hb = find_ptr(s.bodies, homeworld_body)) {
+    hb->orbit_phase_radians = 0.0;
+    if (auto it = hb->mineral_deposits.find("Duranium"); it != hb->mineral_deposits.end()) it->second *= 1.6;
+    if (auto it = hb->mineral_deposits.find("Neutronium"); it != hb->mineral_deposits.end()) it->second *= 1.6;
+  }
+
   // --- Jump points ---
-  // Build a connected graph via a random spanning tree, then add a few extra links.
+  // Build a connected graph using a minimum spanning tree over galaxy distances, then add extra "local" edges.
   std::unordered_set<std::uint64_t> edges;
-  edges.reserve(static_cast<std::size_t>(num_systems) * 2);
+  edges.reserve(static_cast<std::size_t>(num_systems) * 3);
+
+  const auto system_dist = [&](int ai, int bi) {
+    const Vec2 d = systems[static_cast<std::size_t>(ai)].galaxy_pos - systems[static_cast<std::size_t>(bi)].galaxy_pos;
+    return d.length();
+  };
 
   auto add_jump_link = [&](int ai, int bi) {
     if (ai == bi) return;
@@ -453,14 +953,15 @@ GameState make_random_scenario(std::uint32_t seed, int num_systems) {
     if (edges.find(k) != edges.end()) return;
     edges.insert(k);
 
-    const auto& a = systems[ai];
-    const auto& b = systems[bi];
+    const auto& a = systems[static_cast<std::size_t>(ai)];
+    const auto& b = systems[static_cast<std::size_t>(bi)];
 
     const Id jp_a_id = allocate_id(s);
     const Id jp_b_id = allocate_id(s);
 
-    auto make_pos = [&]() {
-      const double r = rand_real(rng, 120.0, 220.0);
+    auto make_pos = [&](const SysInfo& from) {
+      const double base = std::max(120.0, from.max_orbit_extent_mkm + 40.0);
+      const double r = base + rand_real(rng, 10.0, 90.0);
       const double ang = rand_real(rng, 0.0, kTwoPi);
       return Vec2{r * std::cos(ang), r * std::sin(ang)};
     };
@@ -470,7 +971,7 @@ GameState make_random_scenario(std::uint32_t seed, int num_systems) {
       jp.id = jp_a_id;
       jp.name = "JP to " + b.name;
       jp.system_id = a.id;
-      jp.position_mkm = make_pos();
+      jp.position_mkm = make_pos(a);
       jp.linked_jump_id = jp_b_id;
       s.jump_points[jp.id] = jp;
       s.systems[a.id].jump_points.push_back(jp.id);
@@ -481,31 +982,83 @@ GameState make_random_scenario(std::uint32_t seed, int num_systems) {
       jp.id = jp_b_id;
       jp.name = "JP to " + a.name;
       jp.system_id = b.id;
-      jp.position_mkm = make_pos();
+      jp.position_mkm = make_pos(b);
       jp.linked_jump_id = jp_a_id;
       s.jump_points[jp.id] = jp;
       s.systems[b.id].jump_points.push_back(jp.id);
     }
   };
 
-  // Spanning tree.
-  for (int i = 1; i < num_systems; ++i) {
-    const int parent = rand_int(rng, 0, i - 1);
-    add_jump_link(i, parent);
+  // Minimum spanning tree (Prim).
+  if (num_systems > 1) {
+    std::vector<double> best(static_cast<std::size_t>(num_systems), std::numeric_limits<double>::infinity());
+    std::vector<int> parent(static_cast<std::size_t>(num_systems), -1);
+    std::vector<bool> used(static_cast<std::size_t>(num_systems), false);
+
+    best[0] = 0.0;
+
+    for (int it = 0; it < num_systems; ++it) {
+      int u = -1;
+      double u_best = std::numeric_limits<double>::infinity();
+      for (int i = 0; i < num_systems; ++i) {
+        if (!used[static_cast<std::size_t>(i)] && best[static_cast<std::size_t>(i)] < u_best) {
+          u_best = best[static_cast<std::size_t>(i)];
+          u = i;
+        }
+      }
+      if (u == -1) break;
+
+      used[static_cast<std::size_t>(u)] = true;
+      if (parent[static_cast<std::size_t>(u)] != -1) {
+        add_jump_link(u, parent[static_cast<std::size_t>(u)]);
+      }
+
+      for (int v = 0; v < num_systems; ++v) {
+        if (used[static_cast<std::size_t>(v)] || v == u) continue;
+        const double d = system_dist(u, v);
+        if (d < best[static_cast<std::size_t>(v)]) {
+          best[static_cast<std::size_t>(v)] = d;
+          parent[static_cast<std::size_t>(v)] = u;
+        }
+      }
+    }
   }
 
-  // Extra edges to create loops.
-  const int extra = std::max(0, num_systems / 3);
-  for (int e = 0; e < extra; ++e) {
-    const int a = rand_int(rng, 0, num_systems - 1);
-    const int b = rand_int(rng, 0, num_systems - 1);
-    add_jump_link(a, b);
+  // Extra edges: prefer shorter links, but allow occasional longer ones.
+  if (num_systems > 2) {
+    struct Pair {
+      double d{0.0};
+      int a{0};
+      int b{0};
+    };
+    std::vector<Pair> pairs;
+    pairs.reserve(static_cast<std::size_t>(num_systems) * static_cast<std::size_t>(num_systems - 1) / 2);
+
+    for (int i = 0; i < num_systems; ++i) {
+      for (int j = i + 1; j < num_systems; ++j) {
+        pairs.push_back({system_dist(i, j), i, j});
+      }
+    }
+    std::sort(pairs.begin(), pairs.end(), [](const Pair& lhs, const Pair& rhs) { return lhs.d < rhs.d; });
+
+    const int extra_target = std::max(1, num_systems / 2);
+    int added = 0;
+    const double link_scale = galaxy_radius * 0.55;
+
+    for (const Pair& p : pairs) {
+      if (added >= extra_target) break;
+
+      // Probability decays with distance.
+      const double prob = 0.40 * std::exp(-p.d / std::max(0.1, link_scale));
+      if (rand_unit(rng) < prob) {
+        const std::size_t before = edges.size();
+        add_jump_link(p.a, p.b);
+        if (edges.size() != before) ++added;
+      }
+    }
   }
 
   // --- Colonies ---
-  const Id homeworld_body = !systems.front().planet_bodies.empty() ? systems.front().planet_bodies.front()
-                                                                   : systems.front().star_body;
-
   const Id home_colony = allocate_id(s);
   {
     Colony c;
@@ -530,14 +1083,21 @@ GameState make_random_scenario(std::uint32_t seed, int num_systems) {
     s.colonies[c.id] = c;
   }
 
-
   // --- Pirate base colony ---
-  // Gives pirates a home industry so they can grow beyond their starting ships.
   {
-    const SysInfo& ps = (pirate_system == home_system) ? systems.front() : systems.back();
-    Id base_body = ps.star_body;
-    if (!ps.planet_bodies.empty()) base_body = ps.planet_bodies.front();
-    if (pirate_system == home_system && ps.planet_bodies.size() >= 2) base_body = ps.planet_bodies[1];
+    const SysInfo& ps = systems[static_cast<std::size_t>(pirate_idx)];
+    Id base_body = ps.preferred_colony_body;
+    if (base_body == kInvalidId) base_body = ps.primary_star;
+
+    // If pirates start in the home system, try to avoid putting them on the homeworld.
+    if (pirate_system == home_system && base_body == homeworld_body) {
+      for (Id pid : ps.planet_bodies) {
+        if (pid != homeworld_body) {
+          base_body = pid;
+          break;
+        }
+      }
+    }
 
     Colony c;
     c.id = allocate_id(s);
@@ -577,11 +1137,10 @@ GameState make_random_scenario(std::uint32_t seed, int num_systems) {
     return id;
   };
 
-  // Spawn near the homeworld (t=0, so phase is position directly).
+  // Spawn near the homeworld.
   Vec2 home_pos{0.0, 0.0};
   if (const auto* b = find_ptr(s.bodies, homeworld_body)) {
-    home_pos = {b->orbit_radius_mkm * std::cos(b->orbit_phase_radians),
-                b->orbit_radius_mkm * std::sin(b->orbit_phase_radians)};
+    home_pos = {b->orbit_radius_mkm * std::cos(b->orbit_phase_radians), b->orbit_radius_mkm * std::sin(b->orbit_phase_radians)};
   }
 
   // --- Starting Terran fleet ---
@@ -590,13 +1149,18 @@ GameState make_random_scenario(std::uint32_t seed, int num_systems) {
   (void)add_ship(terrans, home_system, home_pos + Vec2{0.0, -0.8}, "Escort Gamma", "escort_gamma");
 
   // --- Pirate presence ---
-  // Keep pirates out of the home system when possible.
-  const Vec2 pirate_pos = {80.0, 0.5};
   if (pirate_system != home_system) {
-    (void)add_ship(pirates, pirate_system, pirate_pos, "Raider I", "pirate_raider");
-    (void)add_ship(pirates, pirate_system, pirate_pos + Vec2{0.7, -0.3}, "Raider II", "pirate_raider");
+    // Spawn near the pirate base body.
+    Vec2 ppos{80.0, 0.5};
+    const SysInfo& ps = systems[static_cast<std::size_t>(pirate_idx)];
+    if (const auto* b = find_ptr(s.bodies, ps.preferred_colony_body)) {
+      ppos = {b->orbit_radius_mkm * std::cos(b->orbit_phase_radians), b->orbit_radius_mkm * std::sin(b->orbit_phase_radians)};
+    }
+    (void)add_ship(pirates, pirate_system, ppos, "Raider I", "pirate_raider");
+    (void)add_ship(pirates, pirate_system, ppos + Vec2{0.7, -0.3}, "Raider II", "pirate_raider");
   } else {
-    (void)add_ship(pirates, pirate_system, home_pos + Vec2{10.0, 10.0}, "Raider I", "pirate_raider");
+    // If only one system exists, keep pirates offset from the home fleet.
+    (void)add_ship(pirates, pirate_system, home_pos + Vec2{12.0, 12.0}, "Raider I", "pirate_raider");
   }
 
   return s;

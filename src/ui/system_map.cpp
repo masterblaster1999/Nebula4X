@@ -85,7 +85,18 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
   for (Id bid : sys->bodies) {
     const auto* b = find_ptr(s.bodies, bid);
     if (!b) continue;
-    max_r = std::max(max_r, b->orbit_radius_mkm);
+
+    // Ensure the view fits both the body's orbit circle and its current absolute position.
+    // For moons (or other child bodies), the orbit is centered on the parent body.
+    Vec2 orbit_center_mkm{0.0, 0.0};
+    if (b->parent_body_id != kInvalidId) {
+      if (const auto* parent = find_ptr(s.bodies, b->parent_body_id)) {
+        orbit_center_mkm = parent->position_mkm;
+      }
+    }
+
+    const double extent = orbit_center_mkm.length() + b->orbit_radius_mkm;
+    max_r = std::max(max_r, extent);
   }
   // Make sure jump points beyond the outermost orbit are still visible.
   for (Id jid : sys->jump_points) {
@@ -139,9 +150,18 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
     const auto* b = find_ptr(s.bodies, bid);
     if (!b) continue;
 
+    // Orbit circle (centered on system origin for planets, or on the parent body for moons/binaries).
     if (b->orbit_radius_mkm > 1e-6) {
-      draw->AddCircle(center, static_cast<float>(b->orbit_radius_mkm * scale * zoom), IM_COL32(35, 35, 35, 255), 0,
-                      1.0f);
+      Vec2 orbit_center_mkm{0.0, 0.0};
+      if (b->parent_body_id != kInvalidId) {
+        if (const auto* parent = find_ptr(s.bodies, b->parent_body_id)) {
+          orbit_center_mkm = parent->position_mkm;
+        }
+      }
+
+      const ImVec2 orbit_center_px = to_screen(orbit_center_mkm, center, scale, zoom, pan);
+      draw->AddCircle(orbit_center_px, static_cast<float>(b->orbit_radius_mkm * scale * zoom),
+                      IM_COL32(35, 35, 35, 255), 0, 1.0f);
     }
 
     const ImVec2 p = to_screen(b->position_mkm, center, scale, zoom, pan);

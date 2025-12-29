@@ -167,6 +167,23 @@ std::vector<std::string> validate_game_state(const GameState& s, const ContentDB
       push(errors, join("Body ", id_u64(bid), " ('", b.name, "') references unknown system_id ", id_u64(b.system_id)));
     }
 
+    // Validate parent-body orbits (moons, binaries, etc).
+    if (b.parent_body_id != kInvalidId) {
+      if (b.parent_body_id == bid) {
+        push(errors, join("Body ", id_u64(bid), " ('", b.name, "') parent_body_id references itself"));
+      } else if (!has_body(b.parent_body_id)) {
+        push(errors, join("Body ", id_u64(bid), " ('", b.name, "') references missing parent_body_id ",
+                          id_u64(b.parent_body_id)));
+      } else {
+        const auto& parent = s.bodies.at(b.parent_body_id);
+        if (parent.system_id != b.system_id) {
+          push(errors, join("Body ", id_u64(bid), " ('", b.name, "') parent_body_id ", id_u64(b.parent_body_id),
+                            " is in a different system (parent.system_id=", id_u64(parent.system_id),
+                            ", body.system_id=", id_u64(b.system_id), ")"));
+        }
+      }
+    }
+
     // Validate mineral deposit data (finite mining).
     for (const auto& [mineral, tons] : b.mineral_deposits) {
       if (mineral.empty()) {

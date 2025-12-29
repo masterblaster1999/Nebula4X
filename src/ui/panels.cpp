@@ -2570,8 +2570,23 @@ if (colony->shipyard_queue.empty()) {
           ImGui::Separator();
           ImGui::Text("Type: %s", body_type_label(b->type));
           ImGui::Text("System: %s", sys ? sys->name.c_str() : "(unknown)");
-          ImGui::Text("Orbit: %.1f mkm", b->orbit_radius_mkm);
+          if (b->parent_body_id != kInvalidId) {
+            const Body* parent = find_ptr(s.bodies, b->parent_body_id);
+            ImGui::Text("Orbits: %s", parent ? parent->name.c_str() : "(missing parent)");
+          } else {
+            ImGui::Text("Orbits: (system origin)");
+          }
+
+          ImGui::Text("Orbit radius: %.2f mkm", b->orbit_radius_mkm);
+          ImGui::Text("Orbit period: %.2f days", b->orbit_period_days);
           ImGui::Text("Pos: (%.2f, %.2f) mkm", b->position_mkm.x, b->position_mkm.y);
+
+          // Physical metadata (optional).
+          if (b->mass_solar > 0.0) ImGui::Text("Mass: %.3f Msun", b->mass_solar);
+          if (b->luminosity_solar > 0.0) ImGui::Text("Luminosity: %.3f Lsun", b->luminosity_solar);
+          if (b->mass_earths > 0.0) ImGui::Text("Mass: %.3f Mearth", b->mass_earths);
+          if (b->radius_km > 0.0) ImGui::Text("Radius: %.0f km", b->radius_km);
+          if (b->surface_temp_k > 0.0) ImGui::Text("Temp: %.0f K", b->surface_temp_k);
 
           // Colony on this body (if any).
           Id colony_here = kInvalidId;
