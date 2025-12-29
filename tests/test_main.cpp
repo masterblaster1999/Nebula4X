@@ -25,6 +25,9 @@ int test_shields();
 int test_ship_repairs();
 int test_fleets();
 int test_ai_economy();
+int test_research_planner();
+int test_mineral_deposits();
+int test_power_system();
 
 int main() {
   int fails = 0;
@@ -41,6 +44,9 @@ int main() {
   fails += test_content_validation();
   fails += test_random_scenario();
   fails += test_ai_economy();
+  fails += test_research_planner();
+  fails += test_mineral_deposits();
+  fails += test_power_system();
   fails += test_file_io();
   fails += test_json_unicode();
   fails += test_json_bom();

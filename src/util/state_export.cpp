@@ -40,6 +40,22 @@ std::string body_name(const GameState& s, Id id) {
   return (it != s.bodies.end()) ? it->second.name : std::string{};
 }
 
+const char* body_type_label(BodyType t) {
+  switch (t) {
+    case BodyType::Star:
+      return "star";
+    case BodyType::Planet:
+      return "planet";
+    case BodyType::Moon:
+      return "moon";
+    case BodyType::Asteroid:
+      return "asteroid";
+    case BodyType::GasGiant:
+      return "gas_giant";
+  }
+  return "unknown";
+}
+
 const ShipDesign* find_design(const GameState& s, const ContentDB* content, const std::string& id) {
   if (id.empty()) return nullptr;
 
@@ -84,6 +100,38 @@ json::Object vec2_to_object(const Vec2& v) {
   return o;
 }
 
+struct PowerAllocation {
+  double generation{0.0};
+  double available{0.0};
+  bool engines_online{true};
+  bool shields_online{true};
+  bool weapons_online{true};
+  bool sensors_online{true};
+};
+
+PowerAllocation compute_power_allocation(const ShipDesign& d) {
+  PowerAllocation out;
+  out.generation = std::max(0.0, d.power_generation);
+  double avail = out.generation;
+
+  auto on = [&](double req) {
+    req = std::max(0.0, req);
+    if (req <= 1e-9) return true;
+    if (req <= avail + 1e-9) {
+      avail -= req;
+      return true;
+    }
+    return false;
+  };
+
+  out.engines_online = on(d.power_use_engines);
+  out.shields_online = on(d.power_use_shields);
+  out.weapons_online = on(d.power_use_weapons);
+  out.sensors_online = on(d.power_use_sensors);
+  out.available = avail;
+  return out;
+}
+
 } // namespace
 
 std::string ships_to_json(const GameState& state, const ContentDB* content) {
@@ -113,16 +161,40 @@ std::string ships_to_json(const GameState& state, const ContentDB* content) {
     obj["speed_km_s"] = sh.speed_km_s;
     obj["hp"] = sh.hp;
     obj["shields"] = std::max(0.0, sh.shields);
+    obj["fuel_tons"] = std::max(0.0, sh.fuel_tons);
 
     obj["design_mass_tons"] = d ? d->mass_tons : 0.0;
+    obj["design_fuel_capacity_tons"] = d ? d->fuel_capacity_tons : 0.0;
+    obj["design_fuel_use_per_mkm"] = d ? d->fuel_use_per_mkm : 0.0;
     obj["design_cargo_tons"] = d ? d->cargo_tons : 0.0;
     obj["design_sensor_range_mkm"] = d ? d->sensor_range_mkm : 0.0;
     obj["design_colony_capacity_millions"] = d ? d->colony_capacity_millions : 0.0;
+    obj["design_power_generation"] = d ? d->power_generation : 0.0;
+    obj["design_power_use_total"] = d ? d->power_use_total : 0.0;
+    obj["design_power_use_engines"] = d ? d->power_use_engines : 0.0;
+    obj["design_power_use_sensors"] = d ? d->power_use_sensors : 0.0;
+    obj["design_power_use_weapons"] = d ? d->power_use_weapons : 0.0;
+    obj["design_power_use_shields"] = d ? d->power_use_shields : 0.0;
     obj["design_max_hp"] = d ? d->max_hp : 0.0;
     obj["design_max_shields"] = d ? d->max_shields : 0.0;
     obj["design_shield_regen_per_day"] = d ? d->shield_regen_per_day : 0.0;
     obj["design_weapon_damage"] = d ? d->weapon_damage : 0.0;
     obj["design_weapon_range_mkm"] = d ? d->weapon_range_mkm : 0.0;
+
+    if (d) {
+      const auto p = compute_power_allocation(*d);
+      obj["power_available"] = p.available;
+      obj["power_engines_online"] = p.engines_online;
+      obj["power_shields_online"] = p.shields_online;
+      obj["power_weapons_online"] = p.weapons_online;
+      obj["power_sensors_online"] = p.sensors_online;
+    } else {
+      obj["power_available"] = 0.0;
+      obj["power_engines_online"] = false;
+      obj["power_shields_online"] = false;
+      obj["power_weapons_online"] = false;
+      obj["power_sensors_online"] = false;
+    }
 
     json::Object cargo;
     for (const auto& [k, v] : sh.cargo) cargo[k] = v;
@@ -173,6 +245,7 @@ std::string colonies_to_json(const GameState& state, const ContentDB* content) {
 
     // Compute aggregate per-day values from installations.
     std::unordered_map<std::string, double> prod;
+    std::unordered_map<std::string, double> mining_prod;
     double construction_points_per_day = 0.0;
     double shipyard_capacity_tons_per_day = 0.0;
 
@@ -182,8 +255,11 @@ std::string colonies_to_json(const GameState& state, const ContentDB* content) {
         const InstallationDef* def = find_installation(content, inst_id);
         if (!def) continue;
 
+        const bool mining = def->mining;
         for (const auto& [mineral, per_day] : def->produces_per_day) {
-          prod[mineral] += per_day * static_cast<double>(count);
+          const double amt = per_day * static_cast<double>(count);
+          prod[mineral] += amt;
+          if (mining) mining_prod[mineral] += amt;
         }
 
         construction_points_per_day += def->construction_points_per_day * static_cast<double>(count);
@@ -209,6 +285,14 @@ std::string colonies_to_json(const GameState& state, const ContentDB* content) {
     for (const auto& [k, v] : c.minerals) minerals[k] = v;
     obj["minerals"] = std::move(minerals);
 
+    if (!c.mineral_reserves.empty()) {
+      json::Object reserves;
+      for (const auto& k : sorted_keys(c.mineral_reserves)) {
+        reserves[k] = c.mineral_reserves.at(k);
+      }
+      obj["mineral_reserves"] = std::move(reserves);
+    }
+
     // Installations as an array (id/name/count) for ease of consumption.
     json::Array inst_arr;
     inst_arr.reserve(c.installations.size());
@@ -231,6 +315,37 @@ std::string colonies_to_json(const GameState& state, const ContentDB* content) {
     json::Object prod_obj;
     for (const auto& [k, v] : prod) prod_obj[k] = v;
     obj["mineral_production_per_day"] = std::move(prod_obj);
+
+    // Finite mineral deposits (if present on the underlying body).
+    if (body && !body->mineral_deposits.empty()) {
+      json::Object dep_obj;
+      for (const auto& mineral : sorted_keys(body->mineral_deposits)) {
+        dep_obj[mineral] = body->mineral_deposits.at(mineral);
+      }
+      obj["body_mineral_deposits"] = std::move(dep_obj);
+
+      // Per-colony mining potential + depletion ETA (days) based on current mining installations.
+      if (!mining_prod.empty()) {
+        json::Object mining_obj;
+        for (const auto& mineral : sorted_keys(mining_prod)) {
+          mining_obj[mineral] = mining_prod.at(mineral);
+        }
+        obj["mineral_mining_potential_per_day"] = std::move(mining_obj);
+
+        json::Object eta_obj;
+        for (const auto& mineral : sorted_keys(body->mineral_deposits)) {
+          const double dep = body->mineral_deposits.at(mineral);
+          const auto it_rate = mining_prod.find(mineral);
+          const double rate = (it_rate != mining_prod.end()) ? it_rate->second : 0.0;
+          if (rate > 1e-9) {
+            eta_obj[mineral] = dep / rate;
+          } else {
+            eta_obj[mineral] = nullptr;
+          }
+        }
+        obj["mineral_depletion_eta_days"] = std::move(eta_obj);
+      }
+    }
 
     obj["construction_points_per_day"] = construction_points_per_day;
     obj["shipyard_capacity_tons_per_day"] = shipyard_capacity_tons_per_day;
@@ -323,6 +438,45 @@ std::string fleets_to_json(const GameState& state) {
       ships.emplace_back(std::move(s));
     }
     obj["ships"] = std::move(ships);
+
+    out.emplace_back(std::move(obj));
+  }
+
+  std::string json_text = json::stringify(json::array(std::move(out)), 2);
+  json_text.push_back('\n');
+  return json_text;
+}
+
+std::string bodies_to_json(const GameState& state) {
+  json::Array out;
+  out.reserve(state.bodies.size());
+
+  for (Id bid : sorted_keys(state.bodies)) {
+    const auto it = state.bodies.find(bid);
+    if (it == state.bodies.end()) continue;
+    const Body& b = it->second;
+
+    json::Object obj;
+    obj["id"] = static_cast<double>(bid);
+    obj["name"] = b.name;
+    obj["type"] = std::string(body_type_label(b.type));
+
+    obj["system_id"] = static_cast<double>(b.system_id);
+    obj["system"] = system_name(state, b.system_id);
+
+    obj["orbit_radius_mkm"] = b.orbit_radius_mkm;
+    obj["orbit_period_days"] = b.orbit_period_days;
+    obj["orbit_phase_radians"] = b.orbit_phase_radians;
+    obj["position_mkm"] = vec2_to_object(b.position_mkm);
+
+    if (!b.mineral_deposits.empty()) {
+      json::Object dep_obj;
+      for (const auto& mineral : sorted_keys(b.mineral_deposits)) {
+        dep_obj[mineral] = b.mineral_deposits.at(mineral);
+      }
+      obj["mineral_deposits"] = std::move(dep_obj);
+      obj["mineral_deposits_total_tons"] = sum_positive(b.mineral_deposits);
+    }
 
     out.emplace_back(std::move(obj));
   }

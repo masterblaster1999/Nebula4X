@@ -1,8 +1,41 @@
-# Patch pack notes (generated 2025-12-28 r31)
+# Patch pack notes (generated 2025-12-29 r37)
 
 This patch pack is designed for **GitHub web uploads** (Add file → Upload files).
 
 It is **cumulative**: it contains the union of files changed/added in all rounds so far, so you can apply it in one upload.
+
+## New in this patch pack: Economy window + mineral reserves + tech tree tier view
+
+- UI:
+  - Adds a new **Economy** window (View → Economy) with:
+    - **Industry**: colony-by-colony CP/RP/mine/yard/queue/stockpile overview.
+    - **Mining**: body-centric extraction + depletion ETA + per-colony breakdown.
+    - **Tech Tree**: tiered tech tree view with search + actions + prereq plan preview.
+  - Colony tab now supports editing **mineral reserves** used by auto-freight.
+- Core:
+  - Adds `Colony::mineral_reserves` and makes auto-freight respect it.
+  - Save schema bumped to **v25** (older saves still load).
+
+## New in this patch pack: Research planner + tech tree export + UI tech browser
+
+- UI:
+  - Research tab now includes a **tech browser** with search/filter.
+  - Plan preview (prereq chain + total cost).
+  - Buttons to **queue with prerequisites** and **replace queue with plan**.
+- Core:
+  - Adds `compute_research_plan()` to compute prerequisite-ordered plans for a target tech.
+  - Detects missing prereqs and prerequisite cycles.
+- CLI:
+  - Adds tech tree exports:
+    - `--export-tech-tree-json PATH`
+    - `--export-tech-tree-dot PATH`
+  - Adds a research planner:
+    - `--plan-research FACTION TECH`
+    - `--plan-research-json PATH`
+- Utility:
+  - Adds `nebula4x::tech_tree_to_json()` and `nebula4x::tech_tree_to_dot()`.
+- Tests:
+  - Adds `test_research_planner`.
 
 ## New in this patch pack: Fleets (persistent ship groups) + JSON export
 

@@ -1,10 +1,121 @@
-# Patch notes (generated 2025-12-28 r31)
+# Patch notes (generated 2025-12-29 r37)
 
 This patch pack contains only the files that changed.
 
 Apply by copying the files over the repo (drag/drop into GitHub's "Upload files"), preserving folder paths.
 
 ## Summary of changes
+
+### r37: Economy window + mineral reserves + tech tree tier view
+
+- UI:
+  - Adds a new **Economy** window (View → Economy) with three tabs:
+    - **Industry**: colony-by-colony overview of population, construction points/day, research points/day,
+      mines, shipyards, queues, and key stockpiles.
+    - **Mining**: body-centric mining overview with predicted daily extraction (based on current deposits and installed mines),
+      depletion ETA, and per-colony mining breakdown.
+    - **Tech Tree**: tiered tech tree view (prereq depth columns) with search, tooltips, and a details pane with
+      quick actions (set active, queue, queue prereq plan).
+- Core:
+  - Adds per-colony **manual mineral reserves** (`Colony::mineral_reserves`):
+    - Auto-freight will not export minerals below your configured reserve (in tons).
+    - Effective reserve is `max(manual reserve, local queue reserve)` so local shipyard/construction needs stay protected.
+  - Save schema bumped to **v25** (older saves still load).
+- Tests:
+  - Extends auto-freight + serialization tests to cover mineral reserves.
+
+### r36: Colonies & planets directory + UI theme/background options
+
+- UI:
+  - Adds a **Directory** window (toggle in View menu) with sortable tables:
+    - **Colonies**: filter by faction/system + search, sort by pop/CP/fuel/shipyards.
+    - **Bodies**: filter by system/type + search, show deposits total, colonization status + population.
+  - Adds a new **Body** tab in the Details panel to inspect the selected planet/body:
+    - body type, orbit, position,
+    - colony (if present),
+    - mineral deposits table.
+  - System map improvements:
+    - highlights colonized bodies and your currently selected body,
+    - **right-click** selects ships or bodies without issuing orders.
+- UI customization:
+  - Adds a new top menu structure:
+    - **View**: toggle windows + reset layout.
+    - **Options → Theme**: change clear color + galaxy/system map backgrounds + optional ImGui window background override.
+    - **Options → UI Prefs**: load/save UI preferences to a JSON file, plus optional autosave on exit.
+  - SDL renderer clear color is now driven by UI settings.
+
+### r35: Ship power budgeting + load shedding + UI/exports
+
+- Core:
+  - Adds a prototype **power** model to ship designs:
+    - Reactors contribute `power_output`.
+    - Components can draw `power_use` (optional; defaults to 0 for legacy content).
+  - Ship subsystems are **load-shed** deterministically when power is insufficient, in priority order:
+    - engines → shields → weapons → sensors.
+  - Sensors/weapon/shield behavior is now gated by available power:
+    - unpowered sensors do not contribute to detection,
+    - unpowered weapons cannot fire,
+    - unpowered shields collapse (set to 0) and stop regenerating.
+- Content:
+  - Extends `starting_blueprints.json` with `power_use` for advanced components (ion engines, improved lasers, advanced sensors, shields).
+- UI:
+  - Ship and Design panels now show **Power generation/use** and indicate which subsystems are online.
+- Serialization:
+  - Save schema bumped to `24` to include new derived power fields in stored custom designs.
+- CLI/Export:
+  - Ship JSON export now includes fuel and power budget fields (plus online/offline flags).
+- Tests:
+  - Adds `test_power_system` to assert that weapons are prevented from firing when shed due to power.
+
+### r33: Finite mineral deposits (body) + mining depletion + exports
+
+- Core:
+  - Adds `Body::mineral_deposits` (tons remaining per mineral) to model finite resources.
+  - Installations can now be flagged as mining extractors (`InstallationDef::mining`).
+    - Mining production pulls from body deposits and depletes them.
+    - When a deposit hits zero, a persistent `Construction` warning event is emitted.
+- Scenarios:
+  - Sol and random scenarios now seed basic Duranium/Neutronium deposits on planets.
+- UI:
+  - Colony panel shows underlying body deposits and (when mining) an estimated depletion ETA.
+- CLI / Export:
+  - Adds `--export-bodies-json PATH` to export bodies + deposits.
+  - `--list-bodies` now includes a deposit total column when deposits are present.
+  - Colony JSON export now includes `body_mineral_deposits` and a `mineral_depletion_eta_days` hint.
+- Content:
+  - Marks `automated_mine` as `"mining": true` in `starting_blueprints.json` for clarity.
+- Serialization:
+  - Save version bumped to `22`.
+  - Saves now include optional per-body `mineral_deposits`.
+- Tests:
+  - Adds `test_mineral_deposits`.
+
+### r32: Research planner + tech tree export + UI tech browser
+
+- Core:
+  - Adds `compute_research_plan()` to compute a prerequisite-ordered research plan (prereqs first) for a target tech.
+  - Detects and reports:
+    - missing tech prerequisites,
+    - self-prereqs,
+    - prerequisite cycles.
+  - Returns a total cost for the plan.
+- UI:
+  - Research tab now includes a full **tech browser** (search/filter) instead of only listing currently researchable techs.
+  - Adds a **plan** preview panel (steps + total cost).
+  - Adds buttons:
+    - **Queue with prereqs** (auto-adds missing prerequisites in the correct order),
+    - **Replace queue with plan**.
+- CLI:
+  - Adds tech tree exports:
+    - `--export-tech-tree-json PATH` (definitions),
+    - `--export-tech-tree-dot PATH` (Graphviz DOT).
+  - Adds a research planner:
+    - `--plan-research FACTION TECH` (human-readable),
+    - `--plan-research-json PATH` (machine-readable; `PATH` can be `-` for stdout).
+- Utility:
+  - Adds `nebula4x::tech_tree_to_json()` and `nebula4x::tech_tree_to_dot()`.
+- Tests:
+  - Adds `test_research_planner`.
 
 ### r31: Fleet system (persistent ship groups) + JSON export
 

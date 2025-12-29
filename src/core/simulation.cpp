@@ -22,6 +22,22 @@ namespace {
 
 constexpr double kTwoPi = 6.283185307179586476925286766559;
 
+std::string ascii_to_lower(std::string s) {
+  std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
+    return static_cast<char>(std::tolower(c));
+  });
+  return s;
+}
+
+bool is_mining_installation(const InstallationDef& def) {
+  if (def.mining) return true;
+  // Back-compat heuristic: if the content didn't explicitly set the flag,
+  // treat installations whose id contains "mine" and that produce minerals as miners.
+  if (def.produces_per_day.empty()) return false;
+  const std::string lid = ascii_to_lower(def.id);
+  return lid.find("mine") != std::string::npos;
+}
+
 double mkm_per_day_from_speed(double speed_km_s, double seconds_per_day) {
   const double km_per_day = speed_km_s * seconds_per_day;
   return km_per_day / 1.0e6; // million km
@@ -275,6 +291,44 @@ struct SensorSource {
   double range_mkm{0.0};
 };
 
+// Simple per-design power allocation used for load shedding.
+//
+// Priority order (highest to lowest): engines -> shields -> weapons -> sensors.
+// If available reactor power is insufficient, lower-priority subsystems go
+// offline. This is intentionally simple/deterministic for the prototype.
+struct PowerAllocation {
+  double generation{0.0};
+  double available{0.0};
+  bool engines_online{true};
+  bool shields_online{true};
+  bool weapons_online{true};
+  bool sensors_online{true};
+};
+
+PowerAllocation compute_power_allocation(const ShipDesign& d) {
+  PowerAllocation out;
+  out.generation = std::max(0.0, d.power_generation);
+  double avail = out.generation;
+
+  auto on = [&](double req) {
+    req = std::max(0.0, req);
+    if (req <= 1e-9) return true;
+    if (req <= avail + 1e-9) {
+      avail -= req;
+      return true;
+    }
+    return false;
+  };
+
+  out.engines_online = on(d.power_use_engines);
+  out.shields_online = on(d.power_use_shields);
+  out.weapons_online = on(d.power_use_weapons);
+  out.sensors_online = on(d.power_use_sensors);
+
+  out.available = avail;
+  return out;
+}
+
 std::vector<SensorSource> gather_sensor_sources(const Simulation& sim, Id faction_id, Id system_id) {
   std::vector<SensorSource> sources;
   const auto& s = sim.state();
@@ -287,7 +341,13 @@ std::vector<SensorSource> gather_sensor_sources(const Simulation& sim, Id factio
     if (!sh) continue;
     if (sh->faction_id != faction_id) continue;
     const auto* d = sim.find_design(sh->design_id);
-    const double range = d ? d->sensor_range_mkm : 0.0;
+    double range = d ? d->sensor_range_mkm : 0.0;
+    if (d && range > 0.0) {
+      const auto p = compute_power_allocation(*d);
+      if (!p.sensors_online && d->power_use_sensors > 1e-9) {
+        range = 0.0;
+      }
+    }
     if (range <= 0.0) continue;
     sources.push_back(SensorSource{sh->position_mkm, range});
   }
@@ -653,6 +713,7 @@ void Simulation::apply_design_stats_to_ship(Ship& ship) {
   if (!d) {
     ship.speed_km_s = 0.0;
     if (ship.hp <= 0.0) ship.hp = 1.0;
+    ship.fuel_tons = 0.0;
     ship.shields = 0.0;
     return;
   }
@@ -660,6 +721,15 @@ void Simulation::apply_design_stats_to_ship(Ship& ship) {
   ship.speed_km_s = d->speed_km_s;
   if (ship.hp <= 0.0) ship.hp = d->max_hp;
   ship.hp = std::clamp(ship.hp, 0.0, d->max_hp);
+
+  const double fuel_cap = std::max(0.0, d->fuel_capacity_tons);
+  if (fuel_cap <= 1e-9) {
+    ship.fuel_tons = 0.0;
+  } else {
+    // Initialize fuel for older saves / newly created ships.
+    if (ship.fuel_tons < 0.0) ship.fuel_tons = fuel_cap;
+    ship.fuel_tons = std::clamp(ship.fuel_tons, 0.0, fuel_cap);
+  }
 
   const double max_sh = std::max(0.0, d->max_shields);
   if (max_sh <= 1e-9) {
@@ -685,6 +755,8 @@ bool Simulation::upsert_custom_design(ShipDesign design, std::string* error) {
 
   double mass = 0.0;
   double speed = 0.0;
+  double fuel_cap = 0.0;
+  double fuel_use = 0.0;
   double cargo = 0.0;
   double sensor = 0.0;
   double colony_cap = 0.0;
@@ -694,6 +766,14 @@ bool Simulation::upsert_custom_design(ShipDesign design, std::string* error) {
   double max_shields = 0.0;
   double shield_regen = 0.0;
 
+  // Power budgeting.
+  double power_gen = 0.0;
+  double power_use_total = 0.0;
+  double power_use_engines = 0.0;
+  double power_use_sensors = 0.0;
+  double power_use_weapons = 0.0;
+  double power_use_shields = 0.0;
+
   for (const auto& cid : design.components) {
     auto it = content_.components.find(cid);
     if (it == content_.components.end()) return fail("Unknown component id: " + cid);
@@ -701,6 +781,8 @@ bool Simulation::upsert_custom_design(ShipDesign design, std::string* error) {
 
     mass += c.mass_tons;
     speed = std::max(speed, c.speed_km_s);
+    fuel_cap += c.fuel_capacity_tons;
+    fuel_use += c.fuel_use_per_mkm;
     cargo += c.cargo_tons;
     sensor = std::max(sensor, c.sensor_range_mkm);
     colony_cap += c.colony_capacity_millions;
@@ -709,6 +791,15 @@ bool Simulation::upsert_custom_design(ShipDesign design, std::string* error) {
       weapon_damage += c.weapon_damage;
       weapon_range = std::max(weapon_range, c.weapon_range_mkm);
     }
+
+    if (c.type == ComponentType::Reactor) {
+      power_gen += c.power_output;
+    }
+    power_use_total += c.power_use;
+    if (c.type == ComponentType::Engine) power_use_engines += c.power_use;
+    if (c.type == ComponentType::Sensor) power_use_sensors += c.power_use;
+    if (c.type == ComponentType::Weapon) power_use_weapons += c.power_use;
+    if (c.type == ComponentType::Shield) power_use_shields += c.power_use;
 
     hp_bonus += c.hp_bonus;
 
@@ -720,9 +811,18 @@ bool Simulation::upsert_custom_design(ShipDesign design, std::string* error) {
 
   design.mass_tons = mass;
   design.speed_km_s = speed;
+  design.fuel_capacity_tons = fuel_cap;
+  design.fuel_use_per_mkm = fuel_use;
   design.cargo_tons = cargo;
   design.sensor_range_mkm = sensor;
   design.colony_capacity_millions = colony_cap;
+
+  design.power_generation = power_gen;
+  design.power_use_total = power_use_total;
+  design.power_use_engines = power_use_engines;
+  design.power_use_sensors = power_use_sensors;
+  design.power_use_weapons = power_use_weapons;
+  design.power_use_shields = power_use_shields;
   design.weapon_damage = weapon_damage;
   design.weapon_range_mkm = weapon_range;
   design.max_shields = max_shields;
@@ -1887,6 +1987,7 @@ void Simulation::tick_one_day() {
   tick_shipyards();
   tick_construction();
   tick_ai();
+  tick_refuel();
   tick_ships();
   tick_contacts();
   tick_shields();
@@ -2079,8 +2180,16 @@ void Simulation::tick_shields() {
       continue;
     }
 
+    const auto p = compute_power_allocation(*d);
+
     const double max_sh = std::max(0.0, d->max_shields);
     if (max_sh <= 1e-9) {
+      sh->shields = 0.0;
+      continue;
+    }
+
+    // If shields draw power and are offline, treat them as fully down.
+    if (!p.shields_online && d->power_use_shields > 1e-9) {
       sh->shields = 0.0;
       continue;
     }
@@ -2094,18 +2203,51 @@ void Simulation::tick_shields() {
 }
 
 void Simulation::tick_colonies() {
+  // Aggregate mining requests so that multiple colonies on the same body share
+  // finite deposits fairly (proportional allocation) and deterministically.
+  //
+  // Structure: body_id -> mineral -> [(colony_id, requested_tons_per_day), ...]
+  std::unordered_map<Id, std::unordered_map<std::string, std::vector<std::pair<Id, double>>>> mine_reqs;
+  mine_reqs.reserve(state_.colonies.size());
+
   for (Id cid : sorted_keys(state_.colonies)) {
     auto& colony = state_.colonies.at(cid);
+
+    // --- Installation-based production ---
     for (const auto& [inst_id, count] : colony.installations) {
       if (count <= 0) continue;
-      auto dit = content_.installations.find(inst_id);
+      const auto dit = content_.installations.find(inst_id);
       if (dit == content_.installations.end()) continue;
-      for (const auto& [mineral, per_day] : dit->second.produces_per_day) {
-        colony.minerals[mineral] += per_day * static_cast<double>(count);
+
+      const InstallationDef& def = dit->second;
+      if (def.produces_per_day.empty()) continue;
+
+      if (is_mining_installation(def)) {
+        // Mining: convert produces_per_day into a request against body deposits.
+        const Id body_id = colony.body_id;
+
+        // If the body is missing (invalid save / hand-edited state), fall back to
+        // the older "unlimited" behaviour to avoid silently losing resources.
+        if (body_id == kInvalidId || state_.bodies.find(body_id) == state_.bodies.end()) {
+          for (const auto& [mineral, per_day] : def.produces_per_day) {
+            colony.minerals[mineral] += per_day * static_cast<double>(count);
+          }
+          continue;
+        }
+        for (const auto& [mineral, per_day] : def.produces_per_day) {
+          const double req = per_day * static_cast<double>(count);
+          if (req <= 1e-12) continue;
+          mine_reqs[body_id][mineral].push_back({cid, req});
+        }
+      } else {
+        // Synthetic production: add directly to colony stockpile.
+        for (const auto& [mineral, per_day] : def.produces_per_day) {
+          colony.minerals[mineral] += per_day * static_cast<double>(count);
+        }
       }
     }
 
-    // Simple population growth/decline (global rate).
+    // --- Population growth/decline ---
     //
     // This intentionally does not generate events (would be too spammy). The UI can
     // display the updated value and players can tune the rate via SimConfig.
@@ -2113,6 +2255,102 @@ void Simulation::tick_colonies() {
       const double per_day = cfg_.population_growth_rate_per_year / 365.25;
       const double next = colony.population_millions * (1.0 + per_day);
       colony.population_millions = std::max(0.0, next);
+    }
+  }
+
+  // --- Execute mining extraction against finite deposits ---
+  if (!mine_reqs.empty()) {
+    std::vector<Id> body_ids;
+    body_ids.reserve(mine_reqs.size());
+    for (const auto& [bid, _] : mine_reqs) body_ids.push_back(bid);
+    std::sort(body_ids.begin(), body_ids.end());
+
+    for (Id bid : body_ids) {
+      Body* body = find_ptr(state_.bodies, bid);
+      if (!body) continue;
+
+      auto& per_mineral = mine_reqs.at(bid);
+      std::vector<std::string> minerals;
+      minerals.reserve(per_mineral.size());
+      for (const auto& [m, _] : per_mineral) minerals.push_back(m);
+      std::sort(minerals.begin(), minerals.end());
+
+      for (const std::string& mineral : minerals) {
+        auto it_list = per_mineral.find(mineral);
+        if (it_list == per_mineral.end()) continue;
+        auto& list = it_list->second;
+        if (list.empty()) continue;
+
+        // Total requested extraction for this mineral on this body.
+        double total_req = 0.0;
+        for (const auto& [_, req] : list) {
+          if (req > 0.0) total_req += req;
+        }
+        if (total_req <= 1e-12) continue;
+
+        // If the deposit key is missing, treat it as unlimited for back-compat.
+        auto it_dep = body->mineral_deposits.find(mineral);
+        if (it_dep == body->mineral_deposits.end()) {
+          for (const auto& [colony_id, req] : list) {
+            if (req <= 1e-12) continue;
+            if (auto* c = find_ptr(state_.colonies, colony_id)) {
+              c->minerals[mineral] += req;
+            }
+          }
+          continue;
+        }
+
+        const double before_raw = it_dep->second;
+        const double before = std::max(0.0, before_raw);
+        if (before <= 1e-9) {
+          it_dep->second = 0.0;
+          continue;
+        }
+
+        if (before + 1e-9 >= total_req) {
+          // Enough deposit to satisfy everyone fully.
+          for (const auto& [colony_id, req] : list) {
+            if (req <= 1e-12) continue;
+            if (auto* c = find_ptr(state_.colonies, colony_id)) {
+              c->minerals[mineral] += req;
+            }
+          }
+          it_dep->second = std::max(0.0, before - total_req);
+        } else {
+          // Not enough deposit: allocate proportionally.
+          const double ratio = before / total_req;
+          for (const auto& [colony_id, req] : list) {
+            if (req <= 1e-12) continue;
+            if (auto* c = find_ptr(state_.colonies, colony_id)) {
+              c->minerals[mineral] += req * ratio;
+            }
+          }
+          it_dep->second = 0.0;
+        }
+
+        // Depletion warning (once, at the moment a deposit hits zero).
+        if (before > 1e-9 && it_dep->second <= 1e-9) {
+          Id best_cid = kInvalidId;
+          Id best_fid = kInvalidId;
+          for (const auto& [colony_id, req] : list) {
+            if (req <= 1e-12) continue;
+            if (best_cid == kInvalidId || colony_id < best_cid) {
+              best_cid = colony_id;
+              if (const Colony* c = find_ptr(state_.colonies, colony_id)) {
+                best_fid = c->faction_id;
+              }
+            }
+          }
+
+          EventContext ctx;
+          ctx.system_id = body->system_id;
+          ctx.colony_id = best_cid;
+          ctx.faction_id = best_fid;
+
+          const std::string msg = "Mineral deposit depleted on " + body->name + ": " + mineral;
+          push_event(EventLevel::Warn, EventCategory::Construction, msg, ctx);
+        }
+      }
     }
   }
 }
@@ -2451,6 +2689,7 @@ void Simulation::tick_shipyards() {
         sh.system_id = body->system_id;
         sh.design_id = bo.design_id;
         sh.position_mkm = body->position_mkm;
+        sh.fuel_tons = 0.0;
         apply_design_stats_to_ship(sh);
         sh.name = design->name + " #" + std::to_string(sh.id);
         state_.ships[sh.id] = sh;
@@ -2822,6 +3061,19 @@ void Simulation::tick_ai() {
     std::unordered_map<Id, std::unordered_map<std::string, double>> missing_by_colony;
     const auto needs = logistics_needs_for_faction(fid);
 
+    // Seed reserves from user-configured colony reserve settings.
+    for (Id cid : colony_ids) {
+      const Colony* c = find_ptr(state_.colonies, cid);
+      if (!c) continue;
+      for (const auto& [mineral, tons_raw] : c->mineral_reserves) {
+        const double tons = std::max(0.0, tons_raw);
+        if (tons <= 1e-9) continue;
+        double& r = reserve_by_colony[cid][mineral];
+        r = std::max(r, tons);
+      }
+    }
+
+
     for (const auto& n : needs) {
       // Reserve: keep enough at the colony to satisfy the local target (one day shipyard throughput or one build unit).
       double& r = reserve_by_colony[n.colony_id][n.mineral];
@@ -3156,6 +3408,71 @@ void Simulation::tick_ai() {
   }
 }
 
+void Simulation::tick_refuel() {
+  constexpr const char* kFuelKey = "Fuel";
+
+  // Fast(ish) lookup: system -> colony ids.
+  std::unordered_map<Id, std::vector<Id>> colonies_in_system;
+  colonies_in_system.reserve(state_.systems.size() * 2 + 8);
+
+  for (const auto& [cid, col] : state_.colonies) {
+    const auto* body = find_ptr(state_.bodies, col.body_id);
+    if (!body) continue;
+    colonies_in_system[body->system_id].push_back(cid);
+  }
+
+  const double arrive_eps = std::max(0.0, cfg_.arrival_epsilon_mkm);
+  const double dock_range = std::max(arrive_eps, cfg_.docking_range_mkm);
+
+  for (auto& [sid, ship] : state_.ships) {
+    const ShipDesign* d = find_design(ship.design_id);
+    if (!d) continue;
+
+    const double cap = std::max(0.0, d->fuel_capacity_tons);
+    if (cap <= 1e-9) continue;
+
+    // Clamp away any weird negative sentinel states before using.
+    ship.fuel_tons = std::clamp(ship.fuel_tons, 0.0, cap);
+
+    const double need = cap - ship.fuel_tons;
+    if (need <= 1e-9) continue;
+
+    auto it = colonies_in_system.find(ship.system_id);
+    if (it == colonies_in_system.end()) continue;
+
+    Id best_cid = kInvalidId;
+    double best_dist = 1e100;
+
+    for (Id cid : it->second) {
+      const Colony* col = find_ptr(state_.colonies, cid);
+      if (!col) continue;
+      if (col->faction_id != ship.faction_id) continue;
+
+      const Body* body = find_ptr(state_.bodies, col->body_id);
+      if (!body) continue;
+      const double dist = (body->position_mkm - ship.position_mkm).length();
+      if (dist > dock_range + 1e-9) continue;
+
+      if (dist < best_dist) {
+        best_dist = dist;
+        best_cid = cid;
+      }
+    }
+
+    if (best_cid == kInvalidId) continue;
+
+    Colony& col = state_.colonies.at(best_cid);
+    const double avail = col.minerals[kFuelKey];
+    if (avail <= 1e-9) continue;
+
+    const double take = std::min(need, avail);
+    ship.fuel_tons += take;
+    col.minerals[kFuelKey] = avail - take;
+    if (col.minerals[kFuelKey] <= 1e-9) col.minerals[kFuelKey] = 0.0;
+  }
+}
+
+
 void Simulation::tick_ships() {
   auto cargo_used_tons = [](const Ship& s) {
     double used = 0.0;
@@ -3343,12 +3660,22 @@ void Simulation::tick_ships() {
       const auto key_opt = make_cohort_key(it_fleet->second, sh->system_id, ord);
       if (!key_opt) continue;
 
+      // Power gating for fleet speed matching: if a ship cannot power its
+      // engines, treat its speed as 0 for cohesion purposes.
+      double base_speed_km_s = sh->speed_km_s;
+      if (const auto* sd = find_design(sh->design_id)) {
+        const auto p = compute_power_allocation(*sd);
+        if (!p.engines_online && sd->power_use_engines > 1e-9) {
+          base_speed_km_s = 0.0;
+        }
+      }
+
       const CohortKey key = *key_opt;
       auto it_min = cohort_min_speed_km_s.find(key);
       if (it_min == cohort_min_speed_km_s.end()) {
-        cohort_min_speed_km_s.emplace(key, sh->speed_km_s);
+        cohort_min_speed_km_s.emplace(key, base_speed_km_s);
       } else {
-        it_min->second = std::min(it_min->second, sh->speed_km_s);
+        it_min->second = std::min(it_min->second, base_speed_km_s);
       }
     }
   }
@@ -3965,6 +4292,9 @@ void Simulation::tick_ships() {
         if (tons > 1e-9) col->minerals[mineral] += tons;
       }
 
+      // Return remaining fuel (if any).
+      if (ship_snapshot.fuel_tons > 1e-9) col->minerals["Fuel"] += ship_snapshot.fuel_tons;
+
       // Refund a fraction of shipyard build costs (if configured/content available).
       std::unordered_map<std::string, double> refunded;
       const double refund_frac = std::clamp(cfg_.scrap_refund_fraction, 0.0, 1.0);
@@ -4248,9 +4578,20 @@ void Simulation::tick_ships() {
       }
     }
 
+    const auto* sd = find_design(ship.design_id);
+
+    // Power gating: if engines draw power and the ship can't allocate it, it
+    // cannot move this tick.
+    double effective_speed_km_s = ship.speed_km_s;
+    if (sd) {
+      const auto p = compute_power_allocation(*sd);
+      if (!p.engines_online && sd->power_use_engines > 1e-9) {
+        effective_speed_km_s = 0.0;
+      }
+    }
+
     // Fleet speed matching: for ships in the same fleet with the same current
     // movement order, cap speed to the slowest ship in that cohort.
-    double effective_speed_km_s = ship.speed_km_s;
     if (cfg_.fleet_speed_matching && fleet_id != kInvalidId && !cohort_min_speed_km_s.empty()) {
       const auto key_opt = make_cohort_key(fleet_id, ship.system_id, q.front());
       if (key_opt) {
@@ -4270,8 +4611,40 @@ void Simulation::tick_ships() {
       if (step <= 0.0) continue;
     }
 
+    const double fuel_cap = sd ? std::max(0.0, sd->fuel_capacity_tons) : 0.0;
+    const double fuel_use = sd ? std::max(0.0, sd->fuel_use_per_mkm) : 0.0;
+    const bool uses_fuel = (fuel_use > 0.0);
+    if (uses_fuel) {
+      // Be defensive for older saves/custom content that may not have been initialized yet.
+      if (ship.fuel_tons < 0.0) ship.fuel_tons = fuel_cap;
+      ship.fuel_tons = std::clamp(ship.fuel_tons, 0.0, fuel_cap);
+
+      const double max_by_fuel = ship.fuel_tons / fuel_use;
+      step = std::min(step, max_by_fuel);
+      if (step <= 1e-12) continue;
+    }
+
+    auto burn_fuel = [&](double moved_mkm) {
+      if (!uses_fuel || moved_mkm <= 0.0) return;
+      const double before = ship.fuel_tons;
+      const double burn = moved_mkm * fuel_use;
+      ship.fuel_tons = std::max(0.0, ship.fuel_tons - burn);
+      if (before > 1e-9 && ship.fuel_tons <= 1e-9) {
+        const auto* sys = find_ptr(state_.systems, ship.system_id);
+        const std::string sys_name = sys ? sys->name : std::string("(unknown)");
+        const std::string msg = "Ship " + ship.name + " has run out of Fuel in " + sys_name;
+        EventContext ctx;
+        ctx.faction_id = ship.faction_id;
+        ctx.system_id = ship.system_id;
+        ctx.ship_id = ship_id;
+        push_event(EventLevel::Warn, EventCategory::Movement, msg, ctx);
+      }
+    };
+
     if (dist <= step) {
       ship.position_mkm = target;
+
+      burn_fuel(dist);
 
       if (is_jump) {
         if (!is_coordinated_jump_group || allow_jump_transit) {
@@ -4297,6 +4670,7 @@ void Simulation::tick_ships() {
 
     const Vec2 dir = delta.normalized();
     ship.position_mkm += dir * step;
+    burn_fuel(step);
   }
 }
 
@@ -4316,6 +4690,15 @@ void Simulation::tick_combat() {
     const auto* ad = find_design(attacker.design_id);
     if (!ad) continue;
     if (ad->weapon_damage <= 0.0 || ad->weapon_range_mkm <= 0.0) continue;
+
+    // Power gating: if weapons draw power and the ship can't allocate it,
+    // it cannot fire.
+    {
+      const auto p = compute_power_allocation(*ad);
+      if (!p.weapons_online && ad->power_use_weapons > 1e-9) {
+        continue;
+      }
+    }
 
     Id chosen = kInvalidId;
     double chosen_dist = 1e300;

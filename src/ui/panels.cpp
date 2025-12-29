@@ -9,10 +9,12 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 
 #include "nebula4x/core/serialization.h"
+#include "nebula4x/core/research_planner.h"
 #include "nebula4x/util/event_export.h"
 #include "nebula4x/util/file_io.h"
 #include "nebula4x/util/log.h"
@@ -79,9 +81,21 @@ const char* ship_role_label(ShipRole r) {
   }
 }
 
+const char* body_type_label(BodyType t) {
+  switch (t) {
+    case BodyType::Star: return "Star";
+    case BodyType::Planet: return "Planet";
+    case BodyType::Moon: return "Moon";
+    case BodyType::Asteroid: return "Asteroid";
+    case BodyType::GasGiant: return "Gas Giant";
+    default: return "Unknown";
+  }
+}
+
 const char* component_type_label(ComponentType t) {
   switch (t) {
     case ComponentType::Engine: return "Engine";
+    case ComponentType::FuelTank: return "Fuel Tank";
     case ComponentType::Cargo: return "Cargo";
     case ComponentType::Sensor: return "Sensor";
     case ComponentType::Reactor: return "Reactor";
@@ -225,6 +239,8 @@ bool prereqs_met(const Faction& f, const TechDef& t) {
 ShipDesign derive_preview_design(const ContentDB& c, ShipDesign d) {
   double mass = 0.0;
   double speed = 0.0;
+  double fuel_cap = 0.0;
+  double fuel_use = 0.0;
   double cargo = 0.0;
   double sensor = 0.0;
   double colony_cap = 0.0;
@@ -234,12 +250,22 @@ ShipDesign derive_preview_design(const ContentDB& c, ShipDesign d) {
   double max_shields = 0.0;
   double shield_regen = 0.0;
 
+  // Power budgeting (prototype).
+  double power_gen = 0.0;
+  double power_use_total = 0.0;
+  double power_use_engines = 0.0;
+  double power_use_sensors = 0.0;
+  double power_use_weapons = 0.0;
+  double power_use_shields = 0.0;
+
   for (const auto& cid : d.components) {
     auto it = c.components.find(cid);
     if (it == c.components.end()) continue;
     const auto& comp = it->second;
     mass += comp.mass_tons;
     speed = std::max(speed, comp.speed_km_s);
+    fuel_cap += comp.fuel_capacity_tons;
+    fuel_use += comp.fuel_use_per_mkm;
     cargo += comp.cargo_tons;
     sensor = std::max(sensor, comp.sensor_range_mkm);
     colony_cap += comp.colony_capacity_millions;
@@ -247,6 +273,15 @@ ShipDesign derive_preview_design(const ContentDB& c, ShipDesign d) {
       weapon_damage += comp.weapon_damage;
       weapon_range = std::max(weapon_range, comp.weapon_range_mkm);
     }
+
+    if (comp.type == ComponentType::Reactor) {
+      power_gen += comp.power_output;
+    }
+    power_use_total += comp.power_use;
+    if (comp.type == ComponentType::Engine) power_use_engines += comp.power_use;
+    if (comp.type == ComponentType::Sensor) power_use_sensors += comp.power_use;
+    if (comp.type == ComponentType::Weapon) power_use_weapons += comp.power_use;
+    if (comp.type == ComponentType::Shield) power_use_shields += comp.power_use;
     hp_bonus += comp.hp_bonus;
 
     if (comp.type == ComponentType::Shield) {
@@ -257,9 +292,18 @@ ShipDesign derive_preview_design(const ContentDB& c, ShipDesign d) {
 
   d.mass_tons = mass;
   d.speed_km_s = speed;
+  d.fuel_capacity_tons = fuel_cap;
+  d.fuel_use_per_mkm = fuel_use;
   d.cargo_tons = cargo;
   d.sensor_range_mkm = sensor;
   d.colony_capacity_millions = colony_cap;
+
+  d.power_generation = power_gen;
+  d.power_use_total = power_use_total;
+  d.power_use_engines = power_use_engines;
+  d.power_use_sensors = power_use_sensors;
+  d.power_use_weapons = power_use_weapons;
+  d.power_use_shields = power_use_shields;
   d.weapon_damage = weapon_damage;
   d.weapon_range_mkm = weapon_range;
   d.max_shields = max_shields;
@@ -270,7 +314,8 @@ ShipDesign derive_preview_design(const ContentDB& c, ShipDesign d) {
 
 } // namespace
 
-void draw_main_menu(Simulation& sim, char* save_path, char* load_path) {
+void draw_main_menu(Simulation& sim, UIState& ui, char* save_path, char* load_path, char* ui_prefs_path,
+                    UIPrefActions& actions) {
   if (ImGui::BeginMainMenuBar()) {
     if (ImGui::BeginMenu("Game")) {
       if (ImGui::MenuItem("New Game")) {
@@ -299,6 +344,56 @@ void draw_main_menu(Simulation& sim, char* save_path, char* load_path) {
         } catch (const std::exception& e) {
           nebula4x::log::error(std::string("Load failed: ") + e.what());
         }
+      }
+
+      ImGui::EndMenu();
+    }
+
+    if (ImGui::BeginMenu("View")) {
+      ImGui::MenuItem("Controls", nullptr, &ui.show_controls_window);
+      ImGui::MenuItem("Map", nullptr, &ui.show_map_window);
+      ImGui::MenuItem("Details", nullptr, &ui.show_details_window);
+      ImGui::MenuItem("Directory (Colonies/Bodies)", nullptr, &ui.show_directory_window);
+      ImGui::MenuItem("Economy (Industry/Mining/Tech Tree)", nullptr, &ui.show_economy_window);
+      ImGui::MenuItem("Settings Window", nullptr, &ui.show_settings_window);
+      ImGui::Separator();
+      if (ImGui::MenuItem("Reset Window Layout")) {
+        actions.reset_window_layout = true;
+      }
+      ImGui::EndMenu();
+    }
+
+    if (ImGui::BeginMenu("Options")) {
+      if (ImGui::BeginMenu("Theme")) {
+        ImGui::TextDisabled("Backgrounds");
+        ImGui::ColorEdit4("Clear (SDL)##theme", ui.clear_color);
+        ImGui::ColorEdit4("System Map##theme", ui.system_map_bg);
+        ImGui::ColorEdit4("Galaxy Map##theme", ui.galaxy_map_bg);
+
+        ImGui::Separator();
+        ImGui::Checkbox("Override window background##theme", &ui.override_window_bg);
+        if (ui.override_window_bg) {
+          ImGui::ColorEdit4("Window Bg##theme", ui.window_bg);
+        }
+
+        ImGui::Separator();
+        if (ImGui::MenuItem("Reset Theme Defaults")) {
+          actions.reset_ui_theme = true;
+        }
+        ImGui::EndMenu();
+      }
+
+      if (ImGui::BeginMenu("UI Prefs")) {
+        ImGui::InputText("Path##ui_prefs", ui_prefs_path, 256);
+        ImGui::Checkbox("Autosave on exit##ui_prefs", &ui.autosave_ui_prefs);
+        ImGui::Separator();
+        if (ImGui::MenuItem("Load UI Prefs")) {
+          actions.load_ui_prefs = true;
+        }
+        if (ImGui::MenuItem("Save UI Prefs")) {
+          actions.save_ui_prefs = true;
+        }
+        ImGui::EndMenu();
       }
 
       ImGui::EndMenu();
@@ -626,7 +721,7 @@ void draw_left_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sele
   }
 }
 
-void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& selected_colony) {
+void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& selected_colony, Id& selected_body) {
   auto& s = sim.state();
 
   static int faction_combo_idx = 0;
@@ -671,6 +766,56 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
             ImGui::TextDisabled("Shields: (none)");
           }
           ImGui::Text("HP: %.0f / %.0f", sh->hp, d->max_hp);
+          if (d->fuel_use_per_mkm > 0.0) {
+            const double cap = std::max(0.0, d->fuel_capacity_tons);
+            const double cur = std::max(0.0, sh->fuel_tons);
+            if (cap > 0.0) {
+              const double range = cur / d->fuel_use_per_mkm;
+              ImGui::Text("Fuel: %.0f / %.0f t  (use %.2f t/mkm, range %.0f mkm)", cur, cap,
+                          d->fuel_use_per_mkm, range);
+            } else {
+              ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "Fuel: 0 t  (needs fuel tanks)");
+            }
+          } else if (d->fuel_capacity_tons > 0.0) {
+            ImGui::Text("Fuel: %.0f / %.0f t", std::max(0.0, sh->fuel_tons), d->fuel_capacity_tons);
+          } else {
+            ImGui::TextDisabled("Fuel: (none)");
+          }
+
+          // Power budget (prototype)
+          {
+            const double gen = std::max(0.0, d->power_generation);
+            const double use = std::max(0.0, d->power_use_total);
+            if (gen > 0.0 || use > 0.0) {
+              if (use <= gen + 1e-9) {
+                ImGui::Text("Power: %.1f gen / %.1f use", gen, use);
+              } else {
+                ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f),
+                                  "Power: %.1f gen / %.1f use (DEFICIT %.1f)", gen, use, use - gen);
+              }
+
+              double avail = gen;
+              auto on = [&](double req) {
+                req = std::max(0.0, req);
+                if (req <= 1e-9) return true;
+                if (req <= avail + 1e-9) {
+                  avail -= req;
+                  return true;
+                }
+                return false;
+              };
+              const bool eng = on(d->power_use_engines);
+              const bool shld = on(d->power_use_shields);
+              const bool weap = on(d->power_use_weapons);
+              const bool sens = on(d->power_use_sensors);
+
+              ImGui::TextDisabled("Online: Engines %s, Shields %s, Weapons %s, Sensors %s  (avail %.1f)",
+                                  eng ? "ON" : "OFF", shld ? "ON" : "OFF", weap ? "ON" : "OFF",
+                                  sens ? "ON" : "OFF", avail);
+            } else {
+              ImGui::TextDisabled("Power: (none)");
+            }
+          }
           ImGui::Text("Cargo: %.0f / %.0f t", cargo_used_tons, d->cargo_tons);
           ImGui::Text("Sensor: %.0f mkm", d->sensor_range_mkm);
           if (d->colony_capacity_millions > 0.0) {
@@ -1731,6 +1876,147 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
           ImGui::BulletText("%s: %.1f", k.c_str(), v);
         }
 
+
+        ImGui::Separator();
+        if (ImGui::TreeNodeEx("Mineral reserves (auto-freight)", ImGuiTreeNodeFlags_DefaultOpen)) {
+          ImGui::TextDisabled("Auto-freight will not export minerals below these amounts (tons).");
+          ImGui::TextDisabled("Effective reserve = max(manual reserve, local queue reserve).");
+
+          // Sorted list of minerals mentioned in either stockpiles or reserves.
+          std::vector<std::string> minerals;
+          minerals.reserve(colony->minerals.size() + colony->mineral_reserves.size());
+          for (const auto& [k, _] : colony->minerals) minerals.push_back(k);
+          for (const auto& [k, _] : colony->mineral_reserves) minerals.push_back(k);
+          std::sort(minerals.begin(), minerals.end());
+          minerals.erase(std::unique(minerals.begin(), minerals.end()), minerals.end());
+
+          const ImGuiTableFlags rflags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
+                                         ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_Resizable;
+          if (ImGui::BeginTable("colony_reserves_table", 4, rflags)) {
+            ImGui::TableSetupColumn("Mineral", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("Stockpile", ImGuiTableColumnFlags_WidthFixed, 90.0f);
+            ImGui::TableSetupColumn("Reserve", ImGuiTableColumnFlags_WidthFixed, 110.0f);
+            ImGui::TableSetupColumn("Edit", ImGuiTableColumnFlags_WidthFixed, 40.0f);
+            ImGui::TableHeadersRow();
+
+            for (const auto& mineral : minerals) {
+              ImGui::TableNextRow();
+
+              ImGui::TableSetColumnIndex(0);
+              ImGui::TextUnformatted(mineral.c_str());
+
+              ImGui::TableSetColumnIndex(1);
+              const auto it_have = colony->minerals.find(mineral);
+              const double have = (it_have == colony->minerals.end()) ? 0.0 : it_have->second;
+              ImGui::Text("%.1f", have);
+
+              ImGui::TableSetColumnIndex(2);
+              double reserve = 0.0;
+              if (auto it = colony->mineral_reserves.find(mineral); it != colony->mineral_reserves.end()) {
+                reserve = it->second;
+              }
+              ImGui::PushID(mineral.c_str());
+              ImGui::SetNextItemWidth(100.0f);
+              if (ImGui::InputDouble("##reserve", &reserve, 0.0, 0.0, "%.1f")) {
+                reserve = std::max(0.0, reserve);
+                if (reserve <= 1e-9) {
+                  colony->mineral_reserves.erase(mineral);
+                } else {
+                  colony->mineral_reserves[mineral] = reserve;
+                }
+              }
+
+              ImGui::TableSetColumnIndex(3);
+              if (ImGui::SmallButton("X")) {
+                colony->mineral_reserves.erase(mineral);
+              }
+              ImGui::PopID();
+            }
+
+            ImGui::EndTable();
+          }
+
+          static char add_reserve_mineral[64] = "";
+          static double add_reserve_tons = 0.0;
+
+          ImGui::Separator();
+          ImGui::Text("Add / set reserve");
+          ImGui::InputText("Mineral##add_reserve_mineral", add_reserve_mineral,
+                           IM_ARRAYSIZE(add_reserve_mineral));
+          ImGui::InputDouble("Tons##add_reserve_tons", &add_reserve_tons, 0.0, 0.0, "%.1f");
+          add_reserve_tons = std::max(0.0, add_reserve_tons);
+
+          if (ImGui::SmallButton("Set reserve")) {
+            const std::string m(add_reserve_mineral);
+            if (!m.empty()) {
+              if (add_reserve_tons <= 1e-9) {
+                colony->mineral_reserves.erase(m);
+              } else {
+                colony->mineral_reserves[m] = add_reserve_tons;
+              }
+            }
+          }
+          ImGui::SameLine();
+          if (ImGui::SmallButton("Clear all")) {
+            colony->mineral_reserves.clear();
+          }
+
+          ImGui::TreePop();
+        }
+
+
+        // Body-level mineral deposits (finite mining).
+        ImGui::Separator();
+        ImGui::Text("Body deposits");
+        const Body* body = find_ptr(s.bodies, colony->body_id);
+        if (!body) {
+          ImGui::TextDisabled("(body not found)");
+        } else if (body->mineral_deposits.empty()) {
+          ImGui::TextDisabled("(not modeled / unlimited)");
+        } else {
+          // Estimate colony mining rates by inspecting mining installations.
+          std::unordered_map<std::string, double> rate_per_day;
+          for (const auto& [inst_id, count] : colony->installations) {
+            if (count <= 0) continue;
+            const auto it = sim.content().installations.find(inst_id);
+            if (it == sim.content().installations.end()) continue;
+            const InstallationDef& def = it->second;
+            if (def.produces_per_day.empty()) continue;
+            const bool mining = def.mining ||
+                                (!def.mining && nebula4x::to_lower(def.id).find("mine") != std::string::npos);
+            if (!mining) continue;
+            for (const auto& [mineral, per_day] : def.produces_per_day) {
+              rate_per_day[mineral] += per_day * static_cast<double>(count);
+            }
+          }
+
+          std::vector<std::string> deps;
+          deps.reserve(body->mineral_deposits.size());
+          for (const auto& [mineral, _] : body->mineral_deposits) deps.push_back(mineral);
+          std::sort(deps.begin(), deps.end());
+
+          for (const auto& mineral : deps) {
+            const auto itv = body->mineral_deposits.find(mineral);
+            const double left = (itv == body->mineral_deposits.end()) ? 0.0 : itv->second;
+            const auto itr = rate_per_day.find(mineral);
+            const double rate = (itr == rate_per_day.end()) ? 0.0 : itr->second;
+
+            if (left <= 1e-9) {
+              ImGui::BulletText("%s: %.0f  (depleted)", mineral.c_str(), left);
+              continue;
+            }
+
+            if (rate > 1e-9) {
+              const double eta_days = left / rate;
+              const double eta_years = eta_days / 365.25;
+              ImGui::BulletText("%s: %.0f  (%.2f/day, ETA %.0f d / %.1f y)",
+                                mineral.c_str(), left, rate, eta_days, eta_years);
+            } else {
+              ImGui::BulletText("%s: %.0f", mineral.c_str(), left);
+            }
+          }
+        }
+
         ImGui::Separator();
         ImGui::Text("Installations");
         for (const auto& [k, v] : colony->installations) {
@@ -2258,6 +2544,88 @@ if (colony->shipyard_queue.empty()) {
       }
     }
 
+    // --- Body (planet) tab ---
+    if (ImGui::BeginTabItem("Body")) {
+      // If no body selected explicitly, fall back to the selected colony's body.
+      Id body_id = selected_body;
+      if (body_id == kInvalidId && selected_colony != kInvalidId) {
+        if (const auto* c = find_ptr(s.colonies, selected_colony)) {
+          body_id = c->body_id;
+        }
+      }
+
+      if (selected_body == kInvalidId && body_id != kInvalidId) {
+        selected_body = body_id;
+      }
+
+      if (body_id == kInvalidId) {
+        ImGui::TextDisabled("No body selected (select a colony, use Directory, or right-click a body on the system map)");
+      } else {
+        const Body* b = find_ptr(s.bodies, body_id);
+        if (!b) {
+          ImGui::TextDisabled("Selected body no longer exists");
+        } else {
+          const StarSystem* sys = find_ptr(s.systems, b->system_id);
+          ImGui::Text("%s", b->name.c_str());
+          ImGui::Separator();
+          ImGui::Text("Type: %s", body_type_label(b->type));
+          ImGui::Text("System: %s", sys ? sys->name.c_str() : "(unknown)");
+          ImGui::Text("Orbit: %.1f mkm", b->orbit_radius_mkm);
+          ImGui::Text("Pos: (%.2f, %.2f) mkm", b->position_mkm.x, b->position_mkm.y);
+
+          // Colony on this body (if any).
+          Id colony_here = kInvalidId;
+          for (const auto& [cid, c] : s.colonies) {
+            if (c.body_id == body_id) {
+              colony_here = cid;
+              break;
+            }
+          }
+
+          if (colony_here != kInvalidId) {
+            if (const Colony* c = find_ptr(s.colonies, colony_here)) {
+              const Faction* fac = find_ptr(s.factions, c->faction_id);
+              ImGui::SeparatorText("Colony");
+              ImGui::Text("Name: %s", c->name.c_str());
+              ImGui::Text("Faction: %s", fac ? fac->name.c_str() : "(unknown)");
+              ImGui::Text("Population: %.2f M", c->population_millions);
+              if (ImGui::Button("Select colony")) {
+                selected_colony = colony_here;
+              }
+            }
+          } else {
+            ImGui::TextDisabled("Colony: (none)");
+          }
+
+          ImGui::SeparatorText("Mineral deposits");
+          if (b->mineral_deposits.empty()) {
+            ImGui::TextDisabled("(none)");
+          } else {
+            // Sort by amount descending for easier scanning.
+            std::vector<std::pair<std::string, double>> deps;
+            deps.reserve(b->mineral_deposits.size());
+            for (const auto& [k, v] : b->mineral_deposits) deps.emplace_back(k, v);
+            std::sort(deps.begin(), deps.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+
+            if (ImGui::BeginTable("body_deposits", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV)) {
+              ImGui::TableSetupColumn("Mineral");
+              ImGui::TableSetupColumn("Amount");
+              ImGui::TableHeadersRow();
+              for (const auto& [k, v] : deps) {
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                ImGui::TextUnformatted(k.c_str());
+                ImGui::TableSetColumnIndex(1);
+                ImGui::Text("%.1f", v);
+              }
+              ImGui::EndTable();
+            }
+          }
+        }
+      }
+      ImGui::EndTabItem();
+    }
+
 
     // --- Logistics tab ---
     if (ImGui::BeginTabItem("Logistics")) {
@@ -2477,56 +2845,271 @@ if (colony->shipyard_queue.empty()) {
         }
 
         ImGui::Separator();
-        ImGui::Text("Available techs");
 
-        // Compute available lis.
-        std::vector<std::string> available;
-        for (const auto& [tid, tech] : sim.content().techs) {
-          if (vec_contains(selected_faction->known_techs, tid)) continue;
-          if (!prereqs_met(*selected_faction, tech)) continue;
-          available.push_back(tid);
-        }
-        std::sort(available.begin(), available.end());
-
-        static int tech_sel = 0;
-        if (!available.empty()) tech_sel = std::clamp(tech_sel, 0, static_cast<int>(available.size()) - 1);
-
-        if (available.empty()) {
-          ImGui::TextDisabled("(none)");
-        } else {
-          // List box
-          if (ImGui::BeginListBox("##techs", ImVec2(-1, 180))) {
-            for (int i = 0; i < static_cast<int>(available.size()); ++i) {
-              const bool sel = (tech_sel == i);
-              const auto it = sim.content().techs.find(available[i]);
-              const std::string label = (it == sim.content().techs.end()) ? available[i] : (it->second.name + "##" + available[i]);
-              if (ImGui::Selectable(label.c_str(), sel)) tech_sel = i;
+        // Also show a computed RP/day so players can reason about timelines.
+        {
+          double rp_per_day = 0.0;
+          for (const auto& [cid, col] : sim.state().colonies) {
+            if (col.faction_id != selected_faction->id) continue;
+            for (const auto& [inst_id, count] : col.installations) {
+              if (count <= 0) continue;
+              const auto it = sim.content().installations.find(inst_id);
+              if (it == sim.content().installations.end()) continue;
+              rp_per_day += it->second.research_points_per_day * static_cast<double>(count);
             }
-            ImGui::EndListBox();
+          }
+          ImGui::Text("Research Points/day: %.1f", rp_per_day);
+        }
+
+        ImGui::Separator();
+        ImGui::Text("Tech browser");
+
+        static char tech_search[128] = "";
+        ImGui::InputTextWithHint("Search", "Type to filter techs...", tech_search, IM_ARRAYSIZE(tech_search));
+
+        static bool show_known = true;
+        static bool show_locked = true;
+        static bool show_researchable = true;
+        ImGui::Checkbox("Known", &show_known);
+        ImGui::SameLine();
+        ImGui::Checkbox("Locked", &show_locked);
+        ImGui::SameLine();
+        ImGui::Checkbox("Researchable", &show_researchable);
+
+        // Build a deterministic, filtered list of tech ids.
+        std::vector<std::string> tech_ids;
+        tech_ids.reserve(sim.content().techs.size());
+        for (const auto& [tid, _] : sim.content().techs) tech_ids.push_back(tid);
+        std::sort(tech_ids.begin(), tech_ids.end(), [&](const std::string& a, const std::string& b) {
+          const auto ia = sim.content().techs.find(a);
+          const auto ib = sim.content().techs.find(b);
+          const std::string an = (ia == sim.content().techs.end()) ? a : ia->second.name;
+          const std::string bn = (ib == sim.content().techs.end()) ? b : ib->second.name;
+          if (an != bn) return an < bn;
+          return a < b;
+        });
+
+        std::vector<std::string> filtered;
+        filtered.reserve(tech_ids.size());
+        for (const auto& tid : tech_ids) {
+          const auto it = sim.content().techs.find(tid);
+          if (it == sim.content().techs.end()) continue;
+          const TechDef& t = it->second;
+
+          const bool known = vec_contains(selected_faction->known_techs, tid);
+          const bool researchable = prereqs_met(*selected_faction, t);
+          const bool locked = (!known && !researchable);
+
+          if (known && !show_known) continue;
+          if (locked && !show_locked) continue;
+          if (researchable && !known && !show_researchable) continue;
+
+          if (tech_search[0] != '\0') {
+            const std::string hay = t.name + " " + t.id;
+            if (!case_insensitive_contains(hay, tech_search)) continue;
           }
 
-          const std::string chosen_id = available[tech_sel];
-          const auto it = sim.content().techs.find(chosen_id);
-          const TechDef* chosen = (it == sim.content().techs.end()) ? nullptr : &it->second;
+          filtered.push_back(tid);
+        }
 
-          if (chosen) {
-            ImGui::Text("Cost: %.0f", chosen->cost);
-            if (!chosen->effects.empty()) {
-              ImGui::Text("Effects:");
-              for (const auto& eff : chosen->effects) {
-                ImGui::BulletText("%s: %s", eff.type.c_str(), eff.value.c_str());
+        static int tech_sel = 0;
+        if (!filtered.empty()) tech_sel = std::clamp(tech_sel, 0, static_cast<int>(filtered.size()) - 1);
+
+        // Layout: list (left) + details (right)
+        const ImGuiTableFlags flags = ImGuiTableFlags_SizingStretchProp;
+        if (ImGui::BeginTable("##tech_browser", 2, flags)) {
+          ImGui::TableSetupColumn("List", ImGuiTableColumnFlags_WidthStretch, 0.55f);
+          ImGui::TableSetupColumn("Details", ImGuiTableColumnFlags_WidthStretch, 0.45f);
+          ImGui::TableNextRow();
+
+          // --- List column ---
+          ImGui::TableSetColumnIndex(0);
+          if (filtered.empty()) {
+            ImGui::TextDisabled("(no techs match filter)");
+          } else {
+            if (ImGui::BeginListBox("##tech_list", ImVec2(-1, 220))) {
+              for (int i = 0; i < static_cast<int>(filtered.size()); ++i) {
+                const std::string& tid = filtered[i];
+                const auto it = sim.content().techs.find(tid);
+                if (it == sim.content().techs.end()) continue;
+                const TechDef& t = it->second;
+
+                const bool known = vec_contains(selected_faction->known_techs, tid);
+                const bool active = (selected_faction->active_research_id == tid);
+                const bool queued = (std::find(selected_faction->research_queue.begin(),
+                                               selected_faction->research_queue.end(), tid) !=
+                                     selected_faction->research_queue.end());
+                const bool researchable = prereqs_met(*selected_faction, t);
+
+                std::string prefix;
+                if (active) prefix = "[A] ";
+                else if (known) prefix = "[K] ";
+                else if (queued) prefix = "[Q] ";
+                else if (researchable) prefix = "[R] ";
+                else prefix = "[L] ";
+
+                std::string label = prefix + t.name;
+                if (t.cost > 0.0) label += "  (" + std::to_string(static_cast<int>(t.cost)) + ")";
+                label += "##" + tid;
+
+                const bool sel = (tech_sel == i);
+                if (ImGui::Selectable(label.c_str(), sel)) tech_sel = i;
+              }
+              ImGui::EndListBox();
+            }
+          }
+
+          // --- Details column ---
+          ImGui::TableSetColumnIndex(1);
+
+          if (!filtered.empty()) {
+            const std::string chosen_id = filtered[tech_sel];
+            const auto it = sim.content().techs.find(chosen_id);
+            const TechDef* chosen = (it == sim.content().techs.end()) ? nullptr : &it->second;
+
+            if (chosen) {
+              const bool known = vec_contains(selected_faction->known_techs, chosen_id);
+              const bool active = (selected_faction->active_research_id == chosen_id);
+              const bool queued = (std::find(selected_faction->research_queue.begin(),
+                                             selected_faction->research_queue.end(), chosen_id) !=
+                                   selected_faction->research_queue.end());
+              const bool researchable = prereqs_met(*selected_faction, *chosen);
+
+              ImGui::TextWrapped("%s", chosen->name.c_str());
+              ImGui::TextDisabled("id: %s", chosen->id.c_str());
+              ImGui::Text("Cost: %.0f", chosen->cost);
+
+              if (known) ImGui::TextDisabled("Status: known");
+              else if (active) ImGui::TextDisabled("Status: active");
+              else if (queued) ImGui::TextDisabled("Status: queued");
+              else if (researchable) ImGui::TextDisabled("Status: researchable");
+              else ImGui::TextDisabled("Status: locked (missing prereqs)");
+
+              ImGui::Separator();
+              ImGui::Text("Prerequisites");
+              if (chosen->prereqs.empty()) {
+                ImGui::TextDisabled("(none)");
+              } else {
+                for (const auto& pre : chosen->prereqs) {
+                  const auto itp = sim.content().techs.find(pre);
+                  const std::string pname = (itp == sim.content().techs.end()) ? pre : itp->second.name;
+                  const bool have = vec_contains(selected_faction->known_techs, pre);
+                  ImGui::BulletText("%s%s (%s)", have ? "[ok] " : "[missing] ", pname.c_str(), pre.c_str());
+                }
+              }
+
+              ImGui::Separator();
+              ImGui::Text("Effects");
+              if (chosen->effects.empty()) {
+                ImGui::TextDisabled("(none)");
+              } else {
+                for (const auto& eff : chosen->effects) {
+                  ImGui::BulletText("%s: %s", eff.type.c_str(), eff.value.c_str());
+                }
+              }
+
+              ImGui::Separator();
+              static std::string last_plan_error;
+
+              const auto plan = nebula4x::compute_research_plan(sim.content(), *selected_faction, chosen_id);
+              if (ImGui::CollapsingHeader("Plan", ImGuiTreeNodeFlags_DefaultOpen)) {
+                if (!plan.ok()) {
+                  ImGui::TextDisabled("(cannot compute plan)");
+                  for (const auto& e : plan.errors) {
+                    ImGui::BulletText("%s", e.c_str());
+                  }
+                } else {
+                  ImGui::Text("Steps: %d", static_cast<int>(plan.plan.tech_ids.size()));
+                  ImGui::Text("Total cost: %.0f", plan.plan.total_cost);
+                  if (ImGui::BeginChild("##plan_list", ImVec2(-1, 100), true)) {
+                    for (const auto& tid : plan.plan.tech_ids) {
+                      const auto it2 = sim.content().techs.find(tid);
+                      const std::string nm = (it2 == sim.content().techs.end()) ? tid : it2->second.name;
+                      ImGui::BulletText("%s", nm.c_str());
+                    }
+                    ImGui::EndChild();
+                  }
+                }
+              }
+
+              const bool can_act = (!known);
+              const bool can_set_active = can_act;
+
+              if (!can_act) {
+                ImGui::TextDisabled("(already researched)");
+              }
+
+              if (!can_set_active) ImGui::BeginDisabled();
+              if (ImGui::Button("Set Active")) {
+                selected_faction->active_research_id = chosen_id;
+                selected_faction->active_research_progress = 0.0;
+              }
+              if (!can_set_active) ImGui::EndDisabled();
+
+              ImGui::SameLine();
+              if (!can_act) ImGui::BeginDisabled();
+              if (ImGui::Button("Add to Queue")) {
+                selected_faction->research_queue.push_back(chosen_id);
+              }
+              if (!can_act) ImGui::EndDisabled();
+
+              if (!can_act) ImGui::BeginDisabled();
+              if (ImGui::Button("Queue with prereqs")) {
+                const auto plan2 = nebula4x::compute_research_plan(sim.content(), *selected_faction, chosen_id);
+                if (!plan2.ok()) {
+                  last_plan_error.clear();
+                  for (const auto& e : plan2.errors) {
+                    if (!last_plan_error.empty()) last_plan_error += "\n";
+                    last_plan_error += e;
+                  }
+                  ImGui::OpenPopup("Research plan error");
+                } else {
+                  for (const auto& tid : plan2.plan.tech_ids) {
+                    if (vec_contains(selected_faction->known_techs, tid)) continue;
+                    if (selected_faction->active_research_id == tid) continue;
+                    if (std::find(selected_faction->research_queue.begin(), selected_faction->research_queue.end(), tid) !=
+                        selected_faction->research_queue.end()) {
+                      continue;
+                    }
+                    selected_faction->research_queue.push_back(tid);
+                  }
+                }
+              }
+              ImGui::SameLine();
+              if (ImGui::Button("Replace queue with plan")) {
+                const auto plan2 = nebula4x::compute_research_plan(sim.content(), *selected_faction, chosen_id);
+                if (!plan2.ok()) {
+                  last_plan_error.clear();
+                  for (const auto& e : plan2.errors) {
+                    if (!last_plan_error.empty()) last_plan_error += "\n";
+                    last_plan_error += e;
+                  }
+                  ImGui::OpenPopup("Research plan error");
+                } else {
+                  selected_faction->research_queue.clear();
+                  for (const auto& tid : plan2.plan.tech_ids) {
+                    if (vec_contains(selected_faction->known_techs, tid)) continue;
+                    if (selected_faction->active_research_id == tid) continue;
+                    selected_faction->research_queue.push_back(tid);
+                  }
+                }
+              }
+              if (!can_act) ImGui::EndDisabled();
+
+              if (ImGui::BeginPopupModal("Research plan error", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+                ImGui::TextUnformatted("Could not compute a valid research plan:");
+                ImGui::Separator();
+                ImGui::TextUnformatted(last_plan_error.c_str());
+                ImGui::Separator();
+                if (ImGui::Button("OK")) {
+                  ImGui::CloseCurrentPopup();
+                }
+                ImGui::EndPopup();
               }
             }
           }
 
-          if (ImGui::Button("Set Active")) {
-            selected_faction->active_research_id = chosen_id;
-            selected_faction->active_research_progress = 0.0;
-          }
-          ImGui::SameLine();
-          if (ImGui::Button("Add to Queue")) {
-            selected_faction->research_queue.push_back(chosen_id);
-          }
+          ImGui::EndTable();
         }
 
         ImGui::EndTabItem();
@@ -2653,6 +3236,52 @@ if (colony->shipyard_queue.empty()) {
             ImGui::Text("Role: %s", ship_role_label(d->role));
             ImGui::Text("Mass: %.0f t", d->mass_tons);
             ImGui::Text("Speed: %.1f km/s", d->speed_km_s);
+            if (d->fuel_use_per_mkm > 0.0) {
+              if (d->fuel_capacity_tons > 0.0) {
+                ImGui::Text("Fuel: %.0f t  (use %.2f t/mkm, range %.0f mkm)", d->fuel_capacity_tons, d->fuel_use_per_mkm, d->fuel_capacity_tons / d->fuel_use_per_mkm);
+              } else {
+                ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "Fuel: 0 t  (needs fuel tanks)");
+              }
+            } else if (d->fuel_capacity_tons > 0.0) {
+              ImGui::Text("Fuel: %.0f t", d->fuel_capacity_tons);
+            } else {
+              ImGui::TextDisabled("Fuel: (none)");
+            }
+
+            // Power budget (prototype)
+            {
+              const double gen = std::max(0.0, d->power_generation);
+              const double use = std::max(0.0, d->power_use_total);
+              if (gen > 0.0 || use > 0.0) {
+                if (use <= gen + 1e-9) {
+                  ImGui::Text("Power: %.1f gen / %.1f use", gen, use);
+                } else {
+                  ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f),
+                                    "Power: %.1f gen / %.1f use (DEFICIT %.1f)", gen, use, use - gen);
+                }
+
+                double avail = gen;
+                auto on = [&](double req) {
+                  req = std::max(0.0, req);
+                  if (req <= 1e-9) return true;
+                  if (req <= avail + 1e-9) {
+                    avail -= req;
+                    return true;
+                  }
+                  return false;
+                };
+                const bool eng = on(d->power_use_engines);
+                const bool shld = on(d->power_use_shields);
+                const bool weap = on(d->power_use_weapons);
+                const bool sens = on(d->power_use_sensors);
+
+                ImGui::TextDisabled("Online: Engines %s, Shields %s, Weapons %s, Sensors %s  (avail %.1f)",
+                                    eng ? "ON" : "OFF", shld ? "ON" : "OFF", weap ? "ON" : "OFF",
+                                    sens ? "ON" : "OFF", avail);
+              } else {
+                ImGui::TextDisabled("Power: (none)");
+              }
+            }
             ImGui::Text("HP: %.0f", d->max_hp);
             if (d->max_shields > 0.0) {
               ImGui::Text("Shields: %.0f (+%.1f/day)", d->max_shields, d->shield_regen_per_day);
@@ -2775,12 +3404,13 @@ if (colony->shipyard_queue.empty()) {
             switch (t) {
               case ComponentType::Engine: return 0;
               case ComponentType::Reactor: return 1;
-              case ComponentType::Cargo: return 2;
-              case ComponentType::ColonyModule: return 3;
-              case ComponentType::Sensor: return 4;
-              case ComponentType::Weapon: return 5;
-              case ComponentType::Armor: return 6;
-              case ComponentType::Shield: return 7;
+              case ComponentType::FuelTank: return 2;
+              case ComponentType::Cargo: return 3;
+              case ComponentType::ColonyModule: return 4;
+              case ComponentType::Sensor: return 5;
+              case ComponentType::Weapon: return 6;
+              case ComponentType::Armor: return 7;
+              case ComponentType::Shield: return 8;
               default: return 99;
             }
           };
@@ -2829,7 +3459,7 @@ if (colony->shipyard_queue.empty()) {
         ImGui::Text("Add component");
 
         static int comp_filter = 0; // 0=All
-        const char* filters[] = {"All", "Engine", "Cargo", "Sensor", "Reactor", "Weapon", "Armor", "Shield", "Colony Module"};
+        const char* filters[] = {"All", "Engine", "Fuel Tank", "Cargo", "Sensor", "Reactor", "Weapon", "Armor", "Shield", "Colony Module"};
         ImGui::Combo("Filter", &comp_filter, filters, IM_ARRAYSIZE(filters));
 
         static char comp_search[64] = "";
@@ -2851,13 +3481,14 @@ if (colony->shipyard_queue.empty()) {
           if (comp_filter != 0) {
             const ComponentType desired =
                 (comp_filter == 1) ? ComponentType::Engine
-                : (comp_filter == 2) ? ComponentType::Cargo
-                : (comp_filter == 3) ? ComponentType::Sensor
-                : (comp_filter == 4) ? ComponentType::Reactor
-                : (comp_filter == 5) ? ComponentType::Weapon
-                : (comp_filter == 6) ? ComponentType::Armor
-                : (comp_filter == 7) ? ComponentType::Shield
-                : (comp_filter == 8) ? ComponentType::ColonyModule
+                : (comp_filter == 2) ? ComponentType::FuelTank
+                : (comp_filter == 3) ? ComponentType::Cargo
+                : (comp_filter == 4) ? ComponentType::Sensor
+                : (comp_filter == 5) ? ComponentType::Reactor
+                : (comp_filter == 6) ? ComponentType::Weapon
+                : (comp_filter == 7) ? ComponentType::Armor
+                : (comp_filter == 8) ? ComponentType::Shield
+                : (comp_filter == 9) ? ComponentType::ColonyModule
                                     : ComponentType::Unknown;
             if (cdef.type != desired) continue;
           }
@@ -2894,8 +3525,11 @@ if (colony->shipyard_queue.empty()) {
               ImGui::TextDisabled("Selected: %s (%s)", c.name.c_str(), component_type_label(c.type));
               ImGui::TextDisabled("Mass: %.0f t", c.mass_tons);
               if (c.speed_km_s > 0.0) ImGui::TextDisabled("Speed: %.1f km/s", c.speed_km_s);
-              if (c.power > 0.0) ImGui::TextDisabled("Power: %.1f", c.power);
+              if (c.power_output > 0.0) ImGui::TextDisabled("Power output: %.1f", c.power_output);
+              if (c.power_use > 0.0) ImGui::TextDisabled("Power use: %.1f", c.power_use);
               if (c.cargo_tons > 0.0) ImGui::TextDisabled("Cargo: %.0f t", c.cargo_tons);
+              if (c.fuel_capacity_tons > 0.0) ImGui::TextDisabled("Fuel cap: %.0f t", c.fuel_capacity_tons);
+              if (c.fuel_use_per_mkm > 0.0) ImGui::TextDisabled("Fuel use: %.2f t/mkm", c.fuel_use_per_mkm);
               if (c.sensor_range_mkm > 0.0) ImGui::TextDisabled("Sensor: %.0f mkm", c.sensor_range_mkm);
               if (c.colony_capacity_millions > 0.0)
                 ImGui::TextDisabled("Colony capacity: %.0f M", c.colony_capacity_millions);
@@ -2924,6 +3558,75 @@ if (colony->shipyard_queue.empty()) {
         ImGui::Text("Preview");
         ImGui::Text("Mass: %.0f t", preview.mass_tons);
         ImGui::Text("Speed: %.1f km/s", preview.speed_km_s);
+        if (preview.fuel_use_per_mkm > 0.0) {
+          if (preview.fuel_capacity_tons > 0.0) {
+            ImGui::Text("Fuel: %.0f t  (use %.2f t/mkm, range %.0f mkm)", preview.fuel_capacity_tons,
+                        preview.fuel_use_per_mkm, preview.fuel_capacity_tons / preview.fuel_use_per_mkm);
+          } else {
+            ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "Fuel: 0 t  (needs fuel tanks)");
+          }
+        } else if (preview.fuel_capacity_tons > 0.0) {
+          ImGui::Text("Fuel: %.0f t", preview.fuel_capacity_tons);
+        } else {
+          ImGui::TextDisabled("Fuel: (none)");
+        }
+
+        // Power budget (prototype).
+        {
+          const double gen = std::max(0.0, d->power_generation);
+          const double use = std::max(0.0, d->power_use_total);
+          if (gen > 0.0 || use > 0.0) {
+            if (use <= gen + 1e-9) {
+              ImGui::Text("Power: %.1f gen / %.1f use", gen, use);
+            } else {
+              ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f),
+                                  "Power: %.1f gen / %.1f use (DEFICIT %.1f)", gen, use, use - gen);
+            }
+          } else {
+            ImGui::TextDisabled("Power: (none)");
+          }
+        }
+
+        // Power budget (prototype).
+        {
+          const double gen = preview.power_generation;
+          const double use = preview.power_use_total;
+          if (gen > 0.0 || use > 0.0) {
+            if (use <= gen + 1e-9) {
+              ImGui::Text("Power: %.1f gen / %.1f use", gen, use);
+            } else {
+              ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "Power: %.1f gen / %.1f use  (DEFICIT %.1f)",
+                                gen, use, use - gen);
+            }
+
+            // Show load-shedding outcome using the same priority as the simulation.
+            double avail = gen;
+            auto on = [&](double req) {
+              if (req <= 0.0) return true;
+              if (req <= avail + 1e-9) {
+                avail -= req;
+                return true;
+              }
+              return false;
+            };
+
+            const bool eng_on = on(preview.power_use_engines);
+            const bool sh_on = on(preview.power_use_shields);
+            const bool weap_on = on(preview.power_use_weapons);
+            const bool sens_on = on(preview.power_use_sensors);
+
+            ImGui::TextDisabled("Load shed: Engines %s  Shields %s  Weapons %s  Sensors %s", eng_on ? "ON" : "OFF",
+                                sh_on ? "ON" : "OFF", weap_on ? "ON" : "OFF", sens_on ? "ON" : "OFF");
+
+            if (preview.power_use_engines > 0.0 || preview.power_use_shields > 0.0 || preview.power_use_weapons > 0.0 ||
+                preview.power_use_sensors > 0.0) {
+              ImGui::TextDisabled("Use breakdown: Eng %.1f  Sh %.1f  Wpn %.1f  Sen %.1f", preview.power_use_engines,
+                                  preview.power_use_shields, preview.power_use_weapons, preview.power_use_sensors);
+            }
+          } else {
+            ImGui::TextDisabled("Power: (none)");
+          }
+        }
         ImGui::Text("HP: %.0f", preview.max_hp);
         if (preview.max_shields > 0.0) {
           ImGui::Text("Shields: %.0f (+%.1f/day)", preview.max_shields, preview.shield_regen_per_day);
@@ -3391,6 +4094,425 @@ if (colony->shipyard_queue.empty()) {
 
     ImGui::EndTabBar();
   }
+}
+
+void draw_settings_window(UIState& ui, char* ui_prefs_path, UIPrefActions& actions) {
+  ImGui::SetNextWindowSize(ImVec2(520, 520), ImGuiCond_FirstUseEver);
+  if (!ImGui::Begin("Settings", &ui.show_settings_window)) {
+    ImGui::End();
+    return;
+  }
+
+  ImGui::SeparatorText("Theme & Backgrounds");
+  ImGui::ColorEdit4("Clear background (SDL)", ui.clear_color);
+  ImGui::ColorEdit4("System map background", ui.system_map_bg);
+  ImGui::ColorEdit4("Galaxy map background", ui.galaxy_map_bg);
+  ImGui::Checkbox("Override window background", &ui.override_window_bg);
+  if (ui.override_window_bg) {
+    ImGui::ColorEdit4("Window background", ui.window_bg);
+  }
+  if (ImGui::Button("Reset theme defaults")) {
+    actions.reset_ui_theme = true;
+  }
+
+  ImGui::SeparatorText("UI prefs file");
+  ImGui::InputText("Path##ui_prefs_path", ui_prefs_path, 256);
+  ImGui::Checkbox("Autosave on exit", &ui.autosave_ui_prefs);
+  if (ImGui::Button("Load UI prefs")) {
+    actions.load_ui_prefs = true;
+  }
+  ImGui::SameLine();
+  if (ImGui::Button("Save UI prefs")) {
+    actions.save_ui_prefs = true;
+  }
+
+  ImGui::SeparatorText("Windows");
+  ImGui::Checkbox("Controls", &ui.show_controls_window);
+  ImGui::Checkbox("Map", &ui.show_map_window);
+  ImGui::Checkbox("Details", &ui.show_details_window);
+  ImGui::Checkbox("Directory", &ui.show_directory_window);
+  if (ImGui::Button("Reset window layout")) {
+    actions.reset_window_layout = true;
+  }
+
+  ImGui::SeparatorText("Notes");
+  ImGui::TextWrapped(
+      "Theme/layout settings are stored separately from save-games. Use 'UI Prefs' to persist your UI theme "
+      "(including background colors) and window visibility.");
+
+  ImGui::End();
+}
+
+void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_colony, Id& selected_body) {
+  auto& s = sim.state();
+
+  ImGui::SetNextWindowSize(ImVec2(860, 520), ImGuiCond_FirstUseEver);
+  if (!ImGui::Begin("Directory", &ui.show_directory_window)) {
+    ImGui::End();
+    return;
+  }
+
+  if (!ImGui::BeginTabBar("directory_tabs")) {
+    ImGui::End();
+    return;
+  }
+
+  // --- Colonies tab ---
+  if (ImGui::BeginTabItem("Colonies")) {
+    static char search[128] = "";
+    static int faction_filter_idx = 0; // 0 = All
+    static int system_filter_idx = 0;  // 0 = All
+
+    const auto factions = sorted_factions(s);
+    const auto systems = sorted_systems(s);
+
+    // Filter controls
+    ImGui::InputTextWithHint("Search##colony", "name / system / body", search, IM_ARRAYSIZE(search));
+
+    {
+      std::vector<const char*> labels;
+      labels.reserve(factions.size() + 1);
+      labels.push_back("All factions");
+      for (const auto& p : factions) labels.push_back(p.second.c_str());
+      if (labels.size() > 1) {
+        faction_filter_idx = std::clamp(faction_filter_idx, 0, static_cast<int>(labels.size()) - 1);
+      } else {
+        faction_filter_idx = 0;
+      }
+      ImGui::Combo("Faction##colony", &faction_filter_idx, labels.data(), static_cast<int>(labels.size()));
+    }
+
+    {
+      std::vector<const char*> labels;
+      labels.reserve(systems.size() + 1);
+      labels.push_back("All systems");
+      for (const auto& p : systems) labels.push_back(p.second.c_str());
+      if (labels.size() > 1) {
+        system_filter_idx = std::clamp(system_filter_idx, 0, static_cast<int>(labels.size()) - 1);
+      } else {
+        system_filter_idx = 0;
+      }
+      ImGui::Combo("System##colony", &system_filter_idx, labels.data(), static_cast<int>(labels.size()));
+    }
+
+    const Id faction_filter = (faction_filter_idx <= 0 || factions.empty()) ? kInvalidId : factions[faction_filter_idx - 1].first;
+    const Id system_filter = (system_filter_idx <= 0 || systems.empty()) ? kInvalidId : systems[system_filter_idx - 1].first;
+
+    struct ColonyRow {
+      Id id{kInvalidId};
+      Id faction_id{kInvalidId};
+      Id system_id{kInvalidId};
+      Id body_id{kInvalidId};
+      std::string name;
+      std::string system;
+      std::string body;
+      std::string faction;
+      double pop{0.0};
+      double cp_day{0.0};
+      double fuel{0.0};
+      int shipyards{0};
+    };
+
+    std::vector<ColonyRow> rows;
+    rows.reserve(s.colonies.size());
+
+    for (const auto& [cid, c] : s.colonies) {
+      if (faction_filter != kInvalidId && c.faction_id != faction_filter) continue;
+
+      const Body* b = (c.body_id != kInvalidId) ? find_ptr(s.bodies, c.body_id) : nullptr;
+      const StarSystem* sys = b ? find_ptr(s.systems, b->system_id) : nullptr;
+      if (system_filter != kInvalidId && (!sys || sys->id != system_filter)) continue;
+
+      const Faction* fac = find_ptr(s.factions, c.faction_id);
+
+      // Search matches colony name, body, or system.
+      if (!case_insensitive_contains(c.name, search) &&
+          !(b && case_insensitive_contains(b->name, search)) &&
+          !(sys && case_insensitive_contains(sys->name, search))) {
+        continue;
+      }
+
+      ColonyRow r;
+      r.id = cid;
+      r.faction_id = c.faction_id;
+      r.system_id = sys ? sys->id : kInvalidId;
+      r.body_id = c.body_id;
+      r.name = c.name;
+      r.system = sys ? sys->name : "?";
+      r.body = b ? b->name : "?";
+      r.faction = fac ? fac->name : "?";
+      r.pop = c.population_millions;
+      r.cp_day = sim.construction_points_per_day(c);
+      if (auto it = c.minerals.find("Fuel"); it != c.minerals.end()) r.fuel = it->second;
+      r.shipyards = static_cast<int>(c.shipyards.size());
+      rows.push_back(std::move(r));
+    }
+
+    ImGui::Separator();
+    ImGui::TextDisabled("Showing %d / %d colonies", (int)rows.size(), (int)s.colonies.size());
+
+    const ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable |
+                                 ImGuiTableFlags_Reorderable | ImGuiTableFlags_Hideable | ImGuiTableFlags_Sortable |
+                                 ImGuiTableFlags_ScrollY;
+
+    const ImVec2 avail = ImGui::GetContentRegionAvail();
+    if (ImGui::BeginTable("colony_directory", 8, flags, ImVec2(avail.x, avail.y))) {
+      ImGui::TableSetupScrollFreeze(0, 1);
+      ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_DefaultSort, 0.0f, 0);
+      ImGui::TableSetupColumn("System", 0, 0.0f, 1);
+      ImGui::TableSetupColumn("Body", 0, 0.0f, 2);
+      ImGui::TableSetupColumn("Faction", 0, 0.0f, 3);
+      ImGui::TableSetupColumn("Pop (M)", ImGuiTableColumnFlags_PreferSortDescending, 0.0f, 4);
+      ImGui::TableSetupColumn("CP/day", ImGuiTableColumnFlags_PreferSortDescending, 0.0f, 5);
+      ImGui::TableSetupColumn("Fuel", ImGuiTableColumnFlags_PreferSortDescending, 0.0f, 6);
+      ImGui::TableSetupColumn("Shipyards", ImGuiTableColumnFlags_PreferSortDescending, 0.0f, 7);
+      ImGui::TableHeadersRow();
+
+      if (ImGuiTableSortSpecs* sort = ImGui::TableGetSortSpecs()) {
+        if (sort->SpecsDirty && sort->SpecsCount > 0) {
+          const ImGuiTableColumnSortSpecs* spec = &sort->Specs[0];
+          const bool asc = (spec->SortDirection == ImGuiSortDirection_Ascending);
+          auto cmp = [&](const ColonyRow& a, const ColonyRow& b) {
+            auto lt = [&](auto x, auto y) { return asc ? (x < y) : (x > y); };
+            switch (spec->ColumnUserID) {
+              case 0: return lt(a.name, b.name);
+              case 1: return lt(a.system, b.system);
+              case 2: return lt(a.body, b.body);
+              case 3: return lt(a.faction, b.faction);
+              case 4: return lt(a.pop, b.pop);
+              case 5: return lt(a.cp_day, b.cp_day);
+              case 6: return lt(a.fuel, b.fuel);
+              case 7: return lt(a.shipyards, b.shipyards);
+              default: return lt(a.name, b.name);
+            }
+          };
+          std::stable_sort(rows.begin(), rows.end(), cmp);
+          sort->SpecsDirty = false;
+        }
+      }
+
+      ImGuiListClipper clip;
+      clip.Begin(static_cast<int>(rows.size()));
+      while (clip.Step()) {
+        for (int i = clip.DisplayStart; i < clip.DisplayEnd; ++i) {
+          const ColonyRow& r = rows[i];
+          ImGui::TableNextRow();
+
+          ImGui::TableSetColumnIndex(0);
+          const bool is_sel = (selected_colony == r.id);
+          std::string label = r.name + "##colony_" + std::to_string((int)r.id);
+          if (ImGui::Selectable(label.c_str(), is_sel, ImGuiSelectableFlags_SpanAllColumns)) {
+            selected_colony = r.id;
+            if (r.system_id != kInvalidId) s.selected_system = r.system_id;
+            selected_body = r.body_id;
+          }
+
+          ImGui::TableSetColumnIndex(1);
+          ImGui::TextUnformatted(r.system.c_str());
+          ImGui::TableSetColumnIndex(2);
+          ImGui::TextUnformatted(r.body.c_str());
+          ImGui::TableSetColumnIndex(3);
+          ImGui::TextUnformatted(r.faction.c_str());
+          ImGui::TableSetColumnIndex(4);
+          ImGui::Text("%.2f", r.pop);
+          ImGui::TableSetColumnIndex(5);
+          ImGui::Text("%.1f", r.cp_day);
+          ImGui::TableSetColumnIndex(6);
+          ImGui::Text("%.1f", r.fuel);
+          ImGui::TableSetColumnIndex(7);
+          ImGui::Text("%d", r.shipyards);
+        }
+      }
+
+      ImGui::EndTable();
+    }
+
+    ImGui::EndTabItem();
+  }
+
+  // --- Bodies tab ---
+  if (ImGui::BeginTabItem("Bodies")) {
+    static char search[128] = "";
+    static int system_filter_idx = 0; // 0 = All
+    static int type_filter_idx = 0;   // 0 = All
+    static bool only_colonized = false;
+
+    const auto systems = sorted_systems(s);
+
+    ImGui::InputTextWithHint("Search##body", "name / system", search, IM_ARRAYSIZE(search));
+    {
+      std::vector<const char*> labels;
+      labels.reserve(systems.size() + 1);
+      labels.push_back("All systems");
+      for (const auto& p : systems) labels.push_back(p.second.c_str());
+      if (labels.size() > 1) {
+        system_filter_idx = std::clamp(system_filter_idx, 0, static_cast<int>(labels.size()) - 1);
+      } else {
+        system_filter_idx = 0;
+      }
+      ImGui::Combo("System##body", &system_filter_idx, labels.data(), static_cast<int>(labels.size()));
+    }
+
+    {
+      const char* types[] = {"All", "Star", "Planet", "Moon", "Asteroid", "Gas Giant"};
+      ImGui::Combo("Type##body", &type_filter_idx, types, IM_ARRAYSIZE(types));
+    }
+    ImGui::Checkbox("Only colonized##body", &only_colonized);
+
+    const Id system_filter = (system_filter_idx <= 0 || systems.empty()) ? kInvalidId : systems[system_filter_idx - 1].first;
+
+    auto type_ok = [&](BodyType t) {
+      switch (type_filter_idx) {
+        case 1: return t == BodyType::Star;
+        case 2: return t == BodyType::Planet;
+        case 3: return t == BodyType::Moon;
+        case 4: return t == BodyType::Asteroid;
+        case 5: return t == BodyType::GasGiant;
+        default: return true;
+      }
+    };
+
+    // Precompute body->colony mapping.
+    std::unordered_map<Id, Id> body_to_colony;
+    body_to_colony.reserve(s.colonies.size() * 2);
+    for (const auto& [cid, c] : s.colonies) {
+      if (c.body_id != kInvalidId) body_to_colony[c.body_id] = cid;
+    }
+
+    struct BodyRow {
+      Id id{kInvalidId};
+      Id system_id{kInvalidId};
+      BodyType type{BodyType::Planet};
+      std::string name;
+      std::string system;
+      double orbit{0.0};
+      double deposits{0.0};
+      Id colony_id{kInvalidId};
+      double colony_pop{0.0};
+    };
+
+    std::vector<BodyRow> rows;
+    rows.reserve(s.bodies.size());
+
+    for (const auto& [bid, b] : s.bodies) {
+      const StarSystem* sys = find_ptr(s.systems, b.system_id);
+      if (system_filter != kInvalidId && b.system_id != system_filter) continue;
+      if (!type_ok(b.type)) continue;
+
+      const auto itc = body_to_colony.find(bid);
+      const Id colony_id = (itc == body_to_colony.end()) ? kInvalidId : itc->second;
+      if (only_colonized && colony_id == kInvalidId) continue;
+
+      if (!case_insensitive_contains(b.name, search) && !(sys && case_insensitive_contains(sys->name, search))) {
+        continue;
+      }
+
+      double dep_total = 0.0;
+      for (const auto& [_, v] : b.mineral_deposits) dep_total += std::max(0.0, v);
+
+      BodyRow r;
+      r.id = bid;
+      r.system_id = b.system_id;
+      r.type = b.type;
+      r.name = b.name;
+      r.system = sys ? sys->name : "?";
+      r.orbit = b.orbit_radius_mkm;
+      r.deposits = dep_total;
+      r.colony_id = colony_id;
+      if (const Colony* c = (colony_id != kInvalidId) ? find_ptr(s.colonies, colony_id) : nullptr) {
+        r.colony_pop = c->population_millions;
+      }
+      rows.push_back(std::move(r));
+    }
+
+    ImGui::Separator();
+    ImGui::TextDisabled("Showing %d bodies", (int)rows.size());
+
+    const ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable |
+                                 ImGuiTableFlags_Reorderable | ImGuiTableFlags_Hideable | ImGuiTableFlags_Sortable |
+                                 ImGuiTableFlags_ScrollY;
+
+    const ImVec2 avail = ImGui::GetContentRegionAvail();
+    if (ImGui::BeginTable("body_directory", 7, flags, ImVec2(avail.x, avail.y))) {
+      ImGui::TableSetupScrollFreeze(0, 1);
+      ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_DefaultSort, 0.0f, 0);
+      ImGui::TableSetupColumn("Type", 0, 0.0f, 1);
+      ImGui::TableSetupColumn("System", 0, 0.0f, 2);
+      ImGui::TableSetupColumn("Orbit (mkm)", ImGuiTableColumnFlags_PreferSortDescending, 0.0f, 3);
+      ImGui::TableSetupColumn("Deposits", ImGuiTableColumnFlags_PreferSortDescending, 0.0f, 4);
+      ImGui::TableSetupColumn("Colonized", 0, 0.0f, 5);
+      ImGui::TableSetupColumn("Pop (M)", ImGuiTableColumnFlags_PreferSortDescending, 0.0f, 6);
+      ImGui::TableHeadersRow();
+
+      if (ImGuiTableSortSpecs* sort = ImGui::TableGetSortSpecs()) {
+        if (sort->SpecsDirty && sort->SpecsCount > 0) {
+          const ImGuiTableColumnSortSpecs* spec = &sort->Specs[0];
+          const bool asc = (spec->SortDirection == ImGuiSortDirection_Ascending);
+          auto cmp = [&](const BodyRow& a, const BodyRow& b) {
+            auto lt = [&](auto x, auto y) { return asc ? (x < y) : (x > y); };
+            switch (spec->ColumnUserID) {
+              case 0: return lt(a.name, b.name);
+              case 1: return lt((int)a.type, (int)b.type);
+              case 2: return lt(a.system, b.system);
+              case 3: return lt(a.orbit, b.orbit);
+              case 4: return lt(a.deposits, b.deposits);
+              case 5: return lt(a.colony_id != kInvalidId, b.colony_id != kInvalidId);
+              case 6: return lt(a.colony_pop, b.colony_pop);
+              default: return lt(a.name, b.name);
+            }
+          };
+          std::stable_sort(rows.begin(), rows.end(), cmp);
+          sort->SpecsDirty = false;
+        }
+      }
+
+      ImGuiListClipper clip;
+      clip.Begin(static_cast<int>(rows.size()));
+      while (clip.Step()) {
+        for (int i = clip.DisplayStart; i < clip.DisplayEnd; ++i) {
+          const BodyRow& r = rows[i];
+          ImGui::TableNextRow();
+
+          ImGui::TableSetColumnIndex(0);
+          const bool is_sel = (selected_body == r.id);
+          std::string label = r.name + "##body_" + std::to_string((int)r.id);
+          if (ImGui::Selectable(label.c_str(), is_sel, ImGuiSelectableFlags_SpanAllColumns)) {
+            selected_body = r.id;
+            if (r.system_id != kInvalidId) s.selected_system = r.system_id;
+            if (r.colony_id != kInvalidId) selected_colony = r.colony_id;
+          }
+
+          ImGui::TableSetColumnIndex(1);
+          ImGui::TextUnformatted(body_type_label(r.type));
+          ImGui::TableSetColumnIndex(2);
+          ImGui::TextUnformatted(r.system.c_str());
+          ImGui::TableSetColumnIndex(3);
+          ImGui::Text("%.1f", r.orbit);
+          ImGui::TableSetColumnIndex(4);
+          ImGui::Text("%.1f", r.deposits);
+          ImGui::TableSetColumnIndex(5);
+          if (r.colony_id != kInvalidId) {
+            ImGui::TextUnformatted("Yes");
+          } else {
+            ImGui::TextDisabled("No");
+          }
+          ImGui::TableSetColumnIndex(6);
+          if (r.colony_id != kInvalidId) {
+            ImGui::Text("%.2f", r.colony_pop);
+          } else {
+            ImGui::TextDisabled("-");
+          }
+        }
+      }
+
+      ImGui::EndTable();
+    }
+
+    ImGui::EndTabItem();
+  }
+
+  ImGui::EndTabBar();
+  ImGui::End();
 }
 
 } // namespace nebula4x::ui

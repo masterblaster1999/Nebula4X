@@ -1,23 +1,32 @@
 {
-  "version": 6,
+  "version": 7,
   "components": {
     "engine_chem_mk1": {
       "name": "Chemical Engine Mk.I",
       "type": "engine",
       "mass_tons": 50,
-      "speed_km_s": 20
+      "speed_km_s": 20,
+      "fuel_use_per_mkm": 0.5
     },
     "engine_ion_mk1": {
       "name": "Ion Engine Mk.I",
       "type": "engine",
       "mass_tons": 35,
-      "speed_km_s": 35
+      "speed_km_s": 35,
+      "fuel_use_per_mkm": 0.3,
+      "power_use": 2
     },
     "cargo_mk1": {
       "name": "Cargo Hold",
       "type": "cargo",
       "mass_tons": 20,
       "cargo_tons": 500
+    },
+    "fuel_tank_mk1": {
+      "name": "Fuel Tank Mk.1",
+      "type": "fuel_tank",
+      "mass_tons": 25,
+      "fuel_capacity_tons": 5000
     },
     "colony_module_mk1": {
       "name": "Colony Module Mk.I",
@@ -55,14 +64,16 @@
       "name": "Advanced Sensor Suite",
       "type": "sensor",
       "mass_tons": 12,
-      "range_mkm": 600
+      "range_mkm": 600,
+      "power_use": 2
     },
     "laser_mk2": {
       "name": "Improved Laser Cannon",
       "type": "weapon",
       "mass_tons": 30,
       "damage": 12,
-      "weapon_range_mkm": 7
+      "weapon_range_mkm": 7,
+      "power_use": 2
     },
     "armor_mk2": {
       "name": "Composite Armor",
@@ -75,14 +86,16 @@
       "type": "shield",
       "mass_tons": 40,
       "shield_hp": 60,
-      "shield_regen_per_day": 6
+      "shield_regen_per_day": 6,
+      "power_use": 4
     },
     "shield_mk2": {
       "name": "Deflector Shield Mk.II",
       "type": "shield",
       "mass_tons": 55,
       "shield_hp": 100,
-      "shield_regen_per_day": 8
+      "shield_regen_per_day": 8,
+      "power_use": 7
     },
     "reactor_mk2": {
       "name": "Reactor Mk2",
@@ -94,7 +107,9 @@
       "name": "Ion Engine Mk2",
       "type": "engine",
       "mass_tons": 40,
-      "speed_km_s": 45
+      "speed_km_s": 45,
+      "fuel_use_per_mkm": 0.25,
+      "power_use": 3
     }
   },
   "designs": [
@@ -105,7 +120,8 @@
       "components": [
         "engine_chem_mk1",
         "cargo_mk1",
-        "cargo_mk1"
+        "cargo_mk1",
+        "fuel_tank_mk1"
       ]
     },
     {
@@ -116,7 +132,8 @@
         "engine_chem_mk1",
         "cargo_mk1",
         "cargo_mk1",
-        "colony_module_mk1"
+        "colony_module_mk1",
+        "fuel_tank_mk1"
       ]
     },
     {
@@ -125,7 +142,8 @@
       "role": "surveyor",
       "components": [
         "engine_chem_mk1",
-        "sensor_mk1"
+        "sensor_mk1",
+        "fuel_tank_mk1"
       ]
     },
     {
@@ -136,7 +154,8 @@
         "engine_chem_mk1",
         "sensor_mk1",
         "laser_mk1",
-        "armor_mk1"
+        "armor_mk1",
+        "fuel_tank_mk1"
       ]
     },
     {
@@ -149,7 +168,8 @@
         "sensor_mk2",
         "laser_mk2",
         "shield_mk1",
-        "armor_mk1"
+        "armor_mk1",
+        "fuel_tank_mk1"
       ]
     },
     {
@@ -161,7 +181,8 @@
         "sensor_mk1",
         "laser_mk1",
         "laser_mk1",
-        "armor_mk1"
+        "armor_mk1",
+        "fuel_tank_mk1"
       ]
     },
     {
@@ -172,7 +193,8 @@
         "engine_ion_mk1",
         "reactor_mk1",
         "cargo_mk1",
-        "cargo_mk1"
+        "cargo_mk1",
+        "fuel_tank_mk1"
       ]
     },
     {
@@ -182,7 +204,8 @@
       "components": [
         "engine_ion_mk1",
         "reactor_mk1",
-        "sensor_mk1"
+        "sensor_mk1",
+        "fuel_tank_mk1"
       ]
     },
     {
@@ -194,7 +217,8 @@
         "reactor_mk1",
         "sensor_mk1",
         "laser_mk1",
-        "armor_mk1"
+        "armor_mk1",
+        "fuel_tank_mk1"
       ]
     },
     {
@@ -207,7 +231,8 @@
         "sensor_mk1",
         "laser_mk1",
         "laser_mk1",
-        "armor_mk1"
+        "armor_mk1",
+        "fuel_tank_mk1"
       ]
     },
     {
@@ -217,7 +242,8 @@
       "components": [
         "engine_ion_mk2",
         "reactor_mk2",
-        "sensor_mk2"
+        "sensor_mk2",
+        "fuel_tank_mk1"
       ]
     },
     {
@@ -229,7 +255,8 @@
         "reactor_mk2",
         "sensor_mk2",
         "laser_mk2",
-        "armor_mk2"
+        "armor_mk2",
+        "fuel_tank_mk1"
       ]
     },
     {
@@ -242,7 +269,8 @@
         "sensor_mk2",
         "laser_mk2",
         "laser_mk2",
-        "armor_mk2"
+        "armor_mk2",
+        "fuel_tank_mk1"
       ]
     },
     {
@@ -254,13 +282,15 @@
         "reactor_mk2",
         "cargo_mk1",
         "cargo_mk1",
-        "cargo_mk1"
+        "cargo_mk1",
+        "fuel_tank_mk1"
       ]
     }
   ],
   "installations": {
     "automated_mine": {
       "name": "Automated Mine",
+      "mining": true,
       "produces": {
         "Duranium": 1.5,
         "Neutronium": 0.2
@@ -278,6 +308,17 @@
       "build_costs": {
         "Duranium": 1000,
         "Neutronium": 100
+      }
+    },
+    "fuel_refinery": {
+      "name": "Fuel Refinery",
+      "produces": {
+        "Fuel": 200.0
+      },
+      "construction_cost": 600,
+      "build_costs": {
+        "Duranium": 1500,
+        "Neutronium": 200
       }
     },
     "shipyard": {

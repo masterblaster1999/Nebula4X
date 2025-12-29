@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cmath>
 #include <iostream>
 #include <string>
 #include <utility>
@@ -55,6 +56,15 @@ int test_serialization() {
     }
   }
 
+
+  // Configure manual mineral reserves on one colony (new in save schema v25).
+  nebula4x::Id reserve_colony_id = nebula4x::kInvalidId;
+  if (!sim.state().colonies.empty()) {
+    reserve_colony_id = sim.state().colonies.begin()->first;
+    sim.state().colonies[reserve_colony_id].mineral_reserves["Duranium"] = 123.0;
+    sim.state().colonies[reserve_colony_id].mineral_reserves["Fuel"] = 45.0;
+  }
+
   // 1) Round-trip serialization should preserve basic counts.
   const std::string json_text = nebula4x::serialize_game_to_json(sim.state());
   const auto loaded = nebula4x::deserialize_game_from_json(json_text);
@@ -65,6 +75,18 @@ int test_serialization() {
   N4X_ASSERT(loaded.colonies.size() == sim.state().colonies.size());
   N4X_ASSERT(loaded.factions.size() == sim.state().factions.size());
 
+
+  // Mineral reserves should survive round-trip.
+  if (reserve_colony_id != nebula4x::kInvalidId) {
+    const auto itc = loaded.colonies.find(reserve_colony_id);
+    N4X_ASSERT(itc != loaded.colonies.end());
+    const auto itd = itc->second.mineral_reserves.find("Duranium");
+    N4X_ASSERT(itd != itc->second.mineral_reserves.end());
+    N4X_ASSERT(std::abs(itd->second - 123.0) < 1e-6);
+    const auto itf = itc->second.mineral_reserves.find("Fuel");
+    N4X_ASSERT(itf != itc->second.mineral_reserves.end());
+    N4X_ASSERT(std::abs(itf->second - 45.0) < 1e-6);
+  }
 
   if (probe_ship != nebula4x::kInvalidId) {
     const auto it = loaded.ships.find(probe_ship);

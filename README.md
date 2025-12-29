@@ -14,6 +14,8 @@ Nebula4X is an **open-source, turn-based space 4X** prototype in **C++20**, insp
 - **Fleets**: persistent ship groups (same-faction) for bulk order issuing + basic formation/cohesion logic
 - **Faction AI profiles**: optional basic AI can generate orders for idle ships (pirate raiders / explorers)
 - **Cargo holds** on ships + mineral transfer orders (prototype logistics)
+- **Fuel**: refineries can convert minerals into fuel; ships consume fuel when moving; colonies can stockpile fuel.
+- **Power (prototype)**: reactors generate power, some components draw power, and subsystems load-shed deterministically when power is insufficient.
 - Day-based turn advancement
 - Colony **population growth/decline** (simple, configurable)
 - **Shipyard repairs**: docked ships repair HP at friendly colonies with shipyards (configurable)
@@ -27,6 +29,7 @@ Nebula4X is an **open-source, turn-based space 4X** prototype in **C++20**, insp
   - **wait days** (simple scheduling)
   - **load/unload minerals** (prototype cargo logistics)
   - **auto-freight minerals when idle** (optional ship automation; routes supplies from surplus colonies to stalled queues)
+- Per-colony **mineral reserves**: protect local stockpiles from auto-freight exports (UI configurable)
   - **ship-to-ship cargo transfer**
   - **scrap ship** (decommission at a colony; refunds some minerals)
   - **repeat orders** (optional looping of a ship's queue for trade routes/patrols)
@@ -67,7 +70,12 @@ Nebula4X is an **open-source, turn-based space 4X** prototype in **C++20**, insp
 - **Fleet tab**: create/rename/disband fleets; add/remove ships; set leader; issue bulk fleet orders (move/orbit/travel/attack/load/unload)
   - toggle **repeat orders** for simple looping routes
 - **Colony tab**: manage shipyard queue + build installations via construction queue
+- **Economy window**: global **Industry / Mining / Tech Tree** overview (View → Economy)
+- Colony tab supports editing **mineral reserves** used by auto-freight
 - **Research tab**: choose projects, queue, see progress; set faction control/AI profile
+  - **Tech browser**: search/filter all techs (known / locked / researchable)
+  - **Research plan preview**: shows prerequisite chain + total cost
+  - **Queue with prerequisites**: auto-adds missing prereqs to the research queue
 - **Design tab**: build custom ship designs from unlocked components
 
 ### CLI (`nebula4x_cli`)
@@ -88,7 +96,15 @@ Nebula4X is an **open-source, turn-based space 4X** prototype in **C++20**, insp
   - `--export-ships-json PATH`
   - `--export-colonies-json PATH`
   - `--export-fleets-json PATH`
+  - `--export-bodies-json PATH`
   (`PATH` can be `-` for stdout)
+- Tech tree export:
+  - `--export-tech-tree-json PATH` (definitions)
+  - `--export-tech-tree-dot PATH` (Graphviz DOT)
+  (`PATH` can be `-` for stdout)
+- Research planner:
+  - `--plan-research FACTION TECH` (prints a prereq-ordered plan)
+  - `--plan-research-json PATH` (optional machine-readable plan; `PATH` can be `-` for stdout)
 - Time warp: `--until-event N` to advance day-by-day until a new matching event occurs (defaults to warn/error; configurable via `--events-*`)
 - `--quiet` to suppress non-essential summary/status output (useful for scripting)
 - Script helpers: `--list-factions`, `--list-systems`, `--list-bodies`, `--list-jumps`, `--list-ships`, `--list-colonies` (print ids/names, then exit)
@@ -204,6 +220,14 @@ Run:
 # CLI (export ships/colonies state to JSON)
 ./build/nebula4x_cli --load save.json --quiet --export-ships-json ships.json
 ./build/nebula4x_cli --load save.json --quiet --export-colonies-json colonies.json
+
+# CLI (export tech tree)
+./build/nebula4x_cli --quiet --export-tech-tree-json tech_tree_flat.json
+./build/nebula4x_cli --quiet --export-tech-tree-dot tech_tree.dot
+
+# CLI (plan research)
+./build/nebula4x_cli --load save.json --plan-research "United Earth" colonization_1
+./build/nebula4x_cli --load save.json --quiet --plan-research "United Earth" colonization_1 --plan-research-json -
 
 # CLI (time warp until next warning/error event, then save)
 ./build/nebula4x_cli --until-event 365 --save autosave.json

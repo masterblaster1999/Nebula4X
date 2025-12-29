@@ -34,6 +34,34 @@ struct UIState {
   // The newest SimEvent::seq the UI considers "seen".
   // Not persisted in saves.
   std::uint64_t last_seen_event_seq{0};
+
+  // --- Window visibility / layout ---
+  // These are UI-only preferences (not persisted in saves).
+  bool show_controls_window{true};
+  bool show_map_window{true};
+  bool show_details_window{true};
+  bool show_directory_window{true};
+  bool show_economy_window{false};
+  bool show_settings_window{false};
+
+  // --- UI theme / colors (RGBA in 0..1) ---
+  // These are UI-only preferences. The UI provides helpers to save/load these
+  // preferences to a separate JSON file (not the save-game).
+
+  // SDL renderer clear color (behind all ImGui windows).
+  float clear_color[4]{0.0f, 0.0f, 0.0f, 1.0f};
+
+  // Map backgrounds.
+  // Defaults match the previous hardcoded colors.
+  float system_map_bg[4]{15.0f / 255.0f, 18.0f / 255.0f, 22.0f / 255.0f, 1.0f};
+  float galaxy_map_bg[4]{12.0f / 255.0f, 14.0f / 255.0f, 18.0f / 255.0f, 1.0f};
+
+  // Optional: override ImGui window background (ImGuiCol_WindowBg/ChildBg).
+  bool override_window_bg{false};
+  float window_bg[4]{0.10f, 0.105f, 0.11f, 0.94f};
+
+  // If true, the UI will auto-save UI prefs to the configured ui_prefs_path on exit.
+  bool autosave_ui_prefs{true};
 };
 
 } // namespace nebula4x::ui

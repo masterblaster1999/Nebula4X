@@ -1,6 +1,7 @@
 #include "nebula4x/core/state_validation.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <sstream>
 #include <string>
@@ -164,6 +165,23 @@ std::vector<std::string> validate_game_state(const GameState& s, const ContentDB
   for (const auto& [bid, b] : s.bodies) {
     if (b.system_id == kInvalidId || !has_system(b.system_id)) {
       push(errors, join("Body ", id_u64(bid), " ('", b.name, "') references unknown system_id ", id_u64(b.system_id)));
+    }
+
+    // Validate mineral deposit data (finite mining).
+    for (const auto& [mineral, tons] : b.mineral_deposits) {
+      if (mineral.empty()) {
+        push(errors, join("Body ", id_u64(bid), " ('", b.name, "') has an empty mineral key in mineral_deposits"));
+        continue;
+      }
+      if (!std::isfinite(tons)) {
+        push(errors,
+             join("Body ", id_u64(bid), " ('", b.name, "') has non-finite deposit for '", mineral, "': ", tons));
+        continue;
+      }
+      if (tons < -1e-9) {
+        push(errors,
+             join("Body ", id_u64(bid), " ('", b.name, "') has negative deposit for '", mineral, "': ", tons));
+      }
     }
   }
 
@@ -387,6 +405,41 @@ std::vector<std::string> validate_game_state(const GameState& s, const ContentDB
                join("Colony ", id_u64(cid), " construction_queue[", i, "] has negative cp_remaining: ", io.cp_remaining));
         }
       }
+    // Validate mineral stockpiles.
+    for (const auto& [mineral, tons] : c.minerals) {
+      if (mineral.empty()) {
+        push(errors, join("Colony ", id_u64(cid), " ('", c.name, "') has an empty mineral key in minerals"));
+        continue;
+      }
+      if (!std::isfinite(tons)) {
+        push(errors,
+             join("Colony ", id_u64(cid), " ('", c.name, "') has non-finite mineral stockpile for '", mineral,
+                  "': ", tons));
+        continue;
+      }
+      if (tons < -1e-6) {
+        push(errors,
+             join("Colony ", id_u64(cid), " ('", c.name, "') has negative mineral stockpile for '", mineral,
+                  "': ", tons));
+      }
+    }
+
+    // Validate manual mineral reserves (auto-freight).
+    for (const auto& [mineral, tons] : c.mineral_reserves) {
+      if (mineral.empty()) {
+        push(errors, join("Colony ", id_u64(cid), " ('", c.name, "') has an empty mineral key in mineral_reserves"));
+        continue;
+      }
+      if (!std::isfinite(tons)) {
+        push(errors,
+             join("Colony ", id_u64(cid), " ('", c.name, "') has non-finite reserve for '", mineral, "': ", tons));
+        continue;
+      }
+      if (tons < -1e-6) {
+        push(errors, join("Colony ", id_u64(cid), " ('", c.name, "') has negative reserve for '", mineral, "': ", tons));
+      }
+    }
+
     }
   }
 

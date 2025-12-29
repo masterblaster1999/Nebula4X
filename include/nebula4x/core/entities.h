@@ -16,7 +16,7 @@ enum class BodyType { Star, Planet, Moon, Asteroid, GasGiant };
 
 enum class ShipRole { Freighter, Surveyor, Combatant, Unknown };
 
-enum class ComponentType { Engine, Cargo, Sensor, Reactor, Weapon, Armor, Shield, ColonyModule, Unknown };
+enum class ComponentType { Engine, FuelTank, Cargo, Sensor, Reactor, Weapon, Armor, Shield, ColonyModule, Unknown };
 
 // Prototype AI / control flags.
 //
@@ -55,6 +55,19 @@ struct Body {
   BodyType type{BodyType::Planet};
   Id system_id{kInvalidId};
 
+  // Mineral deposits on this body.
+  //
+  // Deposits are interpreted as remaining extractable tons per mineral type.
+  // Mining installations (see InstallationDef::mining) will extract from these
+  // deposits each day and transfer the mined resources to colony stockpiles on
+  // this body.
+  //
+  // Back-compat / mods:
+  // - If a mineral key is missing, extraction for that mineral is treated as
+  //   "unlimited" (i.e., mines will produce as they did in older versions).
+  // - If a mineral is present with value <= 0, that deposit is depleted.
+  std::unordered_map<std::string, double> mineral_deposits;
+
   // Simple circular orbit around the system origin.
   double orbit_radius_mkm{0.0};     // million km
   double orbit_period_days{0.0};    // days
@@ -74,10 +87,19 @@ struct ComponentDef {
 
   // Type-specific stats (0 means "not applicable").
   double speed_km_s{0.0};          // engine
+  double fuel_use_per_mkm{0.0};    // engine (tons per million km)
+  double fuel_capacity_tons{0.0};  // fuel tank
   double cargo_tons{0.0};          // cargo
   double sensor_range_mkm{0.0};    // sensor
   double colony_capacity_millions{0.0}; // colony module
-  double power{0.0};               // reactor
+  // Power model (prototype):
+  // - Reactors contribute positive power_output.
+  // - Other components may draw power_use.
+  // Units are arbitrary "power points"; the simulation uses them only for
+  // simple load-shedding (offline sensors/weapons/shields/engines) when a
+  // design's total power use exceeds its generation.
+  double power_output{0.0};        // reactor
+  double power_use{0.0};           // consumer
   double weapon_damage{0.0};       // weapon (damage per day)
   double weapon_range_mkm{0.0};    // weapon
   double hp_bonus{0.0};            // armor
@@ -95,9 +117,19 @@ struct ShipDesign {
   // Derived:
   double mass_tons{0.0};
   double speed_km_s{0.0};
+  double fuel_capacity_tons{0.0};
+  double fuel_use_per_mkm{0.0};
   double cargo_tons{0.0};
   double sensor_range_mkm{0.0};
   double colony_capacity_millions{0.0};
+
+  // Power budgeting.
+  double power_generation{0.0};
+  double power_use_total{0.0};
+  double power_use_engines{0.0};
+  double power_use_sensors{0.0};
+  double power_use_weapons{0.0};
+  double power_use_shields{0.0};
   double max_hp{0.0};
   double max_shields{0.0};
   double shield_regen_per_day{0.0};
@@ -108,6 +140,14 @@ struct ShipDesign {
 struct InstallationDef {
   std::string id;
   std::string name;
+
+  // If true, `produces_per_day` is interpreted as extraction from the colony's
+  // underlying body mineral deposits (Body::mineral_deposits). Extraction is
+  // capped by remaining deposits.
+  //
+  // If false, `produces_per_day` creates minerals out of thin air (prototype /
+  // back-compat behavior).
+  bool mining{false};
 
   // Simple mineral production.
   std::unordered_map<std::string, double> produces_per_day;
@@ -168,6 +208,13 @@ struct Ship {
 
   // Combat state.
   double hp{0.0};
+
+  // Fuel state (if the design defines fuel).
+  //
+  // A value < 0 indicates "uninitialized" (e.g. loaded from an older save) and
+  // will be initialized to the design max when design stats are applied.
+  double fuel_tons{-1.0};
+
   // Shield state (if the design has shields).
   //
   // A value < 0 indicates \"uninitialized\" (e.g. loaded from an older save) and
@@ -209,6 +256,12 @@ struct Colony {
 
   // Stockpiles
   std::unordered_map<std::string, double> minerals;
+
+  // Manual mineral reserve thresholds (UI/auto-freight).
+  //
+  // Auto-freight will not export minerals below these values.
+  // Missing entries imply a reserve of 0.
+  std::unordered_map<std::string, double> mineral_reserves;
 
   // Installation counts
   std::unordered_map<std::string, int> installations;

@@ -20,6 +20,8 @@ GameState make_sol_scenario() {
   // v10: adds persistent GameState::events (simulation event log).
   // v11: adds structured event fields (category + context ids).
   // v12: adds SimEvent::seq + GameState::next_event_seq (monotonic event ids).
+  // v22: adds Body::mineral_deposits (finite mining / depletion).
+  // v23: adds ship fuel tanks + fuel consumption (logistics).
   // New games should start at the current save schema version.
   s.save_version = GameState{}.save_version;
   s.date = Date::from_ymd(2200, 1, 1);
@@ -106,7 +108,24 @@ GameState make_sol_scenario() {
 
   // --- Barnard's Star bodies ---
   (void)add_body(barnard, "Barnard's Star", BodyType::Star, 0.0, 1.0, 0.0);
-  (void)add_body(barnard, "Barnard b", BodyType::Planet, 60.0, 233.0, 0.2);
+  const Id barnard_b = add_body(barnard, "Barnard b", BodyType::Planet, 60.0, 233.0, 0.2);
+
+  // --- Mineral deposits (finite mining) ---
+  //
+  // Newer versions of the prototype support finite mineral deposits attached to
+  // bodies. Mines extract from these deposits each day.
+  auto seed_deposits = [&](Id body_id, double duranium_tons, double neutronium_tons) {
+    auto& b = s.bodies.at(body_id);
+    b.mineral_deposits["Duranium"] = std::max(0.0, duranium_tons);
+    b.mineral_deposits["Neutronium"] = std::max(0.0, neutronium_tons);
+  };
+
+  // Give home bodies deep deposits so early growth isn't immediately blocked.
+  seed_deposits(earth, 2.0e6, 2.0e5);
+  seed_deposits(mars, 4.0e5, 4.0e4);
+  seed_deposits(centauri_prime, 1.2e6, 1.2e5);
+  seed_deposits(barnard_b, 3.0e5, 3.0e4);
+  seed_deposits(barnard_b, 2.0e5, 2.0e4);
 
   // --- Jump points (Sol <-> Alpha Centauri) ---
   const Id jp_sol = allocate_id(s);
@@ -168,10 +187,12 @@ GameState make_sol_scenario() {
     c.minerals = {
         {"Duranium", 10000.0},
         {"Neutronium", 1500.0},
+        {"Fuel", 30000.0},
     };
     c.installations = {
         {"automated_mine", 50},
         {"construction_factory", 5},
+        {"fuel_refinery", 10},
         {"shipyard", 1},
         {"research_lab", 20},
         {"sensor_station", 1},
@@ -190,10 +211,12 @@ GameState make_sol_scenario() {
     c.minerals = {
         {"Duranium", 200.0},
         {"Neutronium", 20.0},
+        {"Fuel", 1000.0},
     };
     c.installations = {
         {"automated_mine", 5},
         {"construction_factory", 1},
+        {"fuel_refinery", 1},
         {"research_lab", 2},
     };
     s.colonies[c.id] = c;
@@ -213,8 +236,10 @@ GameState make_sol_scenario() {
     c.installations["research_lab"] = 5;
     c.installations["sensor_station"] = 1;
     c.installations["automated_mine"] = 10;
+    c.installations["fuel_refinery"] = 3;
     c.minerals["Duranium"] = 15000.0;
     c.minerals["Neutronium"] = 1500.0;
+    c.minerals["Fuel"] = 20000.0;
     s.colonies[c.id] = c;
   }
 
@@ -279,6 +304,8 @@ GameState make_random_scenario(std::uint32_t seed, int num_systems) {
   // v9: adds ShipOrders repeat fields (repeat + repeat_template).
   // v10: adds persistent GameState::events (simulation event log).
   // v11: adds structured event fields (category + context ids).
+  // v22: adds Body::mineral_deposits (finite mining / depletion).
+  // v23: adds ship fuel tanks + fuel consumption (logistics).
   // New games should start at the current save schema version.
   s.save_version = GameState{}.save_version;
   s.date = Date::from_ymd(2200, 1, 1);
@@ -377,6 +404,30 @@ GameState make_random_scenario(std::uint32_t seed, int num_systems) {
 
       const std::string pname = info.name + " " + std::to_string(p + 1);
       const Id pid = add_body(sys_id, pname, type, radius, period, phase);
+
+      // --- Mineral deposits (finite mining) ---
+      // Seed a basic pair of deposits for early-game logistics: Duranium + Neutronium.
+      // Values are in tons and are intentionally generous for the homeworld so the
+      // prototype doesn't immediately stall.
+      {
+        auto& b = s.bodies.at(pid);
+        double dur = rand_real(rng, 2.0e5, 2.0e6);
+        double neu = rand_real(rng, 2.0e4, 2.0e5);
+        if (gas) {
+          dur *= 0.6;
+          neu *= 0.8;
+        }
+        if (i == 0 && p == 0) {
+          dur *= 2.0;
+          neu *= 2.0;
+        }
+        if (i == num_systems - 1 && p == 0) {
+          dur *= 1.5;
+          neu *= 1.5;
+        }
+        b.mineral_deposits["Duranium"] = std::max(0.0, dur);
+        b.mineral_deposits["Neutronium"] = std::max(0.0, neu);
+      }
       info.planet_bodies.push_back(pid);
     }
 
@@ -466,10 +517,12 @@ GameState make_random_scenario(std::uint32_t seed, int num_systems) {
     c.minerals = {
         {"Duranium", 10000.0},
         {"Neutronium", 1500.0},
+        {"Fuel", 30000.0},
     };
     c.installations = {
         {"automated_mine", 50},
         {"construction_factory", 5},
+        {"fuel_refinery", 10},
         {"shipyard", 1},
         {"research_lab", 20},
         {"sensor_station", 1},
@@ -495,6 +548,7 @@ GameState make_random_scenario(std::uint32_t seed, int num_systems) {
     c.installations = {
         {"shipyard", 1},
         {"construction_factory", 1},
+        {"fuel_refinery", 3},
         {"research_lab", 5},
         {"sensor_station", 1},
         {"automated_mine", 10},
@@ -502,6 +556,7 @@ GameState make_random_scenario(std::uint32_t seed, int num_systems) {
     c.minerals = {
         {"Duranium", 15000.0},
         {"Neutronium", 1500.0},
+        {"Fuel", 20000.0},
     };
     s.colonies[c.id] = c;
   }

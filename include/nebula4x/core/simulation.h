@@ -491,6 +491,7 @@ bool move_construction_order(Id colony_id, int from_index, int to_index);
   void tick_shipyards();
   void tick_construction();
   void tick_ai();
+  void tick_refuel();
   void tick_ships();
   void tick_contacts();
   void tick_shields();

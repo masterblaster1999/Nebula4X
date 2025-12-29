@@ -75,7 +75,7 @@ int test_auto_freight() {
   st.factions[f.id] = f;
 
   // One system, two bodies at origin (zero orbit) so loading/unloading can complete immediately.
-  System sys;
+  StarSystem sys;
   sys.id = 1;
   sys.name = "Sol";
   sys.galaxy_pos = Vec2{0.0, 0.0};
@@ -87,7 +87,7 @@ int test_auto_freight() {
   src_body.system_id = sys.id;
   src_body.orbit_radius_mkm = 0.0;
   src_body.orbit_period_days = 1.0;
-  src_body.orbit_phase = 0.0;
+  src_body.orbit_phase_radians = 0.0;
   st.bodies[src_body.id] = src_body;
 
   Body dst_body;
@@ -96,7 +96,7 @@ int test_auto_freight() {
   dst_body.system_id = sys.id;
   dst_body.orbit_radius_mkm = 0.0;
   dst_body.orbit_period_days = 1.0;
-  dst_body.orbit_phase = 0.0;
+  dst_body.orbit_phase_radians = 0.0;
   st.bodies[dst_body.id] = dst_body;
 
   // Source colony has minerals.
@@ -156,6 +156,28 @@ int test_auto_freight() {
   auto it = tsh.cargo.find("Duranium");
   const double cargo_after = (it == tsh.cargo.end()) ? 0.0 : it->second;
   N4X_ASSERT(cargo_after < 1e-6, "ship cargo is empty after same-day delivery");
+
+
+  // 2) Manual mineral reserves should cap exports.
+  {
+    Simulation sim2(content, cfg);
+
+    GameState st2 = st;
+    st2.colonies[src.id].mineral_reserves["Duranium"] = 950.0;
+
+    sim2.load_game(st2);
+
+    sim2.advance_days(1);
+
+    const double src_after2 = get_mineral(sim2.state().colonies.at(src.id), "Duranium");
+    const double dst_after2 = get_mineral(sim2.state().colonies.at(dst.id), "Duranium");
+
+    N4X_ASSERT(std::abs(src_after2 - 950.0) < 1e-6, "source kept reserve (export capped)");
+    N4X_ASSERT(std::abs(dst_after2 - 50.0) < 1e-6, "destination received only surplus above reserve");
+
+    N4X_ASSERT(std::abs((src_after2 + dst_after2) - 1000.0) < 1e-6,
+               "total Duranium conserved with reserves");
+  }
 
   return 0;
 }

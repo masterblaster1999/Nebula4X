@@ -14,7 +14,7 @@ using json::Array;
 using json::Object;
 using json::Value;
 
-constexpr int kCurrentSaveVersion = 21;
+constexpr int kCurrentSaveVersion = 25;
 
 template <typename Map>
 std::vector<typename Map::key_type> sorted_keys(const Map& m) {
@@ -410,6 +410,9 @@ std::string serialize_game_to_json(const GameState& s) {
     o["orbit_radius_mkm"] = b.orbit_radius_mkm;
     o["orbit_period_days"] = b.orbit_period_days;
     o["orbit_phase_radians"] = b.orbit_phase_radians;
+    if (!b.mineral_deposits.empty()) {
+      o["mineral_deposits"] = map_string_double_to_json(b.mineral_deposits);
+    }
     bodies.push_back(o);
   }
   root["bodies"] = bodies;
@@ -445,6 +448,7 @@ std::string serialize_game_to_json(const GameState& s) {
     o["auto_freight"] = sh.auto_freight;
     o["speed_km_s"] = sh.speed_km_s;
     o["hp"] = sh.hp;
+    o["fuel_tons"] = sh.fuel_tons;
     o["shields"] = sh.shields;
     o["cargo"] = map_string_double_to_json(sh.cargo);
     ships.push_back(o);
@@ -463,6 +467,9 @@ std::string serialize_game_to_json(const GameState& s) {
     o["body_id"] = static_cast<double>(c.body_id);
     o["population_millions"] = c.population_millions;
     o["minerals"] = map_string_double_to_json(c.minerals);
+    if (!c.mineral_reserves.empty()) {
+      o["mineral_reserves"] = map_string_double_to_json(c.mineral_reserves);
+    }
     o["installations"] = map_string_int_to_json(c.installations);
 
     Array q;
@@ -585,9 +592,17 @@ std::string serialize_game_to_json(const GameState& s) {
     o["components"] = string_vector_to_json(d.components);
     o["mass_tons"] = d.mass_tons;
     o["speed_km_s"] = d.speed_km_s;
+    o["fuel_capacity_tons"] = d.fuel_capacity_tons;
+    o["fuel_use_per_mkm"] = d.fuel_use_per_mkm;
     o["cargo_tons"] = d.cargo_tons;
     o["sensor_range_mkm"] = d.sensor_range_mkm;
     o["colony_capacity_millions"] = d.colony_capacity_millions;
+    o["power_generation"] = d.power_generation;
+    o["power_use_total"] = d.power_use_total;
+    o["power_use_engines"] = d.power_use_engines;
+    o["power_use_sensors"] = d.power_use_sensors;
+    o["power_use_weapons"] = d.power_use_weapons;
+    o["power_use_shields"] = d.power_use_shields;
     o["max_hp"] = d.max_hp;
     o["max_shields"] = d.max_shields;
     o["shield_regen_per_day"] = d.shield_regen_per_day;
@@ -720,6 +735,9 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     b.orbit_radius_mkm = o.at("orbit_radius_mkm").number_value();
     b.orbit_period_days = o.at("orbit_period_days").number_value();
     b.orbit_phase_radians = o.at("orbit_phase_radians").number_value();
+    if (auto it = o.find("mineral_deposits"); it != o.end()) {
+      b.mineral_deposits = map_string_double_from_json(it->second);
+    }
     s.bodies[b.id] = b;
   }
 
@@ -751,6 +769,7 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     if (auto it = o.find("auto_freight"); it != o.end()) sh.auto_freight = it->second.bool_value(false);
     sh.speed_km_s = o.at("speed_km_s").number_value(0.0);
     sh.hp = o.at("hp").number_value(0.0);
+    if (auto it = o.find("fuel_tons"); it != o.end()) sh.fuel_tons = it->second.number_value(-1.0);
     if (auto it = o.find("shields"); it != o.end()) sh.shields = it->second.number_value(-1.0);
     if (auto it = o.find("cargo"); it != o.end()) sh.cargo = map_string_double_from_json(it->second);
     s.ships[sh.id] = sh;
@@ -766,6 +785,9 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     c.body_id = static_cast<Id>(o.at("body_id").int_value());
     c.population_millions = o.at("population_millions").number_value();
     c.minerals = map_string_double_from_json(o.at("minerals"));
+    if (auto it = o.find("mineral_reserves"); it != o.end()) {
+      c.mineral_reserves = map_string_double_from_json(it->second);
+    }
     c.installations = map_string_int_from_json(o.at("installations"));
 
     if (auto itq = o.find("shipyard_queue"); itq != o.end()) {
@@ -922,11 +944,19 @@ GameState deserialize_game_from_json(const std::string& json_text) {
       if (auto itc = o.find("components"); itc != o.end()) d.components = string_vector_from_json(itc->second);
       d.mass_tons = o.at("mass_tons").number_value(0.0);
       d.speed_km_s = o.at("speed_km_s").number_value(0.0);
+      if (auto itfc = o.find("fuel_capacity_tons"); itfc != o.end()) d.fuel_capacity_tons = itfc->second.number_value(0.0);
+      if (auto itfu = o.find("fuel_use_per_mkm"); itfu != o.end()) d.fuel_use_per_mkm = itfu->second.number_value(0.0);
       d.cargo_tons = o.at("cargo_tons").number_value(0.0);
       d.sensor_range_mkm = o.at("sensor_range_mkm").number_value(0.0);
       if (auto itcc = o.find("colony_capacity_millions"); itcc != o.end()) {
         d.colony_capacity_millions = itcc->second.number_value(0.0);
       }
+      if (auto itpg = o.find("power_generation"); itpg != o.end()) d.power_generation = itpg->second.number_value(0.0);
+      if (auto itput = o.find("power_use_total"); itput != o.end()) d.power_use_total = itput->second.number_value(0.0);
+      if (auto itpue = o.find("power_use_engines"); itpue != o.end()) d.power_use_engines = itpue->second.number_value(0.0);
+      if (auto itpus = o.find("power_use_sensors"); itpus != o.end()) d.power_use_sensors = itpus->second.number_value(0.0);
+      if (auto itpuw = o.find("power_use_weapons"); itpuw != o.end()) d.power_use_weapons = itpuw->second.number_value(0.0);
+      if (auto itpush = o.find("power_use_shields"); itpush != o.end()) d.power_use_shields = itpush->second.number_value(0.0);
       d.max_hp = o.at("max_hp").number_value(0.0);
       if (auto itms = o.find("max_shields"); itms != o.end()) d.max_shields = itms->second.number_value(0.0);
       if (auto itsr = o.find("shield_regen_per_day"); itsr != o.end()) {

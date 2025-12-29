@@ -26,6 +26,7 @@ target_sources(nebula4x_core
     src/core/date.cpp
     src/core/game_state.cpp
     src/core/orders.cpp
+    src/core/research_planner.cpp
     src/core/scenario.cpp
     src/core/simulation.cpp
   src/core/ai_economy.cpp
@@ -39,6 +40,7 @@ target_sources(nebula4x_core
     src/util/state_export.cpp
     src/util/strings.cpp
     src/util/save_diff.cpp
+    src/util/tech_export.cpp
 )
 
 target_include_directories(nebula4x_core
@@ -117,6 +119,7 @@ if(NEBULA4X_BUILD_UI)
     src/main.cpp
     src/ui/app.cpp
     src/ui/panels.cpp
+    src/ui/economy_window.cpp
     src/ui/galaxy_map.cpp
     src/ui/system_map.cpp
   )
@@ -154,6 +157,9 @@ if(NEBULA4X_BUILD_TESTS)
     tests/test_serialization.cpp
     tests/test_auto_freight.cpp
   tests/test_ai_economy.cpp
+    tests/test_research_planner.cpp
+    tests/test_mineral_deposits.cpp
+    tests/test_power_system.cpp
   tests/test_refit.cpp
     tests/test_diplomacy.cpp
     tests/test_auto_routing.cpp

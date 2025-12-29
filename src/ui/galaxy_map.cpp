@@ -113,7 +113,9 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   }
 
   auto* draw = ImGui::GetWindowDrawList();
-  draw->AddRectFilled(origin, ImVec2(origin.x + avail.x, origin.y + avail.y), IM_COL32(12, 14, 18, 255));
+  const ImU32 bg = ImGui::ColorConvertFloat4ToU32(
+      ImVec4(ui.galaxy_map_bg[0], ui.galaxy_map_bg[1], ui.galaxy_map_bg[2], ui.galaxy_map_bg[3]));
+  draw->AddRectFilled(origin, ImVec2(origin.x + avail.x, origin.y + avail.y), bg);
   draw->AddRect(origin, ImVec2(origin.x + avail.x, origin.y + avail.y), IM_COL32(60, 60, 60, 255));
 
   // Axes

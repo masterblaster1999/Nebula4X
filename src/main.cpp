@@ -17,6 +17,8 @@
 
 #include <string>
 
+#include <algorithm>
+
 #include <imgui.h>
 #include <imgui_impl_sdl2.h>
 #include <imgui_impl_sdlrenderer2.h>
@@ -88,11 +90,25 @@ int main(int /*argc*/, char** /*argv*/) {
       app.frame();
 
       ImGui::Render();
-      SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+      // Clear color is user-configurable via UI settings.
+      const float* cc = app.clear_color_rgba();
+      auto to_u8 = [](float v) -> Uint8 {
+        v = std::clamp(v, 0.0f, 1.0f);
+        return static_cast<Uint8>(v * 255.0f + 0.5f);
+      };
+      SDL_SetRenderDrawColor(renderer, to_u8(cc[0]), to_u8(cc[1]), to_u8(cc[2]), to_u8(cc[3]));
       SDL_RenderClear(renderer);
       // Dear ImGui's SDL_Renderer2 backend requires the renderer parameter (v1.91+).
       ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), renderer);
       SDL_RenderPresent(renderer);
+    }
+
+    // Best-effort auto-save of UI prefs (theme/layout) on exit.
+    if (app.autosave_ui_prefs_enabled()) {
+      std::string err;
+      if (!app.save_ui_prefs(app.ui_prefs_path(), &err)) {
+        nebula4x::log::warn(std::string("UI prefs auto-save failed: ") + err);
+      }
     }
 
     ImGui_ImplSDLRenderer2_Shutdown();

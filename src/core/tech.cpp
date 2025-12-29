@@ -1,6 +1,7 @@
 #include "nebula4x/core/tech.h"
 
 #include <algorithm>
+#include <cctype>
 #include <stdexcept>
 
 #include "nebula4x/util/file_io.h"
@@ -8,6 +9,13 @@
 
 namespace nebula4x {
 namespace {
+
+std::string ascii_to_lower(std::string s) {
+  std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
+    return static_cast<char>(std::tolower(c));
+  });
+  return s;
+}
 
 ShipRole parse_role(const std::string& s) {
   if (s == "freighter") return ShipRole::Freighter;
@@ -18,6 +26,7 @@ ShipRole parse_role(const std::string& s) {
 
 ComponentType parse_component_type(const std::string& s) {
   if (s == "engine") return ComponentType::Engine;
+  if (s == "fuel_tank" || s == "fuel") return ComponentType::FuelTank;
   if (s == "cargo") return ComponentType::Cargo;
   if (s == "sensor") return ComponentType::Sensor;
   if (s == "reactor") return ComponentType::Reactor;
@@ -54,6 +63,22 @@ ContentDB load_content_db_from_file(const std::string& path) {
 
       // Optional stats
       if (const auto* v_speed = find_key(cj, "speed_km_s")) c.speed_km_s = v_speed->number_value(0.0);
+
+      // Optional: fuel mechanics
+      // - fuel_use_per_mkm is interpreted as tons of fuel consumed per million km traveled.
+      // - fuel_capacity_tons is the shipboard tank capacity in fuel tons.
+      if (const auto* v_fuse = find_key(cj, "fuel_use_per_mkm")) c.fuel_use_per_mkm = v_fuse->number_value(0.0);
+      if (const auto* v_fuse2 = find_key(cj, "fuel_use")) {
+        if (c.fuel_use_per_mkm <= 0.0) c.fuel_use_per_mkm = v_fuse2->number_value(0.0);
+      }
+      if (const auto* v_fcap = find_key(cj, "fuel_capacity_tons")) c.fuel_capacity_tons = v_fcap->number_value(0.0);
+      if (const auto* v_fcap2 = find_key(cj, "fuel_tons")) {
+        if (c.fuel_capacity_tons <= 0.0) c.fuel_capacity_tons = v_fcap2->number_value(0.0);
+      }
+      if (const auto* v_fcap3 = find_key(cj, "fuel_capacity")) {
+        if (c.fuel_capacity_tons <= 0.0) c.fuel_capacity_tons = v_fcap3->number_value(0.0);
+      }
+
       if (const auto* v_cargo = find_key(cj, "cargo_tons")) c.cargo_tons = v_cargo->number_value(0.0);
 
       // Back-compat: sensors used to be "range_mkm".
@@ -65,7 +90,26 @@ ContentDB load_content_db_from_file(const std::string& path) {
         c.colony_capacity_millions = v_col->number_value(0.0);
       }
 
-      if (const auto* v_pow = find_key(cj, "power")) c.power = v_pow->number_value(0.0);
+      // Power model (prototype):
+      // - Reactors contribute positive power_output.
+      // - Other components may draw power_use.
+      // Back-compat: allow using "power" as output for reactors, or as
+      // consumption for non-reactor components.
+      if (const auto* v_out = find_key(cj, "power_output")) c.power_output = v_out->number_value(0.0);
+      if (const auto* v_use = find_key(cj, "power_use")) c.power_use = v_use->number_value(0.0);
+      if (const auto* v_use2 = find_key(cj, "power_draw")) {
+        if (c.power_use <= 0.0) c.power_use = v_use2->number_value(0.0);
+      }
+      if (const auto* v_use3 = find_key(cj, "power_consumption")) {
+        if (c.power_use <= 0.0) c.power_use = v_use3->number_value(0.0);
+      }
+      if (const auto* v_pow = find_key(cj, "power")) {
+        if (c.type == ComponentType::Reactor) {
+          if (c.power_output <= 0.0) c.power_output = v_pow->number_value(0.0);
+        } else {
+          if (c.power_use <= 0.0) c.power_use = v_pow->number_value(0.0);
+        }
+      }
 
       if (const auto* v_dmg = find_key(cj, "damage")) c.weapon_damage = v_dmg->number_value(0.0);
       if (const auto* v_wr = find_key(cj, "weapon_range_mkm")) c.weapon_range_mkm = v_wr->number_value(0.0);
@@ -106,6 +150,26 @@ ContentDB load_content_db_from_file(const std::string& path) {
       if (const auto* prod_v = find_key(vo, "produces")) {
         for (const auto& [mineral, amount_v] : prod_v->object()) {
           def.produces_per_day[mineral] = amount_v.number_value(0.0);
+        }
+      }
+
+      // Optional: mark this installation as a mining extractor.
+      // If not explicitly specified, fall back to a simple heuristic for back-compat
+      // content: any installation whose id contains "mine" and that produces minerals
+      // is treated as a miner.
+      bool mining_explicit = false;
+      if (const auto* mv = find_key(vo, "mining")) {
+        def.mining = mv->bool_value(false);
+        mining_explicit = true;
+      } else if (const auto* mv2 = find_key(vo, "extracts_deposits")) {
+        def.mining = mv2->bool_value(false);
+        mining_explicit = true;
+      }
+
+      if (!mining_explicit && !def.produces_per_day.empty()) {
+        const std::string lid = ascii_to_lower(def.id);
+        if (lid.find("mine") != std::string::npos) {
+          def.mining = true;
         }
       }
 
@@ -166,6 +230,8 @@ ContentDB load_content_db_from_file(const std::string& path) {
       // Derive stats.
       double mass = 0.0;
       double speed = 0.0;
+      double fuel_cap = 0.0;
+      double fuel_use = 0.0;
       double cargo = 0.0;
       double sensor = 0.0;
       double colony_cap = 0.0;
@@ -175,6 +241,14 @@ ContentDB load_content_db_from_file(const std::string& path) {
       double max_shields = 0.0;
       double shield_regen = 0.0;
 
+      // Power budgeting.
+      double power_gen = 0.0;
+      double power_use_total = 0.0;
+      double power_use_engines = 0.0;
+      double power_use_sensors = 0.0;
+      double power_use_weapons = 0.0;
+      double power_use_shields = 0.0;
+
       for (const auto& cid : d.components) {
         auto cit = db.components.find(cid);
         if (cit == db.components.end()) throw std::runtime_error("Unknown component id: " + cid);
@@ -182,6 +256,8 @@ ContentDB load_content_db_from_file(const std::string& path) {
 
         mass += c.mass_tons;
         speed = std::max(speed, c.speed_km_s);
+        fuel_cap += c.fuel_capacity_tons;
+        fuel_use += c.fuel_use_per_mkm;
         cargo += c.cargo_tons;
         sensor = std::max(sensor, c.sensor_range_mkm);
         colony_cap += c.colony_capacity_millions;
@@ -190,6 +266,15 @@ ContentDB load_content_db_from_file(const std::string& path) {
           weapon_damage += c.weapon_damage;
           weapon_range = std::max(weapon_range, c.weapon_range_mkm);
         }
+
+        if (c.type == ComponentType::Reactor) {
+          power_gen += c.power_output;
+        }
+        power_use_total += c.power_use;
+        if (c.type == ComponentType::Engine) power_use_engines += c.power_use;
+        if (c.type == ComponentType::Sensor) power_use_sensors += c.power_use;
+        if (c.type == ComponentType::Weapon) power_use_weapons += c.power_use;
+        if (c.type == ComponentType::Shield) power_use_shields += c.power_use;
 
         hp_bonus += c.hp_bonus;
 
@@ -201,9 +286,18 @@ ContentDB load_content_db_from_file(const std::string& path) {
 
       d.mass_tons = mass;
       d.speed_km_s = speed;
+      d.fuel_capacity_tons = fuel_cap;
+      d.fuel_use_per_mkm = fuel_use;
       d.cargo_tons = cargo;
       d.sensor_range_mkm = sensor;
       d.colony_capacity_millions = colony_cap;
+
+      d.power_generation = power_gen;
+      d.power_use_total = power_use_total;
+      d.power_use_engines = power_use_engines;
+      d.power_use_sensors = power_use_sensors;
+      d.power_use_weapons = power_use_weapons;
+      d.power_use_shields = power_use_shields;
       d.weapon_damage = weapon_damage;
       d.weapon_range_mkm = weapon_range;
 

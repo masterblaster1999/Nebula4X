@@ -30,4 +30,11 @@ std::string colonies_to_json(const GameState& state, const ContentDB* content = 
 // Output is a JSON array and ends with a trailing newline.
 std::string fleets_to_json(const GameState& state);
 
+// Export bodies as structured JSON.
+//
+// Includes basic orbit parameters and (if present) Body::mineral_deposits.
+//
+// Output is a JSON array and ends with a trailing newline.
+std::string bodies_to_json(const GameState& state);
+
 } // namespace nebula4x

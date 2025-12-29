@@ -6,6 +6,7 @@
 
 #include "nebula4x/core/content_validation.h"
 #include "nebula4x/core/date.h"
+#include "nebula4x/core/research_planner.h"
 #include "nebula4x/core/serialization.h"
 #include "nebula4x/core/scenario.h"
 #include "nebula4x/core/simulation.h"
@@ -15,6 +16,7 @@
 #include "nebula4x/util/event_export.h"
 #include "nebula4x/util/save_diff.h"
 #include "nebula4x/util/state_export.h"
+#include "nebula4x/util/tech_export.h"
 #include "nebula4x/util/json.h"
 #include "nebula4x/util/log.h"
 #include "nebula4x/util/strings.h"
@@ -221,6 +223,20 @@ std::vector<typename Map::key_type> sorted_keys(const Map& m) {
   return keys;
 }
 
+std::string resolve_tech_id(const std::unordered_map<std::string, nebula4x::TechDef>& techs, const std::string& raw) {
+  if (raw.empty()) return {};
+  if (techs.find(raw) != techs.end()) return raw;
+
+  // Name match (case-insensitive). Prefer deterministic id ordering.
+  const std::string want = nebula4x::to_lower(raw);
+  for (const auto& id : sorted_keys(techs)) {
+    const auto it = techs.find(id);
+    if (it == techs.end()) continue;
+    if (nebula4x::to_lower(it->second.name) == want) return id;
+  }
+  return {};
+}
+
 
 
 
@@ -326,6 +342,11 @@ void print_usage(const char* exe) {
   std::cout << "  --export-ships-json PATH    Export ships state to JSON (PATH can be '-' for stdout)\n";
   std::cout << "  --export-colonies-json PATH Export colonies state to JSON (PATH can be '-' for stdout)\n";
   std::cout << "  --export-fleets-json PATH   Export fleets state to JSON (PATH can be '-' for stdout)\n";
+  std::cout << "  --export-bodies-json PATH   Export bodies state to JSON (PATH can be '-' for stdout)\n";
+  std::cout << "  --export-tech-tree-json PATH Export tech tree definitions to JSON (PATH can be '-' for stdout)\n";
+  std::cout << "  --export-tech-tree-dot PATH  Export tech tree graph to Graphviz DOT (PATH can be '-' for stdout)\n";
+  std::cout << "  --plan-research FACTION TECH  Print a prereq-ordered research plan for FACTION -> TECH\n";
+  std::cout << "  --plan-research-json PATH     (optional) Export the plan as JSON (PATH can be '-' for stdout)\n";
   std::cout << "  --dump-events    Print the persistent simulation event log to stdout\n";
   std::cout << "  --export-events-csv PATH  Export the persistent simulation event log to CSV (PATH can be '-' for stdout)\n";
   std::cout << "  --export-events-json PATH Export the persistent simulation event log to JSON (PATH can be '-' for stdout)\n";
@@ -422,6 +443,27 @@ int main(int argc, char** argv) {
     const std::string export_ships_json_path = get_str_arg(argc, argv, "--export-ships-json", "");
     const std::string export_colonies_json_path = get_str_arg(argc, argv, "--export-colonies-json", "");
     const std::string export_fleets_json_path = get_str_arg(argc, argv, "--export-fleets-json", "");
+    const std::string export_bodies_json_path = get_str_arg(argc, argv, "--export-bodies-json", "");
+    const std::string export_tech_tree_json_path = get_str_arg(argc, argv, "--export-tech-tree-json", "");
+    const std::string export_tech_tree_dot_path = get_str_arg(argc, argv, "--export-tech-tree-dot", "");
+
+    std::string plan_faction_raw;
+    std::string plan_tech_raw;
+    const bool plan_research = get_two_str_args(argc, argv, "--plan-research", plan_faction_raw, plan_tech_raw);
+    const bool plan_research_flag = has_flag(argc, argv, "--plan-research");
+    const std::string plan_research_json_path = get_str_arg(argc, argv, "--plan-research-json", "");
+
+    if (plan_research_flag && !plan_research) {
+      std::cerr << "--plan-research requires two args: --plan-research FACTION TECH\n\n";
+      print_usage(argv[0]);
+      return 2;
+    }
+
+    if (!plan_research && !plan_research_json_path.empty()) {
+      std::cerr << "--plan-research-json requires --plan-research\n\n";
+      print_usage(argv[0]);
+      return 2;
+    }
 
     const bool script_stdout =
         (!export_events_csv_path.empty() && export_events_csv_path == "-") ||
@@ -431,7 +473,11 @@ int main(int argc, char** argv) {
         (!events_summary_csv_path.empty() && events_summary_csv_path == "-") ||
         (!export_ships_json_path.empty() && export_ships_json_path == "-") ||
         (!export_colonies_json_path.empty() && export_colonies_json_path == "-") ||
-        (!export_fleets_json_path.empty() && export_fleets_json_path == "-");
+        (!export_fleets_json_path.empty() && export_fleets_json_path == "-") ||
+        (!export_bodies_json_path.empty() && export_bodies_json_path == "-") ||
+        (!export_tech_tree_json_path.empty() && export_tech_tree_json_path == "-") ||
+        (!export_tech_tree_dot_path.empty() && export_tech_tree_dot_path == "-") ||
+        (!plan_research_json_path.empty() && plan_research_json_path == "-");
 
     const bool list_factions = has_flag(argc, argv, "--list-factions");
     const bool list_systems = has_flag(argc, argv, "--list-systems");
@@ -557,12 +603,20 @@ int main(int argc, char** argv) {
           const auto it = st.bodies.find(id);
           if (it == st.bodies.end()) continue;
           const auto& b = it->second;
+          double dep_total = 0.0;
+          for (const auto& [_, tons] : b.mineral_deposits) {
+            if (tons > 0.0) dep_total += tons;
+          }
           std::cout << "  " << static_cast<unsigned long long>(id) << "\t" << b.name
                     << "\t" << body_type_label(b.type)
                     << "\t" << system_name(b.system_id)
                     << "\torbit_r=" << b.orbit_radius_mkm
                     << "\torbit_d=" << b.orbit_period_days
-                    << "\tpos=(" << b.position_mkm.x << "," << b.position_mkm.y << ")\n";
+                    << "\tpos=(" << b.position_mkm.x << "," << b.position_mkm.y << ")";
+          if (!b.mineral_deposits.empty()) {
+            std::cout << "\tdeposits_tons=" << dep_total;
+          }
+          std::cout << "\n";
         }
       }
 
@@ -768,9 +822,15 @@ int main(int argc, char** argv) {
     const bool export_ships_json = !export_ships_json_path.empty();
     const bool export_colonies_json = !export_colonies_json_path.empty();
     const bool export_fleets_json = !export_fleets_json_path.empty();
+    const bool export_bodies_json = !export_bodies_json_path.empty();
+    const bool export_tech_tree_json = !export_tech_tree_json_path.empty();
+    const bool export_tech_tree_dot = !export_tech_tree_dot_path.empty();
+    const bool export_plan_json = !plan_research_json_path.empty();
 
     if (dump_events || export_events_csv || export_events_json || export_events_jsonl || events_summary ||
-        events_summary_json || events_summary_csv || export_ships_json || export_colonies_json || export_fleets_json) {
+        events_summary_json || events_summary_csv || export_ships_json || export_colonies_json || export_fleets_json ||
+        export_bodies_json ||
+        export_tech_tree_json || export_tech_tree_dot || plan_research || export_plan_json) {
       // Prevent ambiguous script output.
       {
         int stdout_exports = 0;
@@ -782,6 +842,10 @@ int main(int argc, char** argv) {
         if (export_ships_json && export_ships_json_path == "-") ++stdout_exports;
         if (export_colonies_json && export_colonies_json_path == "-") ++stdout_exports;
         if (export_fleets_json && export_fleets_json_path == "-") ++stdout_exports;
+        if (export_bodies_json && export_bodies_json_path == "-") ++stdout_exports;
+        if (export_tech_tree_json && export_tech_tree_json_path == "-") ++stdout_exports;
+        if (export_tech_tree_dot && export_tech_tree_dot_path == "-") ++stdout_exports;
+        if (export_plan_json && plan_research_json_path == "-") ++stdout_exports;
         if (stdout_exports > 1) {
           std::cerr << "Multiple machine-readable outputs set to '-' (stdout). Choose at most one.\n";
           return 2;
@@ -794,6 +858,116 @@ int main(int argc, char** argv) {
           }
         }
       }
+
+      // --- Tech tree exports (content-level) ---
+      if (export_tech_tree_json) {
+        const std::string blob = nebula4x::tech_tree_to_json(sim.content().techs);
+        if (export_tech_tree_json_path == "-") {
+          std::cout << blob;
+        } else {
+          nebula4x::write_text_file(export_tech_tree_json_path, blob);
+          if (!quiet) {
+            std::ostream& info = script_stdout ? std::cerr : std::cout;
+            info << "Tech tree JSON written to " << export_tech_tree_json_path << "\n";
+          }
+        }
+      }
+
+      if (export_tech_tree_dot) {
+        const std::string blob = nebula4x::tech_tree_to_dot(sim.content().techs);
+        if (export_tech_tree_dot_path == "-") {
+          std::cout << blob;
+        } else {
+          nebula4x::write_text_file(export_tech_tree_dot_path, blob);
+          if (!quiet) {
+            std::ostream& info = script_stdout ? std::cerr : std::cout;
+            info << "Tech tree DOT written to " << export_tech_tree_dot_path << "\n";
+          }
+        }
+      }
+
+      // --- Research planner ---
+      if (plan_research) {
+        const nebula4x::Id fid = resolve_faction_id(s, plan_faction_raw);
+        if (fid == nebula4x::kInvalidId) {
+          std::cerr << "Unknown --plan-research faction: " << plan_faction_raw << "\n";
+          return 2;
+        }
+        const auto* fac = nebula4x::find_ptr(s.factions, fid);
+        if (!fac) {
+          std::cerr << "Faction not found: " << plan_faction_raw << "\n";
+          return 2;
+        }
+
+        const std::string tech_id = resolve_tech_id(sim.content().techs, plan_tech_raw);
+        if (tech_id.empty()) {
+          std::cerr << "Unknown --plan-research tech: " << plan_tech_raw << "\n";
+          return 2;
+        }
+
+        const auto it_tech = sim.content().techs.find(tech_id);
+        const std::string tech_name = (it_tech == sim.content().techs.end()) ? tech_id : it_tech->second.name;
+
+        const auto plan = nebula4x::compute_research_plan(sim.content(), *fac, tech_id);
+
+        if (export_plan_json) {
+          nebula4x::json::Object root;
+          root["ok"] = plan.ok();
+          root["faction_id"] = static_cast<double>(fid);
+          root["faction"] = fac->name;
+          root["target_tech_id"] = tech_id;
+          root["target_tech"] = tech_name;
+          root["total_cost"] = plan.plan.total_cost;
+
+          nebula4x::json::Array errors;
+          for (const auto& e : plan.errors) errors.push_back(e);
+          root["errors"] = nebula4x::json::array(std::move(errors));
+
+          nebula4x::json::Array techs;
+          techs.reserve(plan.plan.tech_ids.size());
+          for (const auto& tid : plan.plan.tech_ids) {
+            nebula4x::json::Object to;
+            to["id"] = tid;
+            const auto it = sim.content().techs.find(tid);
+            if (it != sim.content().techs.end()) {
+              to["name"] = it->second.name;
+              to["cost"] = it->second.cost;
+            }
+            techs.push_back(nebula4x::json::object(std::move(to)));
+          }
+          root["plan"] = nebula4x::json::array(std::move(techs));
+
+          const std::string blob = nebula4x::json::stringify(nebula4x::json::object(std::move(root))) + "\n";
+          if (plan_research_json_path == "-") {
+            std::cout << blob;
+          } else {
+            nebula4x::write_text_file(plan_research_json_path, blob);
+            if (!quiet) {
+              std::ostream& info = script_stdout ? std::cerr : std::cout;
+              info << "Research plan JSON written to " << plan_research_json_path << "\n";
+            }
+          }
+        } else {
+          // Human-readable plan.
+          std::ostream& out = script_stdout ? std::cerr : std::cout;
+          out << "Research plan for " << fac->name << " -> " << tech_name << " (" << tech_id << ")\n";
+          if (!plan.ok()) {
+            out << "Errors:\n";
+            for (const auto& e : plan.errors) out << "  - " << e << "\n";
+          }
+          out << "Steps: " << plan.plan.tech_ids.size() << ", Total cost: " << plan.plan.total_cost << "\n";
+          for (std::size_t i = 0; i < plan.plan.tech_ids.size(); ++i) {
+            const auto& tid = plan.plan.tech_ids[i];
+            const auto it = sim.content().techs.find(tid);
+            const std::string nm = (it == sim.content().techs.end()) ? tid : it->second.name;
+            const double cost = (it == sim.content().techs.end()) ? 0.0 : it->second.cost;
+            out << "  " << (i + 1) << ". " << nm << " (" << tid << ")";
+            if (cost > 0.0) out << "  cost=" << cost;
+            out << "\n";
+          }
+        }
+      }
+
       const int events_last = std::max(0, get_int_arg(argc, argv, "--events-last", 0));
       const std::string cat_raw = get_str_arg(argc, argv, "--events-category", "");
       const std::string fac_raw = get_str_arg(argc, argv, "--events-faction", "");
@@ -1167,6 +1341,25 @@ if (events_summary_csv) {
         }
       } catch (const std::exception& e) {
         std::cerr << "Failed to export fleets JSON: " << e.what() << "\n";
+        return 1;
+      }
+    }
+
+    if (export_bodies_json) {
+      try {
+        const std::string json_text = nebula4x::bodies_to_json(s);
+        if (export_bodies_json_path == "-") {
+          // Explicit stdout export for scripting.
+          std::cout << json_text;
+        } else {
+          nebula4x::write_text_file(export_bodies_json_path, json_text);
+          if (!quiet) {
+            std::ostream& info = script_stdout ? std::cerr : std::cout;
+            info << "\nWrote bodies JSON to " << export_bodies_json_path << "\n";
+          }
+        }
+      } catch (const std::exception& e) {
+        std::cerr << "Failed to export bodies JSON: " << e.what() << "\n";
         return 1;
       }
     }

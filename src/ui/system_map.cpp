@@ -39,7 +39,8 @@ Vec2 to_world(const ImVec2& screen_px, const ImVec2& center_px, double scale_px_
 
 } // namespace
 
-void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zoom, Vec2& pan) {
+void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& selected_colony, Id& selected_body,
+                     double& zoom, Vec2& pan) {
   const auto& s = sim.state();
   const auto* sys = find_ptr(s.systems, s.selected_system);
   if (!sys) {
@@ -116,12 +117,22 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   }
 
   auto* draw = ImGui::GetWindowDrawList();
-  draw->AddRectFilled(origin, ImVec2(origin.x + avail.x, origin.y + avail.y), IM_COL32(15, 18, 22, 255));
+  const ImU32 bg = ImGui::ColorConvertFloat4ToU32(ImVec4(ui.system_map_bg[0], ui.system_map_bg[1], ui.system_map_bg[2],
+                                                         ui.system_map_bg[3]));
+  draw->AddRectFilled(origin, ImVec2(origin.x + avail.x, origin.y + avail.y), bg);
   draw->AddRect(origin, ImVec2(origin.x + avail.x, origin.y + avail.y), IM_COL32(60, 60, 60, 255));
 
   // Axes
   draw->AddLine(ImVec2(origin.x, center.y), ImVec2(origin.x + avail.x, center.y), IM_COL32(40, 40, 40, 255));
   draw->AddLine(ImVec2(center.x, origin.y), ImVec2(center.x, origin.y + avail.y), IM_COL32(40, 40, 40, 255));
+
+  // Cache: colonized bodies (for highlight rings).
+  std::unordered_set<Id> colonized_bodies;
+  colonized_bodies.reserve(s.colonies.size() * 2);
+  for (const auto& [cid, c] : s.colonies) {
+    (void)cid;
+    if (c.body_id != kInvalidId) colonized_bodies.insert(c.body_id);
+  }
 
   // Orbits + bodies
   for (Id bid : sys->bodies) {
@@ -136,6 +147,16 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
     const ImVec2 p = to_screen(b->position_mkm, center, scale, zoom, pan);
     const float r = (b->type == BodyType::Star) ? 8.0f : 5.0f;
     draw->AddCircleFilled(p, r, color_body(b->type));
+
+    // Highlight colonized bodies.
+    if (colonized_bodies.count(bid)) {
+      draw->AddCircle(p, r + 4.0f, IM_COL32(0, 255, 140, 180), 0, 1.5f);
+    }
+
+    // Highlight selected body.
+    if (selected_body == bid) {
+      draw->AddCircle(p, r + 7.0f, IM_COL32(255, 220, 80, 220), 0, 2.0f);
+    }
     draw->AddText(ImVec2(p.x + 6, p.y + 6), IM_COL32(200, 200, 200, 255), b->name.c_str());
   }
 
@@ -210,7 +231,10 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
     }
   }
 
-  // Interaction: left click issues an order for the selected ship.
+  // Interaction:
+  // - Left click issues an order for the selected ship.
+  //   (Also selects the clicked body for convenience)
+  // - Right click selects the closest ship/body (no orders).
   // Ctrl + left click issues an order for the selected fleet (if any).
   // - Click near a body: MoveToBody
   //   - Alt + click near a body: ColonizeBody
@@ -277,6 +301,17 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
             sim.issue_travel_via_jump(selected_ship, picked_jump);
           }
         } else if (picked_body != kInvalidId) {
+          // Always select the clicked body (even when ordering).
+          selected_body = picked_body;
+
+          // If this body has a colony, select it too.
+          for (const auto& [cid, c] : s.colonies) {
+            if (c.body_id == picked_body) {
+              selected_colony = cid;
+              break;
+            }
+          }
+
           if (fleet_mode) {
             sim.issue_fleet_move_to_body(selected_fleet->id, picked_body, ui.fog_of_war);
           } else {
@@ -298,6 +333,71 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
     }
   }
 
+  // Right click selection (no orders). Prefer ships, then bodies.
+  if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+    if (!ImGui::IsAnyItemHovered()) {
+      const ImVec2 mp = ImGui::GetIO().MousePos;
+      if (mp.x >= origin.x && mp.x <= origin.x + avail.x && mp.y >= origin.y && mp.y <= origin.y + avail.y) {
+        constexpr float kPickRadiusPx = 14.0f;
+        const float pick_d2 = kPickRadiusPx * kPickRadiusPx;
+
+        Id picked_ship = kInvalidId;
+        float best_ship_d2 = pick_d2;
+        for (Id sid : sys->ships) {
+          const auto* sh = find_ptr(s.ships, sid);
+          if (!sh) continue;
+
+          // Respect fog-of-war visibility for picking.
+          if (ui.fog_of_war && viewer_faction_id != kInvalidId) {
+            if (sh->faction_id != viewer_faction_id) {
+              if (std::find(detected_hostiles.begin(), detected_hostiles.end(), sid) == detected_hostiles.end()) {
+                continue;
+              }
+            }
+          }
+
+          const ImVec2 p = to_screen(sh->position_mkm, center, scale, zoom, pan);
+          const float dx = mp.x - p.x;
+          const float dy = mp.y - p.y;
+          const float d2 = dx * dx + dy * dy;
+          if (d2 <= best_ship_d2) {
+            best_ship_d2 = d2;
+            picked_ship = sid;
+          }
+        }
+
+        Id picked_body = kInvalidId;
+        float best_body_d2 = pick_d2;
+        for (Id bid : sys->bodies) {
+          const auto* b = find_ptr(s.bodies, bid);
+          if (!b) continue;
+          const ImVec2 p = to_screen(b->position_mkm, center, scale, zoom, pan);
+          const float dx = mp.x - p.x;
+          const float dy = mp.y - p.y;
+          const float d2 = dx * dx + dy * dy;
+          if (d2 <= best_body_d2) {
+            best_body_d2 = d2;
+            picked_body = bid;
+          }
+        }
+
+        if (picked_ship != kInvalidId && best_ship_d2 <= best_body_d2) {
+          selected_ship = picked_ship;
+          ui.selected_fleet_id = sim.fleet_for_ship(picked_ship);
+        } else if (picked_body != kInvalidId) {
+          selected_body = picked_body;
+          // Select colony on that body if present.
+          for (const auto& [cid, c] : s.colonies) {
+            if (c.body_id == picked_body) {
+              selected_colony = cid;
+              break;
+            }
+          }
+        }
+      }
+    }
+  }
+
   // Legend / help
   ImGui::SetCursorScreenPos(ImVec2(origin.x + 10, origin.y + 10));
   ImGui::BeginChild("legend", ImVec2(280, 190), true);
@@ -305,6 +405,7 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   ImGui::BulletText("Mouse wheel: zoom");
   ImGui::BulletText("Middle drag: pan");
   ImGui::BulletText("Left click: issue order to ship (Shift queues)");
+  ImGui::BulletText("Right click: select ship/body (no orders)");
   ImGui::BulletText("Alt+Left click body: colonize (colony ship required)");
   ImGui::BulletText("Ctrl+Left click: issue order to fleet");
   ImGui::BulletText("Click body: move-to-body");

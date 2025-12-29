@@ -39,6 +39,10 @@ std::vector<std::string> validate_content_db(const ContentDB& db) {
       push(errors, join("Component '", key, "' has invalid mass_tons: ", c.mass_tons));
     if (!is_non_negative(c.speed_km_s))
       push(errors, join("Component '", key, "' has invalid speed_km_s: ", c.speed_km_s));
+    if (!is_non_negative(c.fuel_use_per_mkm))
+      push(errors, join("Component '", key, "' has invalid fuel_use_per_mkm: ", c.fuel_use_per_mkm));
+    if (!is_non_negative(c.fuel_capacity_tons))
+      push(errors, join("Component '", key, "' has invalid fuel_capacity_tons: ", c.fuel_capacity_tons));
     if (!is_non_negative(c.cargo_tons))
       push(errors, join("Component '", key, "' has invalid cargo_tons: ", c.cargo_tons));
     if (!is_non_negative(c.sensor_range_mkm))
@@ -46,8 +50,10 @@ std::vector<std::string> validate_content_db(const ContentDB& db) {
     if (!is_non_negative(c.colony_capacity_millions))
       push(errors,
            join("Component '", key, "' has invalid colony_capacity_millions: ", c.colony_capacity_millions));
-    if (!is_non_negative(c.power))
-      push(errors, join("Component '", key, "' has invalid power: ", c.power));
+    if (!is_non_negative(c.power_output))
+      push(errors, join("Component '", key, "' has invalid power_output: ", c.power_output));
+    if (!is_non_negative(c.power_use))
+      push(errors, join("Component '", key, "' has invalid power_use: ", c.power_use));
     if (!is_non_negative(c.weapon_damage))
       push(errors, join("Component '", key, "' has invalid weapon_damage: ", c.weapon_damage));
     if (!is_non_negative(c.weapon_range_mkm))
@@ -82,6 +88,12 @@ std::vector<std::string> validate_content_db(const ContentDB& db) {
       push(errors, join("Design '", key, "' has invalid mass_tons: ", d.mass_tons));
     if (!is_non_negative(d.speed_km_s))
       push(errors, join("Design '", key, "' has invalid speed_km_s: ", d.speed_km_s));
+    if (!is_non_negative(d.fuel_capacity_tons))
+      push(errors, join("Design '", key, "' has invalid fuel_capacity_tons: ", d.fuel_capacity_tons));
+    if (!is_non_negative(d.fuel_use_per_mkm))
+      push(errors, join("Design '", key, "' has invalid fuel_use_per_mkm: ", d.fuel_use_per_mkm));
+    if (d.fuel_use_per_mkm > 1e-9 && d.fuel_capacity_tons <= 1e-9)
+      push(errors, join("Design '", key, "' consumes fuel but has zero fuel_capacity_tons"));
     if (!is_non_negative(d.cargo_tons))
       push(errors, join("Design '", key, "' has invalid cargo_tons: ", d.cargo_tons));
     if (!is_non_negative(d.sensor_range_mkm))
@@ -89,6 +101,19 @@ std::vector<std::string> validate_content_db(const ContentDB& db) {
     if (!is_non_negative(d.colony_capacity_millions))
       push(errors,
            join("Design '", key, "' has invalid colony_capacity_millions: ", d.colony_capacity_millions));
+
+    if (!is_non_negative(d.power_generation))
+      push(errors, join("Design '", key, "' has invalid power_generation: ", d.power_generation));
+    if (!is_non_negative(d.power_use_total))
+      push(errors, join("Design '", key, "' has invalid power_use_total: ", d.power_use_total));
+    if (!is_non_negative(d.power_use_engines))
+      push(errors, join("Design '", key, "' has invalid power_use_engines: ", d.power_use_engines));
+    if (!is_non_negative(d.power_use_sensors))
+      push(errors, join("Design '", key, "' has invalid power_use_sensors: ", d.power_use_sensors));
+    if (!is_non_negative(d.power_use_weapons))
+      push(errors, join("Design '", key, "' has invalid power_use_weapons: ", d.power_use_weapons));
+    if (!is_non_negative(d.power_use_shields))
+      push(errors, join("Design '", key, "' has invalid power_use_shields: ", d.power_use_shields));
     if (!is_non_negative(d.max_hp) || d.max_hp <= 0.0)
       push(errors, join("Design '", key, "' has invalid max_hp: ", d.max_hp));
     if (!is_non_negative(d.max_shields))
