@@ -85,6 +85,11 @@ struct UIState {
   // UI scaling (1.0 = default). This affects readability on high-DPI displays.
   float ui_scale{1.0f};
 
+  // Docking behavior (ImGui IO config). These are stored in UI prefs.
+  bool docking_with_shift{false};
+  bool docking_always_tab_bar{false};
+  bool docking_transparent_payload{true};
+
   // Event toast notifications (warn/error popups).
   bool show_event_toasts{true};
   float event_toast_duration_sec{6.0f};

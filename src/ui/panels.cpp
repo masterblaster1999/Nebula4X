@@ -4314,6 +4314,15 @@ void draw_settings_window(UIState& ui, char* ui_prefs_path, UIPrefActions& actio
     actions.reset_window_layout = true;
   }
 
+  ImGui::SeparatorText("Docking");
+  ImGui::Checkbox("Hold Shift to dock", &ui.docking_with_shift);
+  ImGui::Checkbox("Always show tab bars", &ui.docking_always_tab_bar);
+  ImGui::Checkbox("Transparent docking preview", &ui.docking_transparent_payload);
+  {
+    const char* ini = ImGui::GetIO().IniFilename;
+    ImGui::TextDisabled("Layout file: %s", (ini && ini[0]) ? ini : "(none)");
+  }
+
   ImGui::SeparatorText("Notes");
   ImGui::TextWrapped(
       "Theme/layout settings are stored separately from save-games. Use 'UI Prefs' to persist your UI theme "

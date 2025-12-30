@@ -40,6 +40,8 @@ class App {
 
  private:
   void apply_imgui_style_overrides();
+  void draw_dockspace();
+  void build_default_dock_layout(unsigned int dockspace_id);
 
   Simulation sim_;
 
@@ -68,6 +70,12 @@ class App {
 
   // HUD transient state (command palette query, toast queue, etc.).
   HUDState hud_{};
+
+  // Docking: when enabled, we create a fullscreen dockspace and build a
+  // sensible default layout the first time (or when the user resets layout).
+  bool dock_layout_initialized_{false};
+  bool dock_layout_checked_ini_{false};
+  bool dock_layout_has_existing_ini_{false};
 };
 
 } // namespace nebula4x::ui

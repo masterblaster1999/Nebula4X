@@ -428,6 +428,7 @@ void draw_help_window(UIState& ui) {
   ImGui::BulletText("Space: Advance +1 day (Shift=+5, Ctrl=+30)");
 
   ImGui::SeparatorText("Window toggles");
+  ImGui::BulletText("Drag window tabs to dock/undock and rearrange the workspace");
   ImGui::BulletText("Ctrl+1: Controls");
   ImGui::BulletText("Ctrl+2: Map");
   ImGui::BulletText("Ctrl+3: Details");

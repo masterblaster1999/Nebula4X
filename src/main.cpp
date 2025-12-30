@@ -124,6 +124,14 @@ int main(int /*argc*/, char** /*argv*/) {
 
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    // Docking dramatically improves the usability of a multi-window UI.
+    //
+    // Note: we intentionally do NOT enable multi-viewports here because the
+    // SDL_Renderer backend is not a great fit for multi-viewport rendering.
+    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+
+    // Keep ImGui's layout/settings in a project-specific file.
+    io.IniFilename = "ui_layout.ini";
 
     ImGui_ImplSDL2_InitForSDLRenderer(window, renderer);
     ImGui_ImplSDLRenderer2_Init(renderer);

@@ -40,6 +40,11 @@ void App::frame() {
     ImGuiIO& io = ImGui::GetIO();
     ui_.ui_scale = std::clamp(ui_.ui_scale, 0.65f, 2.5f);
     io.FontGlobalScale = ui_.ui_scale;
+
+    // Docking behavior (persisted via ui_prefs.json).
+    io.ConfigDockingWithShift = ui_.docking_with_shift;
+    io.ConfigDockingAlwaysTabBar = ui_.docking_always_tab_bar;
+    io.ConfigDockingTransparentPayload = ui_.docking_transparent_payload;
   }
 
   // Apply last-frame style overrides so the menu/settings windows reflect them.
@@ -122,74 +127,60 @@ void App::frame() {
   // Re-apply style overrides in case theme values changed this frame.
   apply_imgui_style_overrides();
 
-  // Optional floating windows.
+  // Create a fullscreen dockspace so the user can rearrange panels.
+  draw_dockspace();
+
+  // Primary workspace windows (dockable).
+  if (ui_.show_controls_window) {
+    ImGui::SetNextWindowSize(ImVec2(320, 720), ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("Controls", &ui_.show_controls_window)) {
+      draw_left_sidebar(sim_, ui_, selected_ship_, selected_colony_);
+    }
+    ImGui::End();
+  }
+
+  if (ui_.show_map_window) {
+    ImGui::SetNextWindowSize(ImVec2(900, 720), ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("Map", &ui_.show_map_window)) {
+      if (ImGui::BeginTabBar("map_tabs")) {
+        const MapTab req = ui_.request_map_tab;
+
+        ImGuiTabItemFlags sys_flags = 0;
+        ImGuiTabItemFlags gal_flags = 0;
+        if (req == MapTab::System) sys_flags |= ImGuiTabItemFlags_SetSelected;
+        if (req == MapTab::Galaxy) gal_flags |= ImGuiTabItemFlags_SetSelected;
+
+        if (ImGui::BeginTabItem("System", nullptr, sys_flags)) {
+          draw_system_map(sim_, ui_, selected_ship_, selected_colony_, selected_body_, map_zoom_, map_pan_);
+          ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Galaxy", nullptr, gal_flags)) {
+          draw_galaxy_map(sim_, ui_, selected_ship_, galaxy_zoom_, galaxy_pan_);
+          ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+
+        // Consume tab request if we drew the tab bar.
+        if (req != MapTab::None) ui_.request_map_tab = MapTab::None;
+      }
+    }
+    ImGui::End();
+  }
+
+  if (ui_.show_details_window) {
+    ImGui::SetNextWindowSize(ImVec2(360, 720), ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("Details", &ui_.show_details_window)) {
+      draw_right_sidebar(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+    }
+    ImGui::End();
+  }
+
+  // Optional secondary windows (also dockable).
   if (ui_.show_directory_window) draw_directory_window(sim_, ui_, selected_colony_, selected_body_);
   if (ui_.show_economy_window) draw_economy_window(sim_, ui_, selected_colony_, selected_body_);
 
   // Help overlay/window.
   draw_help_window(ui_);
-
-  // Layout: left sidebar / center map / right sidebar
-  // The layout adapts when panels are hidden.
-  const ImVec2 ds = ImGui::GetIO().DisplaySize;
-  constexpr float kMargin = 10.0f;
-  const float kTop = ImGui::GetFrameHeight() + kMargin;
-  const float status_h = ui_.show_status_bar ? (ImGui::GetFrameHeight() + ImGui::GetStyle().WindowPadding.y * 2.0f) : 0.0f;
-  const float bottom_reserve = ui_.show_status_bar ? (status_h + kMargin) : kMargin;
-  const float full_h = std::max(100.0f, ds.y - (kTop + bottom_reserve));
-  constexpr float kSideW = 300.0f;
-
-  float x_left = kMargin;
-  float x_map = kMargin;
-  float x_right = ds.x - (kSideW + kMargin);
-
-  if (ui_.show_controls_window) {
-    ImGui::SetNextWindowPos(ImVec2(x_left, kTop), ImGuiCond_Always);
-    ImGui::SetNextWindowSize(ImVec2(kSideW, full_h), ImGuiCond_Always);
-    ImGui::Begin("Controls", &ui_.show_controls_window, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove);
-    draw_left_sidebar(sim_, ui_, selected_ship_, selected_colony_);
-    ImGui::End();
-    x_map = x_left + kSideW + kMargin;
-  }
-
-  if (ui_.show_details_window) {
-    ImGui::SetNextWindowPos(ImVec2(x_right, kTop), ImGuiCond_Always);
-    ImGui::SetNextWindowSize(ImVec2(kSideW, full_h), ImGuiCond_Always);
-    ImGui::Begin("Details", &ui_.show_details_window, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove);
-    draw_right_sidebar(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
-    ImGui::End();
-  }
-
-  if (ui_.show_map_window) {
-    const float right_gutter = ui_.show_details_window ? (kSideW + kMargin) : kMargin;
-    const float map_w = std::max(200.0f, ds.x - x_map - right_gutter);
-
-    ImGui::SetNextWindowPos(ImVec2(x_map, kTop), ImGuiCond_Always);
-    ImGui::SetNextWindowSize(ImVec2(map_w, full_h), ImGuiCond_Always);
-    ImGui::Begin("Map", &ui_.show_map_window, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove);
-    if (ImGui::BeginTabBar("map_tabs")) {
-      const MapTab req = ui_.request_map_tab;
-
-      ImGuiTabItemFlags sys_flags = 0;
-      ImGuiTabItemFlags gal_flags = 0;
-      if (req == MapTab::System) sys_flags |= ImGuiTabItemFlags_SetSelected;
-      if (req == MapTab::Galaxy) gal_flags |= ImGuiTabItemFlags_SetSelected;
-
-      if (ImGui::BeginTabItem("System", nullptr, sys_flags)) {
-        draw_system_map(sim_, ui_, selected_ship_, selected_colony_, selected_body_, map_zoom_, map_pan_);
-        ImGui::EndTabItem();
-      }
-      if (ImGui::BeginTabItem("Galaxy", nullptr, gal_flags)) {
-        draw_galaxy_map(sim_, ui_, selected_ship_, galaxy_zoom_, galaxy_pan_);
-        ImGui::EndTabItem();
-      }
-      ImGui::EndTabBar();
-
-      // Consume tab request if we drew the tab bar.
-      if (req != MapTab::None) ui_.request_map_tab = MapTab::None;
-    }
-    ImGui::End();
-  }
 
   // HUD chrome (status bar, command palette, event toasts).
   draw_status_bar(sim_, ui_, hud_, selected_ship_, selected_colony_, selected_body_, save_path_, load_path_);
@@ -197,6 +188,98 @@ void App::frame() {
 
   update_event_toasts(sim_, ui_, hud_);
   draw_event_toasts(sim_, ui_, hud_, selected_ship_, selected_colony_, selected_body_);
+}
+
+void App::draw_dockspace() {
+  ImGuiIO& io = ImGui::GetIO();
+  if ((io.ConfigFlags & ImGuiConfigFlags_DockingEnable) == 0) return;
+
+  ImGuiViewport* viewport = ImGui::GetMainViewport();
+
+  // Respect the menu bar (viewport->WorkPos/WorkSize) and reserve space for the status bar.
+  ImVec2 pos = viewport->WorkPos;
+  ImVec2 size = viewport->WorkSize;
+
+  if (ui_.show_status_bar) {
+    const ImGuiStyle& style = ImGui::GetStyle();
+    const float status_h = ImGui::GetFrameHeight() + style.WindowPadding.y * 2.0f;
+    size.y = std::max(0.0f, size.y - status_h);
+  }
+
+  ImGui::SetNextWindowPos(pos);
+  ImGui::SetNextWindowSize(size);
+  ImGui::SetNextWindowViewport(viewport->ID);
+
+  ImGuiDockNodeFlags dock_flags = ImGuiDockNodeFlags_PassthruCentralNode;
+
+  ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoTitleBar |
+                                  ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                                  ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus |
+                                  ImGuiWindowFlags_NoBackground;
+
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+
+  if (ImGui::Begin("##nebula4x_dockspace", nullptr, window_flags)) {
+    const unsigned int dockspace_id = ImGui::GetID("Nebula4XDockSpace");
+    ImGui::DockSpace(dockspace_id, ImVec2(0.0f, 0.0f), dock_flags);
+
+    // Only auto-build a default layout when there isn't already a persisted layout.
+    if (!dock_layout_checked_ini_) {
+      dock_layout_checked_ini_ = true;
+      dock_layout_has_existing_ini_ = false;
+
+      const char* ini = io.IniFilename;
+      if (ini && ini[0] != '\0') {
+        try {
+          dock_layout_has_existing_ini_ = std::filesystem::exists(ini);
+        } catch (...) {
+          dock_layout_has_existing_ini_ = false;
+        }
+      }
+    }
+
+    if (!dock_layout_initialized_) {
+      if (!dock_layout_has_existing_ini_) {
+        build_default_dock_layout(dockspace_id);
+      }
+      dock_layout_initialized_ = true;
+    }
+  }
+
+  ImGui::End();
+  ImGui::PopStyleVar(3);
+}
+
+void App::build_default_dock_layout(unsigned int dockspace_id) {
+  if (dockspace_id == 0) return;
+  if ((ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_DockingEnable) == 0) return;
+
+  ImGuiViewport* viewport = ImGui::GetMainViewport();
+  ImVec2 size = viewport->WorkSize;
+  if (ui_.show_status_bar) {
+    const ImGuiStyle& style = ImGui::GetStyle();
+    const float status_h = ImGui::GetFrameHeight() + style.WindowPadding.y * 2.0f;
+    size.y = std::max(0.0f, size.y - status_h);
+  }
+
+  ImGui::DockBuilderRemoveNode(dockspace_id);               // clear previous layout
+  ImGui::DockBuilderAddNode(dockspace_id, ImGuiDockNodeFlags_DockSpace);
+  ImGui::DockBuilderSetNodeSize(dockspace_id, size);
+
+  ImGuiID dock_main = dockspace_id;
+  ImGuiID dock_left = ImGui::DockBuilderSplitNode(dock_main, ImGuiDir_Left, 0.22f, nullptr, &dock_main);
+  ImGuiID dock_right = ImGui::DockBuilderSplitNode(dock_main, ImGuiDir_Right, 0.26f, nullptr, &dock_main);
+  ImGuiID dock_bottom = ImGui::DockBuilderSplitNode(dock_main, ImGuiDir_Down, 0.30f, nullptr, &dock_main);
+
+  ImGui::DockBuilderDockWindow("Controls", dock_left);
+  ImGui::DockBuilderDockWindow("Details", dock_right);
+  ImGui::DockBuilderDockWindow("Map", dock_main);
+  ImGui::DockBuilderDockWindow("Directory", dock_bottom);
+  ImGui::DockBuilderDockWindow("Economy", dock_bottom);
+
+  ImGui::DockBuilderFinish(dockspace_id);
 }
 
 namespace {
@@ -285,6 +368,17 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
         ui_.event_toast_duration_sec = static_cast<float>(it->second.number_value(ui_.event_toast_duration_sec));
         ui_.event_toast_duration_sec = std::clamp(ui_.event_toast_duration_sec, 0.5f, 60.0f);
       }
+
+      // Docking behavior.
+      if (auto it = obj->find("docking_with_shift"); it != obj->end()) {
+        ui_.docking_with_shift = it->second.bool_value(ui_.docking_with_shift);
+      }
+      if (auto it = obj->find("docking_always_tab_bar"); it != obj->end()) {
+        ui_.docking_always_tab_bar = it->second.bool_value(ui_.docking_always_tab_bar);
+      }
+      if (auto it = obj->find("docking_transparent_payload"); it != obj->end()) {
+        ui_.docking_transparent_payload = it->second.bool_value(ui_.docking_transparent_payload);
+      }
     }
 
     // Window layout.
@@ -328,7 +422,7 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     }
 
     nebula4x::json::Object o;
-    o["version"] = 2.0;
+    o["version"] = 3.0;
 
     // Theme.
     o["clear_color"] = color_to_json(ui_.clear_color);
@@ -342,6 +436,11 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     o["ui_scale"] = static_cast<double>(ui_.ui_scale);
     o["show_event_toasts"] = ui_.show_event_toasts;
     o["event_toast_duration_sec"] = static_cast<double>(ui_.event_toast_duration_sec);
+
+    // Docking behavior.
+    o["docking_with_shift"] = ui_.docking_with_shift;
+    o["docking_always_tab_bar"] = ui_.docking_always_tab_bar;
+    o["docking_transparent_payload"] = ui_.docking_transparent_payload;
 
     // Layout.
     o["show_controls_window"] = ui_.show_controls_window;
@@ -397,6 +496,19 @@ void App::reset_window_layout_defaults() {
   ui_.show_status_bar = true;
   ui_.show_event_toasts = true;
   ui_.event_toast_duration_sec = 6.0f;
+
+  // Docking layout reset: rebuild the default dock layout next frame.
+  dock_layout_initialized_ = false;
+  // Don't let an existing ini file prevent a reset request from applying.
+  dock_layout_checked_ini_ = true;
+  dock_layout_has_existing_ini_ = false;
+
+  // Best-effort: clear ImGui's ini settings in memory so window docking/positions
+  // don't fight our reset. We guard this in case the function is called when
+  // no ImGui context exists (e.g. unit tests / headless).
+  if (ImGui::GetCurrentContext() != nullptr) {
+    ImGui::LoadIniSettingsFromMemory("");
+  }
 }
 
 void App::apply_imgui_style_overrides() {
