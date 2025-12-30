@@ -44,7 +44,7 @@ std::string events_to_jsonl(const GameState& state, const std::vector<const SimE
 //   count
 //   range: { day_min, day_max, date_min, date_max }  (nulls when count=0)
 //   levels: { info, warn, error }
-//   categories: { general, research, shipyard, construction, movement, combat, intel, exploration }
+//   categories: { general, research, shipyard, construction, movement, combat, intel, exploration, diplomacy }
 //
 // Output ends with a trailing newline.
 std::string events_summary_to_json(const std::vector<const SimEvent*>& events);
@@ -59,7 +59,7 @@ std::string events_summary_to_json(const std::vector<const SimEvent*>& events);
 //   count,
 //   day_min, day_max, date_min, date_max,
 //   info, warn, error,
-//   general, research, shipyard, construction, movement, combat, intel, exploration
+//   general, research, shipyard, construction, movement, combat, intel, exploration, diplomacy
 //
 // Output ends with a trailing newline.
 std::string events_summary_to_csv(const std::vector<const SimEvent*>& events);

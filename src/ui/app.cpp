@@ -12,8 +12,13 @@
 #include "nebula4x/util/file_io.h"
 #include "ui/panels.h"
 #include "ui/economy_window.h"
+#include "ui/production_window.h"
 #include "ui/galaxy_map.h"
 #include "ui/system_map.h"
+#include "ui/timeline_window.h"
+#include "ui/design_studio_window.h"
+#include "ui/intel_window.h"
+#include "ui/diplomacy_window.h"
 
 namespace nebula4x::ui {
 
@@ -65,6 +70,11 @@ void App::frame() {
       if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_3)) ui_.show_details_window = !ui_.show_details_window;
       if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_4)) ui_.show_directory_window = !ui_.show_directory_window;
       if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_5)) ui_.show_economy_window = !ui_.show_economy_window;
+      if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_6)) ui_.show_production_window = !ui_.show_production_window;
+      if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_7)) ui_.show_timeline_window = !ui_.show_timeline_window;
+      if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_8)) ui_.show_design_studio_window = !ui_.show_design_studio_window;
+      if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_9)) ui_.show_intel_window = !ui_.show_intel_window;
+      if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_0)) ui_.show_diplomacy_window = !ui_.show_diplomacy_window;
       if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Comma)) ui_.show_settings_window = !ui_.show_settings_window;
 
       // Save/load.
@@ -177,7 +187,18 @@ void App::frame() {
 
   // Optional secondary windows (also dockable).
   if (ui_.show_directory_window) draw_directory_window(sim_, ui_, selected_colony_, selected_body_);
+  if (ui_.show_production_window) draw_production_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   if (ui_.show_economy_window) draw_economy_window(sim_, ui_, selected_colony_, selected_body_);
+  if (ui_.show_timeline_window) draw_timeline_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  if (ui_.show_design_studio_window) {
+    draw_design_studio_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  }
+  if (ui_.show_intel_window) {
+    draw_intel_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  }
+  if (ui_.show_diplomacy_window) {
+    draw_diplomacy_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  }
 
   // Help overlay/window.
   draw_help_window(ui_);
@@ -277,7 +298,12 @@ void App::build_default_dock_layout(unsigned int dockspace_id) {
   ImGui::DockBuilderDockWindow("Details", dock_right);
   ImGui::DockBuilderDockWindow("Map", dock_main);
   ImGui::DockBuilderDockWindow("Directory", dock_bottom);
+  ImGui::DockBuilderDockWindow("Production", dock_bottom);
   ImGui::DockBuilderDockWindow("Economy", dock_bottom);
+  ImGui::DockBuilderDockWindow("Timeline", dock_bottom);
+  ImGui::DockBuilderDockWindow("Design Studio", dock_bottom);
+  ImGui::DockBuilderDockWindow("Intel", dock_bottom);
+  ImGui::DockBuilderDockWindow("Diplomacy Graph", dock_bottom);
 
   ImGui::DockBuilderFinish(dockspace_id);
 }
@@ -369,6 +395,107 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
         ui_.event_toast_duration_sec = std::clamp(ui_.event_toast_duration_sec, 0.5f, 60.0f);
       }
 
+      // Timeline view defaults.
+      if (auto it = obj->find("timeline_show_minimap"); it != obj->end()) {
+        ui_.timeline_show_minimap = it->second.bool_value(ui_.timeline_show_minimap);
+      }
+      if (auto it = obj->find("timeline_show_grid"); it != obj->end()) {
+        ui_.timeline_show_grid = it->second.bool_value(ui_.timeline_show_grid);
+      }
+      if (auto it = obj->find("timeline_show_labels"); it != obj->end()) {
+        ui_.timeline_show_labels = it->second.bool_value(ui_.timeline_show_labels);
+      }
+      if (auto it = obj->find("timeline_compact_rows"); it != obj->end()) {
+        ui_.timeline_compact_rows = it->second.bool_value(ui_.timeline_compact_rows);
+      }
+      if (auto it = obj->find("timeline_lane_height"); it != obj->end()) {
+        ui_.timeline_lane_height = static_cast<float>(it->second.number_value(ui_.timeline_lane_height));
+        ui_.timeline_lane_height = std::clamp(ui_.timeline_lane_height, 18.0f, 80.0f);
+      }
+      if (auto it = obj->find("timeline_marker_size"); it != obj->end()) {
+        ui_.timeline_marker_size = static_cast<float>(it->second.number_value(ui_.timeline_marker_size));
+        ui_.timeline_marker_size = std::clamp(ui_.timeline_marker_size, 2.0f, 12.0f);
+      }
+      if (auto it = obj->find("timeline_follow_now"); it != obj->end()) {
+        ui_.timeline_follow_now = it->second.bool_value(ui_.timeline_follow_now);
+      }
+
+      // Design Studio view defaults.
+      if (auto it = obj->find("design_studio_show_grid"); it != obj->end()) {
+        ui_.design_studio_show_grid = it->second.bool_value(ui_.design_studio_show_grid);
+      }
+      if (auto it = obj->find("design_studio_show_labels"); it != obj->end()) {
+        ui_.design_studio_show_labels = it->second.bool_value(ui_.design_studio_show_labels);
+      }
+      if (auto it = obj->find("design_studio_show_compare"); it != obj->end()) {
+        ui_.design_studio_show_compare = it->second.bool_value(ui_.design_studio_show_compare);
+      }
+      if (auto it = obj->find("design_studio_show_power_overlay"); it != obj->end()) {
+        ui_.design_studio_show_power_overlay = it->second.bool_value(ui_.design_studio_show_power_overlay);
+      }
+
+      // Intel view defaults.
+      if (auto it = obj->find("intel_radar_scanline"); it != obj->end()) {
+        ui_.intel_radar_scanline = it->second.bool_value(ui_.intel_radar_scanline);
+      }
+      if (auto it = obj->find("intel_radar_grid"); it != obj->end()) {
+        ui_.intel_radar_grid = it->second.bool_value(ui_.intel_radar_grid);
+      }
+      if (auto it = obj->find("intel_radar_show_sensors"); it != obj->end()) {
+        ui_.intel_radar_show_sensors = it->second.bool_value(ui_.intel_radar_show_sensors);
+      }
+      if (auto it = obj->find("intel_radar_sensor_heat"); it != obj->end()) {
+        ui_.intel_radar_sensor_heat = it->second.bool_value(ui_.intel_radar_sensor_heat);
+      }
+      if (auto it = obj->find("intel_radar_show_bodies"); it != obj->end()) {
+        ui_.intel_radar_show_bodies = it->second.bool_value(ui_.intel_radar_show_bodies);
+      }
+      if (auto it = obj->find("intel_radar_show_jump_points"); it != obj->end()) {
+        ui_.intel_radar_show_jump_points = it->second.bool_value(ui_.intel_radar_show_jump_points);
+      }
+      if (auto it = obj->find("intel_radar_show_friendlies"); it != obj->end()) {
+        ui_.intel_radar_show_friendlies = it->second.bool_value(ui_.intel_radar_show_friendlies);
+      }
+      if (auto it = obj->find("intel_radar_show_hostiles"); it != obj->end()) {
+        ui_.intel_radar_show_hostiles = it->second.bool_value(ui_.intel_radar_show_hostiles);
+      }
+      if (auto it = obj->find("intel_radar_show_contacts"); it != obj->end()) {
+        ui_.intel_radar_show_contacts = it->second.bool_value(ui_.intel_radar_show_contacts);
+      }
+      if (auto it = obj->find("intel_radar_labels"); it != obj->end()) {
+        ui_.intel_radar_labels = it->second.bool_value(ui_.intel_radar_labels);
+      }
+
+      // Diplomacy Graph defaults.
+      if (auto it = obj->find("diplomacy_graph_starfield"); it != obj->end()) {
+        ui_.diplomacy_graph_starfield = it->second.bool_value(ui_.diplomacy_graph_starfield);
+      }
+      if (auto it = obj->find("diplomacy_graph_grid"); it != obj->end()) {
+        ui_.diplomacy_graph_grid = it->second.bool_value(ui_.diplomacy_graph_grid);
+      }
+      if (auto it = obj->find("diplomacy_graph_labels"); it != obj->end()) {
+        ui_.diplomacy_graph_labels = it->second.bool_value(ui_.diplomacy_graph_labels);
+      }
+      if (auto it = obj->find("diplomacy_graph_arrows"); it != obj->end()) {
+        ui_.diplomacy_graph_arrows = it->second.bool_value(ui_.diplomacy_graph_arrows);
+      }
+      if (auto it = obj->find("diplomacy_graph_dim_nonfocus"); it != obj->end()) {
+        ui_.diplomacy_graph_dim_nonfocus = it->second.bool_value(ui_.diplomacy_graph_dim_nonfocus);
+      }
+      if (auto it = obj->find("diplomacy_graph_show_hostile"); it != obj->end()) {
+        ui_.diplomacy_graph_show_hostile = it->second.bool_value(ui_.diplomacy_graph_show_hostile);
+      }
+      if (auto it = obj->find("diplomacy_graph_show_neutral"); it != obj->end()) {
+        ui_.diplomacy_graph_show_neutral = it->second.bool_value(ui_.diplomacy_graph_show_neutral);
+      }
+      if (auto it = obj->find("diplomacy_graph_show_friendly"); it != obj->end()) {
+        ui_.diplomacy_graph_show_friendly = it->second.bool_value(ui_.diplomacy_graph_show_friendly);
+      }
+      if (auto it = obj->find("diplomacy_graph_layout"); it != obj->end()) {
+        ui_.diplomacy_graph_layout = static_cast<int>(it->second.number_value(ui_.diplomacy_graph_layout));
+        ui_.diplomacy_graph_layout = std::clamp(ui_.diplomacy_graph_layout, 0, 2);
+      }
+
       // Docking behavior.
       if (auto it = obj->find("docking_with_shift"); it != obj->end()) {
         ui_.docking_with_shift = it->second.bool_value(ui_.docking_with_shift);
@@ -378,6 +505,92 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       }
       if (auto it = obj->find("docking_transparent_payload"); it != obj->end()) {
         ui_.docking_transparent_payload = it->second.bool_value(ui_.docking_transparent_payload);
+      }
+
+      // Map rendering chrome.
+      if (auto it = obj->find("system_map_starfield"); it != obj->end()) {
+        ui_.system_map_starfield = it->second.bool_value(ui_.system_map_starfield);
+      }
+      if (auto it = obj->find("system_map_grid"); it != obj->end()) {
+        ui_.system_map_grid = it->second.bool_value(ui_.system_map_grid);
+      }
+      if (auto it = obj->find("system_map_order_paths"); it != obj->end()) {
+        ui_.system_map_order_paths = it->second.bool_value(ui_.system_map_order_paths);
+      }
+      if (auto it = obj->find("system_map_fleet_formation_preview"); it != obj->end()) {
+        ui_.system_map_fleet_formation_preview = it->second.bool_value(ui_.system_map_fleet_formation_preview);
+      }
+      if (auto it = obj->find("system_map_follow_selected"); it != obj->end()) {
+        ui_.system_map_follow_selected = it->second.bool_value(ui_.system_map_follow_selected);
+      }
+      if (auto it = obj->find("galaxy_map_starfield"); it != obj->end()) {
+        ui_.galaxy_map_starfield = it->second.bool_value(ui_.galaxy_map_starfield);
+      }
+      if (auto it = obj->find("galaxy_map_grid"); it != obj->end()) {
+        ui_.galaxy_map_grid = it->second.bool_value(ui_.galaxy_map_grid);
+      }
+      if (auto it = obj->find("galaxy_map_selected_route"); it != obj->end()) {
+        ui_.galaxy_map_selected_route = it->second.bool_value(ui_.galaxy_map_selected_route);
+      }
+      if (auto it = obj->find("map_starfield_density"); it != obj->end()) {
+        ui_.map_starfield_density = static_cast<float>(it->second.number_value(ui_.map_starfield_density));
+        ui_.map_starfield_density = std::clamp(ui_.map_starfield_density, 0.0f, 4.0f);
+      }
+      if (auto it = obj->find("map_starfield_parallax"); it != obj->end()) {
+        ui_.map_starfield_parallax = static_cast<float>(it->second.number_value(ui_.map_starfield_parallax));
+        ui_.map_starfield_parallax = std::clamp(ui_.map_starfield_parallax, 0.0f, 1.0f);
+      }
+      if (auto it = obj->find("map_grid_opacity"); it != obj->end()) {
+        ui_.map_grid_opacity = static_cast<float>(it->second.number_value(ui_.map_grid_opacity));
+        ui_.map_grid_opacity = std::clamp(ui_.map_grid_opacity, 0.0f, 1.0f);
+      }
+      if (auto it = obj->find("map_route_opacity"); it != obj->end()) {
+        ui_.map_route_opacity = static_cast<float>(it->second.number_value(ui_.map_route_opacity));
+        ui_.map_route_opacity = std::clamp(ui_.map_route_opacity, 0.0f, 1.0f);
+      }
+
+      // Combat / tactical overlays.
+      if (auto it = obj->find("show_selected_weapon_range"); it != obj->end()) {
+        ui_.show_selected_weapon_range = it->second.bool_value(ui_.show_selected_weapon_range);
+      }
+      if (auto it = obj->find("show_fleet_weapon_ranges"); it != obj->end()) {
+        ui_.show_fleet_weapon_ranges = it->second.bool_value(ui_.show_fleet_weapon_ranges);
+      }
+      if (auto it = obj->find("show_hostile_weapon_ranges"); it != obj->end()) {
+        ui_.show_hostile_weapon_ranges = it->second.bool_value(ui_.show_hostile_weapon_ranges);
+      }
+
+      // Map intel/exploration toggles.
+      if (auto it = obj->find("show_selected_sensor_range"); it != obj->end()) {
+        ui_.show_selected_sensor_range = it->second.bool_value(ui_.show_selected_sensor_range);
+      }
+      if (auto it = obj->find("show_contact_markers"); it != obj->end()) {
+        ui_.show_contact_markers = it->second.bool_value(ui_.show_contact_markers);
+      }
+      if (auto it = obj->find("show_contact_labels"); it != obj->end()) {
+        ui_.show_contact_labels = it->second.bool_value(ui_.show_contact_labels);
+      }
+      if (auto it = obj->find("show_minor_bodies"); it != obj->end()) {
+        ui_.show_minor_bodies = it->second.bool_value(ui_.show_minor_bodies);
+      }
+      if (auto it = obj->find("show_minor_body_labels"); it != obj->end()) {
+        ui_.show_minor_body_labels = it->second.bool_value(ui_.show_minor_body_labels);
+      }
+      if (auto it = obj->find("show_galaxy_labels"); it != obj->end()) {
+        ui_.show_galaxy_labels = it->second.bool_value(ui_.show_galaxy_labels);
+      }
+      if (auto it = obj->find("show_galaxy_jump_lines"); it != obj->end()) {
+        ui_.show_galaxy_jump_lines = it->second.bool_value(ui_.show_galaxy_jump_lines);
+      }
+      if (auto it = obj->find("show_galaxy_unknown_exits"); it != obj->end()) {
+        ui_.show_galaxy_unknown_exits = it->second.bool_value(ui_.show_galaxy_unknown_exits);
+      }
+      if (auto it = obj->find("show_galaxy_intel_alerts"); it != obj->end()) {
+        ui_.show_galaxy_intel_alerts = it->second.bool_value(ui_.show_galaxy_intel_alerts);
+      }
+      if (auto it = obj->find("contact_max_age_days"); it != obj->end()) {
+        ui_.contact_max_age_days = static_cast<int>(it->second.number_value(ui_.contact_max_age_days));
+        ui_.contact_max_age_days = std::clamp(ui_.contact_max_age_days, 1, 3650);
       }
     }
 
@@ -395,8 +608,23 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       if (auto it = obj->find("show_directory_window"); it != obj->end()) {
         ui_.show_directory_window = it->second.bool_value(ui_.show_directory_window);
       }
+      if (auto it = obj->find("show_production_window"); it != obj->end()) {
+        ui_.show_production_window = it->second.bool_value(ui_.show_production_window);
+      }
       if (auto it = obj->find("show_economy_window"); it != obj->end()) {
         ui_.show_economy_window = it->second.bool_value(ui_.show_economy_window);
+      }
+      if (auto it = obj->find("show_timeline_window"); it != obj->end()) {
+        ui_.show_timeline_window = it->second.bool_value(ui_.show_timeline_window);
+      }
+      if (auto it = obj->find("show_design_studio_window"); it != obj->end()) {
+        ui_.show_design_studio_window = it->second.bool_value(ui_.show_design_studio_window);
+      }
+      if (auto it = obj->find("show_intel_window"); it != obj->end()) {
+        ui_.show_intel_window = it->second.bool_value(ui_.show_intel_window);
+      }
+      if (auto it = obj->find("show_diplomacy_window"); it != obj->end()) {
+        ui_.show_diplomacy_window = it->second.bool_value(ui_.show_diplomacy_window);
       }
       if (auto it = obj->find("show_settings_window"); it != obj->end()) {
         ui_.show_settings_window = it->second.bool_value(ui_.show_settings_window);
@@ -422,7 +650,7 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     }
 
     nebula4x::json::Object o;
-    o["version"] = 3.0;
+    o["version"] = 9.0;
 
     // Theme.
     o["clear_color"] = color_to_json(ui_.clear_color);
@@ -437,17 +665,91 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     o["show_event_toasts"] = ui_.show_event_toasts;
     o["event_toast_duration_sec"] = static_cast<double>(ui_.event_toast_duration_sec);
 
+    // Timeline view defaults.
+    o["timeline_show_minimap"] = ui_.timeline_show_minimap;
+    o["timeline_show_grid"] = ui_.timeline_show_grid;
+    o["timeline_show_labels"] = ui_.timeline_show_labels;
+    o["timeline_compact_rows"] = ui_.timeline_compact_rows;
+    o["timeline_lane_height"] = static_cast<double>(ui_.timeline_lane_height);
+    o["timeline_marker_size"] = static_cast<double>(ui_.timeline_marker_size);
+    o["timeline_follow_now"] = ui_.timeline_follow_now;
+
+    // Design Studio defaults.
+    o["design_studio_show_grid"] = ui_.design_studio_show_grid;
+    o["design_studio_show_labels"] = ui_.design_studio_show_labels;
+    o["design_studio_show_compare"] = ui_.design_studio_show_compare;
+    o["design_studio_show_power_overlay"] = ui_.design_studio_show_power_overlay;
+
+    // Intel defaults.
+    o["intel_radar_scanline"] = ui_.intel_radar_scanline;
+    o["intel_radar_grid"] = ui_.intel_radar_grid;
+    o["intel_radar_show_sensors"] = ui_.intel_radar_show_sensors;
+    o["intel_radar_sensor_heat"] = ui_.intel_radar_sensor_heat;
+    o["intel_radar_show_bodies"] = ui_.intel_radar_show_bodies;
+    o["intel_radar_show_jump_points"] = ui_.intel_radar_show_jump_points;
+    o["intel_radar_show_friendlies"] = ui_.intel_radar_show_friendlies;
+    o["intel_radar_show_hostiles"] = ui_.intel_radar_show_hostiles;
+    o["intel_radar_show_contacts"] = ui_.intel_radar_show_contacts;
+    o["intel_radar_labels"] = ui_.intel_radar_labels;
+
+    // Diplomacy Graph defaults.
+    o["diplomacy_graph_starfield"] = ui_.diplomacy_graph_starfield;
+    o["diplomacy_graph_grid"] = ui_.diplomacy_graph_grid;
+    o["diplomacy_graph_labels"] = ui_.diplomacy_graph_labels;
+    o["diplomacy_graph_arrows"] = ui_.diplomacy_graph_arrows;
+    o["diplomacy_graph_dim_nonfocus"] = ui_.diplomacy_graph_dim_nonfocus;
+    o["diplomacy_graph_show_hostile"] = ui_.diplomacy_graph_show_hostile;
+    o["diplomacy_graph_show_neutral"] = ui_.diplomacy_graph_show_neutral;
+    o["diplomacy_graph_show_friendly"] = ui_.diplomacy_graph_show_friendly;
+    o["diplomacy_graph_layout"] = static_cast<double>(ui_.diplomacy_graph_layout);
+
     // Docking behavior.
     o["docking_with_shift"] = ui_.docking_with_shift;
     o["docking_always_tab_bar"] = ui_.docking_always_tab_bar;
     o["docking_transparent_payload"] = ui_.docking_transparent_payload;
+
+    // Map rendering chrome.
+    o["system_map_starfield"] = ui_.system_map_starfield;
+    o["system_map_grid"] = ui_.system_map_grid;
+    o["system_map_order_paths"] = ui_.system_map_order_paths;
+    o["system_map_fleet_formation_preview"] = ui_.system_map_fleet_formation_preview;
+    o["system_map_follow_selected"] = ui_.system_map_follow_selected;
+    o["galaxy_map_starfield"] = ui_.galaxy_map_starfield;
+    o["galaxy_map_grid"] = ui_.galaxy_map_grid;
+    o["galaxy_map_selected_route"] = ui_.galaxy_map_selected_route;
+    o["map_starfield_density"] = static_cast<double>(ui_.map_starfield_density);
+    o["map_starfield_parallax"] = static_cast<double>(ui_.map_starfield_parallax);
+    o["map_grid_opacity"] = static_cast<double>(ui_.map_grid_opacity);
+    o["map_route_opacity"] = static_cast<double>(ui_.map_route_opacity);
+
+    // Combat / tactical overlays.
+    o["show_selected_weapon_range"] = ui_.show_selected_weapon_range;
+    o["show_fleet_weapon_ranges"] = ui_.show_fleet_weapon_ranges;
+    o["show_hostile_weapon_ranges"] = ui_.show_hostile_weapon_ranges;
+
+    // Map intel/exploration toggles.
+    o["show_selected_sensor_range"] = ui_.show_selected_sensor_range;
+    o["show_contact_markers"] = ui_.show_contact_markers;
+    o["show_contact_labels"] = ui_.show_contact_labels;
+    o["show_minor_bodies"] = ui_.show_minor_bodies;
+    o["show_minor_body_labels"] = ui_.show_minor_body_labels;
+    o["show_galaxy_labels"] = ui_.show_galaxy_labels;
+    o["show_galaxy_jump_lines"] = ui_.show_galaxy_jump_lines;
+    o["show_galaxy_unknown_exits"] = ui_.show_galaxy_unknown_exits;
+    o["show_galaxy_intel_alerts"] = ui_.show_galaxy_intel_alerts;
+    o["contact_max_age_days"] = static_cast<double>(ui_.contact_max_age_days);
 
     // Layout.
     o["show_controls_window"] = ui_.show_controls_window;
     o["show_map_window"] = ui_.show_map_window;
     o["show_details_window"] = ui_.show_details_window;
     o["show_directory_window"] = ui_.show_directory_window;
+    o["show_production_window"] = ui_.show_production_window;
     o["show_economy_window"] = ui_.show_economy_window;
+    o["show_timeline_window"] = ui_.show_timeline_window;
+    o["show_design_studio_window"] = ui_.show_design_studio_window;
+    o["show_intel_window"] = ui_.show_intel_window;
+    o["show_diplomacy_window"] = ui_.show_diplomacy_window;
     o["show_settings_window"] = ui_.show_settings_window;
     o["show_status_bar"] = ui_.show_status_bar;
 
@@ -482,6 +784,19 @@ void App::reset_ui_theme_defaults() {
   ui_.window_bg[2] = 0.11f;
   ui_.window_bg[3] = 0.94f;
 
+  // Map rendering chrome.
+  ui_.system_map_starfield = true;
+  ui_.system_map_grid = false;
+  ui_.system_map_order_paths = true;
+  ui_.system_map_follow_selected = false;
+  ui_.galaxy_map_starfield = true;
+  ui_.galaxy_map_grid = false;
+  ui_.galaxy_map_selected_route = true;
+  ui_.map_starfield_density = 1.0f;
+  ui_.map_starfield_parallax = 0.15f;
+  ui_.map_grid_opacity = 1.0f;
+  ui_.map_route_opacity = 1.0f;
+
   ui_.ui_scale = 1.0f;
 }
 
@@ -490,7 +805,12 @@ void App::reset_window_layout_defaults() {
   ui_.show_map_window = true;
   ui_.show_details_window = true;
   ui_.show_directory_window = true;
+  ui_.show_production_window = false;
   ui_.show_economy_window = false;
+  ui_.show_timeline_window = false;
+  ui_.show_design_studio_window = false;
+  ui_.show_intel_window = false;
+  ui_.show_diplomacy_window = false;
   ui_.show_settings_window = false;
 
   ui_.show_status_bar = true;

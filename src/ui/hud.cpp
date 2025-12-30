@@ -144,7 +144,12 @@ enum class PaletteAction {
   ToggleMap,
   ToggleDetails,
   ToggleDirectory,
+  ToggleProduction,
   ToggleEconomy,
+  ToggleTimeline,
+  ToggleDesignStudio,
+  ToggleIntel,
+  ToggleDiplomacyGraph,
   ToggleSettings,
   ToggleStatusBar,
   ToggleFogOfWar,
@@ -185,8 +190,23 @@ void activate_palette_item(PaletteItem& item, Simulation& sim, UIState& ui, Id& 
         case PaletteAction::ToggleDirectory:
           ui.show_directory_window = !ui.show_directory_window;
           break;
+        case PaletteAction::ToggleProduction:
+          ui.show_production_window = !ui.show_production_window;
+          break;
         case PaletteAction::ToggleEconomy:
           ui.show_economy_window = !ui.show_economy_window;
+          break;
+        case PaletteAction::ToggleTimeline:
+          ui.show_timeline_window = !ui.show_timeline_window;
+          break;
+        case PaletteAction::ToggleDesignStudio:
+          ui.show_design_studio_window = !ui.show_design_studio_window;
+          break;
+        case PaletteAction::ToggleIntel:
+          ui.show_intel_window = !ui.show_intel_window;
+          break;
+        case PaletteAction::ToggleDiplomacyGraph:
+          ui.show_diplomacy_window = !ui.show_diplomacy_window;
           break;
         case PaletteAction::ToggleSettings:
           ui.show_settings_window = !ui.show_settings_window;
@@ -434,6 +454,11 @@ void draw_help_window(UIState& ui) {
   ImGui::BulletText("Ctrl+3: Details");
   ImGui::BulletText("Ctrl+4: Directory");
   ImGui::BulletText("Ctrl+5: Economy");
+  ImGui::BulletText("Ctrl+6: Production");
+  ImGui::BulletText("Ctrl+7: Timeline");
+  ImGui::BulletText("Ctrl+8: Design Studio");
+  ImGui::BulletText("Ctrl+9: Intel");
+  ImGui::BulletText("Ctrl+0: Diplomacy Graph");
   ImGui::BulletText("Ctrl+,: Settings");
 
   ImGui::SeparatorText("Map controls");
@@ -515,7 +540,12 @@ void draw_command_palette(Simulation& sim, UIState& ui, HUDState& hud, Id& selec
   add_action("[Action] Toggle Map window", PaletteAction::ToggleMap);
   add_action("[Action] Toggle Details window", PaletteAction::ToggleDetails);
   add_action("[Action] Toggle Directory window", PaletteAction::ToggleDirectory);
+  add_action("[Action] Toggle Production window", PaletteAction::ToggleProduction);
   add_action("[Action] Toggle Economy window", PaletteAction::ToggleEconomy);
+  add_action("[Action] Toggle Timeline window", PaletteAction::ToggleTimeline);
+  add_action("[Action] Toggle Design Studio window", PaletteAction::ToggleDesignStudio);
+  add_action("[Action] Toggle Intel window", PaletteAction::ToggleIntel);
+  add_action("[Action] Toggle Diplomacy Graph window", PaletteAction::ToggleDiplomacyGraph);
   add_action("[Action] Open Settings", PaletteAction::ToggleSettings);
   add_action("[Action] Toggle Status Bar", PaletteAction::ToggleStatusBar);
   add_action("[Action] Toggle Fog of War", PaletteAction::ToggleFogOfWar);
@@ -768,6 +798,11 @@ void draw_event_toasts(Simulation& sim, UIState& ui, HUDState& hud, Id& selected
     if (ImGui::SmallButton("Log")) {
       ui.show_details_window = true;
       ui.request_details_tab = DetailsTab::Log;
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Timeline")) {
+      ui.show_timeline_window = true;
+      ui.request_focus_event_seq = t.seq;
     }
 
     auto& s = sim.state();

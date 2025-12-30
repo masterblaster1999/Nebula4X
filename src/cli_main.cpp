@@ -97,6 +97,7 @@ const char* event_category_label(nebula4x::EventCategory c) {
     case nebula4x::EventCategory::Combat: return "COMBAT";
     case nebula4x::EventCategory::Intel: return "INTEL";
     case nebula4x::EventCategory::Exploration: return "EXPLORATION";
+    case nebula4x::EventCategory::Diplomacy: return "DIPLOMACY";
   }
   return "GENERAL";
 }
@@ -149,6 +150,8 @@ bool parse_event_category(const std::string& raw, nebula4x::EventCategory& out) 
   }
   if (s == "exploration") {
     out = nebula4x::EventCategory::Exploration;
+  } else if (s == "diplomacy") {
+    out = nebula4x::EventCategory::Diplomacy;
     return true;
   }
   return false;
@@ -1324,7 +1327,7 @@ int main(int argc, char** argv) {
           std::size_t info_count = 0;
           std::size_t warn_count = 0;
           std::size_t error_count = 0;
-          std::vector<std::size_t> by_cat(8, 0);
+          std::vector<std::size_t> by_cat(9, 0);
 
           std::int64_t min_day = filtered.front()->day;
           std::int64_t max_day = filtered.front()->day;
@@ -1356,6 +1359,7 @@ int main(int argc, char** argv) {
               nebula4x::EventCategory::Combat,
               nebula4x::EventCategory::Intel,
               nebula4x::EventCategory::Exploration,
+              nebula4x::EventCategory::Diplomacy,
           };
           for (auto c : cats) {
             const int idx = static_cast<int>(c);

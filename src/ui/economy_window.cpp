@@ -196,6 +196,672 @@ TechTierLayout compute_tech_tiers(const ContentDB& content) {
   return out;
 }
 
+
+// ---- Tech tree graph view --------------------------------------------------
+// The table-based tech list is useful for scanning, but a graph view provides
+// much better context for prerequisites and research planning.
+struct TechGraphNode {
+  std::string id;
+  ImVec2 pos_world{0.0f, 0.0f};   // top-left in "world" pixels
+  ImVec2 size_world{0.0f, 0.0f};  // size in "world" pixels
+  bool match_filter{true};
+  bool known{false};
+  bool active{false};
+  bool queued{false};
+  bool prereqs_met{false};
+};
+
+inline bool point_in_rect(const ImVec2& p, const ImVec2& a, const ImVec2& b) {
+  return (p.x >= a.x && p.x <= b.x && p.y >= a.y && p.y <= b.y);
+}
+
+inline ImVec2 world_to_screen(const ImVec2& w, const ImVec2& origin, float zoom, const ImVec2& pan_world) {
+  return ImVec2(origin.x + (w.x + pan_world.x) * zoom, origin.y + (w.y + pan_world.y) * zoom);
+}
+
+inline ImVec2 screen_to_world(const ImVec2& s, const ImVec2& origin, float zoom, const ImVec2& pan_world) {
+  return ImVec2((s.x - origin.x) / zoom - pan_world.x, (s.y - origin.y) / zoom - pan_world.y);
+}
+
+static bool prereqs_met_for(const Faction& fac, const TechDef& def) {
+  for (const auto& pre : def.prereqs) {
+    if (!vec_contains(fac.known_techs, pre)) return false;
+  }
+  return true;
+}
+
+static void collect_prereqs_recursive(const ContentDB& content,
+                                      const std::string& tech_id,
+                                      std::unordered_set<std::string>& out,
+                                      int depth = 0) {
+  if (depth > 128) return;
+  const auto it = content.techs.find(tech_id);
+  if (it == content.techs.end()) return;
+  for (const auto& pre : it->second.prereqs) {
+    if (out.insert(pre).second) collect_prereqs_recursive(content, pre, out, depth + 1);
+  }
+}
+
+static std::string ellipsize_for_width(const std::string& s, ImFont* font, float font_size, float max_width) {
+  if (!font) return s;
+  if (s.empty()) return s;
+  const ImVec2 sz = font->CalcTextSizeA(font_size, std::numeric_limits<float>::max(), 0.0f, s.c_str());
+  if (sz.x <= max_width) return s;
+
+  const char* ell = "...";
+  const ImVec2 ell_sz = font->CalcTextSizeA(font_size, std::numeric_limits<float>::max(), 0.0f, ell);
+  if (ell_sz.x > max_width) return "";
+
+  // Binary search for the longest prefix that fits.
+  int lo = 0;
+  int hi = static_cast<int>(s.size());
+  while (lo < hi) {
+    const int mid = (lo + hi + 1) / 2;
+    const std::string cand = s.substr(0, static_cast<std::size_t>(mid)) + ell;
+    const ImVec2 cand_sz = font->CalcTextSizeA(font_size, std::numeric_limits<float>::max(), 0.0f, cand.c_str());
+    if (cand_sz.x <= max_width) {
+      lo = mid;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return s.substr(0, static_cast<std::size_t>(lo)) + ell;
+}
+
+static void center_view_on_world(const ImVec2& world_center, const ImVec2& canvas_sz, float zoom, ImVec2& pan_world) {
+  // screen_center = origin + (world_center + pan) * zoom
+  // => pan = screen_center/zoom - world_center
+  pan_world.x = (canvas_sz.x * 0.5f) / zoom - world_center.x;
+  pan_world.y = (canvas_sz.y * 0.5f) / zoom - world_center.y;
+}
+
+static void reset_view_to_bounds(const ImVec2& bounds_min,
+                                 const ImVec2& bounds_max,
+                                 const ImVec2& canvas_sz,
+                                 float& zoom,
+                                 ImVec2& pan_world) {
+  const float margin = 120.0f;
+  const float bw = std::max(1.0f, (bounds_max.x - bounds_min.x) + margin * 2.0f);
+  const float bh = std::max(1.0f, (bounds_max.y - bounds_min.y) + margin * 2.0f);
+
+  const float zx = canvas_sz.x / bw;
+  const float zy = canvas_sz.y / bh;
+  zoom = std::clamp(std::min(zx, zy), 0.25f, 2.50f);
+
+  const ImVec2 center((bounds_min.x + bounds_max.x) * 0.5f, (bounds_min.y + bounds_max.y) * 0.5f);
+  center_view_on_world(center, canvas_sz, zoom, pan_world);
+}
+
+static ImU32 col32a(int r, int g, int b, float a01) {
+  const int a = static_cast<int>(std::clamp(a01, 0.0f, 1.0f) * 255.0f + 0.5f);
+  return IM_COL32(r, g, b, a);
+}
+
+static void add_arrow(ImDrawList* draw, const ImVec2& tip, const ImVec2& dir_norm, float size, ImU32 col) {
+  // Simple triangular arrow head.
+  const ImVec2 d(dir_norm.x * size, dir_norm.y * size);
+  const ImVec2 n(-dir_norm.y * size * 0.65f, dir_norm.x * size * 0.65f);
+  const ImVec2 p0(tip.x, tip.y);
+  const ImVec2 p1(tip.x - d.x + n.x, tip.y - d.y + n.y);
+  const ImVec2 p2(tip.x - d.x - n.x, tip.y - d.y - n.y);
+  draw->AddTriangleFilled(p0, p1, p2, col);
+}
+
+static void draw_tech_tree_graph(Simulation& sim,
+                                 UIState& ui,
+                                 Faction& fac,
+                                 const TechTierLayout& layout,
+                                 const char* filter,
+                                 std::string& selected_tech) {
+  // Persistent per-session view state (good enough for now; UI prefs can later persist these).
+  static float zoom = 1.0f;
+  static ImVec2 pan_world(40.0f, 40.0f);
+  static bool init = true;
+
+  static bool show_grid = true;
+  static bool show_edges = true;
+  static bool dim_non_matching = true;
+  static bool hide_non_matching = false;
+  static bool show_minimap = true;
+
+  // Layout constants (in world pixels at zoom=1).
+  const float node_w = 260.0f;
+  const float node_h = 62.0f;
+  const float gap_x = 120.0f;
+  const float gap_y = 18.0f;
+
+  // Build node positions (cached layout is tiered but we also need per-id coordinates).
+  std::unordered_map<std::string, TechGraphNode> nodes;
+  nodes.reserve(sim.content().techs.size());
+
+  ImVec2 bounds_min(0.0f, 0.0f);
+  ImVec2 bounds_max(0.0f, 0.0f);
+
+  for (std::size_t t = 0; t < layout.tiers.size(); ++t) {
+    const auto& tier = layout.tiers[t];
+    for (std::size_t r = 0; r < tier.size(); ++r) {
+      const std::string& tid = tier[r];
+      const auto it = sim.content().techs.find(tid);
+      if (it == sim.content().techs.end()) continue;
+
+      const TechDef& def = it->second;
+
+      TechGraphNode n;
+      n.id = tid;
+      n.pos_world = ImVec2(static_cast<float>(t) * (node_w + gap_x), static_cast<float>(r) * (node_h + gap_y));
+      n.size_world = ImVec2(node_w, node_h);
+
+      const std::string hay = def.name + " " + tid;
+      n.match_filter = case_insensitive_contains(hay, filter);
+
+      n.known = vec_contains(fac.known_techs, tid);
+      n.active = (!fac.active_research_id.empty() && fac.active_research_id == tid);
+      n.queued = vec_contains(fac.research_queue, tid);
+      n.prereqs_met = prereqs_met_for(fac, def);
+
+      bounds_max.x = std::max(bounds_max.x, n.pos_world.x + n.size_world.x);
+      bounds_max.y = std::max(bounds_max.y, n.pos_world.y + n.size_world.y);
+
+      nodes.emplace(tid, std::move(n));
+    }
+  }
+
+  // If the selected node no longer exists (e.g. content reload), clear.
+  if (!selected_tech.empty() && nodes.find(selected_tech) == nodes.end()) selected_tech.clear();
+
+  // --- Controls (rendered above the canvas) ---
+  {
+    ImGui::Checkbox("Grid", &show_grid);
+    ImGui::SameLine();
+    ImGui::Checkbox("Edges", &show_edges);
+    ImGui::SameLine();
+    ImGui::Checkbox("Dim non-matching", &dim_non_matching);
+    ImGui::SameLine();
+    ImGui::Checkbox("Hide non-matching", &hide_non_matching);
+    ImGui::SameLine();
+    ImGui::Checkbox("Minimap", &show_minimap);
+
+    ImGui::Spacing();
+
+    bool do_reset = false;
+    bool do_focus = false;
+
+    if (ImGui::SmallButton("Reset view (R)")) do_reset = true;
+    ImGui::SameLine();
+
+    const bool can_focus = (!selected_tech.empty() && nodes.find(selected_tech) != nodes.end());
+    if (!can_focus) ImGui::BeginDisabled();
+    if (ImGui::SmallButton("Focus selected (F)")) do_focus = true;
+    if (!can_focus) ImGui::EndDisabled();
+
+    ImGui::SameLine();
+    ImGui::TextDisabled("Pan: MMB drag   Zoom: Wheel   Select: LMB   Double-click: Set Active (Shift=Queue)");
+
+    // --- Canvas ---
+    const ImVec2 canvas_p0 = ImGui::GetCursorScreenPos();
+    ImVec2 canvas_sz = ImGui::GetContentRegionAvail();
+    canvas_sz.x = std::max(120.0f, canvas_sz.x);
+    canvas_sz.y = std::max(220.0f, canvas_sz.y);
+    const ImVec2 canvas_p1(canvas_p0.x + canvas_sz.x, canvas_p0.y + canvas_sz.y);
+
+    // Minimap rectangle (computed early so hit-testing can ignore it).
+    const float minimap_w = 210.0f;
+    const float minimap_h = 140.0f;
+    ImVec2 minimap_p0(0.0f, 0.0f);
+    ImVec2 minimap_p1(0.0f, 0.0f);
+    bool over_minimap = false;
+    if (show_minimap) {
+      minimap_p1 = ImVec2(canvas_p1.x - 10.0f, canvas_p1.y - 10.0f);
+      minimap_p0 = ImVec2(minimap_p1.x - minimap_w, minimap_p1.y - minimap_h);
+      over_minimap = point_in_rect(ImGui::GetIO().MousePos, minimap_p0, minimap_p1);
+    }
+
+    ImGui::InvisibleButton("tech_tree_canvas", canvas_sz,
+                           ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight |
+                               ImGuiButtonFlags_MouseButtonMiddle);
+    const bool hovered = ImGui::IsItemHovered();
+    const bool active = ImGui::IsItemActive();
+
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+
+    // Background.
+    draw->AddRectFilled(canvas_p0, canvas_p1, IM_COL32(16, 18, 22, 255));
+    draw->AddRect(canvas_p0, canvas_p1, IM_COL32(70, 70, 80, 255));
+
+    // Initial fit-to-view.
+    if (init) {
+      reset_view_to_bounds(bounds_min, bounds_max, canvas_sz, zoom, pan_world);
+      init = false;
+    }
+
+    // Keyboard shortcuts only when canvas is hovered to avoid stealing keys.
+    if (hovered && !ImGui::GetIO().WantTextInput) {
+      if (ImGui::IsKeyPressed(ImGuiKey_R)) do_reset = true;
+      if (ImGui::IsKeyPressed(ImGuiKey_F)) do_focus = true;
+    }
+
+    // Apply requested actions.
+    if (do_reset) {
+      reset_view_to_bounds(bounds_min, bounds_max, canvas_sz, zoom, pan_world);
+    }
+    if (do_focus && can_focus) {
+      const auto itn = nodes.find(selected_tech);
+      if (itn != nodes.end()) {
+        const ImVec2 c(itn->second.pos_world.x + itn->second.size_world.x * 0.5f,
+                       itn->second.pos_world.y + itn->second.size_world.y * 0.5f);
+        center_view_on_world(c, canvas_sz, zoom, pan_world);
+      }
+    }
+
+    // Panning.
+    if (active && ImGui::IsMouseDragging(ImGuiMouseButton_Middle, 0.0f)) {
+      const ImVec2 d = ImGui::GetIO().MouseDelta;
+      pan_world.x += d.x / zoom;
+      pan_world.y += d.y / zoom;
+    }
+
+    // Zoom-to-cursor.
+    if (hovered) {
+      const float wheel = ImGui::GetIO().MouseWheel;
+      if (wheel != 0.0f) {
+        const ImVec2 mouse = ImGui::GetIO().MousePos;
+        const ImVec2 before = screen_to_world(mouse, canvas_p0, zoom, pan_world);
+
+        const float zoom_factor = std::pow(1.18f, wheel);
+        zoom = std::clamp(zoom * zoom_factor, 0.20f, 3.00f);
+
+        // Adjust pan so the world point under the cursor remains stable.
+        pan_world.x = (mouse.x - canvas_p0.x) / zoom - before.x;
+        pan_world.y = (mouse.y - canvas_p0.y) / zoom - before.y;
+      }
+    }
+
+    // Clip all drawlist operations to the canvas.
+    draw->PushClipRect(canvas_p0, canvas_p1, true);
+
+    // Grid.
+    if (show_grid) {
+      float step = 120.0f;
+      // Keep grid density reasonable on screen.
+      while (step * zoom < 60.0f) step *= 2.0f;
+      while (step * zoom > 240.0f) step *= 0.5f;
+
+      const float major = step * 5.0f;
+
+      const float min_x = -pan_world.x;
+      const float max_x = (canvas_sz.x / zoom) - pan_world.x;
+      const float min_y = -pan_world.y;
+      const float max_y = (canvas_sz.y / zoom) - pan_world.y;
+
+      auto floor_to = [](float v, float s) {
+        return std::floor(v / s) * s;
+      };
+
+      for (float x = floor_to(min_x, step); x <= max_x; x += step) {
+        const float sx = canvas_p0.x + (x + pan_world.x) * zoom;
+        draw->AddLine(ImVec2(sx, canvas_p0.y), ImVec2(sx, canvas_p1.y), IM_COL32(60, 60, 70, 30), 1.0f);
+      }
+      for (float y = floor_to(min_y, step); y <= max_y; y += step) {
+        const float sy = canvas_p0.y + (y + pan_world.y) * zoom;
+        draw->AddLine(ImVec2(canvas_p0.x, sy), ImVec2(canvas_p1.x, sy), IM_COL32(60, 60, 70, 30), 1.0f);
+      }
+
+      for (float x = floor_to(min_x, major); x <= max_x; x += major) {
+        const float sx = canvas_p0.x + (x + pan_world.x) * zoom;
+        draw->AddLine(ImVec2(sx, canvas_p0.y), ImVec2(sx, canvas_p1.y), IM_COL32(90, 90, 100, 50), 1.0f);
+      }
+      for (float y = floor_to(min_y, major); y <= max_y; y += major) {
+        const float sy = canvas_p0.y + (y + pan_world.y) * zoom;
+        draw->AddLine(ImVec2(canvas_p0.x, sy), ImVec2(canvas_p1.x, sy), IM_COL32(90, 90, 100, 50), 1.0f);
+      }
+    }
+
+    // Highlight prerequisite chain for the selected tech.
+    std::unordered_set<std::string> prereq_chain;
+    if (!selected_tech.empty()) {
+      collect_prereqs_recursive(sim.content(), selected_tech, prereq_chain);
+    }
+
+    // Determine hovered node (manual hit test).
+    std::string hovered_id;
+    if (hovered && !over_minimap) {
+      const ImVec2 m = ImGui::GetIO().MousePos;
+      for (const auto& [tid, n] : nodes) {
+        if (hide_non_matching && !n.match_filter) continue;
+        const ImVec2 a = world_to_screen(n.pos_world, canvas_p0, zoom, pan_world);
+        const ImVec2 b(a.x + n.size_world.x * zoom, a.y + n.size_world.y * zoom);
+        if (point_in_rect(m, a, b)) {
+          hovered_id = tid;
+          break;
+        }
+      }
+    }
+
+    // Edges (behind nodes).
+    if (show_edges) {
+      for (const auto& [tid, n] : nodes) {
+        if (hide_non_matching && !n.match_filter) continue;
+
+        const auto it = sim.content().techs.find(tid);
+        if (it == sim.content().techs.end()) continue;
+
+        const TechDef& def = it->second;
+        if (def.prereqs.empty()) continue;
+
+        for (const auto& pre : def.prereqs) {
+          const auto itp = nodes.find(pre);
+          if (itp == nodes.end()) continue;
+
+          const TechGraphNode& a_node = itp->second;
+          if (hide_non_matching && !a_node.match_filter) continue;
+
+          const ImVec2 start_w(a_node.pos_world.x + a_node.size_world.x, a_node.pos_world.y + a_node.size_world.y * 0.5f);
+          const ImVec2 end_w(n.pos_world.x, n.pos_world.y + n.size_world.y * 0.5f);
+
+          const ImVec2 start = world_to_screen(start_w, canvas_p0, zoom, pan_world);
+          const ImVec2 end = world_to_screen(end_w, canvas_p0, zoom, pan_world);
+
+          // Visual priority: selected chain edges pop more.
+          const bool in_chain = (!selected_tech.empty() && (tid == selected_tech || prereq_chain.count(tid) || prereq_chain.count(pre)));
+
+          float a01 = 0.28f;
+          if (in_chain) a01 = 0.75f;
+          if (dim_non_matching && filter && filter[0] != '\0') {
+            if (!n.match_filter && !a_node.match_filter && !in_chain) a01 *= 0.25f;
+          }
+
+          const float thickness = std::max(1.0f, 2.2f * zoom * (in_chain ? 1.15f : 1.0f));
+          const ImU32 col = in_chain ? col32a(210, 210, 255, a01) : col32a(170, 170, 190, a01);
+
+          const float dx = std::max(40.0f, 90.0f * zoom);
+          const ImVec2 cp1(start.x + dx, start.y);
+          const ImVec2 cp2(end.x - dx, end.y);
+
+          draw->AddBezierCubic(start, cp1, cp2, end, col, thickness, 0);
+
+          // Arrow head at end.
+          ImVec2 dir(end.x - cp2.x, end.y - cp2.y);
+          const float len = std::sqrt(dir.x * dir.x + dir.y * dir.y);
+          if (len > 0.0001f) {
+            dir.x /= len;
+            dir.y /= len;
+            add_arrow(draw, end, dir, std::max(5.0f, 7.0f * zoom), col);
+          }
+        }
+      }
+    }
+
+    // Nodes (foreground).
+    ImFont* font = ImGui::GetFont();
+    const float base_font_size = ImGui::GetFontSize();
+
+    for (const auto& [tid, n] : nodes) {
+      if (hide_non_matching && !n.match_filter) continue;
+
+      const auto it = sim.content().techs.find(tid);
+      if (it == sim.content().techs.end()) continue;
+      const TechDef& def = it->second;
+
+      const bool is_sel = (selected_tech == tid);
+      const bool is_hover = (!hovered_id.empty() && hovered_id == tid);
+      const bool in_chain = (!selected_tech.empty() && (tid == selected_tech || prereq_chain.count(tid)));
+
+      float alpha = 1.0f;
+      if (dim_non_matching && filter && filter[0] != '\0' && !n.match_filter && !in_chain) alpha = 0.25f;
+
+      // Base palette by status.
+      ImU32 border = IM_COL32(120, 120, 130, 255);
+      ImU32 fill = IM_COL32(28, 30, 36, 255);
+      ImU32 fill_hi = IM_COL32(42, 44, 52, 255);
+
+      if (n.known) {
+        border = IM_COL32(90, 235, 150, 255);
+        fill = IM_COL32(18, 44, 28, 255);
+        fill_hi = IM_COL32(26, 66, 40, 255);
+      } else if (n.active) {
+        border = IM_COL32(255, 220, 120, 255);
+        fill = IM_COL32(56, 42, 18, 255);
+        fill_hi = IM_COL32(78, 60, 22, 255);
+      } else if (n.queued) {
+        border = IM_COL32(170, 210, 255, 255);
+        fill = IM_COL32(18, 30, 52, 255);
+        fill_hi = IM_COL32(24, 44, 78, 255);
+      } else if (n.prereqs_met) {
+        border = IM_COL32(210, 210, 220, 255);
+        fill = IM_COL32(34, 34, 42, 255);
+        fill_hi = IM_COL32(46, 46, 58, 255);
+      } else {
+        border = IM_COL32(120, 120, 120, 255);
+        fill = IM_COL32(26, 26, 30, 255);
+        fill_hi = IM_COL32(34, 34, 40, 255);
+      }
+
+      const ImVec2 a = world_to_screen(n.pos_world, canvas_p0, zoom, pan_world);
+      const ImVec2 b(a.x + n.size_world.x * zoom, a.y + n.size_world.y * zoom);
+
+      const float rounding = std::max(4.0f, 9.0f * zoom);
+
+      // Drop shadow (subtle).
+      draw->AddRectFilled(ImVec2(a.x + 3.0f, a.y + 3.0f), ImVec2(b.x + 3.0f, b.y + 3.0f), col32a(0, 0, 0, 0.35f * alpha),
+                          rounding);
+
+      // Body.
+      draw->AddRectFilled(a, b, col32a((fill >> IM_COL32_R_SHIFT) & 0xFF, (fill >> IM_COL32_G_SHIFT) & 0xFF,
+                                      (fill >> IM_COL32_B_SHIFT) & 0xFF, alpha),
+                          rounding);
+
+      // Inner highlight band (fake gradient).
+      const float inset = std::max(1.0f, 2.0f * zoom);
+      const ImVec2 g0(a.x + inset, a.y + inset);
+      const ImVec2 g1(b.x - inset, a.y + (b.y - a.y) * 0.55f);
+
+      draw->AddRectFilledMultiColor(g0, g1,
+                                    col32a((fill_hi >> IM_COL32_R_SHIFT) & 0xFF, (fill_hi >> IM_COL32_G_SHIFT) & 0xFF,
+                                           (fill_hi >> IM_COL32_B_SHIFT) & 0xFF, 0.95f * alpha),
+                                    col32a((fill_hi >> IM_COL32_R_SHIFT) & 0xFF, (fill_hi >> IM_COL32_G_SHIFT) & 0xFF,
+                                           (fill_hi >> IM_COL32_B_SHIFT) & 0xFF, 0.95f * alpha),
+                                    col32a((fill >> IM_COL32_R_SHIFT) & 0xFF, (fill >> IM_COL32_G_SHIFT) & 0xFF,
+                                           (fill >> IM_COL32_B_SHIFT) & 0xFF, 0.55f * alpha),
+                                    col32a((fill >> IM_COL32_R_SHIFT) & 0xFF, (fill >> IM_COL32_G_SHIFT) & 0xFF,
+                                           (fill >> IM_COL32_B_SHIFT) & 0xFF, 0.55f * alpha));
+
+      // Outline.
+      draw->AddRect(a, b, col32a((border >> IM_COL32_R_SHIFT) & 0xFF, (border >> IM_COL32_G_SHIFT) & 0xFF,
+                                (border >> IM_COL32_B_SHIFT) & 0xFF, alpha),
+                    rounding, 0, std::max(1.0f, 1.6f * zoom));
+
+      if (is_sel) {
+        draw->AddRect(ImVec2(a.x - 2.0f, a.y - 2.0f), ImVec2(b.x + 2.0f, b.y + 2.0f), col32a(255, 255, 255, 0.65f),
+                      rounding + 1.0f, 0, std::max(1.5f, 2.6f * zoom));
+      } else if (is_hover) {
+        draw->AddRect(ImVec2(a.x - 1.5f, a.y - 1.5f), ImVec2(b.x + 1.5f, b.y + 1.5f), col32a(255, 255, 255, 0.35f * alpha),
+                      rounding + 1.0f, 0, std::max(1.0f, 2.1f * zoom));
+      }
+
+      // Status glyph prefix.
+      std::string prefix;
+      if (n.known) prefix = u8_cstr(u8"✓ ");
+      else if (n.active) prefix = u8_cstr(u8"▶ ");
+      else if (n.queued) prefix = u8_cstr(u8"⏳ ");
+      else if (n.prereqs_met) prefix = u8_cstr(u8"• ");
+      else prefix = "  ";
+
+      const float font_size = base_font_size * zoom;
+      const float font_size_small = base_font_size * zoom * 0.78f;
+      const float pad = std::max(4.0f, 8.0f * zoom);
+
+      // Title (clipped).
+      const float max_text_w = std::max(10.0f, (b.x - a.x) - pad * 2.0f);
+      const std::string title = prefix + ellipsize_for_width(def.name, font, font_size, max_text_w);
+
+      draw->PushClipRect(a, b, true);
+      draw->AddText(font, font_size, ImVec2(a.x + pad, a.y + pad), col32a(245, 245, 250, alpha), title.c_str());
+
+      // Subline: cost + short id.
+      {
+        std::string sub = "Cost " + std::to_string(static_cast<int>(std::round(def.cost)));
+        if (!def.id.empty()) {
+          sub += "  •  " + ellipsize_for_width(def.id, font, font_size_small, max_text_w);
+        }
+        draw->AddText(font, font_size_small, ImVec2(a.x + pad, a.y + pad + font_size * 1.05f),
+                      col32a(210, 210, 220, 0.92f * alpha), sub.c_str());
+      }
+      draw->PopClipRect();
+
+      // Small status badge (top-right).
+      {
+        const float r = std::max(4.0f, 6.0f * zoom);
+        const ImVec2 c(b.x - pad * 0.75f, a.y + pad * 0.75f);
+        ImU32 badge = border;
+        if (!n.prereqs_met && !n.known && !n.active && !n.queued) badge = IM_COL32(120, 120, 120, 255);
+        draw->AddCircleFilled(c, r, col32a((badge >> IM_COL32_R_SHIFT) & 0xFF, (badge >> IM_COL32_G_SHIFT) & 0xFF,
+                                          (badge >> IM_COL32_B_SHIFT) & 0xFF, 0.85f * alpha),
+                              0);
+        draw->AddCircle(c, r, col32a(0, 0, 0, 0.40f * alpha), 0, std::max(1.0f, 1.3f * zoom));
+      }
+    }
+
+    // Canvas interactions (selection + quick actions).
+    if (!hovered_id.empty()) {
+      ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+
+      const auto itn = nodes.find(hovered_id);
+      const auto it_def = sim.content().techs.find(hovered_id);
+      if (itn != nodes.end() && it_def != sim.content().techs.end()) {
+        TechGraphNode& n = itn->second;
+        const TechDef& def = it_def->second;
+
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+          selected_tech = hovered_id;
+        }
+
+        // Double-click quick action.
+        if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+          if (!n.known && n.prereqs_met) {
+            if (ImGui::GetIO().KeyShift) {
+              push_unique(fac.research_queue, def.id);
+            } else {
+              fac.active_research_id = def.id;
+              fac.active_research_progress = 0.0;
+              fac.research_queue.erase(std::remove(fac.research_queue.begin(), fac.research_queue.end(), def.id),
+                                       fac.research_queue.end());
+              ui.request_details_tab = DetailsTab::Research;
+            }
+          }
+        }
+
+        // Tooltip with details + actions.
+        if (!ImGui::IsMouseDown(ImGuiMouseButton_Middle)) {
+          ImGui::BeginTooltip();
+          ImGui::Text("%s", def.name.c_str());
+          ImGui::TextDisabled("%s", def.id.c_str());
+          ImGui::Separator();
+          ImGui::Text("Cost: %.0f", def.cost);
+
+          const bool known = n.known;
+          const bool active_now = n.active;
+          const bool queued_now = n.queued;
+          const bool avail = n.prereqs_met;
+
+          if (known) ImGui::TextColored(ImVec4(0.47f, 1.0f, 0.55f, 1.0f), "Status: Known");
+          else if (active_now) ImGui::TextColored(ImVec4(1.0f, 0.86f, 0.47f, 1.0f), "Status: Active");
+          else if (queued_now) ImGui::TextColored(ImVec4(0.65f, 0.82f, 1.0f, 1.0f), "Status: Queued");
+          else if (avail) ImGui::Text("Status: Available");
+          else ImGui::TextDisabled("Status: Locked");
+
+          if (!def.prereqs.empty()) {
+            ImGui::Separator();
+            ImGui::Text("Prereqs:");
+            for (const auto& pre : def.prereqs) {
+              const bool have = vec_contains(fac.known_techs, pre);
+              ImGui::BulletText("%s%s", pre.c_str(), have ? " (known)" : " (missing)");
+            }
+          }
+
+          ImGui::Separator();
+          ImGui::Text("Actions");
+          if (!known && avail) {
+            if (ImGui::SmallButton("Set Active")) {
+              fac.active_research_id = def.id;
+              fac.active_research_progress = 0.0;
+              fac.research_queue.erase(std::remove(fac.research_queue.begin(), fac.research_queue.end(), def.id),
+                                       fac.research_queue.end());
+              ui.request_details_tab = DetailsTab::Research;
+            }
+            ImGui::SameLine();
+            if (!queued_now) {
+              if (ImGui::SmallButton("Queue")) push_unique(fac.research_queue, def.id);
+            } else {
+              if (ImGui::SmallButton("Unqueue")) {
+                fac.research_queue.erase(std::remove(fac.research_queue.begin(), fac.research_queue.end(), def.id),
+                                         fac.research_queue.end());
+              }
+            }
+          } else {
+            ImGui::TextDisabled("(no actions)");
+          }
+
+          ImGui::EndTooltip();
+        }
+      }
+    }
+
+    // Minimap (bottom-right overlay).
+    if (show_minimap) {
+      const float mm_w = minimap_w;
+      const float mm_h = minimap_h;
+      const ImVec2 mm_p0 = minimap_p0;
+      const ImVec2 mm_p1 = minimap_p1;
+
+      // Background.
+      draw->AddRectFilled(mm_p0, mm_p1, IM_COL32(0, 0, 0, 120), 6.0f);
+      draw->AddRect(mm_p0, mm_p1, IM_COL32(160, 160, 180, 80), 6.0f);
+
+      const float bw = std::max(1.0f, bounds_max.x - bounds_min.x);
+      const float bh = std::max(1.0f, bounds_max.y - bounds_min.y);
+
+      auto world_to_mm = [&](const ImVec2& w) -> ImVec2 {
+        const float nx = (w.x - bounds_min.x) / bw;
+        const float ny = (w.y - bounds_min.y) / bh;
+        return ImVec2(mm_p0.x + nx * mm_w, mm_p0.y + ny * mm_h);
+      };
+
+      // Nodes as dots.
+      for (const auto& [tid, n] : nodes) {
+        if (hide_non_matching && !n.match_filter) continue;
+        float a01 = 0.55f;
+        if (dim_non_matching && filter && filter[0] != '\0' && !n.match_filter) a01 *= 0.25f;
+        const ImVec2 c = world_to_mm(ImVec2(n.pos_world.x + n.size_world.x * 0.5f, n.pos_world.y + n.size_world.y * 0.5f));
+        draw->AddCircleFilled(c, 2.2f, col32a(220, 220, 235, a01), 0);
+      }
+
+      // View rectangle.
+      const float view_w = canvas_sz.x / zoom;
+      const float view_h = canvas_sz.y / zoom;
+      const ImVec2 view_min(-pan_world.x, -pan_world.y);
+      const ImVec2 view_max(view_min.x + view_w, view_min.y + view_h);
+
+      const ImVec2 vm0 = world_to_mm(view_min);
+      const ImVec2 vm1 = world_to_mm(view_max);
+      draw->AddRect(vm0, vm1, IM_COL32(255, 255, 255, 120));
+
+      // Click minimap to recenter.
+      if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        const ImVec2 m = ImGui::GetIO().MousePos;
+        if (point_in_rect(m, mm_p0, mm_p1)) {
+          const float nx = std::clamp((m.x - mm_p0.x) / mm_w, 0.0f, 1.0f);
+          const float ny = std::clamp((m.y - mm_p0.y) / mm_h, 0.0f, 1.0f);
+          const ImVec2 w(bounds_min.x + nx * bw, bounds_min.y + ny * bh);
+          center_view_on_world(w, canvas_sz, zoom, pan_world);
+        }
+      }
+    }
+
+    draw->PopClipRect();
+  }
+}
+
+
 }  // namespace
 
 void draw_economy_window(Simulation& sim, UIState& ui, Id& selected_colony, Id& selected_body) {
@@ -635,6 +1301,7 @@ void draw_economy_window(Simulation& sim, UIState& ui, Id& selected_colony, Id& 
 
         static char tech_filter[128] = "";
         static std::string selected_tech;
+        static bool graph_view = true;
 
         // Cache tiers (content is static).
         static int cached_tech_count = -1;
@@ -649,96 +1316,107 @@ void draw_economy_window(Simulation& sim, UIState& ui, Id& selected_colony, Id& 
         ImGui::SameLine();
         if (ImGui::SmallButton("Clear##tech_tree_filter_clear")) tech_filter[0] = '\0';
 
+        ImGui::SameLine();
+        ImGui::Checkbox("Graph view##tech_tree_graph_view", &graph_view);
+
         const float left_w = ImGui::GetContentRegionAvail().x * 0.62f;
-        ImGui::BeginChild("tech_tree_left", ImVec2(left_w, 0), true, ImGuiWindowFlags_HorizontalScrollbar);
+        const ImGuiWindowFlags left_flags =
+            graph_view ? (ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)
+                       : ImGuiWindowFlags_HorizontalScrollbar;
+        ImGui::BeginChild("tech_tree_left", ImVec2(left_w, 0), true, left_flags);
 
-        // Table layout: one column per tier.
-        const int tiers = static_cast<int>(cached_layout.tiers.size());
-        int max_rows = 0;
-        for (const auto& t : cached_layout.tiers) max_rows = std::max(max_rows, static_cast<int>(t.size()));
+        if (graph_view) {
+          draw_tech_tree_graph(sim, ui, fac, cached_layout, tech_filter, selected_tech);
+        } else {
+          // Table layout: one column per tier.
+          const int tiers = static_cast<int>(cached_layout.tiers.size());
+          int max_rows = 0;
+          for (const auto& t : cached_layout.tiers) max_rows = std::max(max_rows, static_cast<int>(t.size()));
 
-        const ImGuiTableFlags tflags = ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingFixedFit |
-                                       ImGuiTableFlags_RowBg;
-        if (ImGui::BeginTable("tech_tree_table", std::max(1, tiers), tflags)) {
-          for (int i = 0; i < std::max(1, tiers); ++i) {
-            const std::string col = "Tier " + std::to_string(i);
-            ImGui::TableSetupColumn(col.c_str(), ImGuiTableColumnFlags_WidthFixed, 240.0f);
-          }
-          ImGui::TableHeadersRow();
+          const ImGuiTableFlags tflags = ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingFixedFit |
+                                         ImGuiTableFlags_RowBg;
+          if (ImGui::BeginTable("tech_tree_table", std::max(1, tiers), tflags)) {
+            for (int i = 0; i < std::max(1, tiers); ++i) {
+              const std::string col = "Tier " + std::to_string(i);
+              ImGui::TableSetupColumn(col.c_str(), ImGuiTableColumnFlags_WidthFixed, 240.0f);
+            }
+            ImGui::TableHeadersRow();
 
-          for (int r = 0; r < max_rows; ++r) {
-            ImGui::TableNextRow();
-            for (int t = 0; t < tiers; ++t) {
-              ImGui::TableSetColumnIndex(t);
-              if (r >= static_cast<int>(cached_layout.tiers[static_cast<std::size_t>(t)].size())) {
-                ImGui::TextUnformatted("");
-                continue;
-              }
-              const std::string& tid = cached_layout.tiers[static_cast<std::size_t>(t)][static_cast<std::size_t>(r)];
-              const auto it = sim.content().techs.find(tid);
-              if (it == sim.content().techs.end()) continue;
-
-              const TechDef& def = it->second;
-
-              // Filter by id or name.
-              const std::string hay = def.name + " " + tid;
-              if (!case_insensitive_contains(hay, tech_filter)) {
-                ImGui::TextUnformatted("");
-                continue;
-              }
-
-              const bool known = vec_contains(fac.known_techs, tid);
-              const bool active = (!fac.active_research_id.empty() && fac.active_research_id == tid);
-              const bool queued = vec_contains(fac.research_queue, tid);
-
-              bool prereqs_met = true;
-              for (const auto& pre : def.prereqs) {
-                if (!vec_contains(fac.known_techs, pre)) {
-                  prereqs_met = false;
-                  break;
+            for (int r = 0; r < max_rows; ++r) {
+              ImGui::TableNextRow();
+              for (int t = 0; t < tiers; ++t) {
+                ImGui::TableSetColumnIndex(t);
+                if (r >= static_cast<int>(cached_layout.tiers[static_cast<std::size_t>(t)].size())) {
+                  ImGui::TextUnformatted("");
+                  continue;
                 }
-              }
+                const std::string& tid =
+                    cached_layout.tiers[static_cast<std::size_t>(t)][static_cast<std::size_t>(r)];
+                const auto it = sim.content().techs.find(tid);
+                if (it == sim.content().techs.end()) continue;
 
-              std::string prefix;
-              if (known) prefix = u8_cstr(u8"✓ ");
-              else if (active) prefix = u8_cstr(u8"▶ ");
-              else if (queued) prefix = u8_cstr(u8"⏳ ");
-              else if (prereqs_met) prefix = u8_cstr(u8"• ");
-              else prefix = "  ";
+                const TechDef& def = it->second;
 
-              const bool sel = (selected_tech == tid);
+                // Filter by id or name.
+                const std::string hay = def.name + " " + tid;
+                if (!case_insensitive_contains(hay, tech_filter)) {
+                  ImGui::TextUnformatted("");
+                  continue;
+                }
 
-              if (known) ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(120, 255, 140, 255));
-              else if (active) ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 220, 120, 255));
-              else if (queued) ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(170, 210, 255, 255));
-              else if (prereqs_met) ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 255, 255, 255));
-              else ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(170, 170, 170, 255));
+                const bool known = vec_contains(fac.known_techs, tid);
+                const bool active = (!fac.active_research_id.empty() && fac.active_research_id == tid);
+                const bool queued = vec_contains(fac.research_queue, tid);
 
-              const std::string lbl = prefix + def.name + "##technode_" + tid;
-              if (ImGui::Selectable(lbl.c_str(), sel)) {
-                selected_tech = tid;
-              }
-
-              if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
-                ImGui::BeginTooltip();
-                ImGui::Text("%s", def.name.c_str());
-                ImGui::TextDisabled("%s", tid.c_str());
-                ImGui::Text("Cost: %.0f", def.cost);
-                if (!def.prereqs.empty()) {
-                  ImGui::Separator();
-                  ImGui::Text("Prereqs:");
-                  for (const auto& pre : def.prereqs) {
-                    ImGui::BulletText("%s", pre.c_str());
+                bool prereqs_met = true;
+                for (const auto& pre : def.prereqs) {
+                  if (!vec_contains(fac.known_techs, pre)) {
+                    prereqs_met = false;
+                    break;
                   }
                 }
-                ImGui::EndTooltip();
+
+                std::string prefix;
+                if (known) prefix = u8_cstr(u8"✓ ");
+                else if (active) prefix = u8_cstr(u8"▶ ");
+                else if (queued) prefix = u8_cstr(u8"⏳ ");
+                else if (prereqs_met) prefix = u8_cstr(u8"• ");
+                else prefix = "  ";
+
+                const bool sel = (selected_tech == tid);
+
+                if (known) ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(120, 255, 140, 255));
+                else if (active) ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 220, 120, 255));
+                else if (queued) ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(170, 210, 255, 255));
+                else if (prereqs_met) ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 255, 255, 255));
+                else ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(170, 170, 170, 255));
+
+                const std::string lbl = prefix + def.name + "##technode_" + tid;
+                if (ImGui::Selectable(lbl.c_str(), sel)) {
+                  selected_tech = tid;
+                }
+
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+                  ImGui::BeginTooltip();
+                  ImGui::Text("%s", def.name.c_str());
+                  ImGui::TextDisabled("%s", tid.c_str());
+                  ImGui::Text("Cost: %.0f", def.cost);
+                  if (!def.prereqs.empty()) {
+                    ImGui::Separator();
+                    ImGui::Text("Prereqs:");
+                    for (const auto& pre : def.prereqs) {
+                      ImGui::BulletText("%s", pre.c_str());
+                    }
+                  }
+                  ImGui::EndTooltip();
+                }
+
+                ImGui::PopStyleColor();
               }
-
-              ImGui::PopStyleColor();
             }
-          }
 
-          ImGui::EndTable();
+            ImGui::EndTable();
+          }
         }
 
         ImGui::EndChild();
@@ -813,11 +1491,12 @@ void draw_economy_window(Simulation& sim, UIState& ui, Id& selected_colony, Id& 
               // Avoid duplicates: remove from queue if present.
               fac.research_queue.erase(std::remove(fac.research_queue.begin(), fac.research_queue.end(), def.id),
                                        fac.research_queue.end());
+              ui.request_details_tab = DetailsTab::Research;
             }
             ImGui::SameLine();
             if (!queued) {
               if (ImGui::Button("Queue")) {
-                fac.research_queue.push_back(def.id);
+                push_unique(fac.research_queue, def.id);
               }
             } else {
               if (ImGui::Button("Unqueue")) {

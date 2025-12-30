@@ -1,5 +1,7 @@
 #include "nebula4x/core/simulation.h"
 
+#include "nebula4x/core/fleet_formation.h"
+
 #include "simulation_internal.h"
 
 #include <algorithm>
@@ -16,7 +18,6 @@
 
 namespace nebula4x {
 namespace {
-using sim_internal::kTwoPi;
 using sim_internal::mkm_per_day_from_speed;
 using sim_internal::push_unique;
 using sim_internal::sorted_keys;
@@ -432,61 +433,9 @@ void Simulation::tick_ships() {
         }
       }
 
-      Vec2 forward = raw_target - leader_pos;
-      const double flen = forward.length();
-      if (flen < 1e-9) {
-        forward = Vec2{1.0, 0.0};
-      } else {
-        forward = forward * (1.0 / flen);
-      }
-      const Vec2 right{-forward.y, forward.x};
-
-      auto world_from_local = [&](double x_right, double y_forward) -> Vec2 {
-        return right * x_right + forward * y_forward;
-      };
-
-      formation_offset_mkm[leader_id] = Vec2{0.0, 0.0};
-
-      std::vector<Id> followers = members;
-      followers.erase(std::remove(followers.begin(), followers.end(), leader_id), followers.end());
-
-      const std::size_t m = followers.size();
-      if (m == 0) continue;
-
-      for (std::size_t i = 0; i < m; ++i) {
-        const Id sid = followers[i];
-        Vec2 off{0.0, 0.0};
-
-        switch (fl->formation) {
-          case FleetFormation::LineAbreast: {
-            const int ring = static_cast<int>(i / 2) + 1;
-            const int sign = ((i % 2) == 0) ? 1 : -1;
-            off = world_from_local(static_cast<double>(sign * ring) * spacing, 0.0);
-            break;
-          }
-          case FleetFormation::Column: {
-            off = world_from_local(0.0, -static_cast<double>(i + 1) * spacing);
-            break;
-          }
-          case FleetFormation::Wedge: {
-            const int layer = static_cast<int>(i / 2) + 1;
-            const int sign = ((i % 2) == 0) ? 1 : -1;
-            off = world_from_local(static_cast<double>(sign * layer) * spacing, -static_cast<double>(layer) * spacing);
-            break;
-          }
-          case FleetFormation::Ring: {
-            const double angle = kTwoPi * (static_cast<double>(i) / static_cast<double>(m));
-            const double radius = std::max(spacing, (static_cast<double>(m) * spacing) / kTwoPi);
-            off = world_from_local(std::cos(angle) * radius, std::sin(angle) * radius);
-            break;
-          }
-          case FleetFormation::None:
-          default: {
-            off = Vec2{0.0, 0.0};
-            break;
-          }
-        }
-
+      // Shared formation solver (used by UI previews as well).
+      const auto offsets = compute_fleet_formation_offsets(fl->formation, spacing, leader_id, leader_pos, raw_target, members);
+      for (const auto& [sid, off] : offsets) {
         formation_offset_mkm[sid] = off;
       }
     }

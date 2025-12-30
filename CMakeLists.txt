@@ -24,6 +24,7 @@ target_sources(nebula4x_core
   PRIVATE
     src/core/content_validation.cpp
     src/core/date.cpp
+    src/core/fleet_formation.cpp
     src/core/game_state.cpp
     src/core/orders.cpp
     src/core/research_planner.cpp
@@ -125,10 +126,16 @@ if(NEBULA4X_BUILD_UI)
     src/main.cpp
     src/ui/app.cpp
     src/ui/hud.cpp
+    src/ui/map_render.cpp
     src/ui/panels.cpp
     src/ui/economy_window.cpp
+    src/ui/production_window.cpp
     src/ui/galaxy_map.cpp
     src/ui/system_map.cpp
+    src/ui/timeline_window.cpp
+    src/ui/design_studio_window.cpp
+    src/ui/intel_window.cpp
+    src/ui/diplomacy_window.cpp
   )
   target_include_directories(nebula4x PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src

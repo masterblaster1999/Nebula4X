@@ -127,6 +127,7 @@ const char* event_category_label(EventCategory c) {
     case EventCategory::Combat: return "Combat";
     case EventCategory::Intel: return "Intel";
     case EventCategory::Exploration: return "Exploration";
+    case EventCategory::Diplomacy: return "Diplomacy";
   }
   return "General";
 }
@@ -355,7 +356,12 @@ void draw_main_menu(Simulation& sim, UIState& ui, char* save_path, char* load_pa
       ImGui::MenuItem("Map", nullptr, &ui.show_map_window);
       ImGui::MenuItem("Details", nullptr, &ui.show_details_window);
       ImGui::MenuItem("Directory (Colonies/Bodies)", nullptr, &ui.show_directory_window);
+      ImGui::MenuItem("Production (Shipyard/Construction Planner)", nullptr, &ui.show_production_window);
       ImGui::MenuItem("Economy (Industry/Mining/Tech Tree)", nullptr, &ui.show_economy_window);
+      ImGui::MenuItem("Timeline (Event Timeline)", nullptr, &ui.show_timeline_window);
+      ImGui::MenuItem("Design Studio (Blueprints)", nullptr, &ui.show_design_studio_window);
+      ImGui::MenuItem("Intel (Contacts/Sensors)", nullptr, &ui.show_intel_window);
+      ImGui::MenuItem("Diplomacy Graph (Relations)", nullptr, &ui.show_diplomacy_window);
       ImGui::MenuItem("Settings Window", nullptr, &ui.show_settings_window);
       ImGui::MenuItem("Status Bar", nullptr, &ui.show_status_bar);
       ImGui::MenuItem("Event Toasts", nullptr, &ui.show_event_toasts);
@@ -375,6 +381,21 @@ void draw_main_menu(Simulation& sim, UIState& ui, char* save_path, char* load_pa
       if (ImGui::MenuItem("Open Event Log")) {
         ui.show_details_window = true;
         ui.request_details_tab = DetailsTab::Log;
+      }
+      if (ImGui::MenuItem("Open Production Planner")) {
+        ui.show_production_window = true;
+      }
+      if (ImGui::MenuItem("Open Design Studio")) {
+        ui.show_design_studio_window = true;
+      }
+      if (ImGui::MenuItem("Open Timeline")) {
+        ui.show_timeline_window = true;
+      }
+      if (ImGui::MenuItem("Open Intel")) {
+        ui.show_intel_window = true;
+      }
+      if (ImGui::MenuItem("Open Diplomacy Graph")) {
+        ui.show_diplomacy_window = true;
       }
       if (ImGui::MenuItem("Focus System Map")) {
         ui.show_map_window = true;
@@ -475,6 +496,7 @@ void draw_left_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sele
             "Combat",
             "Intel",
             "Exploration",
+            "Diplomacy",
         };
         ImGui::Combo("Category##autorun", &category_idx, cats, IM_ARRAYSIZE(cats));
       }
@@ -567,6 +589,7 @@ void draw_left_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sele
               EventCategory::Combat,
               EventCategory::Intel,
               EventCategory::Exploration,
+              EventCategory::Diplomacy,
           };
           const int idx = category_idx - 1;
           if (idx >= 0 && idx < (int)IM_ARRAYSIZE(cat_vals)) {
@@ -752,6 +775,16 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
   static int faction_combo_idx = 0;
   const auto factions = sorted_factions(s);
   if (!factions.empty()) {
+    // Allow other windows to request that the details panel focus a specific faction.
+    if (ui.request_focus_faction_id != kInvalidId) {
+      for (int i = 0; i < (int)factions.size(); ++i) {
+        if (factions[(std::size_t)i].first == ui.request_focus_faction_id) {
+          faction_combo_idx = i;
+          break;
+        }
+      }
+      ui.request_focus_faction_id = kInvalidId;
+    }
     faction_combo_idx = std::clamp(faction_combo_idx, 0, static_cast<int>(factions.size()) - 1);
   }
   const Id selected_faction_id = factions.empty() ? kInvalidId : factions[faction_combo_idx].first;
@@ -3400,6 +3433,16 @@ if (colony->shipyard_queue.empty()) {
         static int design_sel = 0;
         if (!all_ids.empty()) design_sel = std::clamp(design_sel, 0, static_cast<int>(all_ids.size()) - 1);
 
+        // Allow other windows (e.g. production planner) to request that a
+        // particular design becomes selected.
+        if (!ui.request_focus_design_id.empty() && !all_ids.empty()) {
+          const auto it = std::find(all_ids.begin(), all_ids.end(), ui.request_focus_design_id);
+          if (it != all_ids.end()) {
+            design_sel = static_cast<int>(std::distance(all_ids.begin(), it));
+          }
+          ui.request_focus_design_id.clear();
+        }
+
         if (ImGui::BeginListBox("##designs", ImVec2(-1, 160))) {
           for (int i = 0; i < static_cast<int>(all_ids.size()); ++i) {
             const bool sel = (design_sel == i);
@@ -3994,6 +4037,7 @@ if (colony->shipyard_queue.empty()) {
               "Combat",
               "Intel",
               "Exploration",
+              "Diplomacy",
           };
           ImGui::Combo("Category", &category_idx, cats, IM_ARRAYSIZE(cats));
         }
@@ -4088,6 +4132,7 @@ if (colony->shipyard_queue.empty()) {
                 EventCategory::Combat,
                 EventCategory::Intel,
                 EventCategory::Exploration,
+                EventCategory::Diplomacy,
             };
             const int idx = category_idx - 1;
             if (idx < 0 || idx >= (int)IM_ARRAYSIZE(cat_vals)) continue;
@@ -4224,6 +4269,11 @@ if (colony->shipyard_queue.empty()) {
                               ev.message;
             ImGui::SetClipboardText(line.c_str());
           }
+          ImGui::SameLine();
+          if (ImGui::SmallButton("Timeline")) {
+            ui.show_timeline_window = true;
+            ui.request_focus_event_seq = ev.seq;
+          }
           if (ev.system_id != kInvalidId) {
             ImGui::SameLine();
             if (ImGui::SmallButton("View system")) {
@@ -4283,6 +4333,55 @@ void draw_settings_window(UIState& ui, char* ui_prefs_path, UIPrefActions& actio
     actions.reset_ui_theme = true;
   }
 
+  ImGui::SeparatorText("Map rendering");
+  ImGui::Checkbox("System: starfield", &ui.system_map_starfield);
+  ImGui::SameLine();
+  ImGui::Checkbox("Galaxy: starfield", &ui.galaxy_map_starfield);
+  ImGui::Checkbox("System: grid", &ui.system_map_grid);
+  ImGui::SameLine();
+  ImGui::Checkbox("Galaxy: grid", &ui.galaxy_map_grid);
+  ImGui::Checkbox("System: order paths", &ui.system_map_order_paths);
+  ImGui::SameLine();
+  ImGui::Checkbox("System: fleet formation preview", &ui.system_map_fleet_formation_preview);
+  ImGui::SameLine();
+  ImGui::Checkbox("Galaxy: selected route", &ui.galaxy_map_selected_route);
+  ImGui::Checkbox("System: follow selected ship", &ui.system_map_follow_selected);
+
+  ImGui::Checkbox("System: weapon range rings (selected)", &ui.show_selected_weapon_range);
+  ImGui::SameLine();
+  ImGui::Checkbox("Fleet", &ui.show_fleet_weapon_ranges);
+  ImGui::SameLine();
+  ImGui::Checkbox("Hostiles", &ui.show_hostile_weapon_ranges);
+
+  ImGui::SeparatorText("Exploration & Intel overlays");
+  ImGui::Checkbox("Selected: sensor range ring", &ui.show_selected_sensor_range);
+  ImGui::Checkbox("System: contact markers", &ui.show_contact_markers);
+  ImGui::SameLine();
+  ImGui::Checkbox("Labels##contacts", &ui.show_contact_labels);
+  ImGui::Checkbox("System: minor bodies", &ui.show_minor_bodies);
+  ImGui::SameLine();
+  ImGui::Checkbox("Labels##minor_bodies", &ui.show_minor_body_labels);
+
+  ImGui::Checkbox("Galaxy: labels", &ui.show_galaxy_labels);
+  ImGui::SameLine();
+  ImGui::Checkbox("Jump lines", &ui.show_galaxy_jump_lines);
+  ImGui::SameLine();
+  ImGui::Checkbox("Unknown exits", &ui.show_galaxy_unknown_exits);
+  ImGui::SameLine();
+  ImGui::Checkbox("Intel alerts", &ui.show_galaxy_intel_alerts);
+
+  ImGui::SliderInt("Contact max age (days)", &ui.contact_max_age_days, 1, 3650);
+  ui.contact_max_age_days = std::clamp(ui.contact_max_age_days, 1, 3650);
+
+  ImGui::SliderFloat("Starfield density", &ui.map_starfield_density, 0.0f, 4.0f, "%.2fx");
+  ui.map_starfield_density = std::clamp(ui.map_starfield_density, 0.0f, 4.0f);
+  ImGui::SliderFloat("Starfield parallax", &ui.map_starfield_parallax, 0.0f, 1.0f, "%.2f");
+  ui.map_starfield_parallax = std::clamp(ui.map_starfield_parallax, 0.0f, 1.0f);
+  ImGui::SliderFloat("Grid opacity", &ui.map_grid_opacity, 0.0f, 1.0f, "%.2f");
+  ui.map_grid_opacity = std::clamp(ui.map_grid_opacity, 0.0f, 1.0f);
+  ImGui::SliderFloat("Route opacity", &ui.map_route_opacity, 0.0f, 1.0f, "%.2f");
+  ui.map_route_opacity = std::clamp(ui.map_route_opacity, 0.0f, 1.0f);
+
   ImGui::SeparatorText("UI prefs file");
   ImGui::InputText("Path##ui_prefs_path", ui_prefs_path, 256);
   ImGui::Checkbox("Autosave on exit", &ui.autosave_ui_prefs);
@@ -4303,13 +4402,73 @@ void draw_settings_window(UIState& ui, char* ui_prefs_path, UIPrefActions& actio
     ImGui::SliderFloat("Toast duration (sec)", &ui.event_toast_duration_sec, 1.0f, 30.0f, "%.0f");
     ui.event_toast_duration_sec = std::clamp(ui.event_toast_duration_sec, 0.5f, 60.0f);
   }
-  ImGui::TextDisabled("Shortcuts: Ctrl+P palette, F1 help, Ctrl+S save, Ctrl+O load, Space +1 day.");
+  ImGui::TextDisabled(
+      "Shortcuts: Ctrl+P palette, F1 help, Ctrl+S save, Ctrl+O load, Ctrl+0 diplomacy, Ctrl+7 timeline, Ctrl+8 design studio, Ctrl+9 intel, Space +1 day.");
+
+  ImGui::SeparatorText("Timeline");
+  ImGui::Checkbox("Show timeline minimap", &ui.timeline_show_minimap);
+  ImGui::Checkbox("Show timeline grid", &ui.timeline_show_grid);
+  ImGui::Checkbox("Show lane labels", &ui.timeline_show_labels);
+  ImGui::Checkbox("Compact rows", &ui.timeline_compact_rows);
+  ImGui::Checkbox("Follow now by default", &ui.timeline_follow_now);
+  ImGui::SliderFloat("Lane height##timeline", &ui.timeline_lane_height, 18.0f, 56.0f, "%.0f px");
+  ui.timeline_lane_height = std::clamp(ui.timeline_lane_height, 18.0f, 80.0f);
+  ImGui::SliderFloat("Marker size##timeline", &ui.timeline_marker_size, 2.5f, 7.0f, "%.1f px");
+  ui.timeline_marker_size = std::clamp(ui.timeline_marker_size, 2.0f, 12.0f);
+
+  ImGui::SeparatorText("Design Studio");
+  ImGui::Checkbox("Show grid##design_studio", &ui.design_studio_show_grid);
+  ImGui::Checkbox("Show labels##design_studio", &ui.design_studio_show_labels);
+  ImGui::Checkbox("Compare by default##design_studio", &ui.design_studio_show_compare);
+  ImGui::Checkbox("Power overlay##design_studio", &ui.design_studio_show_power_overlay);
+
+  ImGui::SeparatorText("Intel");
+  ImGui::Checkbox("Radar: scanline", &ui.intel_radar_scanline);
+  ImGui::SameLine();
+  ImGui::Checkbox("Grid/range rings", &ui.intel_radar_grid);
+  ImGui::Checkbox("Radar: sensor coverage", &ui.intel_radar_show_sensors);
+  ImGui::SameLine();
+  ImGui::Checkbox("Heat##intel", &ui.intel_radar_sensor_heat);
+  ImGui::Checkbox("Radar: bodies", &ui.intel_radar_show_bodies);
+  ImGui::SameLine();
+  ImGui::Checkbox("Jump points", &ui.intel_radar_show_jump_points);
+  ImGui::Checkbox("Radar: friendlies", &ui.intel_radar_show_friendlies);
+  ImGui::SameLine();
+  ImGui::Checkbox("Hostiles", &ui.intel_radar_show_hostiles);
+  ImGui::SameLine();
+  ImGui::Checkbox("Contacts", &ui.intel_radar_show_contacts);
+  ImGui::Checkbox("Radar: labels", &ui.intel_radar_labels);
+
+  ImGui::SeparatorText("Diplomacy Graph");
+  ImGui::Checkbox("Starfield##dipl", &ui.diplomacy_graph_starfield);
+  ImGui::SameLine();
+  ImGui::Checkbox("Grid##dipl", &ui.diplomacy_graph_grid);
+  ImGui::Checkbox("Labels##dipl", &ui.diplomacy_graph_labels);
+  ImGui::SameLine();
+  ImGui::Checkbox("Arrows##dipl", &ui.diplomacy_graph_arrows);
+  ImGui::Checkbox("Dim non-selected##dipl", &ui.diplomacy_graph_dim_nonfocus);
+  ImGui::Checkbox("Show Hostile##dipl", &ui.diplomacy_graph_show_hostile);
+  ImGui::SameLine();
+  ImGui::Checkbox("Neutral##dipl", &ui.diplomacy_graph_show_neutral);
+  ImGui::SameLine();
+  ImGui::Checkbox("Friendly##dipl", &ui.diplomacy_graph_show_friendly);
+  {
+    const char* layouts[] = {"Radial", "Force", "Circle"};
+    ui.diplomacy_graph_layout = std::clamp(ui.diplomacy_graph_layout, 0, 2);
+    ImGui::Combo("Layout##dipl", &ui.diplomacy_graph_layout, layouts, IM_ARRAYSIZE(layouts));
+  }
 
   ImGui::SeparatorText("Windows");
   ImGui::Checkbox("Controls", &ui.show_controls_window);
   ImGui::Checkbox("Map", &ui.show_map_window);
   ImGui::Checkbox("Details", &ui.show_details_window);
   ImGui::Checkbox("Directory", &ui.show_directory_window);
+  ImGui::Checkbox("Production", &ui.show_production_window);
+  ImGui::Checkbox("Economy", &ui.show_economy_window);
+  ImGui::Checkbox("Timeline", &ui.show_timeline_window);
+  ImGui::Checkbox("Design Studio", &ui.show_design_studio_window);
+  ImGui::Checkbox("Intel", &ui.show_intel_window);
+  ImGui::Checkbox("Diplomacy Graph", &ui.show_diplomacy_window);
   if (ImGui::Button("Reset window layout")) {
     actions.reset_window_layout = true;
   }

@@ -31,6 +31,7 @@ const char* event_category_csv_label(EventCategory c) {
     case EventCategory::Combat: return "COMBAT";
     case EventCategory::Intel: return "INTEL";
     case EventCategory::Exploration: return "EXPLORATION";
+    case EventCategory::Diplomacy: return "DIPLOMACY";
   }
   return "GENERAL";
 }
@@ -54,6 +55,7 @@ const char* event_category_json_label(EventCategory c) {
     case EventCategory::Combat: return "combat";
     case EventCategory::Intel: return "intel";
     case EventCategory::Exploration: return "exploration";
+    case EventCategory::Diplomacy: return "diplomacy";
   }
   return "general";
 }
@@ -201,7 +203,7 @@ std::string events_summary_to_json(const std::vector<const SimEvent*>& events) {
   std::size_t warn_count = 0;
   std::size_t error_count = 0;
 
-  std::array<std::size_t, 8> by_cat{};
+  std::array<std::size_t, 9> by_cat{};
 
   for (const auto* ev : events) {
     if (!ev) continue;
@@ -258,6 +260,7 @@ std::string events_summary_to_json(const std::vector<const SimEvent*>& events) {
   cats["combat"] = static_cast<double>(by_cat[static_cast<std::size_t>(EventCategory::Combat)]);
   cats["intel"] = static_cast<double>(by_cat[static_cast<std::size_t>(EventCategory::Intel)]);
   cats["exploration"] = static_cast<double>(by_cat[static_cast<std::size_t>(EventCategory::Exploration)]);
+  cats["diplomacy"] = static_cast<double>(by_cat[static_cast<std::size_t>(EventCategory::Diplomacy)]);
   out["categories"] = std::move(cats);
 
   std::string json_text = json::stringify(json::object(std::move(out)), 2);
@@ -276,7 +279,7 @@ std::string events_summary_to_csv(const std::vector<const SimEvent*>& events) {
   std::size_t warn_count = 0;
   std::size_t error_count = 0;
 
-  std::array<std::size_t, 8> by_cat{};
+  std::array<std::size_t, 9> by_cat{};
 
   for (const auto* ev : events) {
     if (!ev) continue;
@@ -303,7 +306,7 @@ std::string events_summary_to_csv(const std::vector<const SimEvent*>& events) {
   std::string csv;
   csv += "count,day_min,day_max,date_min,date_max,"
          "info,warn,error,"
-         "general,research,shipyard,construction,movement,combat,intel,exploration\n";
+         "general,research,shipyard,construction,movement,combat,intel,exploration,diplomacy\n";
 
   csv += std::to_string(count);
   csv += ",";
@@ -344,6 +347,8 @@ std::string events_summary_to_csv(const std::vector<const SimEvent*>& events) {
   csv += std::to_string(by_cat[static_cast<std::size_t>(EventCategory::Intel)]);
   csv += ",";
   csv += std::to_string(by_cat[static_cast<std::size_t>(EventCategory::Exploration)]);
+  csv += ",";
+  csv += std::to_string(by_cat[static_cast<std::size_t>(EventCategory::Diplomacy)]);
   csv += "\n";
   return csv;
 }

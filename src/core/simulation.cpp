@@ -705,7 +705,7 @@ bool Simulation::set_diplomatic_status(Id from_faction_id, Id to_faction_id, Dip
       EventContext ctx;
       ctx.faction_id = from_faction_id;
       ctx.faction_id2 = to_faction_id;
-      push_event(EventLevel::Info, EventCategory::General, msg, ctx);
+      push_event(EventLevel::Info, EventCategory::Diplomacy, msg, ctx);
     }
   }
 

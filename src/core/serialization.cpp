@@ -156,6 +156,7 @@ const char* event_category_to_string(EventCategory c) {
     case EventCategory::Combat: return "combat";
     case EventCategory::Intel: return "intel";
     case EventCategory::Exploration: return "exploration";
+    case EventCategory::Diplomacy: return "diplomacy";
   }
   return "general";
 }
@@ -168,6 +169,7 @@ EventCategory event_category_from_string(const std::string& s) {
   if (s == "combat") return EventCategory::Combat;
   if (s == "intel") return EventCategory::Intel;
   if (s == "exploration") return EventCategory::Exploration;
+  if (s == "diplomacy") return EventCategory::Diplomacy;
   return EventCategory::General;
 }
 

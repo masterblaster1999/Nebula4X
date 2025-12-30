@@ -500,6 +500,7 @@ enum class EventCategory {
   Combat,
   Intel,
   Exploration,
+  Diplomacy,
 };
 
 struct SimEvent {
