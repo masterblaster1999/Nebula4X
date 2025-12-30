@@ -3,6 +3,7 @@
 #include <imgui.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cctype>
 #include <cstdio>
@@ -356,10 +357,34 @@ void draw_main_menu(Simulation& sim, UIState& ui, char* save_path, char* load_pa
       ImGui::MenuItem("Directory (Colonies/Bodies)", nullptr, &ui.show_directory_window);
       ImGui::MenuItem("Economy (Industry/Mining/Tech Tree)", nullptr, &ui.show_economy_window);
       ImGui::MenuItem("Settings Window", nullptr, &ui.show_settings_window);
+      ImGui::MenuItem("Status Bar", nullptr, &ui.show_status_bar);
+      ImGui::MenuItem("Event Toasts", nullptr, &ui.show_event_toasts);
       ImGui::Separator();
       if (ImGui::MenuItem("Reset Window Layout")) {
         actions.reset_window_layout = true;
       }
+      ImGui::EndMenu();
+    }
+
+    if (ImGui::BeginMenu("Tools")) {
+      if (ImGui::MenuItem("Command Palette", "Ctrl+P")) ui.show_command_palette = true;
+      if (ImGui::MenuItem("Help / Shortcuts", "F1")) ui.show_help_window = true;
+
+      ImGui::Separator();
+
+      if (ImGui::MenuItem("Open Event Log")) {
+        ui.show_details_window = true;
+        ui.request_details_tab = DetailsTab::Log;
+      }
+      if (ImGui::MenuItem("Focus System Map")) {
+        ui.show_map_window = true;
+        ui.request_map_tab = MapTab::System;
+      }
+      if (ImGui::MenuItem("Focus Galaxy Map")) {
+        ui.show_map_window = true;
+        ui.request_map_tab = MapTab::Galaxy;
+      }
+
       ImGui::EndMenu();
     }
 
@@ -736,8 +761,12 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
   ui.viewer_faction_id = selected_faction_id;
 
   if (ImGui::BeginTabBar("details_tabs")) {
+    const DetailsTab req_tab = ui.request_details_tab;
+    auto flags_for = [&](DetailsTab t) -> ImGuiTabItemFlags {
+      return (req_tab == t) ? ImGuiTabItemFlags_SetSelected : 0;
+    };
     // --- Ship tab ---
-    if (ImGui::BeginTabItem("Ship")) {
+    if (ImGui::BeginTabItem("Ship", nullptr, flags_for(DetailsTab::Ship))) {
       if (selected_ship == kInvalidId) {
         ImGui::TextDisabled("No ship selected");
         ImGui::EndTabItem();
@@ -1488,7 +1517,7 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
     }
 
     // --- Fleet tab ---
-    if (ImGui::BeginTabItem("Fleet")) {
+    if (ImGui::BeginTabItem("Fleet", nullptr, flags_for(DetailsTab::Fleet))) {
       // Keep selection valid.
       if (ui.selected_fleet_id != kInvalidId && !find_ptr(s.fleets, ui.selected_fleet_id)) {
         ui.selected_fleet_id = kInvalidId;
@@ -1861,7 +1890,7 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
     }
 
     // --- Colony tab ---
-    if (ImGui::BeginTabItem("Colony")) {
+    if (ImGui::BeginTabItem("Colony", nullptr, flags_for(DetailsTab::Colony))) {
       if (selected_colony == kInvalidId) {
         ImGui::TextDisabled("No colony selected");
         ImGui::EndTabItem();
@@ -2545,7 +2574,7 @@ if (colony->shipyard_queue.empty()) {
     }
 
     // --- Body (planet) tab ---
-    if (ImGui::BeginTabItem("Body")) {
+    if (ImGui::BeginTabItem("Body", nullptr, flags_for(DetailsTab::Body))) {
       // If no body selected explicitly, fall back to the selected colony's body.
       Id body_id = selected_body;
       if (body_id == kInvalidId && selected_colony != kInvalidId) {
@@ -2577,8 +2606,17 @@ if (colony->shipyard_queue.empty()) {
             ImGui::Text("Orbits: (system origin)");
           }
 
-          ImGui::Text("Orbit radius: %.2f mkm", b->orbit_radius_mkm);
-          ImGui::Text("Orbit period: %.2f days", b->orbit_period_days);
+          ImGui::Text("a: %.2f mkm (%.2f AU)", b->orbit_radius_mkm, b->orbit_radius_mkm / 149.6);
+          ImGui::Text("Period: %.2f days", b->orbit_period_days);
+          if (std::abs(b->orbit_eccentricity) > 1e-4) {
+            const double e = b->orbit_eccentricity;
+            const double peri = b->orbit_radius_mkm * (1.0 - e);
+            const double apo = b->orbit_radius_mkm * (1.0 + e);
+            ImGui::Text("e: %.3f", e);
+            ImGui::Text("Periapsis: %.2f mkm (%.2f AU)", peri, peri / 149.6);
+            ImGui::Text("Apoapsis: %.2f mkm (%.2f AU)", apo, apo / 149.6);
+            ImGui::Text("ω: %.1f°", b->orbit_arg_periapsis_radians * 57.29577951308232);
+          }
           ImGui::Text("Pos: (%.2f, %.2f) mkm", b->position_mkm.x, b->position_mkm.y);
 
           // Physical metadata (optional).
@@ -2643,7 +2681,7 @@ if (colony->shipyard_queue.empty()) {
 
 
     // --- Logistics tab ---
-    if (ImGui::BeginTabItem("Logistics")) {
+    if (ImGui::BeginTabItem("Logistics", nullptr, flags_for(DetailsTab::Logistics))) {
       if (!selected_faction) {
         ImGui::TextDisabled("No faction selected.");
       } else {
@@ -2784,7 +2822,7 @@ if (colony->shipyard_queue.empty()) {
     }
 
     // --- Research tab ---
-    if (ImGui::BeginTabItem("Research")) {
+    if (ImGui::BeginTabItem("Research", nullptr, flags_for(DetailsTab::Research))) {
       if (factions.empty() || !selected_faction) {
         ImGui::TextDisabled("No factions available");
         ImGui::EndTabItem();
@@ -3133,7 +3171,7 @@ if (colony->shipyard_queue.empty()) {
 
 
     // --- Diplomacy tab ---
-    if (ImGui::BeginTabItem("Diplomacy")) {
+    if (ImGui::BeginTabItem("Diplomacy", nullptr, flags_for(DetailsTab::Diplomacy))) {
       if (factions.empty() || !selected_faction) {
         ImGui::TextDisabled("No factions available");
       } else {
@@ -3216,7 +3254,7 @@ if (colony->shipyard_queue.empty()) {
     }
 
     // --- Ship design tab ---
-    if (ImGui::BeginTabItem("Design")) {
+    if (ImGui::BeginTabItem("Design", nullptr, flags_for(DetailsTab::Design))) {
       if (factions.empty() || !selected_faction) {
         ImGui::TextDisabled("No factions available");
         ImGui::EndTabItem();
@@ -3656,7 +3694,7 @@ if (colony->shipyard_queue.empty()) {
     }
 
     // --- Contacts / intel tab ---
-    if (ImGui::BeginTabItem("Contacts")) {
+    if (ImGui::BeginTabItem("Contacts", nullptr, flags_for(DetailsTab::Contacts))) {
       // Default viewer faction: use selected ship's faction if available, otherwise use the faction combo.
       Id viewer_faction_id = selected_faction_id;
       if (selected_ship != kInvalidId) {
@@ -3792,7 +3830,7 @@ if (colony->shipyard_queue.empty()) {
         log_label = "Log###log_tab";
       }
 
-      if (ImGui::BeginTabItem(log_label.c_str())) {
+      if (ImGui::BeginTabItem(log_label.c_str(), nullptr, flags_for(DetailsTab::Log))) {
         // Mark everything up to the newest event as "seen" while the tab is open.
         if (newest_seq > ui.last_seen_event_seq) ui.last_seen_event_seq = newest_seq;
 
@@ -4092,6 +4130,9 @@ if (colony->shipyard_queue.empty()) {
     }
 
     ImGui::EndTabBar();
+
+    // Consume any programmatic tab selection request once we have rendered the tab bar.
+    if (req_tab != DetailsTab::None) ui.request_details_tab = DetailsTab::None;
   }
 }
 
@@ -4124,6 +4165,17 @@ void draw_settings_window(UIState& ui, char* ui_prefs_path, UIPrefActions& actio
   if (ImGui::Button("Save UI prefs")) {
     actions.save_ui_prefs = true;
   }
+
+  ImGui::SeparatorText("HUD & Accessibility");
+  ImGui::SliderFloat("UI scale", &ui.ui_scale, 0.65f, 2.5f, "%.2fx");
+  ui.ui_scale = std::clamp(ui.ui_scale, 0.65f, 2.5f);
+  ImGui::Checkbox("Status bar", &ui.show_status_bar);
+  ImGui::Checkbox("Event toasts (warn/error)", &ui.show_event_toasts);
+  if (ui.show_event_toasts) {
+    ImGui::SliderFloat("Toast duration (sec)", &ui.event_toast_duration_sec, 1.0f, 30.0f, "%.0f");
+    ui.event_toast_duration_sec = std::clamp(ui.event_toast_duration_sec, 0.5f, 60.0f);
+  }
+  ImGui::TextDisabled("Shortcuts: Ctrl+P palette, F1 help, Ctrl+S save, Ctrl+O load, Space +1 day.");
 
   ImGui::SeparatorText("Windows");
   ImGui::Checkbox("Controls", &ui.show_controls_window);
@@ -4353,7 +4405,7 @@ void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_colony, Id
     }
 
     {
-      const char* types[] = {"All", "Star", "Planet", "Moon", "Asteroid", "Gas Giant"};
+      const char* types[] = {"All", "Star", "Planet", "Moon", "Asteroid", "Comet", "Gas Giant"};
       ImGui::Combo("Type##body", &type_filter_idx, types, IM_ARRAYSIZE(types));
     }
     ImGui::Checkbox("Only colonized##body", &only_colonized);
@@ -4366,7 +4418,8 @@ void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_colony, Id
         case 2: return t == BodyType::Planet;
         case 3: return t == BodyType::Moon;
         case 4: return t == BodyType::Asteroid;
-        case 5: return t == BodyType::GasGiant;
+        case 5: return t == BodyType::Comet;
+        case 6: return t == BodyType::GasGiant;
         default: return true;
       }
     };

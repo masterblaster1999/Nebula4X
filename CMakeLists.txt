@@ -122,6 +122,7 @@ if(NEBULA4X_BUILD_UI)
   add_executable(nebula4x
     src/main.cpp
     src/ui/app.cpp
+    src/ui/hud.cpp
     src/ui/panels.cpp
     src/ui/economy_window.cpp
     src/ui/galaxy_map.cpp

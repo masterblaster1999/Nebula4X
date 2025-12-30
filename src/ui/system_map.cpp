@@ -10,10 +10,13 @@
 namespace nebula4x::ui {
 namespace {
 
+constexpr double kTwoPi = 6.283185307179586;
+
 ImU32 color_body(BodyType t) {
   switch (t) {
     case BodyType::Star: return IM_COL32(255, 230, 120, 255);
     case BodyType::GasGiant: return IM_COL32(180, 160, 255, 255);
+    case BodyType::Comet: return IM_COL32(120, 255, 210, 255);
     case BodyType::Asteroid: return IM_COL32(170, 170, 170, 255);
     case BodyType::Moon: return IM_COL32(210, 210, 210, 255);
     default: return IM_COL32(120, 200, 255, 255);
@@ -95,7 +98,12 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
       }
     }
 
-    const double extent = orbit_center_mkm.length() + b->orbit_radius_mkm;
+    const bool is_minor = (b->type == BodyType::Asteroid || b->type == BodyType::Comet);
+    if (!ui.show_minor_bodies && is_minor && selected_body != bid) continue;
+
+    const double e = std::clamp(std::abs(b->orbit_eccentricity), 0.0, 0.999999);
+    const double orbit_extent = b->orbit_radius_mkm * (1.0 + e);
+    const double extent = orbit_center_mkm.length() + orbit_extent;
     max_r = std::max(max_r, extent);
   }
   // Make sure jump points beyond the outermost orbit are still visible.
@@ -150,7 +158,10 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
     const auto* b = find_ptr(s.bodies, bid);
     if (!b) continue;
 
-    // Orbit circle (centered on system origin for planets, or on the parent body for moons/binaries).
+    const bool is_minor = (b->type == BodyType::Asteroid || b->type == BodyType::Comet);
+    if (!ui.show_minor_bodies && is_minor && selected_body != bid) continue;
+
+    // Orbit path (centered on system origin for planets, or on the parent body for moons/binaries).
     if (b->orbit_radius_mkm > 1e-6) {
       Vec2 orbit_center_mkm{0.0, 0.0};
       if (b->parent_body_id != kInvalidId) {
@@ -159,13 +170,66 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
         }
       }
 
-      const ImVec2 orbit_center_px = to_screen(orbit_center_mkm, center, scale, zoom, pan);
-      draw->AddCircle(orbit_center_px, static_cast<float>(b->orbit_radius_mkm * scale * zoom),
-                      IM_COL32(35, 35, 35, 255), 0, 1.0f);
+      const double a = b->orbit_radius_mkm;
+      const double e = std::clamp(std::abs(b->orbit_eccentricity), 0.0, 0.999999);
+
+      if (e < 1e-4) {
+        const ImVec2 orbit_center_px = to_screen(orbit_center_mkm, center, scale, zoom, pan);
+        draw->AddCircle(orbit_center_px, static_cast<float>(a * scale * zoom), IM_COL32(35, 35, 35, 255), 0, 1.0f);
+      } else {
+        // Ellipse sampled in eccentric anomaly (focus at orbit_center_mkm).
+        const double bsemi = a * std::sqrt(std::max(0.0, 1.0 - e * e));
+        const double w = b->orbit_arg_periapsis_radians;
+        const double cw = std::cos(w);
+        const double sw = std::sin(w);
+
+        constexpr int kSegments = 96;
+        ImVec2 first{};
+        ImVec2 prev{};
+        for (int i = 0; i <= kSegments; ++i) {
+          const double E = (kTwoPi * static_cast<double>(i)) / static_cast<double>(kSegments);
+          const double cE = std::cos(E);
+          const double sE = std::sin(E);
+
+          const double x = a * (cE - e);
+          const double y = bsemi * sE;
+          const double rx = x * cw - y * sw;
+          const double ry = x * sw + y * cw;
+
+          const Vec2 world = orbit_center_mkm + Vec2{rx, ry};
+          const ImVec2 pt = to_screen(world, center, scale, zoom, pan);
+
+          if (i == 0) {
+            first = pt;
+            prev = pt;
+          } else {
+            draw->AddLine(prev, pt, IM_COL32(35, 35, 35, 255), 1.0f);
+            prev = pt;
+          }
+        }
+        draw->AddLine(prev, first, IM_COL32(35, 35, 35, 255), 1.0f);
+      }
     }
 
     const ImVec2 p = to_screen(b->position_mkm, center, scale, zoom, pan);
-    const float r = (b->type == BodyType::Star) ? 8.0f : 5.0f;
+
+    float r = 5.0f;
+    switch (b->type) {
+      case BodyType::Star: r = 8.0f; break;
+      case BodyType::GasGiant: r = 6.0f; break;
+      case BodyType::Moon: r = 4.0f; break;
+      case BodyType::Asteroid: r = 2.5f; break;
+      case BodyType::Comet: r = 3.0f; break;
+      default: r = 5.0f; break;
+    }
+
+    // Comet tail (visual hint): points away from the system origin (star).
+    if (b->type == BodyType::Comet) {
+      const Vec2 dir = b->position_mkm.normalized();
+      const ImVec2 tail = ImVec2(p.x + static_cast<float>(dir.x * 14.0), p.y + static_cast<float>(dir.y * 14.0));
+      draw->AddLine(p, tail, IM_COL32(120, 255, 210, 180), 2.0f);
+    }
+
     draw->AddCircleFilled(p, r, color_body(b->type));
 
     // Highlight colonized bodies.
@@ -177,7 +241,12 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
     if (selected_body == bid) {
       draw->AddCircle(p, r + 7.0f, IM_COL32(255, 220, 80, 220), 0, 2.0f);
     }
-    draw->AddText(ImVec2(p.x + 6, p.y + 6), IM_COL32(200, 200, 200, 255), b->name.c_str());
+
+    const bool show_label =
+        (!is_minor) || (selected_body == bid) || (ui.show_minor_body_labels && zoom >= 2.0);
+    if (show_label) {
+      draw->AddText(ImVec2(p.x + 6, p.y + 6), IM_COL32(200, 200, 200, 255), b->name.c_str());
+    }
   }
 
   // Jump points
@@ -303,6 +372,8 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
         for (Id bid : sys->bodies) {
           const auto* b = find_ptr(s.bodies, bid);
           if (!b) continue;
+          const bool is_minor = (b->type == BodyType::Asteroid || b->type == BodyType::Comet);
+          if (!ui.show_minor_bodies && is_minor) continue;
           const ImVec2 p = to_screen(b->position_mkm, center, scale, zoom, pan);
           const float dx = mp.x - p.x;
           const float dy = mp.y - p.y;
@@ -391,6 +462,8 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
         for (Id bid : sys->bodies) {
           const auto* b = find_ptr(s.bodies, bid);
           if (!b) continue;
+          const bool is_minor = (b->type == BodyType::Asteroid || b->type == BodyType::Comet);
+          if (!ui.show_minor_bodies && is_minor) continue;
           const ImVec2 p = to_screen(b->position_mkm, center, scale, zoom, pan);
           const float dx = mp.x - p.x;
           const float dy = mp.y - p.y;
@@ -420,7 +493,7 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
 
   // Legend / help
   ImGui::SetCursorScreenPos(ImVec2(origin.x + 10, origin.y + 10));
-  ImGui::BeginChild("legend", ImVec2(280, 190), true);
+  ImGui::BeginChild("legend", ImVec2(280, 240), true);
   ImGui::Text("Controls");
   ImGui::BulletText("Mouse wheel: zoom");
   ImGui::BulletText("Middle drag: pan");
@@ -437,6 +510,12 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
   ImGui::Checkbox("Show contacts", &ui.show_contact_markers);
   ImGui::SameLine();
   ImGui::Checkbox("Labels", &ui.show_contact_labels);
+
+  ImGui::Separator();
+  ImGui::Checkbox("Show minor bodies", &ui.show_minor_bodies);
+  ImGui::SameLine();
+  ImGui::Checkbox("Minor labels", &ui.show_minor_body_labels);
+  ImGui::TextDisabled("(Minor labels appear at zoom >= 2x or when selected)");
 
   if (ui.fog_of_war) {
     if (viewer_faction_id == kInvalidId) {

@@ -107,6 +107,7 @@ const char* body_type_label(nebula4x::BodyType t) {
     case nebula4x::BodyType::Planet: return "planet";
     case nebula4x::BodyType::Moon: return "moon";
     case nebula4x::BodyType::Asteroid: return "asteroid";
+    case nebula4x::BodyType::Comet: return "comet";
     case nebula4x::BodyType::GasGiant: return "gas_giant";
   }
   return "planet";

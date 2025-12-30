@@ -14,7 +14,7 @@ using json::Array;
 using json::Object;
 using json::Value;
 
-constexpr int kCurrentSaveVersion = 26;
+constexpr int kCurrentSaveVersion = 27;
 
 template <typename Map>
 std::vector<typename Map::key_type> sorted_keys(const Map& m) {
@@ -51,6 +51,7 @@ std::string body_type_to_string(BodyType t) {
     case BodyType::Planet: return "planet";
     case BodyType::Moon: return "moon";
     case BodyType::Asteroid: return "asteroid";
+    case BodyType::Comet: return "comet";
     case BodyType::GasGiant: return "gas_giant";
   }
   return "planet";
@@ -61,6 +62,7 @@ BodyType body_type_from_string(const std::string& s) {
   if (s == "planet") return BodyType::Planet;
   if (s == "moon") return BodyType::Moon;
   if (s == "asteroid") return BodyType::Asteroid;
+  if (s == "comet") return BodyType::Comet;
   if (s == "gas_giant") return BodyType::GasGiant;
   return BodyType::Planet;
 }
@@ -416,6 +418,8 @@ std::string serialize_game_to_json(const GameState& s) {
     o["orbit_radius_mkm"] = b.orbit_radius_mkm;
     o["orbit_period_days"] = b.orbit_period_days;
     o["orbit_phase_radians"] = b.orbit_phase_radians;
+    o["orbit_eccentricity"] = b.orbit_eccentricity;
+    o["orbit_arg_periapsis_radians"] = b.orbit_arg_periapsis_radians;
     if (!b.mineral_deposits.empty()) {
       o["mineral_deposits"] = map_string_double_to_json(b.mineral_deposits);
     }
@@ -749,6 +753,16 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     b.orbit_radius_mkm = o.at("orbit_radius_mkm").number_value();
     b.orbit_period_days = o.at("orbit_period_days").number_value();
     b.orbit_phase_radians = o.at("orbit_phase_radians").number_value();
+
+    b.orbit_eccentricity = 0.0;
+    if (auto ite = o.find("orbit_eccentricity"); ite != o.end()) {
+      b.orbit_eccentricity = ite->second.number_value();
+    }
+
+    b.orbit_arg_periapsis_radians = 0.0;
+    if (auto itw = o.find("orbit_arg_periapsis_radians"); itw != o.end()) {
+      b.orbit_arg_periapsis_radians = itw->second.number_value();
+    }
     if (auto it = o.find("mineral_deposits"); it != o.end()) {
       b.mineral_deposits = map_string_double_from_json(it->second);
     }

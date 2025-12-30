@@ -50,6 +50,8 @@ const char* body_type_label(BodyType t) {
       return "moon";
     case BodyType::Asteroid:
       return "asteroid";
+    case BodyType::Comet:
+      return "comet";
     case BodyType::GasGiant:
       return "gas_giant";
   }

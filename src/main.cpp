@@ -40,6 +40,21 @@ std::string trim_copy(const std::string& s) {
   size_t b = s.size();
   while (b > a && std::isspace(static_cast<unsigned char>(s[b - 1]))) --b;
   return s.substr(a, b - a);
+std::string get_env_string(const char* name) {
+#ifdef _MSC_VER
+  // MSVC warns on getenv(); use _dupenv_s instead.
+  char* buf = nullptr;
+  size_t sz = 0;
+  if (_dupenv_s(&buf, &sz, name) != 0 || buf == nullptr) return {};
+  std::string out(buf);
+  std::free(buf);
+  return out;
+#else
+  const char* v = std::getenv(name);
+  return v ? std::string(v) : std::string{};
+#endif
+}
+
 }
 
 std::vector<std::string> split_env_paths(const char* env_value) {

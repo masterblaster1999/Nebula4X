@@ -6,6 +6,7 @@
 
 #include "nebula4x/core/simulation.h"
 
+#include "ui/hud.h"
 #include "ui/ui_state.h"
 
 namespace nebula4x::ui {
@@ -64,6 +65,9 @@ class App {
 
   // Shared UI toggles (fog-of-war etc.)
   UIState ui_{};
+
+  // HUD transient state (command palette query, toast queue, etc.).
+  HUDState hud_{};
 };
 
 } // namespace nebula4x::ui

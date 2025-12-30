@@ -6,6 +6,30 @@
 
 namespace nebula4x::ui {
 
+// Programmatic tab selection helpers.
+// These are UI-only (not persisted in saves). They allow other UI surfaces
+// (status bar, command palette, toast notifications) to request that a
+// particular tab becomes active on the next frame.
+enum class DetailsTab {
+  None,
+  Ship,
+  Fleet,
+  Colony,
+  Body,
+  Logistics,
+  Research,
+  Diplomacy,
+  Design,
+  Contacts,
+  Log,
+};
+
+enum class MapTab {
+  None,
+  System,
+  Galaxy,
+};
+
 // Shared UI toggle/state so multiple panels can respect the same fog-of-war settings.
 // This is intentionally not persisted in saves.
 struct UIState {
@@ -21,6 +45,9 @@ struct UIState {
   bool show_selected_sensor_range{true};
   bool show_contact_markers{true};
   bool show_contact_labels{false};
+
+  bool show_minor_bodies{true};
+  bool show_minor_body_labels{false};
 
   // Galaxy map view toggles.
   bool show_galaxy_labels{true};
@@ -43,6 +70,24 @@ struct UIState {
   bool show_directory_window{true};
   bool show_economy_window{false};
   bool show_settings_window{false};
+
+  // Additional UI chrome.
+  bool show_status_bar{true};
+
+  // Transient helper windows.
+  bool show_command_palette{false};
+  bool show_help_window{false};
+
+  // Requested tab focus (consumed by the next frame).
+  DetailsTab request_details_tab{DetailsTab::None};
+  MapTab request_map_tab{MapTab::None};
+
+  // UI scaling (1.0 = default). This affects readability on high-DPI displays.
+  float ui_scale{1.0f};
+
+  // Event toast notifications (warn/error popups).
+  bool show_event_toasts{true};
+  float event_toast_duration_sec{6.0f};
 
   // --- UI theme / colors (RGBA in 0..1) ---
   // These are UI-only preferences. The UI provides helpers to save/load these

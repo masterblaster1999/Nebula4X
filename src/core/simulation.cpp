@@ -2071,9 +2071,43 @@ void Simulation::recompute_body_positions() {
 
     Vec2 pos = center;
     if (b.orbit_radius_mkm > 1e-9) {
+      const double a = std::max(0.0, b.orbit_radius_mkm);
+      const double e = std::clamp(b.orbit_eccentricity, 0.0, 0.999999);
       const double period = std::max(1.0, b.orbit_period_days);
-      const double theta = b.orbit_phase_radians + kTwoPi * (t / period);
-      pos = center + Vec2{b.orbit_radius_mkm * std::cos(theta), b.orbit_radius_mkm * std::sin(theta)};
+
+      // Mean anomaly advances linearly with time.
+      double M = b.orbit_phase_radians + kTwoPi * (t / period);
+      // Wrap for numerical stability.
+      M = std::fmod(M, kTwoPi);
+      if (M < 0.0) M += kTwoPi;
+
+      // Solve Kepler's equation: M = E - e sin(E) for eccentric anomaly E.
+      // Newton iteration converges quickly for typical orbital eccentricities.
+      double E = (e < 0.8) ? M : (kTwoPi * 0.5); // start at pi for high-e orbits
+      for (int it = 0; it < 12; ++it) {
+        const double sE = std::sin(E);
+        const double cE = std::cos(E);
+        const double f = (E - e * sE) - M;
+        const double fp = 1.0 - e * cE;
+        if (std::fabs(fp) < 1e-12) break;
+        const double d = f / fp;
+        E -= d;
+        if (std::fabs(f) < 1e-10) break;
+      }
+
+      const double sE = std::sin(E);
+      const double cE = std::cos(E);
+      const double bsemi = a * std::sqrt(std::max(0.0, 1.0 - e * e));
+      const double x = a * (cE - e);
+      const double y = bsemi * sE;
+
+      const double w = b.orbit_arg_periapsis_radians;
+      const double cw = std::cos(w);
+      const double sw = std::sin(w);
+      const double rx = x * cw - y * sw;
+      const double ry = x * sw + y * cw;
+
+      pos = center + Vec2{rx, ry};
     }
 
     cache[id] = pos;

@@ -8,6 +8,7 @@
 #include <random>
 #include <string>
 #include <unordered_set>
+#include <unordered_map>
 #include <vector>
 
 #include "nebula4x/core/date.h"
@@ -25,6 +26,7 @@ GameState make_sol_scenario() {
   // v22: adds Body::mineral_deposits (finite mining / depletion).
   // v23: adds ship fuel tanks + fuel consumption (logistics).
   // v26: adds hierarchical orbits (Body::parent_body_id) + optional physical metadata.
+  // v27: adds eccentric orbits + BodyType::Comet.
   // New games should start at the current save schema version.
   s.save_version = GameState{}.save_version;
   s.date = Date::from_ymd(2200, 1, 1);
@@ -82,17 +84,19 @@ GameState make_sol_scenario() {
 
   s.selected_system = sol;
 
-  auto add_body = [&](Id system_id, const std::string& name, BodyType type, double radius_mkm, double period_days,
-                      double phase) {
+  auto add_body = [&](Id system_id, const std::string& name, BodyType type, double a_mkm, double period_days,
+                      double mean_anomaly, double eccentricity = 0.0, double arg_periapsis = 0.0) {
     const Id id = allocate_id(s);
     Body b;
     b.id = id;
     b.name = name;
     b.type = type;
     b.system_id = system_id;
-    b.orbit_radius_mkm = radius_mkm;
+    b.orbit_radius_mkm = a_mkm;
     b.orbit_period_days = period_days;
-    b.orbit_phase_radians = phase;
+    b.orbit_phase_radians = mean_anomaly;
+    b.orbit_eccentricity = eccentricity;
+    b.orbit_arg_periapsis_radians = arg_periapsis;
     s.bodies[id] = b;
     s.systems[system_id].bodies.push_back(id);
     return id;
@@ -103,6 +107,47 @@ GameState make_sol_scenario() {
   const Id earth = add_body(sol, "Earth", BodyType::Planet, 149.6, 365.25, 0.0);
   const Id mars = add_body(sol, "Mars", BodyType::Planet, 227.9, 686.98, 1.0);
   (void)add_body(sol, "Jupiter", BodyType::GasGiant, 778.5, 4332.6, 2.0);
+
+  // Minor bodies (prototype): a modest asteroid belt and a short-period comet.
+  //
+  // This keeps the Sol start interesting for mining and demonstrates
+  // non-circular (eccentric) orbits without blowing out the map scale.
+  auto period_solar = [](double a_mkm) {
+    const double a_au = a_mkm / 149.6;
+    const double years = std::sqrt(std::max(0.0, a_au * a_au * a_au));
+    return std::max(1.0, years * 365.25);
+  };
+
+  auto eq_temp_solar = [](double dist_au, double albedo) {
+    const double d = std::max(0.05, dist_au);
+    const double a = std::clamp(albedo, 0.0, 0.95);
+    const double t = 278.0 / std::sqrt(d) * std::pow(1.0 - a, 0.25);
+    return std::clamp(t, 30.0, 2000.0);
+  };
+
+  std::vector<Id> sol_belt;
+  sol_belt.reserve(12);
+  for (int i = 0; i < 12; ++i) {
+    const double rr = 414.0 + (static_cast<double>(i) - 5.5) * 3.0; // ~2.7 AU belt band
+    const double ph = 0.35 * static_cast<double>(i);
+    const Id aid = add_body(sol, "Asteroid " + std::to_string(i + 1), BodyType::Asteroid, rr, period_solar(rr), ph);
+    sol_belt.push_back(aid);
+    auto& b = s.bodies.at(aid);
+    b.radius_km = 50.0 + 15.0 * (i % 5);
+    b.surface_temp_k = eq_temp_solar(rr / 149.6, 0.08);
+  }
+
+  // A short-period comet with a noticeable eccentricity but a manageable aphelion.
+  const double encke_a = 332.0; // ~2.22 AU
+  const Id encke =
+      add_body(sol, "Comet Encke", BodyType::Comet, encke_a, period_solar(encke_a), 0.7, 0.85, 1.2);
+  {
+    auto& b = s.bodies.at(encke);
+    b.radius_km = 6.0;
+    // Temperature shown is a rough perihelion equilibrium estimate.
+    const double q_au = (encke_a / 149.6) * (1.0 - 0.85);
+    b.surface_temp_k = eq_temp_solar(q_au, 0.04);
+  }
 
   // --- Alpha Centauri bodies ---
   (void)add_body(centauri, "Alpha Centauri A", BodyType::Star, 0.0, 1.0, 0.0);
@@ -126,6 +171,11 @@ GameState make_sol_scenario() {
   // Give home bodies deep deposits so early growth isn't immediately blocked.
   seed_deposits(earth, 2.0e6, 2.0e5);
   seed_deposits(mars, 4.0e5, 4.0e4);
+  // Minor bodies have smaller, but sometimes useful deposits.
+  for (Id aid : sol_belt) {
+    seed_deposits(aid, 7.5e4, 6.0e3);
+  }
+  seed_deposits(encke, 2.5e4, 1.5e3);
   seed_deposits(centauri_prime, 1.2e6, 1.2e5);
   seed_deposits(barnard_b, 3.0e5, 3.0e4);
   seed_deposits(barnard_b, 2.0e5, 2.0e4);
@@ -467,6 +517,9 @@ double sample_albedo(std::mt19937& rng, BodyType type) {
   switch (type) {
     case BodyType::GasGiant:
       return rand_real(rng, 0.30, 0.65);
+    case BodyType::Comet:
+      // Comets: very dark, dusty ice.
+      return rand_real(rng, 0.02, 0.06);
     case BodyType::Asteroid:
       return rand_real(rng, 0.02, 0.18);
     case BodyType::Moon:
@@ -503,6 +556,7 @@ GameState make_random_scenario(std::uint32_t seed, int num_systems) {
   // v22: adds Body::mineral_deposits (finite mining / depletion).
   // v23: adds ship fuel tanks + fuel consumption (logistics).
   // v26: adds hierarchical orbits (Body::parent_body_id) + optional physical metadata.
+  // v27: adds eccentric orbits + BodyType::Comet.
   // New games should start at the current save schema version.
   s.save_version = GameState{}.save_version;
   s.date = Date::from_ymd(2200, 1, 1);
@@ -536,8 +590,8 @@ GameState make_random_scenario(std::uint32_t seed, int num_systems) {
   }
 
   // --- Helpers ---
-  auto add_body = [&](Id system_id, Id parent_body_id, const std::string& name, BodyType type, double radius_mkm,
-                      double period_days, double phase_radians) -> Id {
+  auto add_body = [&](Id system_id, Id parent_body_id, const std::string& name, BodyType type, double a_mkm,
+                      double period_days, double mean_anomaly, double eccentricity = 0.0, double arg_periapsis = 0.0) -> Id {
     const Id id = allocate_id(s);
     Body b;
     b.id = id;
@@ -545,9 +599,11 @@ GameState make_random_scenario(std::uint32_t seed, int num_systems) {
     b.type = type;
     b.system_id = system_id;
     b.parent_body_id = parent_body_id;
-    b.orbit_radius_mkm = radius_mkm;
+    b.orbit_radius_mkm = a_mkm;
     b.orbit_period_days = period_days;
-    b.orbit_phase_radians = phase_radians;
+    b.orbit_phase_radians = mean_anomaly;
+    b.orbit_eccentricity = eccentricity;
+    b.orbit_arg_periapsis_radians = arg_periapsis;
     s.bodies[id] = b;
     s.systems[system_id].bodies.push_back(id);
     return id;
@@ -576,6 +632,11 @@ GameState make_random_scenario(std::uint32_t seed, int num_systems) {
       case BodyType::Asteroid:
         base_dur = 4.5e5;
         base_neu = 4.0e4;
+        break;
+      case BodyType::Comet:
+        // Comets trend volatile-rich but metal-poor (prototype: fewer mineable tons).
+        base_dur = 1.6e5;
+        base_neu = 1.2e4;
         break;
       case BodyType::Planet:
       default:
@@ -794,7 +855,7 @@ GameState make_random_scenario(std::uint32_t seed, int num_systems) {
 
       // Asteroid belt.
       if (idx == belt_index) {
-        const int asteroids = rand_int(rng, 4, 8);
+        const int asteroids = rand_int(rng, 24, 64);
         for (int aidx = 0; aidx < asteroids; ++aidx) {
           const double rr = std::max(5.0, orbit_mkm + rand_normal(rng, 0.0, std::max(0.8, orbit_mkm * 0.012)));
           const double ph = rand_real(rng, 0.0, kTwoPi);
@@ -805,7 +866,7 @@ GameState make_random_scenario(std::uint32_t seed, int num_systems) {
           const Id aid = add_body(sys_id, kInvalidId, aname, BodyType::Asteroid, rr, pd, ph);
 
           auto& b = s.bodies.at(aid);
-          b.radius_km = rand_real(rng, 30.0, 350.0);
+          b.radius_km = rand_real(rng, 5.0, 180.0);
           b.surface_temp_k = equilibrium_temp_k(sp.luminosity_solar, rr / kAu_mkm, sample_albedo(rng, BodyType::Asteroid));
           seed_basic_deposits(aid, BodyType::Asteroid, rr / kAu_mkm, sp.metallicity, 1.0);
 
@@ -848,6 +909,36 @@ GameState make_random_scenario(std::uint32_t seed, int num_systems) {
       const double richness = (idx == forced_home_idx) ? 2.1 : 1.0;
       seed_basic_deposits(pid, type, orbit_au, sp.metallicity, richness);
 
+      // Trojan asteroids (L4/L5) around some gas giants.
+      // These orbit the primary star at roughly the same semi-major axis as the giant.
+      if (type == BodyType::GasGiant && rand_unit(rng) < 0.70) {
+        const int tro_each = rand_int(rng, 4, 12);
+
+        auto add_trojans = [&](const char* tag, double offset) {
+          for (int ti = 0; ti < tro_each; ++ti) {
+            const double rr = orbit_mkm * rand_real(rng, 0.995, 1.005);
+            const double e = std::clamp(rand_real(rng, 0.0, 0.06), 0.0, 0.12);
+            const double w = rand_real(rng, 0.0, kTwoPi);
+            const double ph = phase + offset + rand_normal(rng, 0.0, 0.20);
+            const double pd = kepler_period_days(rr / kAu_mkm, sp.mass_solar);
+
+            const std::string tname = pname + " " + tag + "-" + std::to_string(ti + 1);
+            const Id tid = add_body(sys_id, kInvalidId, tname, BodyType::Asteroid, rr, pd, ph, e, w);
+
+            auto& tb = s.bodies.at(tid);
+            tb.radius_km = rand_real(rng, 2.0, 60.0);
+            tb.surface_temp_k =
+                equilibrium_temp_k(sp.luminosity_solar, rr / kAu_mkm, sample_albedo(rng, BodyType::Asteroid));
+            seed_basic_deposits(tid, BodyType::Asteroid, rr / kAu_mkm, sp.metallicity, 0.8);
+
+            max_extent_mkm = std::max(max_extent_mkm, rr * (1.0 + e));
+          }
+        };
+
+        add_trojans("L4", kTwoPi / 6.0);   // +60 degrees
+        add_trojans("L5", -kTwoPi / 6.0);  // -60 degrees
+      }
+
       // Habitable-ish scoring for colony candidates.
       if (type == BodyType::Planet) {
         const double t = pb.surface_temp_k;
@@ -889,7 +980,65 @@ GameState make_random_scenario(std::uint32_t seed, int num_systems) {
 
         max_extent_mkm = std::max(max_extent_mkm, orbit_mkm + mr);
       }
+
+      // Captured minor bodies / irregular satellites around some gas giants.
+      // Implemented as Asteroid-type bodies orbiting the planet (not the star).
+      if (type == BodyType::GasGiant && rand_unit(rng) < 0.35) {
+        const int captured = rand_int(rng, 1, 3);
+        for (int ci = 0; ci < captured; ++ci) {
+          const double mr = rand_log_uniform(rng, 0.05, 1.5);
+          const double mp = rand_real(rng, 10.0, 180.0);
+          const double ph = rand_real(rng, 0.0, kTwoPi);
+          const double e = std::clamp(rand_real(rng, 0.0, 0.35), 0.0, 0.8);
+          const double w = rand_real(rng, 0.0, kTwoPi);
+
+          const std::string cname = pname + " Captured-" + std::to_string(ci + 1);
+          const Id cid = add_body(sys_id, pid, cname, BodyType::Asteroid, mr, mp, ph, e, w);
+
+          auto& cb = s.bodies.at(cid);
+          cb.mass_earths = rand_log_uniform(rng, 0.000001, 0.00005);
+          cb.radius_km = rand_real(rng, 1.0, 25.0);
+          cb.surface_temp_k =
+              equilibrium_temp_k(sp.luminosity_solar, orbit_au, sample_albedo(rng, BodyType::Asteroid));
+          seed_basic_deposits(cid, BodyType::Asteroid, orbit_au, sp.metallicity, 0.65);
+
+          max_extent_mkm = std::max(max_extent_mkm, orbit_mkm + mr * (1.0 + e));
+        }
+      }
     }
+
+    // Comets: eccentric minor bodies with perihelia in the inner system and aphelia near the outer edge.
+    // Keep aphelion within a modest multiple of the system's current extent so the map stays readable.
+    const double sys_extent = std::max(max_extent_mkm, outer_au * kAu_mkm);
+    if (rand_unit(rng) < 0.65) {
+      const int comets = rand_int(rng, 1, 3);
+      for (int ci = 0; ci < comets; ++ci) {
+        const double aphelion = sys_extent * rand_real(rng, 1.05, 1.25);
+
+        // Perihelion biased toward the inner system.
+        double perihelion = inner_au * kAu_mkm * rand_real(rng, 0.35, 0.85);
+        perihelion = std::max(perihelion, 0.05 * kAu_mkm);
+        perihelion = std::min(perihelion, aphelion * 0.70);
+
+        const double e = (aphelion - perihelion) / (aphelion + perihelion);
+        const double a_mkm = 0.5 * (aphelion + perihelion);
+        const double pd = kepler_period_days(a_mkm / kAu_mkm, sp.mass_solar);
+        const double M0 = rand_real(rng, 0.0, kTwoPi);
+        const double w = rand_real(rng, 0.0, kTwoPi);
+
+        const std::string cname = sys.name + " Comet " + std::string(1, static_cast<char>('A' + ci));
+        const Id cid = add_body(sys_id, kInvalidId, cname, BodyType::Comet, a_mkm, pd, M0, e, w);
+
+        auto& cb = s.bodies.at(cid);
+        cb.radius_km = rand_real(rng, 1.0, 20.0);
+        // Temperature shown is a perihelion equilibrium estimate (what matters for "active" comets).
+        cb.surface_temp_k = equilibrium_temp_k(sp.luminosity_solar, perihelion / kAu_mkm, sample_albedo(rng, BodyType::Comet));
+        seed_basic_deposits(cid, BodyType::Comet, a_mkm / kAu_mkm, sp.metallicity, 0.55);
+
+        max_extent_mkm = std::max(max_extent_mkm, aphelion);
+      }
+    }
+
 
     // Colony candidate selection for this system.
     if (best_hab_id != kInvalidId) {
@@ -1137,11 +1286,56 @@ GameState make_random_scenario(std::uint32_t seed, int num_systems) {
     return id;
   };
 
-  // Spawn near the homeworld.
+  // Approximate body positions at epoch (t=0) so ships spawn near the right place even for eccentric orbits.
+  std::unordered_map<Id, Vec2> epoch_pos_cache;
+
+  auto orbit_offset_epoch = [&](const Body& b) -> Vec2 {
+    if (b.orbit_radius_mkm <= 1e-9) return {0.0, 0.0};
+    const double a = std::max(0.0, b.orbit_radius_mkm);
+    const double e = std::clamp(std::abs(b.orbit_eccentricity), 0.0, 0.999999);
+    const double M = std::fmod(b.orbit_phase_radians, kTwoPi);
+
+    // Solve Kepler's equation for eccentric anomaly E (t=0).
+    double E = (e < 0.8) ? M : (kTwoPi * 0.5);
+    for (int it = 0; it < 12; ++it) {
+      const double sE = std::sin(E);
+      const double cE = std::cos(E);
+      const double f = (E - e * sE) - M;
+      const double fp = 1.0 - e * cE;
+      if (std::fabs(fp) < 1e-12) break;
+      E -= f / fp;
+      if (std::fabs(f) < 1e-10) break;
+    }
+
+    const double sE = std::sin(E);
+    const double cE = std::cos(E);
+    const double bsemi = a * std::sqrt(std::max(0.0, 1.0 - e * e));
+    const double x = a * (cE - e);
+    const double y = bsemi * sE;
+
+    const double w = b.orbit_arg_periapsis_radians;
+    const double cw = std::cos(w);
+    const double sw = std::sin(w);
+    return {x * cw - y * sw, x * sw + y * cw};
+  };
+
+  auto body_pos_epoch = [&](Id bid, auto&& self) -> Vec2 {
+    if (auto it = epoch_pos_cache.find(bid); it != epoch_pos_cache.end()) return it->second;
+    const auto* b = find_ptr(s.bodies, bid);
+    if (!b) return {0.0, 0.0};
+
+    Vec2 parent_pos{0.0, 0.0};
+    if (b->parent_body_id != kInvalidId) {
+      parent_pos = self(b->parent_body_id, self);
+    }
+
+    const Vec2 pos = parent_pos + orbit_offset_epoch(*b);
+    epoch_pos_cache[bid] = pos;
+    return pos;
+  };
+
   Vec2 home_pos{0.0, 0.0};
-  if (const auto* b = find_ptr(s.bodies, homeworld_body)) {
-    home_pos = {b->orbit_radius_mkm * std::cos(b->orbit_phase_radians), b->orbit_radius_mkm * std::sin(b->orbit_phase_radians)};
-  }
+  home_pos = body_pos_epoch(homeworld_body, body_pos_epoch);
 
   // --- Starting Terran fleet ---
   (void)add_ship(terrans, home_system, home_pos, "Freighter Alpha", "freighter_alpha");
@@ -1153,9 +1347,7 @@ GameState make_random_scenario(std::uint32_t seed, int num_systems) {
     // Spawn near the pirate base body.
     Vec2 ppos{80.0, 0.5};
     const SysInfo& ps = systems[static_cast<std::size_t>(pirate_idx)];
-    if (const auto* b = find_ptr(s.bodies, ps.preferred_colony_body)) {
-      ppos = {b->orbit_radius_mkm * std::cos(b->orbit_phase_radians), b->orbit_radius_mkm * std::sin(b->orbit_phase_radians)};
-    }
+    ppos = body_pos_epoch(ps.preferred_colony_body, body_pos_epoch);
     (void)add_ship(pirates, pirate_system, ppos, "Raider I", "pirate_raider");
     (void)add_ship(pirates, pirate_system, ppos + Vec2{0.7, -0.3}, "Raider II", "pirate_raider");
   } else {
