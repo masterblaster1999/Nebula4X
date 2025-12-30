@@ -154,6 +154,43 @@
           "value": "shield_mk2"
         }
       ]
+    },
+    {
+      "id": "ground_forces_1",
+      "name": "Planetary Defense Forces",
+      "cost": 900,
+      "prereqs": [
+        "chemistry_1"
+      ],
+      "effects": [
+        {
+          "type": "unlock_component",
+          "value": "troop_bay_mk1"
+        },
+        {
+          "type": "unlock_installation",
+          "value": "training_facility"
+        },
+        {
+          "type": "unlock_installation",
+          "value": "planetary_fortress"
+        }
+      ]
+    },
+    {
+      "id": "terraforming_1",
+      "name": "Terraforming Systems",
+      "cost": 1600,
+      "prereqs": [
+        "chemistry_1",
+        "colonization_1"
+      ],
+      "effects": [
+        {
+          "type": "unlock_installation",
+          "value": "terraforming_plant"
+        }
+      ]
     }
   ]
 }

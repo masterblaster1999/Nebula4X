@@ -803,6 +803,13 @@ void Simulation::apply_design_stats_to_ship(Ship& ship) {
     if (ship.shields < 0.0) ship.shields = max_sh;
     ship.shields = std::clamp(ship.shields, 0.0, max_sh);
   }
+
+  const double troop_cap = std::max(0.0, d->troop_capacity);
+  if (troop_cap <= 1e-9) {
+    ship.troops = 0.0;
+  } else {
+    ship.troops = std::clamp(ship.troops, 0.0, troop_cap);
+  }
 }
 
 bool Simulation::upsert_custom_design(ShipDesign design, std::string* error) {
@@ -824,6 +831,7 @@ bool Simulation::upsert_custom_design(ShipDesign design, std::string* error) {
   double cargo = 0.0;
   double sensor = 0.0;
   double colony_cap = 0.0;
+  double troop_cap = 0.0;
   double weapon_damage = 0.0;
   double weapon_range = 0.0;
   double hp_bonus = 0.0;
@@ -850,6 +858,7 @@ bool Simulation::upsert_custom_design(ShipDesign design, std::string* error) {
     cargo += c.cargo_tons;
     sensor = std::max(sensor, c.sensor_range_mkm);
     colony_cap += c.colony_capacity_millions;
+    troop_cap += c.troop_capacity;
 
     if (c.type == ComponentType::Weapon) {
       weapon_damage += c.weapon_damage;
@@ -880,6 +889,7 @@ bool Simulation::upsert_custom_design(ShipDesign design, std::string* error) {
   design.cargo_tons = cargo;
   design.sensor_range_mkm = sensor;
   design.colony_capacity_millions = colony_cap;
+  design.troop_capacity = troop_cap;
 
   design.power_generation = power_gen;
   design.power_use_total = power_use_total;
@@ -1903,6 +1913,132 @@ bool Simulation::issue_unload_mineral(Id ship_id, Id colony_id, const std::strin
   return true;
 }
 
+bool Simulation::issue_load_troops(Id ship_id, Id colony_id, double strength, bool restrict_to_discovered) {
+  auto* ship = find_ptr(state_.ships, ship_id);
+  if (!ship) return false;
+  auto* colony = find_ptr(state_.colonies, colony_id);
+  if (!colony) return false;
+  if (colony->faction_id != ship->faction_id) return false;
+  const auto* body = find_ptr(state_.bodies, colony->body_id);
+  if (!body) return false;
+  if (body->system_id == kInvalidId) return false;
+  if (!find_ptr(state_.systems, body->system_id)) return false;
+  if (strength < 0.0) return false;
+
+  if (!issue_travel_to_system(ship_id, body->system_id, restrict_to_discovered)) return false;
+
+  auto& orders = state_.ship_orders[ship_id];
+  orders.queue.push_back(LoadTroops{colony_id, strength});
+  return true;
+}
+
+bool Simulation::issue_unload_troops(Id ship_id, Id colony_id, double strength, bool restrict_to_discovered) {
+  auto* ship = find_ptr(state_.ships, ship_id);
+  if (!ship) return false;
+  auto* colony = find_ptr(state_.colonies, colony_id);
+  if (!colony) return false;
+  if (colony->faction_id != ship->faction_id) return false;
+  const auto* body = find_ptr(state_.bodies, colony->body_id);
+  if (!body) return false;
+  if (body->system_id == kInvalidId) return false;
+  if (!find_ptr(state_.systems, body->system_id)) return false;
+  if (strength < 0.0) return false;
+
+  if (!issue_travel_to_system(ship_id, body->system_id, restrict_to_discovered)) return false;
+
+  auto& orders = state_.ship_orders[ship_id];
+  orders.queue.push_back(UnloadTroops{colony_id, strength});
+  return true;
+}
+
+bool Simulation::issue_invade_colony(Id ship_id, Id colony_id, bool restrict_to_discovered) {
+  auto* ship = find_ptr(state_.ships, ship_id);
+  if (!ship) return false;
+  auto* colony = find_ptr(state_.colonies, colony_id);
+  if (!colony) return false;
+  if (colony->faction_id == ship->faction_id) return false;
+  const auto* body = find_ptr(state_.bodies, colony->body_id);
+  if (!body) return false;
+  if (body->system_id == kInvalidId) return false;
+  if (!find_ptr(state_.systems, body->system_id)) return false;
+
+  if (!issue_travel_to_system(ship_id, body->system_id, restrict_to_discovered)) return false;
+
+  auto& orders = state_.ship_orders[ship_id];
+  orders.queue.push_back(InvadeColony{colony_id});
+  return true;
+}
+
+bool Simulation::enqueue_troop_training(Id colony_id, double strength) {
+  auto* colony = find_ptr(state_.colonies, colony_id);
+  if (!colony) return false;
+  if (strength <= 0.0) return false;
+  colony->troop_training_queue += strength;
+  return true;
+}
+
+bool Simulation::clear_troop_training_queue(Id colony_id) {
+  auto* colony = find_ptr(state_.colonies, colony_id);
+  if (!colony) return false;
+  colony->troop_training_queue = 0.0;
+  return true;
+}
+
+bool Simulation::set_terraforming_target(Id body_id, double target_temp_k, double target_atm) {
+  auto* body = find_ptr(state_.bodies, body_id);
+  if (!body) return false;
+  if (target_temp_k <= 0.0 && target_atm <= 0.0) return false;
+  body->terraforming_target_temp_k = std::max(0.0, target_temp_k);
+  body->terraforming_target_atm = std::max(0.0, target_atm);
+  body->terraforming_complete = false;
+  return true;
+}
+
+bool Simulation::clear_terraforming_target(Id body_id) {
+  auto* body = find_ptr(state_.bodies, body_id);
+  if (!body) return false;
+  body->terraforming_target_temp_k = 0.0;
+  body->terraforming_target_atm = 0.0;
+  body->terraforming_complete = false;
+  return true;
+}
+
+double Simulation::terraforming_points_per_day(const Colony& c) const {
+  double total = 0.0;
+  for (const auto& [inst_id, count] : c.installations) {
+    if (count <= 0) continue;
+    auto it = content_.installations.find(inst_id);
+    if (it == content_.installations.end()) continue;
+    const double p = it->second.terraforming_points_per_day;
+    if (p > 0.0) total += p * static_cast<double>(count);
+  }
+  return total;
+}
+
+double Simulation::troop_training_points_per_day(const Colony& c) const {
+  double total = 0.0;
+  for (const auto& [inst_id, count] : c.installations) {
+    if (count <= 0) continue;
+    auto it = content_.installations.find(inst_id);
+    if (it == content_.installations.end()) continue;
+    const double p = it->second.troop_training_points_per_day;
+    if (p > 0.0) total += p * static_cast<double>(count);
+  }
+  return total;
+}
+
+double Simulation::fortification_points(const Colony& c) const {
+  double total = 0.0;
+  for (const auto& [inst_id, count] : c.installations) {
+    if (count <= 0) continue;
+    auto it = content_.installations.find(inst_id);
+    if (it == content_.installations.end()) continue;
+    const double p = it->second.fortification_points;
+    if (p > 0.0) total += p * static_cast<double>(count);
+  }
+  return total;
+}
+
 bool Simulation::issue_transfer_cargo_to_ship(Id ship_id, Id target_ship_id, const std::string& mineral, double tons,
                                               bool restrict_to_discovered) {
   auto* ship = find_ptr(state_.ships, ship_id);
@@ -2133,6 +2269,8 @@ void Simulation::tick_one_day() {
   tick_contacts();
   tick_shields();
   tick_combat();
+  tick_ground_combat();
+  tick_terraforming();
   tick_repairs();
 }
 

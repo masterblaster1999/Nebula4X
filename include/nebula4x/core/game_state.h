@@ -23,7 +23,7 @@ struct ContentDB {
 
 // A single save-game state.
 struct GameState {
-  int save_version{27};
+  int save_version{28};
   Date date;
 
   Id next_id{1};
@@ -56,6 +56,10 @@ struct GameState {
   // Persistent simulation event log.
   // Events are appended during ticks and saved/loaded with the game.
   std::vector<SimEvent> events;
+
+  // Persistent ground battles.
+  // Key: colony id.
+  std::unordered_map<Id, GroundBattle> ground_battles;
 
   // UI convenience: which system is selected.
   Id selected_system{kInvalidId};

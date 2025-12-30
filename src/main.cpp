@@ -40,6 +40,8 @@ std::string trim_copy(const std::string& s) {
   size_t b = s.size();
   while (b > a && std::isspace(static_cast<unsigned char>(s[b - 1]))) --b;
   return s.substr(a, b - a);
+}
+
 std::string get_env_string(const char* name) {
 #ifdef _MSC_VER
   // MSVC warns on getenv(); use _dupenv_s instead.
@@ -55,7 +57,6 @@ std::string get_env_string(const char* name) {
 #endif
 }
 
-}
 
 std::vector<std::string> split_env_paths(const char* env_value) {
   std::vector<std::string> out;
@@ -82,9 +83,11 @@ int main(int /*argc*/, char** /*argv*/) {
   try {
     nebula4x::log::set_level(nebula4x::log::Level::Info);
 
-    std::vector<std::string> content_paths = split_env_paths(std::getenv("NEBULA4X_CONTENT"));
+    const std::string content_env = get_env_string("NEBULA4X_CONTENT");
+    std::vector<std::string> content_paths = split_env_paths(content_env.empty() ? nullptr : content_env.c_str());
     if (content_paths.empty()) content_paths.push_back("data/blueprints/starting_blueprints.json");
-    std::vector<std::string> tech_paths = split_env_paths(std::getenv("NEBULA4X_TECH"));
+    const std::string tech_env = get_env_string("NEBULA4X_TECH");
+    std::vector<std::string> tech_paths = split_env_paths(tech_env.empty() ? nullptr : tech_env.c_str());
     if (tech_paths.empty()) tech_paths.push_back("data/tech/tech_tree.json");
 
     auto content = nebula4x::load_content_db_from_files(content_paths);

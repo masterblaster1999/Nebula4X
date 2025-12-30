@@ -87,6 +87,27 @@ struct UnloadMineral {
   double tons{0.0};
 };
 
+// Load troops from a friendly colony into this ship.
+// If strength <= 0, load as much as possible (up to troop capacity).
+struct LoadTroops {
+  Id colony_id{kInvalidId};
+  double strength{0.0};
+};
+
+// Unload troops from this ship into a friendly colony.
+// If strength <= 0, unload as much as possible.
+struct UnloadTroops {
+  Id colony_id{kInvalidId};
+  double strength{0.0};
+};
+
+// Invade a hostile colony using embarked troops.
+// The ship will move into docking range of the colony's body and then
+// initiate a ground battle.
+struct InvadeColony {
+  Id colony_id{kInvalidId};
+};
+
 // Transfer minerals from this ship's cargo into another friendly ship.
 // If mineral is empty, transfer all minerals (until capacity or requested tons).
 // If tons <= 0, transfer as much as possible.
@@ -110,6 +131,9 @@ using Order = std::variant<MoveToPoint,
                            WaitDays,
                            LoadMineral,
                            UnloadMineral,
+                           LoadTroops,
+                           UnloadTroops,
+                           InvadeColony,
                            TransferCargoToShip,
                            ScrapShip>;
 

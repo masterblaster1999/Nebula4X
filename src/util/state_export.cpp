@@ -481,6 +481,10 @@ std::string bodies_to_json(const GameState& state) {
     if (b.mass_earths > 0.0) obj["mass_earths"] = b.mass_earths;
     if (b.radius_km > 0.0) obj["radius_km"] = b.radius_km;
     if (b.surface_temp_k > 0.0) obj["surface_temp_k"] = b.surface_temp_k;
+    if (b.atmosphere_atm > 0.0) obj["atmosphere_atm"] = b.atmosphere_atm;
+    if (b.terraforming_target_temp_k > 0.0) obj["terraforming_target_temp_k"] = b.terraforming_target_temp_k;
+    if (b.terraforming_target_atm > 0.0) obj["terraforming_target_atm"] = b.terraforming_target_atm;
+    if (b.terraforming_complete) obj["terraforming_complete"] = true;
 
     if (!b.mineral_deposits.empty()) {
       json::Object dep_obj;

@@ -108,6 +108,24 @@ GameState make_sol_scenario() {
   const Id mars = add_body(sol, "Mars", BodyType::Planet, 227.9, 686.98, 1.0);
   (void)add_body(sol, "Jupiter", BodyType::GasGiant, 778.5, 4332.6, 2.0);
 
+  // Basic environmental defaults + a starter terraforming target for Mars.
+  {
+    auto& e = s.bodies.at(earth);
+    e.surface_temp_k = 288.0;
+    e.atmosphere_atm = 1.0;
+    e.terraforming_target_temp_k = 288.0;
+    e.terraforming_target_atm = 1.0;
+    e.terraforming_complete = true;
+
+    auto& m = s.bodies.at(mars);
+    m.surface_temp_k = 210.0;
+    m.atmosphere_atm = 0.006;
+    // Prototype target: "Earthlike".
+    m.terraforming_target_temp_k = 288.0;
+    m.terraforming_target_atm = 0.8;
+    m.terraforming_complete = false;
+  }
+
   // Minor bodies (prototype): a modest asteroid belt and a short-period comet.
   //
   // This keeps the Sol start interesting for mining and demonstrates
@@ -249,7 +267,10 @@ GameState make_sol_scenario() {
         {"shipyard", 1},
         {"research_lab", 20},
         {"sensor_station", 1},
+        {"training_facility", 2},
+        {"planetary_fortress", 1},
     };
+    c.ground_forces = 1200.0;
     s.colonies[c.id] = c;
   }
 
@@ -271,7 +292,9 @@ GameState make_sol_scenario() {
         {"construction_factory", 1},
         {"fuel_refinery", 1},
         {"research_lab", 2},
+        {"terraforming_plant", 1},
     };
+    c.ground_forces = 80.0;
     s.colonies[c.id] = c;
   }
 
@@ -288,6 +311,8 @@ GameState make_sol_scenario() {
     c.installations["construction_factory"] = 1;
     c.installations["research_lab"] = 5;
     c.installations["sensor_station"] = 1;
+    c.installations["planetary_fortress"] = 1;
+    c.ground_forces = 400.0;
     c.installations["automated_mine"] = 10;
     c.installations["fuel_refinery"] = 3;
     c.minerals["Duranium"] = 15000.0;

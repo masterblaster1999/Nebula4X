@@ -531,7 +531,7 @@ void Simulation::tick_ships() {
     // Cargo vars
     bool is_cargo_op = false;
     // 0=Load, 1=Unload, 2=TransferToShip
-    int cargo_mode = 0; 
+    int cargo_mode = 0;
 
     // Pointers to active orders for updating state
     LoadMineral* load_ord = nullptr;
@@ -542,6 +542,15 @@ void Simulation::tick_ships() {
     Id cargo_target_ship_id = kInvalidId;
     std::string cargo_mineral;
     double cargo_tons = 0.0;
+
+    // Troop ops
+    bool is_troop_op = false;
+    // 0=LoadTroops, 1=UnloadTroops, 2=Invade
+    int troop_mode = 0;
+    LoadTroops* load_troops_ord = nullptr;
+    UnloadTroops* unload_troops_ord = nullptr;
+    Id troop_colony_id = kInvalidId;
+    double troop_strength = 0.0;
 
     if (std::holds_alternative<MoveToPoint>(q.front())) {
       target = std::get<MoveToPoint>(q.front()).target_mkm;
@@ -644,6 +653,47 @@ void Simulation::tick_ships() {
       if (!colony || colony->faction_id != ship.faction_id) { q.erase(q.begin()); continue; }
       const auto* body = find_ptr(state_.bodies, colony->body_id);
       if (!body || body->system_id != ship.system_id) { q.erase(q.begin()); continue; }
+      target = body->position_mkm;
+    } else if (std::holds_alternative<LoadTroops>(q.front())) {
+      auto& ord = std::get<LoadTroops>(q.front());
+      is_troop_op = true;
+      troop_mode = 0;
+      load_troops_ord = &ord;
+      troop_colony_id = ord.colony_id;
+      troop_strength = ord.strength;
+      const auto* colony = find_ptr(state_.colonies, troop_colony_id);
+      if (!colony || colony->faction_id != ship.faction_id) { q.erase(q.begin()); continue; }
+      const auto* body = find_ptr(state_.bodies, colony->body_id);
+      if (!body || body->system_id != ship.system_id) { q.erase(q.begin()); continue; }
+      target = body->position_mkm;
+    } else if (std::holds_alternative<UnloadTroops>(q.front())) {
+      auto& ord = std::get<UnloadTroops>(q.front());
+      is_troop_op = true;
+      troop_mode = 1;
+      unload_troops_ord = &ord;
+      troop_colony_id = ord.colony_id;
+      troop_strength = ord.strength;
+      const auto* colony = find_ptr(state_.colonies, troop_colony_id);
+      if (!colony || colony->faction_id != ship.faction_id) { q.erase(q.begin()); continue; }
+      const auto* body = find_ptr(state_.bodies, colony->body_id);
+      if (!body || body->system_id != ship.system_id) { q.erase(q.begin()); continue; }
+      target = body->position_mkm;
+    } else if (std::holds_alternative<InvadeColony>(q.front())) {
+      auto& ord = std::get<InvadeColony>(q.front());
+      is_troop_op = true;
+      troop_mode = 2;
+      troop_colony_id = ord.colony_id;
+      const auto* colony = find_ptr(state_.colonies, troop_colony_id);
+      if (!colony) { q.erase(q.begin()); continue; }
+      if (colony->faction_id == ship.faction_id) { q.erase(q.begin()); continue; }
+      const auto* body = find_ptr(state_.bodies, colony->body_id);
+      if (!body || body->system_id != ship.system_id) { q.erase(q.begin()); continue; }
+
+      // An explicit invasion is an act of hostility.
+      if (!are_factions_hostile(ship.faction_id, colony->faction_id)) {
+        set_diplomatic_status(ship.faction_id, colony->faction_id, DiplomacyStatus::Hostile, /*reciprocal=*/true,
+                             /*push_event_on_change=*/true);
+      }
       target = body->position_mkm;
     } else if (std::holds_alternative<TransferCargoToShip>(q.front())) {
       auto& ord = std::get<TransferCargoToShip>(q.front());
@@ -818,6 +868,76 @@ void Simulation::tick_ships() {
       ship.position_mkm = target;
       const double moved = do_cargo_transfer();
       if (cargo_order_complete(moved)) q.erase(q.begin());
+      continue;
+    }
+    if (is_troop_op && dist <= dock_range) {
+      ship.position_mkm = target;
+
+      const auto* design = find_design(ship.design_id);
+      const double cap = design ? std::max(0.0, design->troop_capacity) : 0.0;
+
+      auto* col = find_ptr(state_.colonies, troop_colony_id);
+      if (!col) {
+        q.erase(q.begin());
+        continue;
+      }
+
+      auto transfer_amount = [&](double want, double available, double free_cap) -> double {
+        double take = (want <= 0.0) ? 1e300 : want;
+        take = std::min(take, available);
+        take = std::min(take, free_cap);
+        if (take < 0.0) take = 0.0;
+        return take;
+      };
+
+      if (troop_mode == 0) {
+        // Load from colony garrison.
+        const double free_cap = std::max(0.0, cap - ship.troops);
+        const double moved = transfer_amount(load_troops_ord ? load_troops_ord->strength : troop_strength,
+                                             std::max(0.0, col->ground_forces), free_cap);
+        if (moved > 1e-9) {
+          ship.troops += moved;
+          col->ground_forces = std::max(0.0, col->ground_forces - moved);
+        }
+      } else if (troop_mode == 1) {
+        // Unload into colony garrison.
+        const double moved = transfer_amount(unload_troops_ord ? unload_troops_ord->strength : troop_strength,
+                                             std::max(0.0, ship.troops), 1e300);
+        if (moved > 1e-9) {
+          ship.troops = std::max(0.0, ship.troops - moved);
+          col->ground_forces += moved;
+        }
+      } else if (troop_mode == 2) {
+        // Invade (disembark all or requested troops into attacker strength).
+        if (ship.troops <= 1e-9) {
+          q.erase(q.begin());
+          continue;
+        }
+        const double moved = ship.troops;
+        ship.troops = 0.0;
+
+        GroundBattle& b = state_.ground_battles[col->id];
+        if (b.colony_id == kInvalidId) {
+          b.colony_id = col->id;
+          b.system_id = ship.system_id;
+          b.attacker_faction_id = ship.faction_id;
+          b.defender_faction_id = col->faction_id;
+          b.attacker_strength = 0.0;
+          b.defender_strength = std::max(0.0, col->ground_forces);
+          b.days_fought = 0;
+        }
+        // Reinforcement: if attacker changes, treat as a new battle by replacing.
+        if (b.attacker_faction_id != ship.faction_id) {
+          b.attacker_faction_id = ship.faction_id;
+          b.defender_faction_id = col->faction_id;
+          b.attacker_strength = 0.0;
+          b.defender_strength = std::max(0.0, col->ground_forces);
+          b.days_fought = 0;
+        }
+        b.attacker_strength += moved;
+      }
+
+      q.erase(q.begin());
       continue;
     }
     if (is_scrap && dist <= dock_range) {

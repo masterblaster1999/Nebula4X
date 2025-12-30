@@ -42,6 +42,16 @@ std::string order_to_string(const Order& order) {
           if (!o.mineral.empty()) ss << ", mineral=" << o.mineral;
           if (o.tons > 0.0) ss << ", tons=" << o.tons;
           ss << ")";
+        } else if constexpr (std::is_same_v<T, LoadTroops>) {
+          ss << "LoadTroops(colony_id=" << o.colony_id;
+          if (o.strength > 0.0) ss << ", strength=" << o.strength;
+          ss << ")";
+        } else if constexpr (std::is_same_v<T, UnloadTroops>) {
+          ss << "UnloadTroops(colony_id=" << o.colony_id;
+          if (o.strength > 0.0) ss << ", strength=" << o.strength;
+          ss << ")";
+        } else if constexpr (std::is_same_v<T, InvadeColony>) {
+          ss << "InvadeColony(colony_id=" << o.colony_id << ")";
         } else if constexpr (std::is_same_v<T, TransferCargoToShip>) {
           ss << "TransferCargoToShip(target_ship_id=" << o.target_ship_id;
           if (!o.mineral.empty()) ss << ", mineral=" << o.mineral;

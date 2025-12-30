@@ -1280,8 +1280,6 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
           ImGui::TextDisabled("No colony selected.");
         } else if (!sel_col_body) {
           ImGui::TextDisabled("Selected colony body missing.");
-        } else if (sel_col->faction_id != sh->faction_id) {
-          ImGui::TextDisabled("Selected colony is not friendly.");
         } else {
           ImGui::Text("Colony: %s", sel_col->name.c_str());
 
@@ -1295,50 +1293,100 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
                                 dest_label.c_str());
           }
 
-          std::vector<std::string> minerals;
-          minerals.reserve(sel_col->minerals.size() + sh->cargo.size());
-          for (const auto& [k, _] : sel_col->minerals) minerals.push_back(k);
-          for (const auto& [k, _] : sh->cargo) minerals.push_back(k);
-          std::sort(minerals.begin(), minerals.end());
-          minerals.erase(std::unique(minerals.begin(), minerals.end()), minerals.end());
+          const bool friendly = (sel_col->faction_id == sh->faction_id);
+          if (!friendly) {
+            ImGui::Spacing();
+            ImGui::TextDisabled("This colony is not friendly.");
+            ImGui::Text("Defenders: %.1f", sel_col->ground_forces);
 
-          static int mineral_idx = 0;
-          static double transfer_tons = 0.0;
-
-          const int max_idx = static_cast<int>(minerals.size());
-          mineral_idx = std::max(0, std::min(mineral_idx, max_idx));
-
-          const std::string current_label = (mineral_idx == 0) ? std::string("All minerals") : minerals[mineral_idx - 1];
-
-          if (ImGui::BeginCombo("Mineral##Col", current_label.c_str())) {
-            if (ImGui::Selectable("All minerals", mineral_idx == 0)) mineral_idx = 0;
-            for (int i = 0; i < static_cast<int>(minerals.size()); ++i) {
-              const bool selected = (mineral_idx == i + 1);
-              if (ImGui::Selectable(minerals[i].c_str(), selected)) mineral_idx = i + 1;
-            }
-            ImGui::EndCombo();
-          }
-
-          ImGui::InputDouble("Tons##Col (0 = max)", &transfer_tons, 10.0, 100.0, "%.1f");
-
-          const std::string mineral_id = (mineral_idx == 0) ? std::string() : minerals[mineral_idx - 1];
-
-          if (ImGui::Button("Load##Col")) {
-            if (!sim.issue_load_mineral(selected_ship, selected_colony, mineral_id, transfer_tons, ui.fog_of_war)) {
-              nebula4x::log::warn("Couldn't queue load order (no known route?).");
-            }
-          }
-          ImGui::SameLine();
-          if (ImGui::Button("Unload##Col")) {
-            if (!sim.issue_unload_mineral(selected_ship, selected_colony, mineral_id, transfer_tons, ui.fog_of_war)) {
-              nebula4x::log::warn("Couldn't queue unload order (no known route?).");
-            }
-          }
-          ImGui::SameLine();
-          if (ImGui::Button("Scrap Ship")) {
-              if(!sim.issue_scrap_ship(selected_ship, selected_colony, ui.fog_of_war)) {
-                  nebula4x::log::warn("Couldn't queue scrap order.");
+            const auto* d2 = sim.find_design(sh->design_id);
+            const double cap2 = d2 ? d2->troop_capacity : 0.0;
+            ImGui::Text("Embarked troops: %.1f / %.1f", sh->troops, cap2);
+            if (sh->troops <= 1e-9 || cap2 <= 1e-9) {
+              ImGui::BeginDisabled();
+              ImGui::Button("Invade (requires troops)");
+              ImGui::EndDisabled();
+            } else {
+              if (ImGui::Button("Invade (disembark all troops)")) {
+                if (!sim.issue_invade_colony(selected_ship, selected_colony, ui.fog_of_war)) {
+                  nebula4x::log::warn("Couldn't queue invade order (no known route?).");
+                }
               }
+            }
+          } else {
+            // --- Minerals ---
+            std::vector<std::string> minerals;
+            minerals.reserve(sel_col->minerals.size() + sh->cargo.size());
+            for (const auto& [k, _] : sel_col->minerals) minerals.push_back(k);
+            for (const auto& [k, _] : sh->cargo) minerals.push_back(k);
+            std::sort(minerals.begin(), minerals.end());
+            minerals.erase(std::unique(minerals.begin(), minerals.end()), minerals.end());
+
+            static int mineral_idx = 0;
+            static double transfer_tons = 0.0;
+
+            const int max_idx = static_cast<int>(minerals.size());
+            mineral_idx = std::max(0, std::min(mineral_idx, max_idx));
+
+            const std::string current_label = (mineral_idx == 0) ? std::string("All minerals") : minerals[mineral_idx - 1];
+
+            if (ImGui::BeginCombo("Mineral##Col", current_label.c_str())) {
+              if (ImGui::Selectable("All minerals", mineral_idx == 0)) mineral_idx = 0;
+              for (int i = 0; i < static_cast<int>(minerals.size()); ++i) {
+                const bool selected = (mineral_idx == i + 1);
+                if (ImGui::Selectable(minerals[i].c_str(), selected)) mineral_idx = i + 1;
+              }
+              ImGui::EndCombo();
+            }
+
+            ImGui::InputDouble("Tons##Col (0 = max)", &transfer_tons, 10.0, 100.0, "%.1f");
+
+            const std::string mineral_id = (mineral_idx == 0) ? std::string() : minerals[mineral_idx - 1];
+
+            if (ImGui::Button("Load##Col")) {
+              if (!sim.issue_load_mineral(selected_ship, selected_colony, mineral_id, transfer_tons, ui.fog_of_war)) {
+                nebula4x::log::warn("Couldn't queue load order (no known route?).");
+              }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Unload##Col")) {
+              if (!sim.issue_unload_mineral(selected_ship, selected_colony, mineral_id, transfer_tons, ui.fog_of_war)) {
+                nebula4x::log::warn("Couldn't queue unload order (no known route?).");
+              }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Scrap Ship")) {
+              if (!sim.issue_scrap_ship(selected_ship, selected_colony, ui.fog_of_war)) {
+                nebula4x::log::warn("Couldn't queue scrap order.");
+              }
+            }
+
+            // --- Troops ---
+            ImGui::Separator();
+            ImGui::Text("Troops");
+            const auto* d2 = sim.find_design(sh->design_id);
+            const double cap2 = d2 ? d2->troop_capacity : 0.0;
+            ImGui::Text("Embarked: %.1f / %.1f", sh->troops, cap2);
+            ImGui::Text("Colony garrison: %.1f", sel_col->ground_forces);
+
+            static double troop_amount = 0.0;
+            ImGui::InputDouble("Strength##Troops (0 = max)", &troop_amount, 10.0, 100.0, "%.1f");
+
+            if (cap2 <= 1e-9) {
+              ImGui::TextDisabled("(This design has no troop bays.)");
+            } else {
+              if (ImGui::Button("Load Troops")) {
+                if (!sim.issue_load_troops(selected_ship, selected_colony, troop_amount, ui.fog_of_war)) {
+                  nebula4x::log::warn("Couldn't queue load troops order.");
+                }
+              }
+              ImGui::SameLine();
+              if (ImGui::Button("Unload Troops")) {
+                if (!sim.issue_unload_troops(selected_ship, selected_colony, troop_amount, ui.fog_of_war)) {
+                  nebula4x::log::warn("Couldn't queue unload troops order.");
+                }
+              }
+            }
           }
         }
 
@@ -1903,6 +1951,79 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
         ImGui::Text("Minerals");
         for (const auto& [k, v] : colony->minerals) {
           ImGui::BulletText("%s: %.1f", k.c_str(), v);
+        }
+
+        // --- Ground forces / training ---
+        ImGui::Separator();
+        ImGui::Text("Ground forces");
+        ImGui::Text("Garrison: %.1f", colony->ground_forces);
+        const double forts = sim.fortification_points(*colony);
+        if (forts > 1e-9) ImGui::Text("Fortifications: %.1f", forts);
+
+        // Active battle status
+        if (auto itb = s.ground_battles.find(colony->id); itb != s.ground_battles.end()) {
+          const auto& b = itb->second;
+          ImGui::TextDisabled("Ground battle in progress");
+          ImGui::Text("Attacker: %.1f", b.attacker_strength);
+          ImGui::Text("Defender: %.1f", b.defender_strength);
+          ImGui::Text("Days: %d", b.days_fought);
+        }
+
+        const double train_pts = sim.troop_training_points_per_day(*colony);
+        if (train_pts > 1e-9) {
+          ImGui::Text("Training: %.1f pts/day", train_pts);
+        } else {
+          ImGui::TextDisabled("Training: 0 (build a Training Facility)");
+        }
+        ImGui::Text("Training queue: %.1f", colony->troop_training_queue);
+
+        static double queue_strength = 0.0;
+        ImGui::InputDouble("Queue strength##troop_train", &queue_strength, 50.0, 200.0, "%.1f");
+        if (ImGui::Button("Add to queue")) {
+          if (!sim.enqueue_troop_training(colony->id, queue_strength)) {
+            nebula4x::log::warn("Couldn't enqueue troop training.");
+          }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Clear queue")) {
+          sim.clear_troop_training_queue(colony->id);
+        }
+
+        // --- Terraforming ---
+        ImGui::Separator();
+        ImGui::Text("Terraforming");
+        const Body* b = find_ptr(s.bodies, colony->body_id);
+        if (!b) {
+          ImGui::TextDisabled("Body missing.");
+        } else {
+          const double tf_pts = sim.terraforming_points_per_day(*colony);
+          ImGui::Text("Points/day: %.1f", tf_pts);
+          ImGui::Text("Temp: %.1f K", b->surface_temp_k);
+          ImGui::Text("Atmosphere: %.3f atm", b->atmosphere_atm);
+
+          const bool has_target = (b->terraforming_target_temp_k > 0.0 || b->terraforming_target_atm > 0.0);
+          if (has_target) {
+            ImGui::Text("Target temp: %.1f K", b->terraforming_target_temp_k);
+            ImGui::Text("Target atm: %.3f", b->terraforming_target_atm);
+            if (b->terraforming_complete) ImGui::TextDisabled("(complete)");
+          } else {
+            ImGui::TextDisabled("No target set.");
+          }
+
+          static double target_temp = 288.0;
+          static double target_atm = 1.0;
+          ImGui::InputDouble("Target temp (K)##tf", &target_temp, 1.0, 10.0, "%.1f");
+          ImGui::InputDouble("Target atm##tf", &target_atm, 0.01, 0.1, "%.3f");
+
+          if (ImGui::Button("Set target")) {
+            if (!sim.set_terraforming_target(colony->body_id, target_temp, target_atm)) {
+              nebula4x::log::warn("Couldn't set terraforming target.");
+            }
+          }
+          ImGui::SameLine();
+          if (ImGui::Button("Clear target")) {
+            sim.clear_terraforming_target(colony->body_id);
+          }
         }
 
 
@@ -2625,6 +2746,13 @@ if (colony->shipyard_queue.empty()) {
           if (b->mass_earths > 0.0) ImGui::Text("Mass: %.3f Mearth", b->mass_earths);
           if (b->radius_km > 0.0) ImGui::Text("Radius: %.0f km", b->radius_km);
           if (b->surface_temp_k > 0.0) ImGui::Text("Temp: %.0f K", b->surface_temp_k);
+          if (b->atmosphere_atm > 0.0 || b->terraforming_target_atm > 0.0) {
+            ImGui::Text("Atmosphere: %.3f atm", b->atmosphere_atm);
+          }
+          if (b->terraforming_target_temp_k > 0.0 || b->terraforming_target_atm > 0.0) {
+            ImGui::Text("Terraform target: %.1f K, %.3f atm", b->terraforming_target_temp_k, b->terraforming_target_atm);
+            if (b->terraforming_complete) ImGui::TextDisabled("(terraforming complete)");
+          }
 
           // Colony on this body (if any).
           Id colony_here = kInvalidId;

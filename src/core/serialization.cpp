@@ -14,7 +14,7 @@ using json::Array;
 using json::Object;
 using json::Value;
 
-constexpr int kCurrentSaveVersion = 27;
+constexpr int kCurrentSaveVersion = 28;
 
 template <typename Map>
 std::vector<typename Map::key_type> sorted_keys(const Map& m) {
@@ -219,6 +219,17 @@ Value order_to_json(const Order& order) {
           obj["colony_id"] = static_cast<double>(o.colony_id);
           if (!o.mineral.empty()) obj["mineral"] = o.mineral;
           obj["tons"] = o.tons;
+        } else if constexpr (std::is_same_v<T, LoadTroops>) {
+          obj["type"] = std::string("load_troops");
+          obj["colony_id"] = static_cast<double>(o.colony_id);
+          obj["strength"] = o.strength;
+        } else if constexpr (std::is_same_v<T, UnloadTroops>) {
+          obj["type"] = std::string("unload_troops");
+          obj["colony_id"] = static_cast<double>(o.colony_id);
+          obj["strength"] = o.strength;
+        } else if constexpr (std::is_same_v<T, InvadeColony>) {
+          obj["type"] = std::string("invade_colony");
+          obj["colony_id"] = static_cast<double>(o.colony_id);
         } else if constexpr (std::is_same_v<T, TransferCargoToShip>) {
           obj["type"] = std::string("transfer_cargo_to_ship");
           obj["target_ship_id"] = static_cast<double>(o.target_ship_id);
@@ -298,6 +309,23 @@ Order order_from_json(const Value& v) {
     if (auto m_it = o.find("mineral"); m_it != o.end()) u.mineral = m_it->second.string_value();
     if (auto t_it = o.find("tons"); t_it != o.end()) u.tons = t_it->second.number_value(0.0);
     return u;
+  }
+  if (type == "load_troops") {
+    LoadTroops l;
+    l.colony_id = static_cast<Id>(o.at("colony_id").int_value(kInvalidId));
+    if (auto it = o.find("strength"); it != o.end()) l.strength = it->second.number_value(0.0);
+    return l;
+  }
+  if (type == "unload_troops") {
+    UnloadTroops u;
+    u.colony_id = static_cast<Id>(o.at("colony_id").int_value(kInvalidId));
+    if (auto it = o.find("strength"); it != o.end()) u.strength = it->second.number_value(0.0);
+    return u;
+  }
+  if (type == "invade_colony") {
+    InvadeColony i;
+    i.colony_id = static_cast<Id>(o.at("colony_id").int_value(kInvalidId));
+    return i;
   }
   if (type == "transfer_cargo_to_ship") {
     TransferCargoToShip t;
@@ -415,6 +443,10 @@ std::string serialize_game_to_json(const GameState& s) {
     if (b.mass_earths > 0.0) o["mass_earths"] = b.mass_earths;
     if (b.radius_km > 0.0) o["radius_km"] = b.radius_km;
     if (b.surface_temp_k > 0.0) o["surface_temp_k"] = b.surface_temp_k;
+    if (b.atmosphere_atm > 0.0) o["atmosphere_atm"] = b.atmosphere_atm;
+    if (b.terraforming_target_temp_k > 0.0) o["terraforming_target_temp_k"] = b.terraforming_target_temp_k;
+    if (b.terraforming_target_atm > 0.0) o["terraforming_target_atm"] = b.terraforming_target_atm;
+    if (b.terraforming_complete) o["terraforming_complete"] = true;
     o["orbit_radius_mkm"] = b.orbit_radius_mkm;
     o["orbit_period_days"] = b.orbit_period_days;
     o["orbit_phase_radians"] = b.orbit_phase_radians;
@@ -461,6 +493,7 @@ std::string serialize_game_to_json(const GameState& s) {
     o["fuel_tons"] = sh.fuel_tons;
     o["shields"] = sh.shields;
     o["cargo"] = map_string_double_to_json(sh.cargo);
+    if (sh.troops > 0.0) o["troops"] = sh.troops;
     ships.push_back(o);
   }
   root["ships"] = ships;
@@ -481,6 +514,8 @@ std::string serialize_game_to_json(const GameState& s) {
       o["mineral_reserves"] = map_string_double_to_json(c.mineral_reserves);
     }
     o["installations"] = map_string_int_to_json(c.installations);
+    if (c.ground_forces > 0.0) o["ground_forces"] = c.ground_forces;
+    if (c.troop_training_queue > 0.0) o["troop_training_queue"] = c.troop_training_queue;
 
     Array q;
     for (const auto& bo : c.shipyard_queue) {
@@ -607,6 +642,7 @@ std::string serialize_game_to_json(const GameState& s) {
     o["cargo_tons"] = d.cargo_tons;
     o["sensor_range_mkm"] = d.sensor_range_mkm;
     o["colony_capacity_millions"] = d.colony_capacity_millions;
+    o["troop_capacity"] = d.troop_capacity;
     o["power_generation"] = d.power_generation;
     o["power_use_total"] = d.power_use_total;
     o["power_use_engines"] = d.power_use_engines;
@@ -679,6 +715,25 @@ std::string serialize_game_to_json(const GameState& s) {
   }
   root["events"] = events;
 
+  // Ground battles (optional)
+  if (!s.ground_battles.empty()) {
+    Array battles;
+    battles.reserve(s.ground_battles.size());
+    for (Id cid : sorted_keys(s.ground_battles)) {
+      const auto& b = s.ground_battles.at(cid);
+      Object o;
+      o["colony_id"] = static_cast<double>(b.colony_id);
+      o["system_id"] = static_cast<double>(b.system_id);
+      o["attacker_faction_id"] = static_cast<double>(b.attacker_faction_id);
+      o["defender_faction_id"] = static_cast<double>(b.defender_faction_id);
+      o["attacker_strength"] = b.attacker_strength;
+      o["defender_strength"] = b.defender_strength;
+      o["days_fought"] = static_cast<double>(b.days_fought);
+      battles.push_back(o);
+    }
+    root["ground_battles"] = battles;
+  }
+
   return json::stringify(root, 2);
 }
 
@@ -750,6 +805,16 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     if (auto it = o.find("mass_earths"); it != o.end()) b.mass_earths = it->second.number_value(0.0);
     if (auto it = o.find("radius_km"); it != o.end()) b.radius_km = it->second.number_value(0.0);
     if (auto it = o.find("surface_temp_k"); it != o.end()) b.surface_temp_k = it->second.number_value(0.0);
+    if (auto it = o.find("atmosphere_atm"); it != o.end()) b.atmosphere_atm = it->second.number_value(0.0);
+    if (auto it = o.find("terraforming_target_temp_k"); it != o.end()) {
+      b.terraforming_target_temp_k = it->second.number_value(0.0);
+    }
+    if (auto it = o.find("terraforming_target_atm"); it != o.end()) {
+      b.terraforming_target_atm = it->second.number_value(0.0);
+    }
+    if (auto it = o.find("terraforming_complete"); it != o.end()) {
+      b.terraforming_complete = it->second.bool_value(false);
+    }
     b.orbit_radius_mkm = o.at("orbit_radius_mkm").number_value();
     b.orbit_period_days = o.at("orbit_period_days").number_value();
     b.orbit_phase_radians = o.at("orbit_phase_radians").number_value();
@@ -800,6 +865,7 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     if (auto it = o.find("fuel_tons"); it != o.end()) sh.fuel_tons = it->second.number_value(-1.0);
     if (auto it = o.find("shields"); it != o.end()) sh.shields = it->second.number_value(-1.0);
     if (auto it = o.find("cargo"); it != o.end()) sh.cargo = map_string_double_from_json(it->second);
+    if (auto it = o.find("troops"); it != o.end()) sh.troops = it->second.number_value(0.0);
     s.ships[sh.id] = sh;
   }
 
@@ -817,6 +883,9 @@ GameState deserialize_game_from_json(const std::string& json_text) {
       c.mineral_reserves = map_string_double_from_json(it->second);
     }
     c.installations = map_string_int_from_json(o.at("installations"));
+
+    if (auto it = o.find("ground_forces"); it != o.end()) c.ground_forces = it->second.number_value(0.0);
+    if (auto it = o.find("troop_training_queue"); it != o.end()) c.troop_training_queue = it->second.number_value(0.0);
 
     if (auto itq = o.find("shipyard_queue"); itq != o.end()) {
       for (const auto& qv : itq->second.array()) {
@@ -978,6 +1047,9 @@ GameState deserialize_game_from_json(const std::string& json_text) {
       d.sensor_range_mkm = o.at("sensor_range_mkm").number_value(0.0);
       if (auto itcc = o.find("colony_capacity_millions"); itcc != o.end()) {
         d.colony_capacity_millions = itcc->second.number_value(0.0);
+      }
+      if (auto ittc = o.find("troop_capacity"); ittc != o.end()) {
+        d.troop_capacity = ittc->second.number_value(0.0);
       }
       if (auto itpg = o.find("power_generation"); itpg != o.end()) d.power_generation = itpg->second.number_value(0.0);
       if (auto itput = o.find("power_use_total"); itput != o.end()) d.power_use_total = itput->second.number_value(0.0);
@@ -1150,6 +1222,28 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     }
 
     if (s.next_event_seq <= seq_cursor) s.next_event_seq = seq_cursor + 1;
+  }
+
+  // Ground battles (optional)
+  if (auto it = root.find("ground_battles"); it != root.end()) {
+    if (!it->second.is_array()) {
+      log::warn("Save load: 'ground_battles' is not an array; ignoring");
+    } else {
+      for (const auto& bv : it->second.array()) {
+        if (!bv.is_object()) continue;
+        const auto& o = bv.object();
+        GroundBattle b;
+        if (auto itc = o.find("colony_id"); itc != o.end()) b.colony_id = static_cast<Id>(itc->second.int_value(kInvalidId));
+        if (b.colony_id == kInvalidId) continue;
+        if (auto its = o.find("system_id"); its != o.end()) b.system_id = static_cast<Id>(its->second.int_value(kInvalidId));
+        if (auto ita = o.find("attacker_faction_id"); ita != o.end()) b.attacker_faction_id = static_cast<Id>(ita->second.int_value(kInvalidId));
+        if (auto itd = o.find("defender_faction_id"); itd != o.end()) b.defender_faction_id = static_cast<Id>(itd->second.int_value(kInvalidId));
+        if (auto itas = o.find("attacker_strength"); itas != o.end()) b.attacker_strength = itas->second.number_value(0.0);
+        if (auto itds = o.find("defender_strength"); itds != o.end()) b.defender_strength = itds->second.number_value(0.0);
+        if (auto itdf = o.find("days_fought"); itdf != o.end()) b.days_fought = static_cast<int>(itdf->second.int_value(0));
+        s.ground_battles[b.colony_id] = b;
+      }
+    }
   }
 
   // Ensure next_id is sane.

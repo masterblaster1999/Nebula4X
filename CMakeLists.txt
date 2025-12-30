@@ -31,6 +31,8 @@ target_sources(nebula4x_core
     src/core/simulation.cpp
     src/core/simulation_tick_ships.cpp
     src/core/simulation_tick_combat.cpp
+    src/core/simulation_tick_ground_combat.cpp
+    src/core/simulation_tick_terraforming.cpp
   src/core/ai_economy.cpp
     src/core/serialization.cpp
     src/core/tech.cpp

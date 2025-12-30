@@ -16,7 +16,19 @@ enum class BodyType { Star, Planet, Moon, Asteroid, Comet, GasGiant };
 
 enum class ShipRole { Freighter, Surveyor, Combatant, Unknown };
 
-enum class ComponentType { Engine, FuelTank, Cargo, Sensor, Reactor, Weapon, Armor, Shield, ColonyModule, Unknown };
+enum class ComponentType {
+  Engine,
+  FuelTank,
+  Cargo,
+  Sensor,
+  Reactor,
+  Weapon,
+  Armor,
+  Shield,
+  ColonyModule,
+  TroopBay,
+  Unknown
+};
 
 // Prototype AI / control flags.
 //
@@ -98,6 +110,15 @@ struct Body {
   double radius_km{0.0};         // approximate radius (km)
   double surface_temp_k{0.0};    // approximate equilibrium temperature (K)
 
+  // Optional: atmospheric pressure (in atm) and terraforming targets.
+  //
+  // These values are primarily used by the terraforming prototype.
+  // If terraforming_target_* are <= 0, terraforming is treated as "disabled".
+  double atmosphere_atm{0.0};
+  double terraforming_target_temp_k{0.0};
+  double terraforming_target_atm{0.0};
+  bool terraforming_complete{false};
+
   // Cached position for current sim date (absolute, after applying parent orbits).
   Vec2 position_mkm{0.0, 0.0};
 };
@@ -130,6 +151,9 @@ struct ComponentDef {
   double hp_bonus{0.0};            // armor
   double shield_hp{0.0};           // shield (max shield points)
   double shield_regen_per_day{0.0}; // shield (regen per day)
+
+  // Troop bay (abstract "strength" points).
+  double troop_capacity{0.0};
 };
 
 // A ship design is essentially a named list of components + derived stats.
@@ -160,6 +184,9 @@ struct ShipDesign {
   double shield_regen_per_day{0.0};
   double weapon_damage{0.0};
   double weapon_range_mkm{0.0};
+
+  // Derived troop capacity (from troop bays).
+  double troop_capacity{0.0};
 };
 
 struct InstallationDef {
@@ -202,6 +229,15 @@ struct InstallationDef {
 
   // Only used by research labs.
   double research_points_per_day{0.0};
+
+  // Optional: terraforming (points per day).
+  double terraforming_points_per_day{0.0};
+
+  // Optional: troop training (points per day).
+  double troop_training_points_per_day{0.0};
+
+  // Optional: fortifications (static defense value).
+  double fortification_points{0.0};
 };
 
 struct Ship {
@@ -222,6 +258,10 @@ struct Ship {
   // Cargo carried by this ship (prototype: mineral tons keyed by mineral name).
   // This enables basic logistics between colonies.
   std::unordered_map<std::string, double> cargo;
+
+  // Embarked ground troops (abstract "strength" points).
+  // Interpreted relative to the ship design's troop_capacity.
+  double troops{0.0};
 
   // Automation: when enabled, the simulation will generate exploration orders
   // for this ship whenever it is idle (no queued orders).
@@ -291,11 +331,33 @@ struct Colony {
   // Installation counts
   std::unordered_map<std::string, int> installations;
 
+  // Ground forces stationed at this colony (abstract "strength" points).
+  double ground_forces{0.0};
+
+  // Training queue for new troops at this colony (strength points remaining).
+  double troop_training_queue{0.0};
+
   // Shipyard queue (very simplified)
   std::vector<BuildOrder> shipyard_queue;
 
   // Colony construction queue (for building installations)
   std::vector<InstallationBuildOrder> construction_queue;
+};
+
+// A persistent ground battle at a colony.
+//
+// This is intentionally minimal: the simulation resolves battles day-by-day.
+struct GroundBattle {
+  Id colony_id{kInvalidId};
+  Id system_id{kInvalidId};
+
+  Id attacker_faction_id{kInvalidId};
+  Id defender_faction_id{kInvalidId};
+
+  double attacker_strength{0.0};
+  double defender_strength{0.0};
+
+  int days_fought{0};
 };
 
 // A simple intel record for a detected ship.

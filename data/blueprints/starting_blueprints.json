@@ -35,6 +35,12 @@
       "colony_capacity_millions": 250,
       "hp_bonus": 25
     },
+    "troop_bay_mk1": {
+      "name": "Troop Bay Mk.I",
+      "type": "troop_bay",
+      "mass_tons": 20,
+      "troop_capacity": 200
+    },
     "sensor_mk1": {
       "name": "Active Sensor",
       "type": "sensor",
@@ -133,6 +139,18 @@
         "cargo_mk1",
         "cargo_mk1",
         "colony_module_mk1",
+        "fuel_tank_mk1"
+      ]
+    },
+    {
+      "id": "troop_transport_mk1",
+      "name": "Troop Transport Mk.I",
+      "role": "freighter",
+      "components": [
+        "engine_chem_mk1",
+        "cargo_mk1",
+        "troop_bay_mk1",
+        "troop_bay_mk1",
         "fuel_tank_mk1"
       ]
     },
@@ -350,6 +368,33 @@
       "build_costs": {
         "Duranium": 1200,
         "Neutronium": 120
+      }
+    },
+    "training_facility": {
+      "name": "Training Facility",
+      "troop_training_points_per_day": 10,
+      "construction_cost": 350,
+      "build_costs": {
+        "Duranium": 800,
+        "Neutronium": 80
+      }
+    },
+    "planetary_fortress": {
+      "name": "Planetary Fortress",
+      "fortification_points": 50,
+      "construction_cost": 600,
+      "build_costs": {
+        "Duranium": 2000,
+        "Neutronium": 250
+      }
+    },
+    "terraforming_plant": {
+      "name": "Terraforming Plant",
+      "terraforming_points_per_day": 8,
+      "construction_cost": 800,
+      "build_costs": {
+        "Duranium": 2500,
+        "Neutronium": 300
       }
     }
   }

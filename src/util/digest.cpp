@@ -138,6 +138,17 @@ static void hash_order(Digest64& d, const Order& ord) {
           d.add_u64(o.colony_id);
           d.add_string(o.mineral);
           d.add_double(o.tons);
+        } else if constexpr (std::is_same_v<T, LoadTroops>) {
+          d.add_u64(12);
+          d.add_u64(o.colony_id);
+          d.add_double(o.strength);
+        } else if constexpr (std::is_same_v<T, UnloadTroops>) {
+          d.add_u64(13);
+          d.add_u64(o.colony_id);
+          d.add_double(o.strength);
+        } else if constexpr (std::is_same_v<T, InvadeColony>) {
+          d.add_u64(14);
+          d.add_u64(o.colony_id);
         } else if constexpr (std::is_same_v<T, TransferCargoToShip>) {
           d.add_u64(10);
           d.add_u64(o.target_ship_id);
@@ -203,6 +214,7 @@ static void hash_ship_design(Digest64& d, const ShipDesign& sd) {
   d.add_double(sd.cargo_tons);
   d.add_double(sd.sensor_range_mkm);
   d.add_double(sd.colony_capacity_millions);
+  d.add_double(sd.troop_capacity);
   d.add_double(sd.power_generation);
   d.add_double(sd.power_use_total);
   d.add_double(sd.power_use_engines);
@@ -227,6 +239,7 @@ static void hash_component_def(Digest64& d, const ComponentDef& c) {
   d.add_double(c.cargo_tons);
   d.add_double(c.sensor_range_mkm);
   d.add_double(c.colony_capacity_millions);
+  d.add_double(c.troop_capacity);
   d.add_double(c.power_output);
   d.add_double(c.power_use);
   d.add_double(c.weapon_damage);
@@ -248,6 +261,9 @@ static void hash_installation_def(Digest64& d, const InstallationDef& def) {
   hash_string_double_map(d, def.build_costs_per_ton);
   d.add_double(def.sensor_range_mkm);
   d.add_double(def.research_points_per_day);
+  d.add_double(def.terraforming_points_per_day);
+  d.add_double(def.troop_training_points_per_day);
+  d.add_double(def.fortification_points);
 }
 
 static void hash_tech_def(Digest64& d, const TechDef& t) {
@@ -350,11 +366,17 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
     d.add_double(b.orbit_radius_mkm);
     d.add_double(b.orbit_period_days);
     d.add_double(b.orbit_phase_radians);
+    d.add_double(b.orbit_eccentricity);
+    d.add_double(b.orbit_arg_periapsis_radians);
     d.add_double(b.mass_solar);
     d.add_double(b.luminosity_solar);
     d.add_double(b.mass_earths);
     d.add_double(b.radius_km);
     d.add_double(b.surface_temp_k);
+    d.add_double(b.atmosphere_atm);
+    d.add_double(b.terraforming_target_temp_k);
+    d.add_double(b.terraforming_target_atm);
+    d.add_bool(b.terraforming_complete);
     hash_vec2(d, b.position_mkm);
     hash_string_double_map(d, b.mineral_deposits);
   }
@@ -387,6 +409,7 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
     d.add_double(sh.hp);
     d.add_double(sh.fuel_tons);
     d.add_double(sh.shields);
+    d.add_double(sh.troops);
   }
 
   // Colonies
@@ -401,6 +424,8 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
     hash_string_double_map(d, c.minerals);
     hash_string_double_map(d, c.mineral_reserves);
     hash_string_int_map(d, c.installations);
+    d.add_double(c.ground_forces);
+    d.add_double(c.troop_training_queue);
 
     d.add_size(c.shipyard_queue.size());
     for (const auto& bo : c.shipyard_queue) {
@@ -506,6 +531,20 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
     d.add_bool(so.repeat);
     d.add_size(so.repeat_template.size());
     for (const auto& o : so.repeat_template) hash_order(d, o);
+  }
+
+  // Ground battles
+  d.add_size(s.ground_battles.size());
+  for (Id cid : sorted_keys(s.ground_battles)) {
+    const auto& b = s.ground_battles.at(cid);
+    d.add_u64(cid);
+    d.add_u64(b.colony_id);
+    d.add_u64(b.system_id);
+    d.add_u64(b.attacker_faction_id);
+    d.add_u64(b.defender_faction_id);
+    d.add_double(b.attacker_strength);
+    d.add_double(b.defender_strength);
+    d.add_i64(b.days_fought);
   }
 
   // Persistent events
