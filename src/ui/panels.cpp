@@ -877,13 +877,13 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
 
             ImGui::TextDisabled("Priority (top = keep online). Drag to reorder:");
             for (int i = 0; i < 4; ++i) {
-              const PowerSubsystem sys = sh->power_policy.priority[(std::size_t)i];
-              std::string label = std::string(power_subsystem_label(sys)) + "##prio" + std::to_string(i);
+              const PowerSubsystem subsys = sh->power_policy.priority[(std::size_t)i];
+              std::string label = std::string(power_subsystem_label(subsys)) + "##prio" + std::to_string(i);
               ImGui::Selectable(label.c_str(), false);
 
               if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
                 ImGui::SetDragDropPayload("PWR_PRIO", &i, sizeof(int));
-                ImGui::Text("%s", power_subsystem_label(sys));
+                ImGui::Text("%s", power_subsystem_label(subsys));
                 ImGui::EndDragDropSource();
               }
               if (ImGui::BeginDragDropTarget()) {
@@ -930,7 +930,7 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
               ImGui::SameLine();
               if (ImGui::SmallButton("Apply to Fleet")) {
                 if (auto* fl = find_ptr(s.fleets, fleet_id)) {
-                  for (Id sid : fl->ships) {
+                  for (Id sid : fl->ship_ids) {
                     if (auto* other = find_ptr(s.ships, sid)) other->power_policy = sh->power_policy;
                   }
                 }

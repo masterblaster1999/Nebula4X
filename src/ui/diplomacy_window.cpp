@@ -309,7 +309,7 @@ void step_force_layout(const Simulation& sim, const std::vector<Id>& ids, float 
       // Relationship-weighted attraction.
       const Id a = ids[(std::size_t)i];
       const Id b = ids[(std::size_t)j];
-      const float aff = status_affinity(sim.get_diplomatic_status(a, b), sim.get_diplomatic_status(b, a));
+      const float aff = status_affinity(sim.diplomatic_status(a, b), sim.diplomatic_status(b, a));
       if (aff > 0.0f) {
         const float rest = 520.0f - 260.0f * aff; // friendly pulls closer.
         const float f_spring = spring_k * aff * (dist - rest);
@@ -346,7 +346,7 @@ void apply_radial_targets(const Simulation& sim, const std::vector<const Faction
 
   for (const auto* f : facs) {
     if (f->id == focus) continue;
-    const DiplomacyStatus st = sim.get_diplomatic_status(focus, f->id);
+    const DiplomacyStatus st = sim.diplomatic_status(focus, f->id);
     if (st == DiplomacyStatus::Friendly)
       friendly.push_back(f->id);
     else if (st == DiplomacyStatus::Neutral)
@@ -543,7 +543,8 @@ void draw_diplomacy_window(Simulation& sim, UIState& ui, Id& /*selected_ship*/, 
       const ImVec2 canvas_p1 = ImVec2(canvas_p0.x + canvas_sz.x, canvas_p0.y + canvas_sz.y);
 
       ImDrawList* dl = ImGui::GetWindowDrawList();
-      dl->AddRectFilled(canvas_p0, canvas_p1, ImGui::ColorConvertFloat4ToU32(ImVec4(0.05f, 0.055f, 0.065f, 1.0f)));
+      const ImU32 bg = ImGui::ColorConvertFloat4ToU32(ImVec4(0.05f, 0.055f, 0.065f, 1.0f));
+      dl->AddRectFilled(canvas_p0, canvas_p1, bg);
 
       // Input capture.
       ImGui::InvisibleButton("##canvas_btn", canvas_sz,
@@ -551,6 +552,7 @@ void draw_diplomacy_window(Simulation& sim, UIState& ui, Id& /*selected_ship*/, 
                                  ImGuiButtonFlags_MouseButtonMiddle);
       const bool hovered = ImGui::IsItemHovered();
       const bool active = ImGui::IsItemActive();
+      (void)active;
 
       const ImGuiIO& io = ImGui::GetIO();
       CanvasXform xf;
@@ -595,13 +597,36 @@ void draw_diplomacy_window(Simulation& sim, UIState& ui, Id& /*selected_ship*/, 
 
       // Background chrome.
       if (ui.diplomacy_graph_starfield) {
-        draw_starfield(dl, canvas_p0, canvas_p1, ImVec2(g.pan.x, g.pan.y), g.zoom, /*seed=*/0xD1P10,
-                       ui.map_starfield_density * 0.75f, ui.map_starfield_parallax);
+        StarfieldStyle sf;
+        sf.enabled = true;
+        sf.density = ui.map_starfield_density * 0.75f;
+        sf.parallax = ui.map_starfield_parallax;
+        sf.alpha = 1.0f;
+
+        // The map helpers want pan expressed in pixels.
+        const float pan_px_x = -g.pan.x * g.zoom;
+        const float pan_px_y = -g.pan.y * g.zoom;
+        const std::uint32_t seed = hash_u32(static_cast<std::uint32_t>(g.perspective)) ^ 0x34400u;
+        draw_starfield(dl, canvas_p0, canvas_sz, bg, pan_px_x, pan_px_y, seed, sf);
       }
       if (ui.diplomacy_graph_grid) {
-        draw_grid(dl, canvas_p0, canvas_p1, ImVec2(g.pan.x, g.pan.y), g.zoom, /*scale_px_per_unit=*/1.0f,
-                  IM_COL32(180, 180, 200, 40), IM_COL32(240, 240, 255, 70), ui.map_grid_opacity * 0.35f,
-                  /*show_labels=*/false, "u");
+        GridStyle gs;
+        gs.enabled = true;
+        gs.desired_minor_px = 95.0f;
+        gs.major_every = 5;
+
+        const float op = ui.map_grid_opacity * 0.35f;
+        gs.minor_alpha = 0.10f * op;
+        gs.major_alpha = 0.18f * op;
+        gs.axis_alpha = 0.25f * op;
+        gs.label_alpha = 0.70f * op;
+
+        // The diplomacy graph is already quite busy; keep it minimal.
+        gs.labels = false;
+
+        draw_grid(dl, canvas_p0, canvas_sz, xf.center, /*scale_px_per_unit=*/1.0, /*zoom=*/g.zoom,
+                  Vec2{static_cast<double>(g.pan.x), static_cast<double>(g.pan.y)},
+                  IM_COL32(220, 220, 230, 255), gs, "u");
       }
 
       // Layout updates (purely visual; uses current diplomacy state).
@@ -697,8 +722,8 @@ void draw_diplomacy_window(Simulation& sim, UIState& ui, Id& /*selected_ship*/, 
             if (a != g.perspective && b != g.perspective) continue;
           }
 
-          const DiplomacyStatus ab = sim.get_diplomatic_status(a, b);
-          const DiplomacyStatus ba = sim.get_diplomatic_status(b, a);
+          const DiplomacyStatus ab = sim.diplomatic_status(a, b);
+          const DiplomacyStatus ba = sim.diplomatic_status(b, a);
 
           const bool draw_ab = status_enabled(ab);
           const bool draw_ba = status_enabled(ba);
@@ -863,7 +888,7 @@ void draw_diplomacy_window(Simulation& sim, UIState& ui, Id& /*selected_ship*/, 
 
           ImGui::Checkbox("Reciprocal", &g.reciprocal_edits);
 
-          const DiplomacyStatus cur = sim.get_diplomatic_status(g.context_edge.from, g.context_edge.to);
+          const DiplomacyStatus cur = sim.diplomatic_status(g.context_edge.from, g.context_edge.to);
           for (DiplomacyStatus st : {DiplomacyStatus::Hostile, DiplomacyStatus::Neutral, DiplomacyStatus::Friendly}) {
             const bool is_sel = (st == cur);
             if (ImGui::MenuItem(status_label(st), nullptr, is_sel)) {
@@ -927,7 +952,7 @@ void draw_diplomacy_window(Simulation& sim, UIState& ui, Id& /*selected_ship*/, 
             ImGui::BeginTooltip();
             ImGui::TextUnformatted(f->name.c_str());
             if (g.hovered_node != g.perspective) {
-              const DiplomacyStatus st = sim.get_diplomatic_status(g.perspective, g.hovered_node);
+              const DiplomacyStatus st = sim.diplomatic_status(g.perspective, g.hovered_node);
               ImGui::Separator();
               ImGui::Text("%s -> %s: %s", find_ptr(s.factions, g.perspective)->name.c_str(), f->name.c_str(),
                           status_label(st));
@@ -939,7 +964,7 @@ void draw_diplomacy_window(Simulation& sim, UIState& ui, Id& /*selected_ship*/, 
           const Faction* a = find_ptr(s.factions, g.hovered_edge.from);
           const Faction* b = find_ptr(s.factions, g.hovered_edge.to);
           if (a && b) {
-            const DiplomacyStatus st = sim.get_diplomatic_status(g.hovered_edge.from, g.hovered_edge.to);
+            const DiplomacyStatus st = sim.diplomatic_status(g.hovered_edge.from, g.hovered_edge.to);
             ImGui::BeginTooltip();
             ImGui::Text("%s -> %s", a->name.c_str(), b->name.c_str());
             ImGui::Text("%s", status_label(st));
@@ -1014,7 +1039,7 @@ void draw_diplomacy_window(Simulation& sim, UIState& ui, Id& /*selected_ship*/, 
 
             for (const auto* other : facs) {
               if (other->id == f->id) continue;
-              const DiplomacyStatus cur = sim.get_diplomatic_status(f->id, other->id);
+              const DiplomacyStatus cur = sim.diplomatic_status(f->id, other->id);
 
               ImGui::TableNextRow();
               ImGui::TableSetColumnIndex(0);
@@ -1049,7 +1074,7 @@ void draw_diplomacy_window(Simulation& sim, UIState& ui, Id& /*selected_ship*/, 
           ImGui::SeparatorText("Selected relation");
           ImGui::Text("%s -> %s", a->name.c_str(), b->name.c_str());
           ImGui::Checkbox("Reciprocal##edge", &g.reciprocal_edits);
-          const DiplomacyStatus cur = sim.get_diplomatic_status(g.selected_edge.from, g.selected_edge.to);
+          const DiplomacyStatus cur = sim.diplomatic_status(g.selected_edge.from, g.selected_edge.to);
 
           for (DiplomacyStatus st : {DiplomacyStatus::Hostile, DiplomacyStatus::Neutral, DiplomacyStatus::Friendly}) {
             ImGui::PushID((int)st);
@@ -1102,7 +1127,7 @@ void draw_diplomacy_window(Simulation& sim, UIState& ui, Id& /*selected_ship*/, 
                   continue;
                 }
 
-                const DiplomacyStatus cur = sim.get_diplomatic_status(rowf->id, colf->id);
+                const DiplomacyStatus cur = sim.diplomatic_status(rowf->id, colf->id);
                 ImGui::PushID((int)rowf->id);
                 ImGui::PushID((int)colf->id);
                 ImGui::PushStyleColor(ImGuiCol_Button, status_color_rgba(cur, 0.92f));

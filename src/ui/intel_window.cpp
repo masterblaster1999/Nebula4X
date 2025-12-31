@@ -413,13 +413,15 @@ void draw_intel_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& sele
     double scan_ang = 0.0;
     if (ui.intel_radar_scanline) {
       scan_ang = std::fmod(ImGui::GetTime() * 0.65, kTwoPi);
-      const ImVec2 end(center.x + std::cos(scan_ang) * radius_px, center.y + std::sin(scan_ang) * radius_px);
+      const ImVec2 end(center.x + static_cast<float>(std::cos(scan_ang)) * radius_px,
+                          center.y + static_cast<float>(std::sin(scan_ang)) * radius_px);
       draw->AddLine(center, end, modulate_alpha(IM_COL32(0, 255, 200, 255), 0.14f), 2.0f);
       // A faint "trail" behind the sweep.
       for (int i = 1; i <= 10; ++i) {
         const double a = scan_ang - (double)i * 0.055;
         const float aa = 0.08f * (1.0f - (float)i / 10.0f);
-        const ImVec2 e2(center.x + std::cos(a) * radius_px, center.y + std::sin(a) * radius_px);
+        const ImVec2 e2(center.x + static_cast<float>(std::cos(a)) * radius_px,
+                         center.y + static_cast<float>(std::sin(a)) * radius_px);
         draw->AddLine(center, e2, modulate_alpha(IM_COL32(0, 255, 200, 255), aa), 1.0f);
       }
     }
@@ -800,7 +802,7 @@ void draw_intel_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& sele
               ImGui::TextDisabled("Select a ship in the same system to issue intercept/attack.");
             } else {
               if (ImGui::Button("Intercept (move)")) {
-                sim.issue_move_to_point(selected_ship, c.last_seen_position_mkm, ui.fog_of_war);
+                sim.issue_move_to_point(selected_ship, c.last_seen_position_mkm);
                 ui.show_map_window = true;
                 ui.request_map_tab = MapTab::System;
               }
