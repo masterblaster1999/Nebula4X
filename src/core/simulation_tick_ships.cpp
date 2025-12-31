@@ -554,6 +554,12 @@ void Simulation::tick_ships() {
         continue;
       }
 
+      if (tgt->faction_id == ship.faction_id) {
+        // Target changed hands (captured) or is otherwise no longer hostile.
+        q.erase(q.begin());
+        continue;
+      }
+
       attack_has_contact = is_ship_detected_by_faction(ship.faction_id, target_id);
       // An explicit AttackShip order acts as a de-facto declaration of hostilities if needed.
       if (attack_has_contact && !are_factions_hostile(ship.faction_id, tgt->faction_id)) {
@@ -569,6 +575,16 @@ void Simulation::tick_ships() {
         const auto* d = find_design(ship.design_id);
         const double w_range = d ? d->weapon_range_mkm : 0.0;
         desired_range = (w_range > 0.0) ? (w_range * 0.9) : 0.1;
+        // If the target is disabled and we have troops, close to boarding range.
+        if (cfg_.enable_boarding && ship.troops >= cfg_.boarding_min_attacker_troops) {
+          const auto* td = find_design(tgt->design_id);
+          const double tmax_hp = (td && td->max_hp > 1e-9) ? td->max_hp : std::max(1.0, tgt->hp);
+          const double hp_frac = (tmax_hp > 1e-9) ? (tgt->hp / tmax_hp) : 1.0;
+          const bool shields_ok = (!cfg_.boarding_require_shields_down) || (tgt->shields <= 1e-9);
+          if (shields_ok && hp_frac <= cfg_.boarding_target_hp_fraction) {
+            desired_range = std::min(desired_range, std::max(0.0, cfg_.boarding_range_mkm));
+          }
+        }
       } else {
         if (!ord.has_last_known) {
           q.erase(q.begin());

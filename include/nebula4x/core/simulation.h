@@ -56,6 +56,43 @@ struct SimConfig {
   // 0.0 disables repairs.
   double repair_hp_per_day_per_shipyard{0.5};
 
+  // Master toggle for space combat.
+  //
+  // When disabled, tick_combat() is skipped. Ships will still move and can still
+  // carry out non-combat orders; ground combat/invasions are unaffected.
+  bool enable_combat{true};
+
+  // --- Boarding / capture (space combat) ---
+  //
+  // When enabled (and enable_combat is also true), ships carrying troops may
+  // attempt to board and capture disabled hostile ships they are actively
+  // attacking.
+  bool enable_boarding{true};
+
+  // Maximum range (mkm) at which boarding can be attempted.
+  double boarding_range_mkm{0.1};
+
+  // Target must be at or below this remaining HP fraction to be considered
+  // "disabled" and boardable.
+  double boarding_target_hp_fraction{0.25};
+
+  // If true, a ship must have its shields fully down before it can be boarded.
+  bool boarding_require_shields_down{true};
+
+  // Minimum troop strength required on the attacker to attempt boarding.
+  double boarding_min_attacker_troops{10.0};
+
+  // Defender "crew resistance" modeled as (max_hp * boarding_defense_hp_factor),
+  // added on top of any embarked troops.
+  double boarding_defense_hp_factor{1.0};
+
+  // Casualty scaling per boarding attempt (fractions of involved troops).
+  double boarding_attacker_casualty_fraction{0.20};
+  double boarding_defender_casualty_fraction{0.30};
+
+  // Log failed boarding attempts as events (can be noisy in large combats).
+  bool boarding_log_failures{false};
+
   // Combat event logging controls.
   //
   // Combat already logs ship destruction. These thresholds control whether we also
@@ -71,6 +108,42 @@ struct SimConfig {
   // If a damaged ship's remaining HP fraction is <= this value, log the damage
   // event as Warn (otherwise Info).
   double combat_damage_event_warn_remaining_fraction{0.25};
+
+  // --- Ground combat / troops ---
+  // How much ground force "strength" is produced per training point per day.
+  //
+  // Training converts Colony::troop_training_queue into Colony::ground_forces in
+  // tick_ground_combat().
+  double troop_strength_per_training_point{1.0};
+
+  // Optional mineral costs per trained strength.
+  //
+  // Set to 0 to disable costs. When enabled, training is scaled down to the
+  // maximum affordable amount for the day.
+  double troop_training_duranium_per_strength{0.0};
+  double troop_training_neutronium_per_strength{0.0};
+
+  // Ground battle daily loss scaling.
+  //
+  // Each day, each side loses (ground_combat_loss_factor * opposing_strength),
+  // modified by defender fortifications.
+  double ground_combat_loss_factor{0.05};
+
+  // Fortification effectiveness scale.
+  //
+  // Defender losses are divided by (1 + forts * fortification_defense_scale).
+  double fortification_defense_scale{0.01};
+
+  // --- Terraforming ---
+  // Temperature change (Kelvin) per terraforming point per day.
+  double terraforming_temp_k_per_point_day{0.1};
+
+  // Atmosphere change (atm) per terraforming point per day.
+  double terraforming_atm_per_point_day{0.001};
+
+  // When within these tolerances of the target, terraforming is considered complete.
+  double terraforming_temp_tolerance_k{0.5};
+  double terraforming_atm_tolerance{0.01};
 
   // --- Fleet cohesion helpers ---
   //
@@ -106,6 +179,13 @@ struct SimConfig {
   // this fraction of that colony's computed exportable surplus in a single task.
   // (0.0 = take nothing, 1.0 = take full surplus).
   double auto_freight_max_take_fraction_of_surplus{0.75};
+
+  // For non-mining "industry" installations that consume minerals (e.g. refineries),
+  // auto-freight will try to keep this many *days* of input stockpiled at the colony.
+  //
+  // Example: an installation consumes 2 Duranium/day and the buffer is 30 days =>
+  // desired stockpile is 60 Duranium.
+  double auto_freight_industry_input_buffer_days{30.0};
 };
 
 // Optional context passed when recording a persistent simulation event.
@@ -167,6 +247,13 @@ struct AdvanceUntilEventResult {
 enum class LogisticsNeedKind {
   Shipyard,
   Construction,
+
+  // Daily-running industry inputs (non-mining installations with consumes_per_day),
+  // expressed as a desired buffer stockpile at the colony.
+  IndustryInput,
+
+  // Fuel required to top up docked ships (and optionally maintain a buffer).
+  Fuel,
 };
 
 // A computed mineral shortfall at a colony.
@@ -396,6 +483,40 @@ class Simulation {
   bool issue_unload_mineral(Id ship_id, Id colony_id, const std::string& mineral, double tons = 0.0,
                             bool restrict_to_discovered = false);
 
+  // Troops / invasion (prototype).
+  // Load/unload colony ground forces into a ship's troop bays.
+  // - strength <= 0 means "as much as possible".
+  //
+  // If the colony is in another system, the simulation will automatically
+  // enqueue TravelViaJump steps before the load/unload/invade order.
+  //
+  // When restrict_to_discovered is true, jump routing will only traverse
+  // systems discovered by the ship's faction.
+  bool issue_load_troops(Id ship_id, Id colony_id, double strength = 0.0,
+                         bool restrict_to_discovered = false);
+  bool issue_unload_troops(Id ship_id, Id colony_id, double strength = 0.0,
+                           bool restrict_to_discovered = false);
+
+  // Invade a hostile colony (combat is resolved on the ground).
+  bool issue_invade_colony(Id ship_id, Id colony_id, bool restrict_to_discovered = false);
+
+  // Colony troop training (prototype).
+  // Adds strength to the colony's training queue; training consumes time
+  // (training points/day) and converts queued strength into colony ground forces
+  // during tick_ground_combat().
+  bool enqueue_troop_training(Id colony_id, double strength);
+  bool clear_troop_training_queue(Id colony_id);
+
+  // Terraforming targets for a body (prototype).
+  // target_* <= 0 means "do not target that parameter".
+  bool set_terraforming_target(Id body_id, double target_temp_k, double target_atm);
+  bool clear_terraforming_target(Id body_id);
+
+  // Ground ops query helpers (pure queries).
+  double terraforming_points_per_day(const Colony& colony) const;
+  double troop_training_points_per_day(const Colony& colony) const;
+  double fortification_points(const Colony& colony) const;
+
   // Transfer cargo directly to another ship in space.
   bool issue_transfer_cargo_to_ship(Id ship_id, Id target_ship_id, const std::string& mineral, double tons = 0.0,
                                     bool restrict_to_discovered = false);
@@ -499,6 +620,8 @@ bool move_construction_order(Id colony_id, int from_index, int to_index);
   void tick_contacts();
   void tick_shields();
   void tick_combat();
+  void tick_ground_combat();
+  void tick_terraforming();
   void tick_repairs();
 
   void discover_system_for_faction(Id faction_id, Id system_id);

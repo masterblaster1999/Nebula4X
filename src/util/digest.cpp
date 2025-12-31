@@ -254,6 +254,7 @@ static void hash_installation_def(Digest64& d, const InstallationDef& def) {
   d.add_string(def.name);
   d.add_bool(def.mining);
   hash_string_double_map(d, def.produces_per_day);
+  hash_string_double_map(d, def.consumes_per_day);
   d.add_double(def.construction_points_per_day);
   d.add_double(def.construction_cost);
   hash_string_double_map(d, def.build_costs);

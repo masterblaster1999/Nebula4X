@@ -333,6 +333,10 @@
       "produces": {
         "Fuel": 200.0
       },
+      "consumes": {
+        "Duranium": 0.5,
+        "Neutronium": 0.25
+      },
       "construction_cost": 600,
       "build_costs": {
         "Duranium": 1500,

@@ -164,6 +164,7 @@ std::string ships_to_json(const GameState& state, const ContentDB* content) {
     obj["hp"] = sh.hp;
     obj["shields"] = std::max(0.0, sh.shields);
     obj["fuel_tons"] = std::max(0.0, sh.fuel_tons);
+    obj["troops"] = std::max(0.0, sh.troops);
 
     obj["design_mass_tons"] = d ? d->mass_tons : 0.0;
     obj["design_fuel_capacity_tons"] = d ? d->fuel_capacity_tons : 0.0;
@@ -171,6 +172,7 @@ std::string ships_to_json(const GameState& state, const ContentDB* content) {
     obj["design_cargo_tons"] = d ? d->cargo_tons : 0.0;
     obj["design_sensor_range_mkm"] = d ? d->sensor_range_mkm : 0.0;
     obj["design_colony_capacity_millions"] = d ? d->colony_capacity_millions : 0.0;
+    obj["design_troop_capacity"] = d ? d->troop_capacity : 0.0;
     obj["design_power_generation"] = d ? d->power_generation : 0.0;
     obj["design_power_use_total"] = d ? d->power_use_total : 0.0;
     obj["design_power_use_engines"] = d ? d->power_use_engines : 0.0;
@@ -247,9 +249,13 @@ std::string colonies_to_json(const GameState& state, const ContentDB* content) {
 
     // Compute aggregate per-day values from installations.
     std::unordered_map<std::string, double> prod;
+    std::unordered_map<std::string, double> cons;
     std::unordered_map<std::string, double> mining_prod;
     double construction_points_per_day = 0.0;
     double shipyard_capacity_tons_per_day = 0.0;
+    double terraforming_points_per_day = 0.0;
+    double troop_training_points_per_day = 0.0;
+    double fortification_points = 0.0;
 
     if (content) {
       for (const auto& [inst_id, count] : c.installations) {
@@ -263,9 +269,17 @@ std::string colonies_to_json(const GameState& state, const ContentDB* content) {
           prod[mineral] += amt;
           if (mining) mining_prod[mineral] += amt;
         }
+        for (const auto& [mineral, per_day] : def->consumes_per_day) {
+          const double amt = per_day * static_cast<double>(count);
+          cons[mineral] += amt;
+        }
+
 
         construction_points_per_day += def->construction_points_per_day * static_cast<double>(count);
         shipyard_capacity_tons_per_day += def->build_rate_tons_per_day * static_cast<double>(count);
+        terraforming_points_per_day += def->terraforming_points_per_day * static_cast<double>(count);
+        troop_training_points_per_day += def->troop_training_points_per_day * static_cast<double>(count);
+        fortification_points += def->fortification_points * static_cast<double>(count);
       }
     }
 
@@ -282,6 +296,8 @@ std::string colonies_to_json(const GameState& state, const ContentDB* content) {
     obj["body"] = body_name(state, c.body_id);
 
     obj["population_millions"] = c.population_millions;
+    obj["ground_forces"] = std::max(0.0, c.ground_forces);
+    obj["troop_training_queue"] = std::max(0.0, c.troop_training_queue);
 
     json::Object minerals;
     for (const auto& [k, v] : c.minerals) minerals[k] = v;
@@ -318,6 +334,10 @@ std::string colonies_to_json(const GameState& state, const ContentDB* content) {
     for (const auto& [k, v] : prod) prod_obj[k] = v;
     obj["mineral_production_per_day"] = std::move(prod_obj);
 
+    json::Object cons_obj;
+    for (const auto& [k, v] : cons) cons_obj[k] = v;
+    obj["mineral_consumption_per_day"] = std::move(cons_obj);
+
     // Finite mineral deposits (if present on the underlying body).
     if (body && !body->mineral_deposits.empty()) {
       json::Object dep_obj;
@@ -351,6 +371,9 @@ std::string colonies_to_json(const GameState& state, const ContentDB* content) {
 
     obj["construction_points_per_day"] = construction_points_per_day;
     obj["shipyard_capacity_tons_per_day"] = shipyard_capacity_tons_per_day;
+    obj["terraforming_points_per_day"] = terraforming_points_per_day;
+    obj["troop_training_points_per_day"] = troop_training_points_per_day;
+    obj["fortification_points"] = fortification_points;
 
     // Shipyard queue
     json::Array shipyard_q;
@@ -377,6 +400,22 @@ std::string colonies_to_json(const GameState& state, const ContentDB* content) {
       constr_q.emplace_back(std::move(io_obj));
     }
     obj["construction_queue"] = std::move(constr_q);
+
+    // Ground battle (if active for this colony).
+    if (auto itb = state.ground_battles.find(cid); itb != state.ground_battles.end()) {
+      const GroundBattle& b = itb->second;
+      json::Object bobj;
+      bobj["attacker_faction_id"] = static_cast<double>(b.attacker_faction_id);
+      bobj["attacker_faction"] = faction_name(state, b.attacker_faction_id);
+      bobj["defender_faction_id"] = static_cast<double>(c.faction_id);
+      bobj["defender_faction"] = faction_name(state, c.faction_id);
+      bobj["system_id"] = static_cast<double>(b.system_id);
+      bobj["system"] = system_name(state, b.system_id);
+      bobj["attacker_strength"] = b.attacker_strength;
+      bobj["defender_strength"] = b.defender_strength;
+      bobj["days_fought"] = static_cast<double>(b.days_fought);
+      obj["ground_battle"] = std::move(bobj);
+    }
 
     out.emplace_back(std::move(obj));
   }

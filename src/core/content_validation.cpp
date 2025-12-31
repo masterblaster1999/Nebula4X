@@ -50,6 +50,8 @@ std::vector<std::string> validate_content_db(const ContentDB& db) {
     if (!is_non_negative(c.colony_capacity_millions))
       push(errors,
            join("Component '", key, "' has invalid colony_capacity_millions: ", c.colony_capacity_millions));
+    if (!is_non_negative(c.troop_capacity))
+      push(errors, join("Component '", key, "' has invalid troop_capacity: ", c.troop_capacity));
     if (!is_non_negative(c.power_output))
       push(errors, join("Component '", key, "' has invalid power_output: ", c.power_output));
     if (!is_non_negative(c.power_use))
@@ -146,11 +148,22 @@ std::vector<std::string> validate_content_db(const ContentDB& db) {
       push(errors, join("Installation '", key, "' has invalid sensor_range_mkm: ", inst.sensor_range_mkm));
     if (!is_non_negative(inst.research_points_per_day))
       push(errors, join("Installation '", key, "' has invalid research_points_per_day: ", inst.research_points_per_day));
+    if (!is_non_negative(inst.terraforming_points_per_day))
+      push(errors, join("Installation '", key, "' has invalid terraforming_points_per_day: ", inst.terraforming_points_per_day));
+    if (!is_non_negative(inst.troop_training_points_per_day))
+      push(errors, join("Installation '", key, "' has invalid troop_training_points_per_day: ", inst.troop_training_points_per_day));
+    if (!is_non_negative(inst.fortification_points))
+      push(errors, join("Installation '", key, "' has invalid fortification_points: ", inst.fortification_points));
 
     for (const auto& [mineral, amount] : inst.produces_per_day) {
       if (mineral.empty()) push(errors, join("Installation '", key, "' produces an empty mineral id"));
       if (!is_non_negative(amount))
         push(errors, join("Installation '", key, "' has invalid production for '", mineral, "': ", amount));
+    }
+    for (const auto& [mineral, amount] : inst.consumes_per_day) {
+      if (mineral.empty()) push(errors, join("Installation '", key, "' consumes an empty mineral id"));
+      if (!is_non_negative(amount))
+        push(errors, join("Installation '", key, "' has invalid consumption for '", mineral, "': ", amount));
     }
     for (const auto& [mineral, amount] : inst.build_costs) {
       if (mineral.empty()) push(errors, join("Installation '", key, "' has a build_cost with empty mineral id"));

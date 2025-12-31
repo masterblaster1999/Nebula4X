@@ -39,6 +39,7 @@ ComponentType parse_component_type(const std::string& s) {
   if (s == "weapon") return ComponentType::Weapon;
   if (s == "armor") return ComponentType::Armor;
   if (s == "shield") return ComponentType::Shield;
+  if (s == "troop_bay" || s == "troops") return ComponentType::TroopBay;
   if (s == "colony_module" || s == "colony") return ComponentType::ColonyModule;
   return ComponentType::Unknown;
 }
@@ -411,6 +412,9 @@ ComponentDef parse_component_def(const std::string& cid, const json::Object& cj)
     c.colony_capacity_millions = v_col->number_value(0.0);
   }
 
+  // Optional: troop bay capacity.
+  if (const auto* v_tc = find_key(cj, "troop_capacity")) c.troop_capacity = v_tc->number_value(0.0);
+
   // Power model (prototype):
   // - Reactors contribute positive power_output.
   // - Other components may draw power_use.
@@ -464,10 +468,28 @@ InstallationDef parse_installation_def(const std::string& inst_id, const json::O
   def.name = find_key(vo, "name") ? find_key(vo, "name")->string_value(inst_id) : inst_id;
 
   if (const auto* prod_v = find_key(vo, "produces")) {
+    if (!prod_v->is_object()) {
+      throw std::runtime_error("Installation '" + inst_id + "': produces must be an object");
+    }
     for (const auto& [mineral, amount_v] : prod_v->object()) {
       def.produces_per_day[mineral] = amount_v.number_value(0.0);
     }
   }
+
+  // Optional "industry" inputs: minerals consumed per day.
+  // Supported keys: consumes (preferred), consumes_per_day (alias/back-compat).
+  auto parse_consumes_obj = [&](const json::Value* v) {
+    if (!v) return;
+    if (!v->is_object()) {
+      throw std::runtime_error("Installation '" + inst_id + "': consumes must be an object");
+    }
+    for (const auto& [mineral, amount_v] : v->object()) {
+      def.consumes_per_day[mineral] = amount_v.number_value(0.0);
+    }
+  };
+
+  parse_consumes_obj(find_key(vo, "consumes"));
+  parse_consumes_obj(find_key(vo, "consumes_per_day"));
 
   // Optional: mark this installation as a mining extractor.
   // If not explicitly specified, fall back to a simple heuristic for back-compat
@@ -526,6 +548,16 @@ InstallationDef parse_installation_def(const std::string& inst_id, const json::O
     def.research_points_per_day = rp_v->number_value(0.0);
   }
 
+  if (const auto* tf_v = find_key(vo, "terraforming_points_per_day")) {
+    def.terraforming_points_per_day = tf_v->number_value(0.0);
+  }
+  if (const auto* tr_v = find_key(vo, "troop_training_points_per_day")) {
+    def.troop_training_points_per_day = tr_v->number_value(0.0);
+  }
+  if (const auto* fort_v = find_key(vo, "fortification_points")) {
+    def.fortification_points = fort_v->number_value(0.0);
+  }
+
   return def;
 }
 
@@ -551,6 +583,7 @@ ShipDesign parse_design_def(const json::Object& o,
   double cargo = 0.0;
   double sensor = 0.0;
   double colony_cap = 0.0;
+  double troop_cap = 0.0;
   double weapon_damage = 0.0;
   double weapon_range = 0.0;
   double hp_bonus = 0.0;
@@ -579,6 +612,7 @@ ShipDesign parse_design_def(const json::Object& o,
     cargo += c.cargo_tons;
     sensor = std::max(sensor, c.sensor_range_mkm);
     colony_cap += c.colony_capacity_millions;
+    troop_cap += c.troop_capacity;
 
     if (c.type == ComponentType::Weapon) {
       weapon_damage += c.weapon_damage;
@@ -609,6 +643,7 @@ ShipDesign parse_design_def(const json::Object& o,
   d.cargo_tons = cargo;
   d.sensor_range_mkm = sensor;
   d.colony_capacity_millions = colony_cap;
+  d.troop_capacity = troop_cap;
 
   d.power_generation = power_gen;
   d.power_use_total = power_use_total;

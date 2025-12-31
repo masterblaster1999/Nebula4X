@@ -204,6 +204,14 @@ struct InstallationDef {
   // Simple mineral production.
   std::unordered_map<std::string, double> produces_per_day;
 
+
+  // Optional: mineral input consumption per day.
+  //
+  // If non-empty, non-mining installations will consume these minerals each day
+  // in tick_colonies() and will scale their output down if inputs are insufficient.
+  // This enables simple "industry recipes" like refineries (e.g. minerals -> Fuel).
+  std::unordered_map<std::string, double> consumes_per_day;
+
   // Colony construction points produced per day (used for building installations).
   // If 0, this installation does not contribute.
   double construction_points_per_day{0.0};

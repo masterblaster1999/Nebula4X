@@ -105,9 +105,10 @@ std::unordered_map<std::string, double> colony_mining_request_per_day(const Simu
   return out;
 }
 
-std::unordered_map<std::string, double> colony_synthetic_production_per_day(const Simulation& sim, const Colony& c) {
-  // "Synthetic" = non-mining produces_per_day (prototype behavior),
-  // e.g. Fuel refineries.
+std::unordered_map<std::string, double> colony_industry_output_per_day(const Simulation& sim, const Colony& c) {
+  // Non-mining "industry" output per day.
+  // If an installation also defines consumes_per_day, actual output may be
+  // input-limited in the simulation tick.
   std::unordered_map<std::string, double> out;
   for (const auto& [inst_id, count_raw] : c.installations) {
     const int count = std::max(0, count_raw);
@@ -127,6 +128,29 @@ std::unordered_map<std::string, double> colony_synthetic_production_per_day(cons
   }
   return out;
 }
+
+std::unordered_map<std::string, double> colony_industry_input_per_day(const Simulation& sim, const Colony& c) {
+  // Non-mining daily mineral inputs (consumed) for "industry" installations.
+  std::unordered_map<std::string, double> out;
+  for (const auto& [inst_id, count_raw] : c.installations) {
+    const int count = std::max(0, count_raw);
+    if (count <= 0) continue;
+    const auto it = sim.content().installations.find(inst_id);
+    if (it == sim.content().installations.end()) continue;
+    const InstallationDef& def = it->second;
+    if (def.consumes_per_day.empty()) continue;
+
+    const bool mining = def.mining ||
+                        (!def.mining && nebula4x::to_lower(def.id).find("mine") != std::string::npos);
+    if (mining) continue;
+
+    for (const auto& [mineral, per_day] : def.consumes_per_day) {
+      out[mineral] += std::max(0.0, per_day) * static_cast<double>(count);
+    }
+  }
+  return out;
+}
+
 
 double get_mineral_tons(const Colony& c, const std::string& mineral) {
   auto it = c.minerals.find(mineral);
@@ -997,8 +1021,9 @@ void draw_economy_window(Simulation& sim, UIState& ui, Id& selected_colony, Id& 
           const double dur_d = mine_req.count("Duranium") ? mine_req.at("Duranium") : 0.0;
           const double neu_d = mine_req.count("Neutronium") ? mine_req.at("Neutronium") : 0.0;
 
-          const auto synth = colony_synthetic_production_per_day(sim, *c);
-          const double fuel_d = synth.count("Fuel") ? synth.at("Fuel") : 0.0;
+          const auto industry_out = colony_industry_output_per_day(sim, *c);
+          const auto industry_in = colony_industry_input_per_day(sim, *c);
+          const double fuel_d = industry_out.count("Fuel") ? industry_out.at("Fuel") : 0.0;
 
           const int yards = c->installations.count("shipyard") ? c->installations.at("shipyard") : 0;
           const int cq = static_cast<int>(c->construction_queue.size());
@@ -1039,6 +1064,18 @@ void draw_economy_window(Simulation& sim, UIState& ui, Id& selected_colony, Id& 
 
           ImGui::TableSetColumnIndex(8);
           ImGui::Text("%.1f", fuel_d);
+          if (!industry_in.empty() && ImGui::IsItemHovered()) {
+            ImGui::BeginTooltip();
+            ImGui::TextUnformatted("Industry inputs per day:");
+            std::vector<std::string> mins;
+            mins.reserve(industry_in.size());
+            for (const auto& [m, _] : industry_in) mins.push_back(m);
+            std::sort(mins.begin(), mins.end());
+            for (const auto& m : mins) {
+              ImGui::Text("%s: %.2f", m.c_str(), industry_in.at(m));
+            }
+            ImGui::EndTooltip();
+          }
 
           ImGui::TableSetColumnIndex(9);
           ImGui::Text("%d", yards);

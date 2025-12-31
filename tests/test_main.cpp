@@ -2,8 +2,11 @@
 
 int test_date();
 int test_simulation();
+int test_ground_ops();
+int test_boarding();
 int test_serialization();
 int test_auto_freight();
+int test_industry();
 int test_refit();
 int test_diplomacy();
 int test_auto_routing();
@@ -36,8 +39,11 @@ int main() {
   int fails = 0;
   fails += test_date();
   fails += test_simulation();
+  fails += test_ground_ops();
+  fails += test_boarding();
   fails += test_serialization();
   fails += test_auto_freight();
+  fails += test_industry();
   fails += test_refit();
   fails += test_diplomacy();
   fails += test_auto_routing();

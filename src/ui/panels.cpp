@@ -2882,8 +2882,22 @@ if (colony->shipyard_queue.empty()) {
         rows.reserve(needs.size());
         for (const auto& n : needs) {
           if (n.missing_tons <= 1e-9) continue;
-          std::string reason = (n.kind == LogisticsNeedKind::Shipyard) ? "Shipyard" : "Construction";
-          if (n.kind == LogisticsNeedKind::Construction && !n.context_id.empty()) reason += (":" + n.context_id);
+          std::string reason;
+          switch (n.kind) {
+            case LogisticsNeedKind::Shipyard:
+              reason = "Shipyard";
+              break;
+            case LogisticsNeedKind::Construction:
+              reason = "Construction";
+              break;
+            case LogisticsNeedKind::IndustryInput:
+              reason = "Industry";
+              break;
+            case LogisticsNeedKind::Fuel:
+              reason = "Fuel";
+              break;
+          }
+          if (!n.context_id.empty()) reason += (":" + n.context_id);
           rows.push_back(NeedRow{n.colony_id, n.mineral, n.missing_tons, reason});
         }
         std::sort(rows.begin(), rows.end(), [](const NeedRow& a, const NeedRow& b) {

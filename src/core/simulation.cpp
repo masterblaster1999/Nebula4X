@@ -444,6 +444,7 @@ std::vector<LogisticsNeed> Simulation::logistics_needs_for_faction(Id faction_id
   }
 
   const auto colony_ids = sorted_keys(state_.colonies);
+  const auto ship_ids = sorted_keys(state_.ships);
   for (Id cid : colony_ids) {
     const Colony* colony = find_ptr(state_.colonies, cid);
     if (!colony) continue;
@@ -506,6 +507,95 @@ std::vector<LogisticsNeed> Simulation::logistics_needs_for_faction(Id faction_id
         n.have_tons = have;
         n.missing_tons = missing;
         n.context_id = def.id;
+        out.push_back(std::move(n));
+      }
+    }
+
+    // Industry input needs: keep a buffer of minerals required by daily-running non-mining industry.
+    const double buffer_days = std::max(0.0, cfg_.auto_freight_industry_input_buffer_days);
+    if (buffer_days > 1e-9) {
+      std::unordered_map<std::string, double> per_day_inputs;
+      for (const auto& [inst_id, count_raw] : colony->installations) {
+        const int count = std::max(0, count_raw);
+        if (count <= 0) continue;
+        const auto it = content_.installations.find(inst_id);
+        if (it == content_.installations.end()) continue;
+        const InstallationDef& def = it->second;
+        if (is_mining_installation(def)) continue;
+        for (const auto& [mineral, per_day_raw] : def.consumes_per_day) {
+          const double per_day = std::max(0.0, per_day_raw);
+          if (per_day <= 1e-12) continue;
+          per_day_inputs[mineral] += per_day * static_cast<double>(count);
+        }
+      }
+
+      if (!per_day_inputs.empty()) {
+        std::vector<std::string> minerals;
+        minerals.reserve(per_day_inputs.size());
+        for (const auto& [m, _] : per_day_inputs) minerals.push_back(m);
+        std::sort(minerals.begin(), minerals.end());
+
+        for (const std::string& mineral : minerals) {
+          const double per_day = per_day_inputs[mineral];
+          const double desired = per_day * buffer_days;
+          if (desired <= 1e-9) continue;
+
+          const double have = [&]() {
+            if (auto it2 = colony->minerals.find(mineral); it2 != colony->minerals.end()) return it2->second;
+            return 0.0;
+          }();
+
+          LogisticsNeed n;
+          n.colony_id = cid;
+          n.kind = LogisticsNeedKind::IndustryInput;
+          n.mineral = mineral;
+          n.desired_tons = desired;
+          n.have_tons = have;
+          n.missing_tons = std::max(0.0, desired - have);
+          out.push_back(std::move(n));
+        }
+      }
+    }
+
+    // Fuel needs: enough Fuel at the colony to top up docked ships.
+    //
+    // Note: this is a "stockpile desired" need (like shipyards), not a per-day rate.
+    const Body* body = find_ptr(state_.bodies, colony->body_id);
+    if (body) {
+      const double dock_range = std::max(0.0, cfg_.docking_range_mkm);
+
+      double desired = 0.0;
+      for (Id sid : ship_ids) {
+        const Ship* ship = find_ptr(state_.ships, sid);
+        if (!ship) continue;
+        if (ship->faction_id != faction_id) continue;
+        if (ship->system_id != body->system_id) continue;
+
+        const double dist = (ship->position_mkm - body->position_mkm).length();
+        if (dist > dock_range + 1e-9) continue;
+
+        const ShipDesign* d = find_design(ship->design_id);
+        if (!d) continue;
+        const double cap = std::max(0.0, d->fuel_capacity_tons);
+        const double have_ship = std::max(0.0, ship->fuel_tons);
+        if (cap <= have_ship + 1e-9) continue;
+
+        desired += (cap - have_ship);
+      }
+
+      if (desired > 1e-9) {
+        const double have = [&]() {
+          if (auto it2 = colony->minerals.find("Fuel"); it2 != colony->minerals.end()) return it2->second;
+          return 0.0;
+        }();
+
+        LogisticsNeed n;
+        n.colony_id = cid;
+        n.kind = LogisticsNeedKind::Fuel;
+        n.mineral = "Fuel";
+        n.desired_tons = desired;
+        n.have_tons = have;
+        n.missing_tons = std::max(0.0, desired - have);
         out.push_back(std::move(n));
       }
     }
@@ -2268,7 +2358,7 @@ void Simulation::tick_one_day() {
   tick_ships();
   tick_contacts();
   tick_shields();
-  tick_combat();
+  if (cfg_.enable_combat) tick_combat();
   tick_ground_combat();
   tick_terraforming();
   tick_repairs();
@@ -2574,11 +2664,6 @@ void Simulation::tick_colonies() {
           if (req <= 1e-12) continue;
           mine_reqs[body_id][mineral].push_back({cid, req});
         }
-      } else {
-        // Synthetic production: add directly to colony stockpile.
-        for (const auto& [mineral, per_day] : def.produces_per_day) {
-          colony.minerals[mineral] += per_day * static_cast<double>(count);
-        }
       }
     }
 
@@ -2687,8 +2772,80 @@ void Simulation::tick_colonies() {
         }
       }
     }
+
+  }
+
+  // --- Execute non-mining industry production/consumption ---
+  //
+  // This stage runs *after* mining extraction so that freshly mined minerals can
+  // be consumed by industry in the same day.
+  for (Id cid : sorted_keys(state_.colonies)) {
+    Colony& colony = state_.colonies.at(cid);
+
+    // Deterministic processing: installation iteration order of unordered_map is unspecified.
+    std::vector<std::string> inst_ids;
+    inst_ids.reserve(colony.installations.size());
+    for (const auto& [inst_id, _] : colony.installations) inst_ids.push_back(inst_id);
+    std::sort(inst_ids.begin(), inst_ids.end());
+
+    for (const std::string& inst_id : inst_ids) {
+      auto it_count = colony.installations.find(inst_id);
+      if (it_count == colony.installations.end()) continue;
+      const int count = std::max(0, it_count->second);
+      if (count <= 0) continue;
+
+      const auto it_def = content_.installations.find(inst_id);
+      if (it_def == content_.installations.end()) continue;
+      const InstallationDef& def = it_def->second;
+
+      // Mining is handled above against finite deposits.
+      if (is_mining_installation(def)) continue;
+
+      if (def.produces_per_day.empty() && def.consumes_per_day.empty()) continue;
+
+      // Compute the fraction of full-rate operation we can support with available inputs.
+      double frac = 1.0;
+      for (const auto& [mineral, per_day_raw] : def.consumes_per_day) {
+        const double per_day = std::max(0.0, per_day_raw);
+        if (per_day <= 1e-12) continue;
+
+        const double req = per_day * static_cast<double>(count);
+
+        const double have = [&]() {
+          const auto it = colony.minerals.find(mineral);
+          if (it == colony.minerals.end()) return 0.0;
+          return std::max(0.0, it->second);
+        }();
+
+        if (req > 1e-12) frac = std::min(frac, have / req);
+      }
+
+      frac = std::clamp(frac, 0.0, 1.0);
+      if (frac <= 1e-12) continue;
+
+      // Consume inputs first (based on the computed fraction), then produce outputs.
+      for (const auto& [mineral, per_day_raw] : def.consumes_per_day) {
+        const double per_day = std::max(0.0, per_day_raw);
+        if (per_day <= 1e-12) continue;
+        const double amt = per_day * static_cast<double>(count) * frac;
+        if (amt <= 1e-12) continue;
+
+        double& stock = colony.minerals[mineral]; // creates entry if missing
+        stock = std::max(0.0, stock - amt);
+        if (stock <= 1e-9) stock = 0.0;
+      }
+
+      for (const auto& [mineral, per_day_raw] : def.produces_per_day) {
+        const double per_day = std::max(0.0, per_day_raw);
+        if (per_day <= 1e-12) continue;
+        const double amt = per_day * static_cast<double>(count) * frac;
+        if (amt <= 1e-12) continue;
+        colony.minerals[mineral] += amt;
+      }
+    }
   }
 }
+
 
 void Simulation::tick_research() {
   for (Id cid : sorted_keys(state_.colonies)) {

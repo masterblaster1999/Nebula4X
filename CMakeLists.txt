@@ -167,15 +167,18 @@ if(NEBULA4X_BUILD_TESTS)
     tests/test_main.cpp
     tests/test_date.cpp
     tests/test_simulation.cpp
+    tests/test_ground_ops.cpp
+    tests/test_boarding.cpp
     tests/test_colonization.cpp
     tests/test_serialization.cpp
     tests/test_auto_freight.cpp
-  tests/test_ai_economy.cpp
+    tests/test_industry.cpp
+    tests/test_ai_economy.cpp
     tests/test_research_planner.cpp
     tests/test_mineral_deposits.cpp
     tests/test_power_system.cpp
     tests/test_digests.cpp
-  tests/test_refit.cpp
+    tests/test_refit.cpp
     tests/test_diplomacy.cpp
     tests/test_auto_routing.cpp
     tests/test_order_repeat.cpp
