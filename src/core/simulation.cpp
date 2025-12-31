@@ -30,6 +30,8 @@ using sim_internal::push_unique;
 using sim_internal::vec_contains;
 using sim_internal::sorted_keys;
 using sim_internal::faction_has_tech;
+using sim_internal::FactionEconomyMultipliers;
+using sim_internal::compute_faction_economy_multipliers;
 using sim_internal::compute_power_allocation;
 
 struct PredictedNavState {
@@ -332,10 +334,8 @@ std::vector<SensorSource> gather_sensor_sources(const Simulation& sim, Id factio
     const auto* d = sim.find_design(sh->design_id);
     double range = d ? d->sensor_range_mkm : 0.0;
     if (d && range > 0.0) {
-      const auto p = compute_power_allocation(*d);
-      if (!p.sensors_online && d->power_use_sensors > 1e-9) {
-        range = 0.0;
-      }
+      const auto p = compute_power_allocation(*d, sh->power_policy);
+      if (!p.sensors_online) range = 0.0;
     }
     if (range <= 0.0) continue;
     sources.push_back(SensorSource{sh->position_mkm, range});
@@ -431,12 +431,25 @@ double Simulation::construction_points_per_day(const Colony& colony) const {
     total += per_day * static_cast<double>(count);
   }
 
-  return total;
+  // Tech-driven faction modifier.
+  if (const auto* fac = find_ptr(state_.factions, colony.faction_id)) {
+    const auto m = compute_faction_economy_multipliers(content_, *fac);
+    total *= std::max(0.0, m.construction);
+  }
+
+  return std::max(0.0, total);
 }
 
 std::vector<LogisticsNeed> Simulation::logistics_needs_for_faction(Id faction_id) const {
   std::vector<LogisticsNeed> out;
   if (faction_id == kInvalidId) return out;
+
+  const double shipyard_rate_mult = [&]() {
+    const auto* fac = find_ptr(state_.factions, faction_id);
+    if (!fac) return 1.0;
+    const auto m = compute_faction_economy_multipliers(content_, *fac);
+    return std::max(0.0, m.shipyard);
+  }();
 
   const InstallationDef* shipyard_def = nullptr;
   if (auto it = content_.installations.find("shipyard"); it != content_.installations.end()) {
@@ -459,7 +472,8 @@ std::vector<LogisticsNeed> Simulation::logistics_needs_for_faction(Id faction_id
 
       if (yards > 0 && !colony->shipyard_queue.empty() && shipyard_def->build_rate_tons_per_day > 0.0 &&
           !shipyard_def->build_costs_per_ton.empty()) {
-        const double capacity_tons = shipyard_def->build_rate_tons_per_day * static_cast<double>(yards);
+        const double capacity_tons =
+            shipyard_def->build_rate_tons_per_day * static_cast<double>(yards) * shipyard_rate_mult;
         for (const auto& [mineral, cost_per_ton] : shipyard_def->build_costs_per_ton) {
           const double desired = std::max(0.0, cost_per_ton) * capacity_tons;
           if (desired <= 1e-9) continue;
@@ -1263,15 +1277,18 @@ bool Simulation::clear_orders(Id ship_id) {
   auto& so = state_.ship_orders[ship_id];
   so.queue.clear();
   so.repeat = false;
+  so.repeat_count_remaining = 0;
   so.repeat_template.clear();
   return true;
 }
 
-bool Simulation::enable_order_repeat(Id ship_id) {
+bool Simulation::enable_order_repeat(Id ship_id, int repeat_count_remaining) {
   if (!find_ptr(state_.ships, ship_id)) return false;
   auto& so = state_.ship_orders[ship_id];
   if (so.queue.empty()) return false;
   so.repeat = true;
+  if (repeat_count_remaining < -1) repeat_count_remaining = -1;
+  so.repeat_count_remaining = repeat_count_remaining;
   so.repeat_template = so.queue;
   return true;
 }
@@ -1280,6 +1297,9 @@ bool Simulation::update_order_repeat_template(Id ship_id) {
   if (!find_ptr(state_.ships, ship_id)) return false;
   auto& so = state_.ship_orders[ship_id];
   if (so.queue.empty()) return false;
+  if (!so.repeat) {
+    so.repeat_count_remaining = -1;
+  }
   so.repeat = true;
   so.repeat_template = so.queue;
   return true;
@@ -1289,7 +1309,40 @@ bool Simulation::disable_order_repeat(Id ship_id) {
   if (!find_ptr(state_.ships, ship_id)) return false;
   auto& so = state_.ship_orders[ship_id];
   so.repeat = false;
+  so.repeat_count_remaining = 0;
   so.repeat_template.clear();
+  return true;
+}
+
+bool Simulation::stop_order_repeat_keep_template(Id ship_id) {
+  if (!find_ptr(state_.ships, ship_id)) return false;
+  auto& so = state_.ship_orders[ship_id];
+  so.repeat = false;
+  so.repeat_count_remaining = 0;
+  return true;
+}
+
+bool Simulation::set_order_repeat_count(Id ship_id, int repeat_count_remaining) {
+  if (!find_ptr(state_.ships, ship_id)) return false;
+  auto& so = state_.ship_orders[ship_id];
+  if (repeat_count_remaining < -1) repeat_count_remaining = -1;
+  so.repeat_count_remaining = repeat_count_remaining;
+  return true;
+}
+
+bool Simulation::enable_order_repeat_from_template(Id ship_id, int repeat_count_remaining) {
+  if (!find_ptr(state_.ships, ship_id)) return false;
+  auto& so = state_.ship_orders[ship_id];
+  if (so.repeat_template.empty()) return false;
+
+  so.repeat = true;
+  if (repeat_count_remaining < -1) repeat_count_remaining = -1;
+  so.repeat_count_remaining = repeat_count_remaining;
+
+  if (so.queue.empty()) {
+    // Immediately start a cycle.
+    so.queue = so.repeat_template;
+  }
   return true;
 }
 
@@ -1512,6 +1565,237 @@ bool Simulation::apply_order_template_to_fleet(Id fleet_id, const std::string& n
     if (!apply_order_template_to_ship(sid, name, append)) ok = false;
   }
   return ok;
+}
+
+bool Simulation::apply_order_template_to_ship_smart(Id ship_id, const std::string& name, bool append,
+                                                    bool restrict_to_discovered, std::string* error) {
+  auto fail = [&](const std::string& msg) {
+    if (error) *error = msg;
+    return false;
+  };
+
+  const auto* tmpl = find_order_template(name);
+  if (!tmpl) return fail("Template not found");
+
+  const auto* ship = find_ptr(state_.ships, ship_id);
+  if (!ship) return fail("Ship not found");
+
+  // Start from the ship's predicted system after any queued jumps if we are appending.
+  PredictedNavState nav = predicted_nav_state_after_queued_jumps(state_, ship_id, append);
+  if (nav.system_id == kInvalidId) return fail("Invalid ship navigation state");
+
+  std::vector<Order> compiled;
+  compiled.reserve(tmpl->size() + 8);
+
+  auto route_to_system = [&](Id required_system_id) {
+    if (required_system_id == kInvalidId) return fail("Invalid required system id");
+    if (required_system_id == nav.system_id) return true;
+
+    const auto plan = plan_jump_route_cached(nav.system_id, nav.position_mkm, ship->faction_id,
+                                             ship->speed_km_s, required_system_id, restrict_to_discovered);
+    if (!plan) {
+      return fail("No jump route available to required system");
+    }
+
+    // Enqueue the source-side jump ids and update predicted nav state.
+    for (Id jid : plan->jump_ids) {
+      const auto* jp = find_ptr(state_.jump_points, jid);
+      if (!jp) return fail("Route contained an invalid jump point");
+      if (jp->system_id != nav.system_id) return fail("Route jump point is not in the current predicted system");
+      if (jp->linked_jump_id == kInvalidId) return fail("Route jump point is unlinked");
+      const auto* dest = find_ptr(state_.jump_points, jp->linked_jump_id);
+      if (!dest) return fail("Route jump point has invalid destination");
+      if (dest->system_id == kInvalidId) return fail("Route jump point has invalid destination system");
+      if (!find_ptr(state_.systems, dest->system_id)) return fail("Route destination system does not exist");
+
+      compiled.push_back(TravelViaJump{jid});
+      nav.system_id = dest->system_id;
+      nav.position_mkm = dest->position_mkm;
+    }
+
+    return true;
+  };
+
+  // Compile the template into a queue, injecting any missing travel.
+
+  // Helper to validate a body exists and returns its system.
+  auto body_system = [&](Id body_id) -> std::optional<Id> {
+    const auto* b = find_ptr(state_.bodies, body_id);
+    if (!b) return std::nullopt;
+    if (b->system_id == kInvalidId) return std::nullopt;
+    if (!find_ptr(state_.systems, b->system_id)) return std::nullopt;
+    return b->system_id;
+  };
+
+  // Helper to find the system of a colony (via its body).
+  auto colony_system = [&](Id colony_id) -> std::optional<Id> {
+    const auto* c = find_ptr(state_.colonies, colony_id);
+    if (!c) return std::nullopt;
+    return body_system(c->body_id);
+  };
+
+  auto ship_system = [&](Id target_ship_id) -> std::optional<Id> {
+    const auto* sh = find_ptr(state_.ships, target_ship_id);
+    if (!sh) return std::nullopt;
+    if (sh->system_id == kInvalidId) return std::nullopt;
+    if (!find_ptr(state_.systems, sh->system_id)) return std::nullopt;
+    return sh->system_id;
+  };
+
+  auto update_position_to_body = [&](Id body_id) {
+    if (const auto* b = find_ptr(state_.bodies, body_id)) {
+      if (b->system_id == nav.system_id) {
+        nav.position_mkm = b->position_mkm;
+      }
+    }
+  };
+
+  auto update_position_to_colony = [&](Id colony_id) {
+    const auto* c = find_ptr(state_.colonies, colony_id);
+    if (!c) return;
+    update_position_to_body(c->body_id);
+  };
+
+  for (const auto& ord : *tmpl) {
+    // Figure out which system the ship must be in for this order to be valid.
+    std::optional<Id> required_system;
+
+    if (std::holds_alternative<MoveToBody>(ord)) {
+      required_system = body_system(std::get<MoveToBody>(ord).body_id);
+      if (!required_system) return fail("Template MoveToBody references an invalid body");
+    } else if (std::holds_alternative<ColonizeBody>(ord)) {
+      required_system = body_system(std::get<ColonizeBody>(ord).body_id);
+      if (!required_system) return fail("Template ColonizeBody references an invalid body");
+    } else if (std::holds_alternative<OrbitBody>(ord)) {
+      required_system = body_system(std::get<OrbitBody>(ord).body_id);
+      if (!required_system) return fail("Template OrbitBody references an invalid body");
+    } else if (std::holds_alternative<LoadMineral>(ord)) {
+      required_system = colony_system(std::get<LoadMineral>(ord).colony_id);
+      if (!required_system) return fail("Template LoadMineral references an invalid colony");
+    } else if (std::holds_alternative<UnloadMineral>(ord)) {
+      required_system = colony_system(std::get<UnloadMineral>(ord).colony_id);
+      if (!required_system) return fail("Template UnloadMineral references an invalid colony");
+    } else if (std::holds_alternative<LoadTroops>(ord)) {
+      required_system = colony_system(std::get<LoadTroops>(ord).colony_id);
+      if (!required_system) return fail("Template LoadTroops references an invalid colony");
+    } else if (std::holds_alternative<UnloadTroops>(ord)) {
+      required_system = colony_system(std::get<UnloadTroops>(ord).colony_id);
+      if (!required_system) return fail("Template UnloadTroops references an invalid colony");
+    } else if (std::holds_alternative<InvadeColony>(ord)) {
+      required_system = colony_system(std::get<InvadeColony>(ord).colony_id);
+      if (!required_system) return fail("Template InvadeColony references an invalid colony");
+    } else if (std::holds_alternative<ScrapShip>(ord)) {
+      required_system = colony_system(std::get<ScrapShip>(ord).colony_id);
+      if (!required_system) return fail("Template ScrapShip references an invalid colony");
+    } else if (std::holds_alternative<AttackShip>(ord)) {
+      required_system = ship_system(std::get<AttackShip>(ord).target_ship_id);
+      if (!required_system) return fail("Template AttackShip references an invalid target ship");
+    } else if (std::holds_alternative<TransferCargoToShip>(ord)) {
+      required_system = ship_system(std::get<TransferCargoToShip>(ord).target_ship_id);
+      if (!required_system) return fail("Template TransferCargoToShip references an invalid target ship");
+    } else if (std::holds_alternative<TravelViaJump>(ord)) {
+      const Id jid = std::get<TravelViaJump>(ord).jump_point_id;
+      const auto* jp = find_ptr(state_.jump_points, jid);
+      if (!jp) return fail("Template TravelViaJump references an invalid jump point");
+      required_system = jp->system_id;
+      if (!required_system || *required_system == kInvalidId) {
+        return fail("Template TravelViaJump has an invalid source system");
+      }
+    }
+
+    if (required_system) {
+      if (!route_to_system(*required_system)) return false;
+    }
+
+    // Enqueue the actual template order.
+    compiled.push_back(ord);
+
+    // Update predicted nav state based on the order.
+    if (std::holds_alternative<MoveToPoint>(ord)) {
+      nav.position_mkm = std::get<MoveToPoint>(ord).target_mkm;
+    } else if (std::holds_alternative<MoveToBody>(ord)) {
+      update_position_to_body(std::get<MoveToBody>(ord).body_id);
+    } else if (std::holds_alternative<ColonizeBody>(ord)) {
+      update_position_to_body(std::get<ColonizeBody>(ord).body_id);
+    } else if (std::holds_alternative<OrbitBody>(ord)) {
+      update_position_to_body(std::get<OrbitBody>(ord).body_id);
+    } else if (std::holds_alternative<LoadMineral>(ord)) {
+      update_position_to_colony(std::get<LoadMineral>(ord).colony_id);
+    } else if (std::holds_alternative<UnloadMineral>(ord)) {
+      update_position_to_colony(std::get<UnloadMineral>(ord).colony_id);
+    } else if (std::holds_alternative<LoadTroops>(ord)) {
+      update_position_to_colony(std::get<LoadTroops>(ord).colony_id);
+    } else if (std::holds_alternative<UnloadTroops>(ord)) {
+      update_position_to_colony(std::get<UnloadTroops>(ord).colony_id);
+    } else if (std::holds_alternative<InvadeColony>(ord)) {
+      update_position_to_colony(std::get<InvadeColony>(ord).colony_id);
+    } else if (std::holds_alternative<ScrapShip>(ord)) {
+      update_position_to_colony(std::get<ScrapShip>(ord).colony_id);
+      // Scrapping removes the ship; any subsequent orders would be meaningless.
+      break;
+    } else if (std::holds_alternative<TravelViaJump>(ord)) {
+      const Id jid = std::get<TravelViaJump>(ord).jump_point_id;
+      const auto* jp = find_ptr(state_.jump_points, jid);
+      if (!jp) return fail("Template TravelViaJump references an invalid jump point");
+      if (jp->system_id != nav.system_id) {
+        // nav.system_id should already match required_system.
+        return fail("Template TravelViaJump is not in the predicted system after routing");
+      }
+      if (jp->linked_jump_id == kInvalidId) return fail("Template TravelViaJump uses an unlinked jump point");
+      const auto* dest = find_ptr(state_.jump_points, jp->linked_jump_id);
+      if (!dest) return fail("Template TravelViaJump has invalid destination");
+      if (dest->system_id == kInvalidId) return fail("Template TravelViaJump has invalid destination system");
+      if (!find_ptr(state_.systems, dest->system_id)) return fail("Template TravelViaJump destination system missing");
+      nav.system_id = dest->system_id;
+      nav.position_mkm = dest->position_mkm;
+    } else if (std::holds_alternative<AttackShip>(ord)) {
+      // Best-effort: update position to the current target snapshot if it's in the same system.
+      const Id tid = std::get<AttackShip>(ord).target_ship_id;
+      if (const auto* t = find_ptr(state_.ships, tid)) {
+        if (t->system_id == nav.system_id) nav.position_mkm = t->position_mkm;
+      }
+    } else if (std::holds_alternative<TransferCargoToShip>(ord)) {
+      const Id tid = std::get<TransferCargoToShip>(ord).target_ship_id;
+      if (const auto* t = find_ptr(state_.ships, tid)) {
+        if (t->system_id == nav.system_id) nav.position_mkm = t->position_mkm;
+      }
+    }
+  }
+
+  if (compiled.empty()) return fail("Template produced no orders");
+
+  // Apply atomically after successful compilation.
+  if (!append) {
+    if (!clear_orders(ship_id)) return fail("Failed to clear orders");
+  }
+
+  auto& so = state_.ship_orders[ship_id];
+  so.queue.insert(so.queue.end(), compiled.begin(), compiled.end());
+  return true;
+}
+
+bool Simulation::apply_order_template_to_fleet_smart(Id fleet_id, const std::string& name, bool append,
+                                                     bool restrict_to_discovered, std::string* error) {
+  prune_fleets();
+  const auto* fl = find_ptr(state_.fleets, fleet_id);
+  if (!fl) {
+    if (error) *error = "Fleet not found";
+    return false;
+  }
+
+  bool ok_any = false;
+  std::string last_err;
+  for (Id sid : fl->ship_ids) {
+    std::string err;
+    if (apply_order_template_to_ship_smart(sid, name, append, restrict_to_discovered, &err)) {
+      ok_any = true;
+    } else {
+      last_err = err;
+    }
+  }
+
+  if (!ok_any && error) *error = last_err;
+  return ok_any;
 }
 
 Id Simulation::create_fleet(Id faction_id, const std::string& name, const std::vector<Id>& ship_ids,
@@ -2102,7 +2386,11 @@ double Simulation::terraforming_points_per_day(const Colony& c) const {
     const double p = it->second.terraforming_points_per_day;
     if (p > 0.0) total += p * static_cast<double>(count);
   }
-  return total;
+  if (const auto* fac = find_ptr(state_.factions, c.faction_id)) {
+    const auto m = compute_faction_economy_multipliers(content_, *fac);
+    total *= std::max(0.0, m.terraforming);
+  }
+  return std::max(0.0, total);
 }
 
 double Simulation::troop_training_points_per_day(const Colony& c) const {
@@ -2114,7 +2402,11 @@ double Simulation::troop_training_points_per_day(const Colony& c) const {
     const double p = it->second.troop_training_points_per_day;
     if (p > 0.0) total += p * static_cast<double>(count);
   }
-  return total;
+  if (const auto* fac = find_ptr(state_.factions, c.faction_id)) {
+    const auto m = compute_faction_economy_multipliers(content_, *fac);
+    total *= std::max(0.0, m.troop_training);
+  }
+  return std::max(0.0, total);
 }
 
 double Simulation::fortification_points(const Colony& c) const {
@@ -2605,7 +2897,7 @@ void Simulation::tick_shields() {
       continue;
     }
 
-    const auto p = compute_power_allocation(*d);
+    const auto p = compute_power_allocation(*d, sh->power_policy);
 
     const double max_sh = std::max(0.0, d->max_shields);
     if (max_sh <= 1e-9) {
@@ -2613,8 +2905,9 @@ void Simulation::tick_shields() {
       continue;
     }
 
-    // If shields draw power and are offline, treat them as fully down.
-    if (!p.shields_online && d->power_use_shields > 1e-9) {
+    // If shields are offline (either due to insufficient power or because
+    // the ship's power policy disables them), treat them as fully down.
+    if (!p.shields_online) {
       sh->shields = 0.0;
       continue;
     }
@@ -2628,6 +2921,21 @@ void Simulation::tick_shields() {
 }
 
 void Simulation::tick_colonies() {
+  // Precompute faction-wide economy modifiers once per tick for determinism
+  // and to avoid repeated tech scanning in inner loops.
+  std::unordered_map<Id, FactionEconomyMultipliers> fac_mult;
+  fac_mult.reserve(state_.factions.size());
+  for (Id fid : sorted_keys(state_.factions)) {
+    fac_mult.emplace(fid, compute_faction_economy_multipliers(content_, state_.factions.at(fid)));
+  }
+
+  const FactionEconomyMultipliers default_mult;
+  auto mult_for = [&](Id fid) -> const FactionEconomyMultipliers& {
+    auto it = fac_mult.find(fid);
+    if (it == fac_mult.end()) return default_mult;
+    return it->second;
+  };
+
   // Aggregate mining requests so that multiple colonies on the same body share
   // finite deposits fairly (proportional allocation) and deterministically.
   //
@@ -2637,6 +2945,8 @@ void Simulation::tick_colonies() {
 
   for (Id cid : sorted_keys(state_.colonies)) {
     auto& colony = state_.colonies.at(cid);
+
+    const double mining_mult = std::max(0.0, mult_for(colony.faction_id).mining);
 
     // --- Installation-based production ---
     for (const auto& [inst_id, count] : colony.installations) {
@@ -2655,12 +2965,12 @@ void Simulation::tick_colonies() {
         // the older "unlimited" behaviour to avoid silently losing resources.
         if (body_id == kInvalidId || state_.bodies.find(body_id) == state_.bodies.end()) {
           for (const auto& [mineral, per_day] : def.produces_per_day) {
-            colony.minerals[mineral] += per_day * static_cast<double>(count);
+            colony.minerals[mineral] += per_day * static_cast<double>(count) * mining_mult;
           }
           continue;
         }
         for (const auto& [mineral, per_day] : def.produces_per_day) {
-          const double req = per_day * static_cast<double>(count);
+          const double req = per_day * static_cast<double>(count) * mining_mult;
           if (req <= 1e-12) continue;
           mine_reqs[body_id][mineral].push_back({cid, req});
         }
@@ -2782,6 +3092,8 @@ void Simulation::tick_colonies() {
   for (Id cid : sorted_keys(state_.colonies)) {
     Colony& colony = state_.colonies.at(cid);
 
+    const double industry_mult = std::max(0.0, mult_for(colony.faction_id).industry);
+
     // Deterministic processing: installation iteration order of unordered_map is unspecified.
     std::vector<std::string> inst_ids;
     inst_ids.reserve(colony.installations.size());
@@ -2838,7 +3150,7 @@ void Simulation::tick_colonies() {
       for (const auto& [mineral, per_day_raw] : def.produces_per_day) {
         const double per_day = std::max(0.0, per_day_raw);
         if (per_day <= 1e-12) continue;
-        const double amt = per_day * static_cast<double>(count) * frac;
+        const double amt = per_day * static_cast<double>(count) * frac * industry_mult;
         if (amt <= 1e-12) continue;
         colony.minerals[mineral] += amt;
       }
@@ -2848,6 +3160,19 @@ void Simulation::tick_colonies() {
 
 
 void Simulation::tick_research() {
+  std::unordered_map<Id, FactionEconomyMultipliers> fac_mult;
+  fac_mult.reserve(state_.factions.size());
+  for (Id fid : sorted_keys(state_.factions)) {
+    fac_mult.emplace(fid, compute_faction_economy_multipliers(content_, state_.factions.at(fid)));
+  }
+
+  const FactionEconomyMultipliers default_mult;
+  auto mult_for = [&](Id fid) -> const FactionEconomyMultipliers& {
+    auto it = fac_mult.find(fid);
+    if (it == fac_mult.end()) return default_mult;
+    return it->second;
+  };
+
   for (Id cid : sorted_keys(state_.colonies)) {
     auto& col = state_.colonies.at(cid);
     double rp_per_day = 0.0;
@@ -2856,6 +3181,8 @@ void Simulation::tick_research() {
       if (dit == content_.installations.end()) continue;
       rp_per_day += dit->second.research_points_per_day * static_cast<double>(count);
     }
+    if (rp_per_day <= 0.0) continue;
+    rp_per_day *= std::max(0.0, mult_for(col.faction_id).research);
     if (rp_per_day <= 0.0) continue;
     auto fit = state_.factions.find(col.faction_id);
     if (fit == state_.factions.end()) continue;
@@ -2989,6 +3316,19 @@ void Simulation::tick_shipyards() {
   const auto it_def = content_.installations.find("shipyard");
   if (it_def == content_.installations.end()) return;
 
+  std::unordered_map<Id, FactionEconomyMultipliers> fac_mult;
+  fac_mult.reserve(state_.factions.size());
+  for (Id fid : sorted_keys(state_.factions)) {
+    fac_mult.emplace(fid, compute_faction_economy_multipliers(content_, state_.factions.at(fid)));
+  }
+
+  const FactionEconomyMultipliers default_mult;
+  auto mult_for = [&](Id fid) -> const FactionEconomyMultipliers& {
+    auto it = fac_mult.find(fid);
+    if (it == fac_mult.end()) return default_mult;
+    return it->second;
+  };
+
   const InstallationDef& shipyard_def = it_def->second;
   const double base_rate = shipyard_def.build_rate_tons_per_day;
   if (base_rate <= 0.0) return;
@@ -3020,7 +3360,8 @@ void Simulation::tick_shipyards() {
     const int yards = (it_yard != colony.installations.end()) ? it_yard->second : 0;
     if (yards <= 0) continue;
 
-    double capacity_tons = base_rate * static_cast<double>(yards);
+    const double shipyard_mult = std::max(0.0, mult_for(colony.faction_id).shipyard);
+    double capacity_tons = base_rate * static_cast<double>(yards) * shipyard_mult;
 
     while (capacity_tons > 1e-9 && !colony.shipyard_queue.empty()) {
       auto& bo = colony.shipyard_queue.front();
@@ -3350,7 +3691,12 @@ void Simulation::tick_ai() {
   auto orders_empty = [&](Id ship_id) -> bool {
     auto it = state_.ship_orders.find(ship_id);
     if (it == state_.ship_orders.end()) return true;
-    return it->second.queue.empty();
+    const ShipOrders& so = it->second;
+    if (!so.queue.empty()) return false;
+    // A ship with repeat enabled and remaining refills is not considered idle:
+    // its queue will be refilled during tick_ships().
+    if (so.repeat && !so.repeat_template.empty() && so.repeat_count_remaining != 0) return false;
+    return true;
   };
 
   auto role_priority = [&](ShipRole r) -> int {
@@ -3578,30 +3924,40 @@ void Simulation::tick_ai() {
       }
     }
 
-    struct NeedAgg {
-      Id colony_id{kInvalidId};
-      std::string mineral;
-      double missing_tons{0.0};
-    };
-
-    std::vector<NeedAgg> need_list;
+    // Precompute per-destination mineral priority lists (descending missing tons).
+    // This provides deterministic iteration order even though our storage is hash-based.
+    std::unordered_map<Id, std::vector<std::string>> need_minerals_by_colony;
+    need_minerals_by_colony.reserve(missing_by_colony.size() * 2 + 8);
     for (Id cid : colony_ids) {
-      auto it = missing_by_colony.find(cid);
-      if (it == missing_by_colony.end()) continue;
-      std::vector<std::string> minerals;
-      minerals.reserve(it->second.size());
-      for (const auto& [mineral, _] : it->second) minerals.push_back(mineral);
-      std::sort(minerals.begin(), minerals.end());
-      for (const auto& mineral : minerals) {
-        need_list.push_back(NeedAgg{cid, mineral, it->second[mineral]});
+      auto it_miss = missing_by_colony.find(cid);
+      if (it_miss == missing_by_colony.end()) continue;
+
+      std::vector<std::pair<std::string, double>> pairs;
+      pairs.reserve(it_miss->second.size());
+      for (const auto& [mineral, miss_raw] : it_miss->second) {
+        const double miss = std::max(0.0, miss_raw);
+        if (miss <= 1e-9) continue;
+        pairs.emplace_back(mineral, miss);
       }
+      if (pairs.empty()) continue;
+
+      std::sort(pairs.begin(), pairs.end(), [](const auto& a, const auto& b) {
+        if (a.second != b.second) return a.second > b.second;
+        return a.first < b.first;
+      });
+
+      std::vector<std::string> minerals;
+      minerals.reserve(pairs.size());
+      for (const auto& [m, _] : pairs) minerals.push_back(m);
+      need_minerals_by_colony[cid] = std::move(minerals);
     }
 
-    std::sort(need_list.begin(), need_list.end(), [](const NeedAgg& a, const NeedAgg& b) {
-      if (a.missing_tons != b.missing_tons) return a.missing_tons > b.missing_tons;
-      if (a.colony_id != b.colony_id) return a.colony_id < b.colony_id;
-      return a.mineral < b.mineral;
-    });
+    // Stable lists of destinations and sources.
+    std::vector<Id> dests_with_needs;
+    dests_with_needs.reserve(need_minerals_by_colony.size());
+    for (Id cid : colony_ids) {
+      if (need_minerals_by_colony.find(cid) != need_minerals_by_colony.end()) dests_with_needs.push_back(cid);
+    }
 
     // Compute exportable minerals for each colony = stockpile - local reserve.
     std::unordered_map<Id, std::unordered_map<std::string, double>> exportable_by_colony;
@@ -3625,6 +3981,40 @@ void Simulation::tick_ai() {
     auto auto_ships = it_auto->second;
     std::sort(auto_ships.begin(), auto_ships.end());
 
+    const bool bundle_multi = cfg_.auto_freight_multi_mineral;
+    // Avoid degenerate "0 ton" shipments if the config is set to 0.
+    const double min_tons = std::max(1e-6, cfg_.auto_freight_min_transfer_tons);
+    const double take_frac = std::clamp(cfg_.auto_freight_max_take_fraction_of_surplus, 0.0, 1.0);
+
+    struct FreightItem {
+      std::string mineral;
+      double tons{0.0};
+    };
+
+    auto dec_map_value = [](std::unordered_map<std::string, double>& m, const std::string& key, double amount) {
+      if (amount <= 0.0) return;
+      auto it = m.find(key);
+      if (it == m.end()) return;
+      it->second = std::max(0.0, it->second - amount);
+      if (it->second <= 1e-9) m.erase(it);
+    };
+
+    auto dec_missing = [&](Id cid, const std::string& mineral, double amount) {
+      if (amount <= 0.0) return;
+      auto itc = missing_by_colony.find(cid);
+      if (itc == missing_by_colony.end()) return;
+      dec_map_value(itc->second, mineral, amount);
+      if (itc->second.empty()) missing_by_colony.erase(itc);
+    };
+
+    auto dec_exportable = [&](Id cid, const std::string& mineral, double amount) {
+      if (amount <= 0.0) return;
+      auto itc = exportable_by_colony.find(cid);
+      if (itc == exportable_by_colony.end()) return;
+      dec_map_value(itc->second, mineral, amount);
+      if (itc->second.empty()) exportable_by_colony.erase(itc);
+    };
+
     for (Id sid : auto_ships) {
       Ship* sh = find_ptr(state_.ships, sid);
       if (!sh) continue;
@@ -3638,136 +4028,212 @@ void Simulation::tick_ai() {
       const double used = cargo_used_tons(*sh);
       const double free = std::max(0.0, cap - used);
 
-      // 1) If we already have cargo, try to deliver it to the nearest colony that needs it.
+      // 1) If we already have cargo, try to deliver it (optionally bundling multiple minerals)
+      //    to a single colony that needs them.
       bool assigned = false;
-      if (used > 1e-9 && !need_list.empty()) {
-        for (const auto& [mineral, tons_raw] : sh->cargo) {
-          const double tons = std::max(0.0, tons_raw);
-          if (tons <= 1e-9) continue;
+      if (used > 1e-9 && !dests_with_needs.empty()) {
+        std::vector<std::string> cargo_minerals;
+        cargo_minerals.reserve(sh->cargo.size());
+        for (const auto& [m, tons_raw] : sh->cargo) {
+          if (std::max(0.0, tons_raw) > 1e-9) cargo_minerals.push_back(m);
+        }
+        std::sort(cargo_minerals.begin(), cargo_minerals.end());
 
-          int best_idx = -1;
-          double best_eta = std::numeric_limits<double>::infinity();
-          double best_missing = 0.0;
+        struct UnloadChoice {
+          Id dest{kInvalidId};
+          double eff{std::numeric_limits<double>::infinity()};
+          double eta{std::numeric_limits<double>::infinity()};
+          double total{0.0};
+          std::vector<FreightItem> items;
+        } best;
 
-          for (int i = 0; i < static_cast<int>(need_list.size()); ++i) {
-            if (need_list[i].missing_tons <= 1e-9) continue;
-            if (need_list[i].mineral != mineral) continue;
+        for (Id dest_cid : dests_with_needs) {
+          if (dest_cid == kInvalidId) continue;
+          auto it_sys = colony_system.find(dest_cid);
+          auto it_pos = colony_pos.find(dest_cid);
+          if (it_sys == colony_system.end() || it_pos == colony_pos.end()) continue;
 
-            const Id dcid = need_list[i].colony_id;
-            auto it_sys = colony_system.find(dcid);
-            auto it_pos = colony_pos.find(dcid);
-            if (it_sys == colony_system.end() || it_pos == colony_pos.end()) continue;
+          std::vector<FreightItem> items;
+          items.reserve(bundle_multi ? cargo_minerals.size() : 1);
+          double total = 0.0;
 
-            const double eta = estimate_eta_days_to_pos(sh->system_id, sh->position_mkm, fid, sh->speed_km_s,
-                                                       it_sys->second, it_pos->second);
+          for (const auto& mineral : cargo_minerals) {
+            const double have = [&]() {
+              auto it = sh->cargo.find(mineral);
+              return (it == sh->cargo.end()) ? 0.0 : std::max(0.0, it->second);
+            }();
+            if (have < min_tons) continue;
 
-            const double miss = need_list[i].missing_tons;
-            if (best_idx < 0 || eta < best_eta - 1e-9 ||
-                (std::abs(eta - best_eta) <= 1e-9 && (miss > best_missing + 1e-9 ||
-                                                     (std::abs(miss - best_missing) <= 1e-9 &&
-                                                      dcid < need_list[best_idx].colony_id)))) {
-              best_idx = i;
-              best_eta = eta;
-              best_missing = miss;
-            }
+            const double miss = [&]() {
+              auto itc = missing_by_colony.find(dest_cid);
+              if (itc == missing_by_colony.end()) return 0.0;
+              auto itm = itc->second.find(mineral);
+              if (itm == itc->second.end()) return 0.0;
+              return std::max(0.0, itm->second);
+            }();
+            if (miss < min_tons) continue;
+
+            const double amount = std::min(have, miss);
+            if (amount < min_tons) continue;
+
+            items.push_back(FreightItem{mineral, amount});
+            total += amount;
+
+            if (!bundle_multi) break;
           }
 
-          if (best_idx >= 0) {
-            const Id dest_cid = need_list[best_idx].colony_id;
-            const double amount = std::min(tons, need_list[best_idx].missing_tons);
-            if (amount > 1e-9 && issue_unload_mineral(sid, dest_cid, mineral, amount, /*restrict_to_discovered=*/true)) {
-              need_list[best_idx].missing_tons = std::max(0.0, need_list[best_idx].missing_tons - amount);
-              assigned = true;
-              break;
+          if (total < min_tons) continue;
+          const double eta = estimate_eta_days_to_pos(sh->system_id, sh->position_mkm, fid, sh->speed_km_s,
+                                                     it_sys->second, it_pos->second);
+          if (!std::isfinite(eta)) continue;
+
+          const double eff = eta / std::max(1e-9, total);
+          if (best.dest == kInvalidId || eff < best.eff - 1e-9 ||
+              (std::abs(eff - best.eff) <= 1e-9 && (eta < best.eta - 1e-9 ||
+                                                   (std::abs(eta - best.eta) <= 1e-9 &&
+                                                    (total > best.total + 1e-9 ||
+                                                     (std::abs(total - best.total) <= 1e-9 && dest_cid < best.dest)))))) {
+            best.dest = dest_cid;
+            best.eff = eff;
+            best.eta = eta;
+            best.total = total;
+            best.items = std::move(items);
+          }
+        }
+
+        if (best.dest != kInvalidId && !best.items.empty()) {
+          bool ok = true;
+          for (const auto& it : best.items) {
+            ok = ok && issue_unload_mineral(sid, best.dest, it.mineral, it.tons, /*restrict_to_discovered=*/true);
+          }
+          if (!ok) {
+            (void)clear_orders(sid);
+          } else {
+            for (const auto& it : best.items) {
+              dec_missing(best.dest, it.mineral, it.tons);
             }
+            assigned = true;
           }
         }
       }
+
       if (assigned) continue;
 
-      // 2) Otherwise, pick a source colony and a destination need.
-      if (free <= 1e-9) continue;
-      if (need_list.empty()) continue;
+      // 2) Otherwise, pick a source colony and destination colony, optionally bundling multiple minerals
+      //    that the destination needs in a single trip.
+      if (free < min_tons) continue;
+      if (dests_with_needs.empty()) continue;
+      if (exportable_by_colony.empty()) continue;
 
-      struct Choice {
-        Id source_colony{kInvalidId};
-        Id dest_colony{kInvalidId};
-        std::string mineral;
-        double amount{0.0};
+      // Candidate source colonies (sorted).
+      std::vector<Id> sources;
+      sources.reserve(exportable_by_colony.size());
+      for (Id cid : colony_ids) {
+        if (exportable_by_colony.find(cid) != exportable_by_colony.end()) sources.push_back(cid);
+      }
+
+      struct LoadChoice {
+        Id source{kInvalidId};
+        Id dest{kInvalidId};
+        double eff{std::numeric_limits<double>::infinity()};
         double eta_total{std::numeric_limits<double>::infinity()};
+        double total{0.0};
+        std::vector<FreightItem> items;
       } best;
 
-      for (const auto& need : need_list) {
-        if (need.missing_tons <= 1e-9) continue;
-        if (need.missing_tons < cfg_.auto_freight_min_transfer_tons) continue;
-
-        const Id dest_cid = need.colony_id;
+      for (Id dest_cid : dests_with_needs) {
+        auto it_need_list = need_minerals_by_colony.find(dest_cid);
+        if (it_need_list == need_minerals_by_colony.end()) continue;
         auto it_dest_sys = colony_system.find(dest_cid);
         auto it_dest_pos = colony_pos.find(dest_cid);
         if (it_dest_sys == colony_system.end() || it_dest_pos == colony_pos.end()) continue;
 
-        for (Id scid : colony_ids) {
-          if (scid == dest_cid) continue;
-          auto it_exp_c = exportable_by_colony.find(scid);
-          if (it_exp_c == exportable_by_colony.end()) continue;
-          auto it_exp = it_exp_c->second.find(need.mineral);
-          if (it_exp == it_exp_c->second.end()) continue;
-
-          const double avail = std::max(0.0, it_exp->second);
-          if (avail <= 1e-9) continue;
-
-          const double take_cap = avail * std::clamp(cfg_.auto_freight_max_take_fraction_of_surplus, 0.0, 1.0);
-          const double amount = std::min({free, need.missing_tons, take_cap});
-          if (amount < cfg_.auto_freight_min_transfer_tons) continue;
-
-          auto it_src_sys = colony_system.find(scid);
-          auto it_src_pos = colony_pos.find(scid);
+        for (Id src_cid : sources) {
+          if (src_cid == dest_cid) continue;
+          auto it_src_sys = colony_system.find(src_cid);
+          auto it_src_pos = colony_pos.find(src_cid);
           if (it_src_sys == colony_system.end() || it_src_pos == colony_pos.end()) continue;
+
+          auto it_exp_c = exportable_by_colony.find(src_cid);
+          if (it_exp_c == exportable_by_colony.end()) continue;
+
+          std::vector<FreightItem> items;
+          items.reserve(bundle_multi ? it_need_list->second.size() : 1);
+          double remaining = free;
+          double total = 0.0;
+
+          for (const std::string& mineral : it_need_list->second) {
+            if (remaining < min_tons) break;
+
+            const double miss = [&]() {
+              auto itc = missing_by_colony.find(dest_cid);
+              if (itc == missing_by_colony.end()) return 0.0;
+              auto itm = itc->second.find(mineral);
+              if (itm == itc->second.end()) return 0.0;
+              return std::max(0.0, itm->second);
+            }();
+            if (miss < min_tons) continue;
+
+            auto it_exp = it_exp_c->second.find(mineral);
+            if (it_exp == it_exp_c->second.end()) continue;
+            const double avail = std::max(0.0, it_exp->second);
+            if (avail < min_tons) continue;
+
+            const double take_cap = avail * take_frac;
+            const double amount = std::min({remaining, miss, take_cap});
+            if (amount < min_tons) continue;
+
+            items.push_back(FreightItem{mineral, amount});
+            total += amount;
+            remaining -= amount;
+
+            if (!bundle_multi) break;
+          }
+
+          if (total < min_tons) continue;
 
           const double eta1 = estimate_eta_days_to_pos(sh->system_id, sh->position_mkm, fid, sh->speed_km_s,
                                                        it_src_sys->second, it_src_pos->second);
           if (!std::isfinite(eta1)) continue;
-
           const double eta2 = estimate_eta_days_to_pos(it_src_sys->second, it_src_pos->second, fid, sh->speed_km_s,
                                                        it_dest_sys->second, it_dest_pos->second);
           if (!std::isfinite(eta2)) continue;
 
           const double eta_total = eta1 + eta2;
+          const double eff = eta_total / std::max(1e-9, total);
 
-          if (best.source_colony == kInvalidId || eta_total < best.eta_total - 1e-9 ||
-              (std::abs(eta_total - best.eta_total) <= 1e-9 && (amount > best.amount + 1e-9 ||
-                                                               (std::abs(amount - best.amount) <= 1e-9 &&
-                                                                (dest_cid < best.dest_colony ||
-                                                                 (dest_cid == best.dest_colony && scid < best.source_colony)))))) {
-            best.source_colony = scid;
-            best.dest_colony = dest_cid;
-            best.mineral = need.mineral;
-            best.amount = amount;
+          if (best.source == kInvalidId || eff < best.eff - 1e-9 ||
+              (std::abs(eff - best.eff) <= 1e-9 && (eta_total < best.eta_total - 1e-9 ||
+                                                   (std::abs(eta_total - best.eta_total) <= 1e-9 &&
+                                                    (total > best.total + 1e-9 ||
+                                                     (std::abs(total - best.total) <= 1e-9 &&
+                                                      (dest_cid < best.dest ||
+                                                       (dest_cid == best.dest && src_cid < best.source)))))))) {
+            best.source = src_cid;
+            best.dest = dest_cid;
+            best.eff = eff;
             best.eta_total = eta_total;
+            best.total = total;
+            best.items = std::move(items);
           }
         }
       }
 
-      if (best.source_colony != kInvalidId && best.dest_colony != kInvalidId &&
-          best.amount >= cfg_.auto_freight_min_transfer_tons) {
-        if (issue_load_mineral(sid, best.source_colony, best.mineral, best.amount, /*restrict_to_discovered=*/true)) {
-          if (!issue_unload_mineral(sid, best.dest_colony, best.mineral, best.amount, /*restrict_to_discovered=*/true)) {
-            // Safety: don't leave half-issued tasks in the queue.
-            (void)clear_orders(sid);
-          } else {
-            // Reduce local bookkeeping so later ships don't over-assign.
-            if (auto it = exportable_by_colony.find(best.source_colony); it != exportable_by_colony.end()) {
-              auto it2 = it->second.find(best.mineral);
-              if (it2 != it->second.end()) {
-                it2->second = std::max(0.0, it2->second - best.amount);
-              }
-            }
-            for (auto& need : need_list) {
-              if (need.colony_id == best.dest_colony && need.mineral == best.mineral) {
-                need.missing_tons = std::max(0.0, need.missing_tons - best.amount);
-                break;
-              }
-            }
+      if (best.source != kInvalidId && best.dest != kInvalidId && !best.items.empty()) {
+        bool ok = true;
+        for (const auto& it : best.items) {
+          ok = ok && issue_load_mineral(sid, best.source, it.mineral, it.tons, /*restrict_to_discovered=*/true);
+        }
+        for (const auto& it : best.items) {
+          ok = ok && issue_unload_mineral(sid, best.dest, it.mineral, it.tons, /*restrict_to_discovered=*/true);
+        }
+
+        if (!ok) {
+          (void)clear_orders(sid);
+        } else {
+          for (const auto& it : best.items) {
+            dec_exportable(best.source, it.mineral, it.tons);
+            dec_missing(best.dest, it.mineral, it.tons);
           }
         }
       }

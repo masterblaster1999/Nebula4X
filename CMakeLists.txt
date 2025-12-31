@@ -24,6 +24,7 @@ target_sources(nebula4x_core
   PRIVATE
     src/core/content_validation.cpp
     src/core/date.cpp
+    src/core/enum_strings.cpp
     src/core/fleet_formation.cpp
     src/core/game_state.cpp
     src/core/orders.cpp
@@ -98,7 +99,9 @@ if(NEBULA4X_BUILD_UI)
   FetchContent_Declare(
     imgui
     GIT_REPOSITORY https://github.com/ocornut/imgui.git
-    GIT_TAG v1.91.4
+    # Docking and viewport APIs live on the upstream 'docking' branch.
+    # Use the matching release tag to keep versioning stable.
+    GIT_TAG v1.91.4-docking
   )
   FetchContent_MakeAvailable(imgui)
 
@@ -178,6 +181,7 @@ if(NEBULA4X_BUILD_TESTS)
     tests/test_mineral_deposits.cpp
     tests/test_power_system.cpp
     tests/test_digests.cpp
+    tests/test_faction_economy_modifiers.cpp
     tests/test_refit.cpp
     tests/test_diplomacy.cpp
     tests/test_auto_routing.cpp

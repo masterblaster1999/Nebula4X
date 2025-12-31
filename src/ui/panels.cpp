@@ -844,7 +844,7 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
             ImGui::TextDisabled("Fuel: (none)");
           }
 
-          // Power budget (prototype)
+          // Power budget + per-ship power policy
           {
             const double gen = std::max(0.0, d->power_generation);
             const double use = std::max(0.0, d->power_use_total);
@@ -855,28 +855,101 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
                 ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f),
                                   "Power: %.1f gen / %.1f use (DEFICIT %.1f)", gen, use, use - gen);
               }
-
-              double avail = gen;
-              auto on = [&](double req) {
-                req = std::max(0.0, req);
-                if (req <= 1e-9) return true;
-                if (req <= avail + 1e-9) {
-                  avail -= req;
-                  return true;
-                }
-                return false;
-              };
-              const bool eng = on(d->power_use_engines);
-              const bool shld = on(d->power_use_shields);
-              const bool weap = on(d->power_use_weapons);
-              const bool sens = on(d->power_use_sensors);
-
-              ImGui::TextDisabled("Online: Engines %s, Shields %s, Weapons %s, Sensors %s  (avail %.1f)",
-                                  eng ? "ON" : "OFF", shld ? "ON" : "OFF", weap ? "ON" : "OFF",
-                                  sens ? "ON" : "OFF", avail);
             } else {
               ImGui::TextDisabled("Power: (none)");
             }
+
+            // Ensure save/mod corruption can't create duplicate priorities.
+            sanitize_power_policy(sh->power_policy);
+
+            ImGui::Spacing();
+            ImGui::TextDisabled("Power policy");
+
+            ImGui::PushID("power_policy");
+            bool changed = false;
+            changed |= ImGui::Checkbox("Engines", &sh->power_policy.engines_enabled);
+            ImGui::SameLine();
+            changed |= ImGui::Checkbox("Shields", &sh->power_policy.shields_enabled);
+            ImGui::SameLine();
+            changed |= ImGui::Checkbox("Weapons", &sh->power_policy.weapons_enabled);
+            ImGui::SameLine();
+            changed |= ImGui::Checkbox("Sensors", &sh->power_policy.sensors_enabled);
+
+            ImGui::TextDisabled("Priority (top = keep online). Drag to reorder:");
+            for (int i = 0; i < 4; ++i) {
+              const PowerSubsystem sys = sh->power_policy.priority[(std::size_t)i];
+              std::string label = std::string(power_subsystem_label(sys)) + "##prio" + std::to_string(i);
+              ImGui::Selectable(label.c_str(), false);
+
+              if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
+                ImGui::SetDragDropPayload("PWR_PRIO", &i, sizeof(int));
+                ImGui::Text("%s", power_subsystem_label(sys));
+                ImGui::EndDragDropSource();
+              }
+              if (ImGui::BeginDragDropTarget()) {
+                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("PWR_PRIO")) {
+                  if (payload->DataSize == sizeof(int)) {
+                    const int src = *static_cast<const int*>(payload->Data);
+                    if (src >= 0 && src < 4 && src != i) {
+                      std::swap(sh->power_policy.priority[(std::size_t)src], sh->power_policy.priority[(std::size_t)i]);
+                      changed = true;
+                    }
+                  }
+                }
+                ImGui::EndDragDropTarget();
+              }
+            }
+
+            // Quick presets
+            if (ImGui::SmallButton("Default")) {
+              sh->power_policy.priority = {PowerSubsystem::Engines, PowerSubsystem::Shields, PowerSubsystem::Weapons,
+                                           PowerSubsystem::Sensors};
+              changed = true;
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Recon")) {
+              sh->power_policy.priority = {PowerSubsystem::Sensors, PowerSubsystem::Engines, PowerSubsystem::Shields,
+                                           PowerSubsystem::Weapons};
+              changed = true;
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Offense")) {
+              sh->power_policy.priority = {PowerSubsystem::Weapons, PowerSubsystem::Engines, PowerSubsystem::Shields,
+                                           PowerSubsystem::Sensors};
+              changed = true;
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Defense")) {
+              sh->power_policy.priority = {PowerSubsystem::Shields, PowerSubsystem::Engines, PowerSubsystem::Weapons,
+                                           PowerSubsystem::Sensors};
+              changed = true;
+            }
+
+            const Id fleet_id = sim.fleet_for_ship(sh->id);
+            if (fleet_id != kInvalidId) {
+              ImGui::SameLine();
+              if (ImGui::SmallButton("Apply to Fleet")) {
+                if (auto* fl = find_ptr(s.fleets, fleet_id)) {
+                  for (Id sid : fl->ships) {
+                    if (auto* other = find_ptr(s.ships, sid)) other->power_policy = sh->power_policy;
+                  }
+                }
+              }
+            }
+
+            if (changed) sanitize_power_policy(sh->power_policy);
+
+            const auto p = compute_power_allocation(gen, d->power_use_engines, d->power_use_shields,
+                                                    d->power_use_weapons, d->power_use_sensors, sh->power_policy);
+            const char* eng = sh->power_policy.engines_enabled ? (p.engines_online ? "ON" : "OFF") : "DIS";
+            const char* shld = sh->power_policy.shields_enabled ? (p.shields_online ? "ON" : "OFF") : "DIS";
+            const char* weap = sh->power_policy.weapons_enabled ? (p.weapons_online ? "ON" : "OFF") : "DIS";
+            const char* sens = sh->power_policy.sensors_enabled ? (p.sensors_online ? "ON" : "OFF") : "DIS";
+
+            ImGui::TextDisabled("Online: Engines %s, Shields %s, Weapons %s, Sensors %s  (avail %.1f)",
+                                eng, shld, weap, sens, p.available);
+
+            ImGui::PopID();
           }
           ImGui::Text("Cargo: %.0f / %.0f t", cargo_used_tons, d->cargo_tons);
           ImGui::Text("Sensor: %.0f mkm", d->sensor_range_mkm);
@@ -1119,27 +1192,92 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
 
         const bool repeat_on = ship_orders ? ship_orders->repeat : false;
         const int repeat_len = ship_orders ? static_cast<int>(ship_orders->repeat_template.size()) : 0;
+        const int repeat_remaining = ship_orders ? ship_orders->repeat_count_remaining : 0;
+        const bool template_saved = (repeat_len > 0);
+        const bool can_repeat_from_template = template_saved;
+
         if (repeat_on) {
-          ImGui::Text("Repeat: ON  (template %d orders)", repeat_len);
+          if (repeat_remaining < 0) {
+            ImGui::Text("Repeat: ON  (infinite, template %d orders)", repeat_len);
+          } else if (repeat_remaining == 0) {
+            ImGui::Text("Repeat: ON  (stop after current cycle, template %d orders)", repeat_len);
+          } else {
+            ImGui::Text("Repeat: ON  (repeats remaining %d, template %d orders)", repeat_remaining, repeat_len);
+          }
         } else {
-          ImGui::Text("Repeat: OFF");
+          if (template_saved) {
+            ImGui::Text("Repeat: OFF  (template saved: %d orders)", repeat_len);
+          } else {
+            ImGui::Text("Repeat: OFF");
+          }
+        }
+
+        // Repeat controls
+        if (repeat_on && ship_orders) {
+          bool infinite = (ship_orders->repeat_count_remaining < 0);
+          if (ImGui::Checkbox("Repeat indefinitely", &infinite)) {
+            // If toggling to finite, default to 1 remaining refill.
+            sim.set_order_repeat_count(selected_ship, infinite ? -1 : 1);
+          }
+
+          if (!infinite) {
+            int count = ship_orders->repeat_count_remaining;
+            if (count < 0) count = 0;
+            if (ImGui::InputInt("Repeats remaining", &count)) {
+              if (count < 0) count = 0;
+              sim.set_order_repeat_count(selected_ship, count);
+            }
+            if (ImGui::IsItemHovered()) {
+              ImGui::SetTooltip("How many times the saved template will be re-enqueued after the current queue completes.\n0 = stop after this cycle.");
+            }
+          }
+
+          if (ImGui::SmallButton("Stop after current cycle")) {
+            sim.set_order_repeat_count(selected_ship, 0);
+          }
         }
 
         ImGui::Spacing();
+        const bool queue_has_orders = ship_orders && !ship_orders->queue.empty();
         if (!repeat_on) {
-          if (ImGui::SmallButton("Enable repeat")) {
+          if (!queue_has_orders) ImGui::BeginDisabled();
+          if (ImGui::SmallButton("Enable repeat from queue")) {
             if (!sim.enable_order_repeat(selected_ship)) {
               nebula4x::log::warn("Couldn't enable repeat (queue empty?).");
             }
           }
+          if (!queue_has_orders) ImGui::EndDisabled();
+
+          if (template_saved) {
+            ImGui::SameLine();
+            if (!can_repeat_from_template) ImGui::BeginDisabled();
+            if (ImGui::SmallButton("Start repeat from saved template")) {
+              if (!sim.enable_order_repeat_from_template(selected_ship)) {
+                nebula4x::log::warn("Couldn't start repeat from template.");
+              }
+            }
+            if (!can_repeat_from_template) ImGui::EndDisabled();
+
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Clear saved template")) {
+              sim.disable_order_repeat(selected_ship);
+            }
+          }
         } else {
-          if (ImGui::SmallButton("Update repeat template")) {
+          if (!queue_has_orders) ImGui::BeginDisabled();
+          if (ImGui::SmallButton("Update template from queue")) {
             if (!sim.update_order_repeat_template(selected_ship)) {
               nebula4x::log::warn("Couldn't update repeat template (queue empty?).");
             }
           }
+          if (!queue_has_orders) ImGui::EndDisabled();
+
           ImGui::SameLine();
-          if (ImGui::SmallButton("Disable repeat")) {
+          if (ImGui::SmallButton("Stop repeat")) {
+            sim.stop_order_repeat_keep_template(selected_ship);
+          }
+          ImGui::SameLine();
+          if (ImGui::SmallButton("Disable repeat (clear)")) {
             sim.disable_order_repeat(selected_ship);
           }
         }
@@ -1162,6 +1300,8 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
           static char rename_buf[128] = "";
           static bool overwrite_existing = false;
           static bool append_when_applying = true;
+          static bool smart_apply = true;
+          static bool strip_travel_orders_on_save = false;
           static bool confirm_delete = false;
           static std::string status;
 
@@ -1197,14 +1337,31 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
           }
 
           ImGui::Checkbox("Append when applying", &append_when_applying);
+          ImGui::SameLine();
+          ImGui::Checkbox("Smart apply (auto-route)", &smart_apply);
+          if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "When enabled, the template is compiled into a valid route from the ship's predicted system\n"
+                "(after any queued jumps) to each order's required system, preventing 'invalid system' drops.");
+          }
 
           const bool can_apply = !selected_template.empty();
           if (!can_apply) ImGui::BeginDisabled();
           if (ImGui::SmallButton("Apply to this ship")) {
-            if (!sim.apply_order_template_to_ship(selected_ship, selected_template, append_when_applying)) {
-              status = "Apply failed (missing template or ship).";
+            if (smart_apply) {
+              std::string err;
+              if (!sim.apply_order_template_to_ship_smart(selected_ship, selected_template, append_when_applying,
+                                                         ui.fog_of_war, &err)) {
+                status = err.empty() ? "Smart apply failed." : err;
+              } else {
+                status = "Applied template to ship (smart).";
+              }
             } else {
-              status = "Applied template to ship.";
+              if (!sim.apply_order_template_to_ship(selected_ship, selected_template, append_when_applying)) {
+                status = "Apply failed (missing template or ship).";
+              } else {
+                status = "Applied template to ship.";
+              }
             }
           }
           if (!can_apply) ImGui::EndDisabled();
@@ -1215,10 +1372,20 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
             const bool can_apply_fleet = can_apply && has_fleet;
             if (!can_apply_fleet) ImGui::BeginDisabled();
             if (ImGui::SmallButton("Apply to selected fleet")) {
-              if (!sim.apply_order_template_to_fleet(ui.selected_fleet_id, selected_template, append_when_applying)) {
-                status = "Apply to fleet failed (missing template or fleet).";
+              if (smart_apply) {
+                std::string err;
+                if (!sim.apply_order_template_to_fleet_smart(ui.selected_fleet_id, selected_template,
+                                                           append_when_applying, ui.fog_of_war, &err)) {
+                  status = err.empty() ? "Smart apply to fleet failed." : err;
+                } else {
+                  status = "Applied template to fleet (smart).";
+                }
               } else {
-                status = "Applied template to fleet.";
+                if (!sim.apply_order_template_to_fleet(ui.selected_fleet_id, selected_template, append_when_applying)) {
+                  status = "Apply to fleet failed (missing template or fleet).";
+                } else {
+                  status = "Applied template to fleet.";
+                }
               }
             }
             if (!can_apply_fleet) ImGui::EndDisabled();
@@ -1227,6 +1394,13 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
           ImGui::Spacing();
           ImGui::InputText("Save name##tmpl_save", save_name_buf, IM_ARRAYSIZE(save_name_buf));
           ImGui::Checkbox("Overwrite existing##tmpl_overwrite", &overwrite_existing);
+          ImGui::SameLine();
+          ImGui::Checkbox("Strip TravelViaJump (portable)", &strip_travel_orders_on_save);
+          if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "If enabled, TravelViaJump orders are removed when saving the template.\n"
+                "Combined with Smart apply, this makes templates more portable between starting systems.");
+          }
 
           const bool can_save = ship_orders && !ship_orders->queue.empty();
           if (!can_save) ImGui::BeginDisabled();
@@ -1234,13 +1408,26 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
             std::string err;
             if (!ship_orders || ship_orders->queue.empty()) {
               status = "No queued orders to save.";
-            } else if (sim.save_order_template(save_name_buf, ship_orders->queue, overwrite_existing, &err)) {
-              status = std::string("Saved template: ") + save_name_buf;
-              selected_template = save_name_buf;
-              std::snprintf(rename_buf, sizeof(rename_buf), "%s", selected_template.c_str());
-              confirm_delete = false;
             } else {
-              status = err.empty() ? "Save failed." : err;
+              std::vector<Order> to_save;
+              if (strip_travel_orders_on_save) {
+                to_save.reserve(ship_orders->queue.size());
+                for (const auto& o : ship_orders->queue) {
+                  if (!std::holds_alternative<TravelViaJump>(o)) to_save.push_back(o);
+                }
+              }
+
+              const auto& src = strip_travel_orders_on_save ? to_save : ship_orders->queue;
+              if (src.empty()) {
+                status = "Nothing to save after stripping travel orders.";
+              } else if (sim.save_order_template(save_name_buf, src, overwrite_existing, &err)) {
+                status = std::string("Saved template: ") + save_name_buf;
+                selected_template = save_name_buf;
+                std::snprintf(rename_buf, sizeof(rename_buf), "%s", selected_template.c_str());
+                confirm_delete = false;
+              } else {
+                status = err.empty() ? "Save failed." : err;
+              }
             }
           }
           if (!can_save) ImGui::EndDisabled();
@@ -2974,7 +3161,15 @@ if (colony->shipyard_queue.empty()) {
               ImGui::TextDisabled("Idle");
             } else {
               std::string order_str = order_to_string(so->queue.front());
-              if (so->repeat) order_str += " (repeat)";
+              if (so->repeat) {
+                if (so->repeat_count_remaining < 0) {
+                  order_str += " (repeat inf)";
+                } else if (so->repeat_count_remaining == 0) {
+                  order_str += " (repeat stop)";
+                } else {
+                  order_str += " (repeat " + std::to_string(so->repeat_count_remaining) + ")";
+                }
+              }
               ImGui::TextUnformatted(order_str.c_str());
             }
             ImGui::TableSetColumnIndex(3);
@@ -3498,24 +3693,12 @@ if (colony->shipyard_queue.empty()) {
                                     "Power: %.1f gen / %.1f use (DEFICIT %.1f)", gen, use, use - gen);
                 }
 
-                double avail = gen;
-                auto on = [&](double req) {
-                  req = std::max(0.0, req);
-                  if (req <= 1e-9) return true;
-                  if (req <= avail + 1e-9) {
-                    avail -= req;
-                    return true;
-                  }
-                  return false;
-                };
-                const bool eng = on(d->power_use_engines);
-                const bool shld = on(d->power_use_shields);
-                const bool weap = on(d->power_use_weapons);
-                const bool sens = on(d->power_use_sensors);
-
+                const auto p = compute_power_allocation(gen, d->power_use_engines, d->power_use_shields,
+                                                        d->power_use_weapons, d->power_use_sensors);
                 ImGui::TextDisabled("Online: Engines %s, Shields %s, Weapons %s, Sensors %s  (avail %.1f)",
-                                    eng ? "ON" : "OFF", shld ? "ON" : "OFF", weap ? "ON" : "OFF",
-                                    sens ? "ON" : "OFF", avail);
+                                    p.engines_online ? "ON" : "OFF", p.shields_online ? "ON" : "OFF",
+                                    p.weapons_online ? "ON" : "OFF", p.sensors_online ? "ON" : "OFF",
+                                    p.available);
               } else {
                 ImGui::TextDisabled("Power: (none)");
               }
@@ -3821,24 +4004,12 @@ if (colony->shipyard_queue.empty()) {
                                 gen, use, use - gen);
             }
 
-            // Show load-shedding outcome using the same priority as the simulation.
-            double avail = gen;
-            auto on = [&](double req) {
-              if (req <= 0.0) return true;
-              if (req <= avail + 1e-9) {
-                avail -= req;
-                return true;
-              }
-              return false;
-            };
-
-            const bool eng_on = on(preview.power_use_engines);
-            const bool sh_on = on(preview.power_use_shields);
-            const bool weap_on = on(preview.power_use_weapons);
-            const bool sens_on = on(preview.power_use_sensors);
-
-            ImGui::TextDisabled("Load shed: Engines %s  Shields %s  Weapons %s  Sensors %s", eng_on ? "ON" : "OFF",
-                                sh_on ? "ON" : "OFF", weap_on ? "ON" : "OFF", sens_on ? "ON" : "OFF");
+            // Show load-shedding outcome using the same logic as the simulation.
+            const auto p = compute_power_allocation(gen, preview.power_use_engines, preview.power_use_shields,
+                                                    preview.power_use_weapons, preview.power_use_sensors);
+            ImGui::TextDisabled("Load shed: Engines %s  Shields %s  Weapons %s  Sensors %s", p.engines_online ? "ON" : "OFF",
+                                p.shields_online ? "ON" : "OFF", p.weapons_online ? "ON" : "OFF",
+                                p.sensors_online ? "ON" : "OFF");
 
             if (preview.power_use_engines > 0.0 || preview.power_use_shields > 0.0 || preview.power_use_weapons > 0.0 ||
                 preview.power_use_sensors > 0.0) {

@@ -1,5 +1,7 @@
 #include "nebula4x/core/serialization.h"
 
+#include "nebula4x/core/enum_strings.h"
+
 #include <algorithm>
 #include <stdexcept>
 #include <type_traits>
@@ -14,7 +16,45 @@ using json::Array;
 using json::Object;
 using json::Value;
 
-constexpr int kCurrentSaveVersion = 28;
+constexpr int kCurrentSaveVersion = 30;
+
+Object ship_power_policy_to_json(const ShipPowerPolicy& p) {
+  Object o;
+  o["engines_enabled"] = p.engines_enabled;
+  o["shields_enabled"] = p.shields_enabled;
+  o["weapons_enabled"] = p.weapons_enabled;
+  o["sensors_enabled"] = p.sensors_enabled;
+  Array pr;
+  pr.reserve(p.priority.size());
+  for (PowerSubsystem s : p.priority) {
+    pr.push_back(power_subsystem_to_string(s));
+  }
+  o["priority"] = pr;
+  return o;
+}
+
+ShipPowerPolicy ship_power_policy_from_json(const Value& v) {
+  ShipPowerPolicy p;
+  if (!v.is_object()) return p;
+  const Object& o = v.object();
+  if (auto it = o.find("engines_enabled"); it != o.end()) p.engines_enabled = it->second.bool_value(true);
+  if (auto it = o.find("shields_enabled"); it != o.end()) p.shields_enabled = it->second.bool_value(true);
+  if (auto it = o.find("weapons_enabled"); it != o.end()) p.weapons_enabled = it->second.bool_value(true);
+  if (auto it = o.find("sensors_enabled"); it != o.end()) p.sensors_enabled = it->second.bool_value(true);
+
+  if (auto it = o.find("priority"); it != o.end()) {
+    std::array<PowerSubsystem, 4> prio = p.priority;
+    std::size_t n = 0;
+    for (const auto& pv : it->second.array()) {
+      if (n >= prio.size()) break;
+      prio[n++] = power_subsystem_from_string(pv.string_value());
+    }
+    p.priority = prio;
+  }
+
+  sanitize_power_policy(p);
+  return p;
+}
 
 template <typename Map>
 std::vector<typename Map::key_type> sorted_keys(const Map& m) {
@@ -45,27 +85,7 @@ Vec2 vec2_from_json(const Value& v) {
   return Vec2{o.at("x").number_value(), o.at("y").number_value()};
 }
 
-std::string body_type_to_string(BodyType t) {
-  switch (t) {
-    case BodyType::Star: return "star";
-    case BodyType::Planet: return "planet";
-    case BodyType::Moon: return "moon";
-    case BodyType::Asteroid: return "asteroid";
-    case BodyType::Comet: return "comet";
-    case BodyType::GasGiant: return "gas_giant";
-  }
-  return "planet";
-}
 
-BodyType body_type_from_string(const std::string& s) {
-  if (s == "star") return BodyType::Star;
-  if (s == "planet") return BodyType::Planet;
-  if (s == "moon") return BodyType::Moon;
-  if (s == "asteroid") return BodyType::Asteroid;
-  if (s == "comet") return BodyType::Comet;
-  if (s == "gas_giant") return BodyType::GasGiant;
-  return BodyType::Planet;
-}
 
 std::string ship_role_to_string(ShipRole r) {
   switch (r) {
@@ -490,6 +510,7 @@ std::string serialize_game_to_json(const GameState& s) {
     o["design_id"] = sh.design_id;
     o["auto_explore"] = sh.auto_explore;
     o["auto_freight"] = sh.auto_freight;
+    o["power_policy"] = ship_power_policy_to_json(sh.power_policy);
     o["speed_km_s"] = sh.speed_km_s;
     o["hp"] = sh.hp;
     o["fuel_tons"] = sh.fuel_tons;
@@ -689,6 +710,7 @@ std::string serialize_game_to_json(const GameState& s) {
     o["queue"] = q;
 
     o["repeat"] = orders.repeat;
+    o["repeat_count_remaining"] = static_cast<double>(orders.repeat_count_remaining);
     Array tmpl;
     tmpl.reserve(orders.repeat_template.size());
     for (const auto& ord : orders.repeat_template) tmpl.push_back(order_to_json(ord));
@@ -862,6 +884,7 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     sh.design_id = o.at("design_id").string_value();
     if (auto it = o.find("auto_explore"); it != o.end()) sh.auto_explore = it->second.bool_value(false);
     if (auto it = o.find("auto_freight"); it != o.end()) sh.auto_freight = it->second.bool_value(false);
+    if (auto it = o.find("power_policy"); it != o.end()) sh.power_policy = ship_power_policy_from_json(it->second);
     sh.speed_km_s = o.at("speed_km_s").number_value(0.0);
     sh.hp = o.at("hp").number_value(0.0);
     if (auto it = o.find("fuel_tons"); it != o.end()) sh.fuel_tons = it->second.number_value(-1.0);
@@ -1178,9 +1201,25 @@ GameState deserialize_game_from_json(const std::string& json_text) {
         if (auto itrep = o.find("repeat"); itrep != o.end()) {
           so.repeat = itrep->second.bool_value(false);
         }
+        bool has_repeat_count = false;
+        if (auto itrc = o.find("repeat_count_remaining"); itrc != o.end()) {
+          so.repeat_count_remaining = static_cast<int>(itrc->second.int_value(0));
+          has_repeat_count = true;
+        }
         if (auto ittmpl = o.find("repeat_template"); ittmpl != o.end()) {
           parse_order_list(ittmpl->second, so.repeat_template, "repeat_template");
         }
+
+        // Backward compatibility: older saves didn't store repeat_count_remaining.
+        if (!has_repeat_count) {
+          if (so.repeat && !so.repeat_template.empty()) {
+            so.repeat_count_remaining = -1;  // match historical infinite repeat behaviour
+          } else {
+            so.repeat_count_remaining = 0;
+          }
+        }
+        if (so.repeat_count_remaining < -1) so.repeat_count_remaining = -1;
+        if (!so.repeat) so.repeat_count_remaining = 0;
 
         s.ship_orders[ship_id] = std::move(so);
       }

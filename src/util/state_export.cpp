@@ -102,36 +102,13 @@ json::Object vec2_to_object(const Vec2& v) {
   return o;
 }
 
-struct PowerAllocation {
-  double generation{0.0};
-  double available{0.0};
-  bool engines_online{true};
-  bool shields_online{true};
-  bool weapons_online{true};
-  bool sensors_online{true};
-};
-
-PowerAllocation compute_power_allocation(const ShipDesign& d) {
-  PowerAllocation out;
-  out.generation = std::max(0.0, d.power_generation);
-  double avail = out.generation;
-
-  auto on = [&](double req) {
-    req = std::max(0.0, req);
-    if (req <= 1e-9) return true;
-    if (req <= avail + 1e-9) {
-      avail -= req;
-      return true;
-    }
-    return false;
-  };
-
-  out.engines_online = on(d.power_use_engines);
-  out.shields_online = on(d.power_use_shields);
-  out.weapons_online = on(d.power_use_weapons);
-  out.sensors_online = on(d.power_use_sensors);
-  out.available = avail;
-  return out;
+json::Array power_priority_to_json(const ShipPowerPolicy& policy) {
+  json::Array pr;
+  pr.reserve(policy.priority.size());
+  for (PowerSubsystem s : policy.priority) {
+    pr.push_back(power_subsystem_to_string(s));
+  }
+  return pr;
 }
 
 } // namespace
@@ -185,8 +162,16 @@ std::string ships_to_json(const GameState& state, const ContentDB* content) {
     obj["design_weapon_damage"] = d ? d->weapon_damage : 0.0;
     obj["design_weapon_range_mkm"] = d ? d->weapon_range_mkm : 0.0;
 
+    // Runtime power settings
+    obj["power_policy_engines_enabled"] = sh.power_policy.engines_enabled;
+    obj["power_policy_shields_enabled"] = sh.power_policy.shields_enabled;
+    obj["power_policy_weapons_enabled"] = sh.power_policy.weapons_enabled;
+    obj["power_policy_sensors_enabled"] = sh.power_policy.sensors_enabled;
+    obj["power_policy_priority"] = power_priority_to_json(sh.power_policy);
+
     if (d) {
-      const auto p = compute_power_allocation(*d);
+      const auto p = compute_power_allocation(d->power_generation, d->power_use_engines, d->power_use_shields,
+                                             d->power_use_weapons, d->power_use_sensors, sh.power_policy);
       obj["power_available"] = p.available;
       obj["power_engines_online"] = p.engines_online;
       obj["power_shields_online"] = p.shields_online;
@@ -211,6 +196,7 @@ std::string ships_to_json(const GameState& state, const ContentDB* content) {
     if (it_orders != state.ship_orders.end()) {
       const ShipOrders& so = it_orders->second;
       obj["orders_repeat"] = so.repeat;
+      obj["orders_repeat_count_remaining"] = static_cast<double>(so.repeat_count_remaining);
 
       json::Array q;
       q.reserve(so.queue.size());
@@ -223,6 +209,7 @@ std::string ships_to_json(const GameState& state, const ContentDB* content) {
       obj["repeat_template"] = std::move(rt);
     } else {
       obj["orders_repeat"] = false;
+      obj["orders_repeat_count_remaining"] = 0.0;
       obj["order_queue"] = json::Array{};
       obj["repeat_template"] = json::Array{};
     }

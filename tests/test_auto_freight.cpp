@@ -179,5 +179,66 @@ int test_auto_freight() {
                "total Duranium conserved with reserves");
   }
 
+  // 3) Multi-mineral bundling: if a destination colony is missing multiple minerals,
+  // auto-freight should (by default) bundle them into a single trip when it can.
+  {
+    ContentDB content3 = content;
+    content3.installations[yard.id].build_costs_per_ton["Corbomite"] = 1.0;
+
+    Simulation sim3(content3, cfg);
+
+    GameState st3 = st;
+    st3.colonies[src.id].minerals["Corbomite"] = 1000.0;
+
+    sim3.load_game(st3);
+
+    sim3.advance_days(1);
+
+    const double src_dur = get_mineral(sim3.state().colonies.at(src.id), "Duranium");
+    const double dst_dur = get_mineral(sim3.state().colonies.at(dst.id), "Duranium");
+    const double src_cor = get_mineral(sim3.state().colonies.at(src.id), "Corbomite");
+    const double dst_cor = get_mineral(sim3.state().colonies.at(dst.id), "Corbomite");
+
+    N4X_ASSERT(std::abs(dst_dur - 100.0) < 1e-6, "destination received bundled Duranium");
+    N4X_ASSERT(std::abs(dst_cor - 100.0) < 1e-6, "destination received bundled Corbomite");
+    N4X_ASSERT(std::abs(src_dur - 900.0) < 1e-6, "source exported bundled Duranium");
+    N4X_ASSERT(std::abs(src_cor - 900.0) < 1e-6, "source exported bundled Corbomite");
+
+    const Ship& tsh = sim3.state().ships.at(sh.id);
+    const double cargo_dur = tsh.cargo.count("Duranium") ? tsh.cargo.at("Duranium") : 0.0;
+    const double cargo_cor = tsh.cargo.count("Corbomite") ? tsh.cargo.at("Corbomite") : 0.0;
+    N4X_ASSERT(cargo_dur < 1e-6 && cargo_cor < 1e-6, "ship cargo is empty after bundled same-day delivery");
+  }
+
+  // 4) Bundling can be disabled via config, falling back to one-mineral-per-trip.
+  {
+    ContentDB content4 = content;
+    content4.installations[yard.id].build_costs_per_ton["Corbomite"] = 1.0;
+
+    SimConfig cfg4 = cfg;
+    cfg4.auto_freight_multi_mineral = false;
+
+    Simulation sim4(content4, cfg4);
+
+    GameState st4 = st;
+    st4.colonies[src.id].minerals["Corbomite"] = 1000.0;
+
+    sim4.load_game(st4);
+
+    // Day 1: only the first mineral in deterministic priority order should arrive.
+    sim4.advance_days(1);
+    const double dst_dur1 = get_mineral(sim4.state().colonies.at(dst.id), "Duranium");
+    const double dst_cor1 = get_mineral(sim4.state().colonies.at(dst.id), "Corbomite");
+    N4X_ASSERT(std::abs(dst_cor1 - 100.0) < 1e-6, "first trip delivered Corbomite");
+    N4X_ASSERT(std::abs(dst_dur1 - 0.0) < 1e-6, "first trip did not deliver Duranium");
+
+    // Day 2: the remaining mineral should be delivered.
+    sim4.advance_days(1);
+    const double dst_dur2 = get_mineral(sim4.state().colonies.at(dst.id), "Duranium");
+    const double dst_cor2 = get_mineral(sim4.state().colonies.at(dst.id), "Corbomite");
+    N4X_ASSERT(std::abs(dst_cor2 - 100.0) < 1e-6, "second day preserved Corbomite delivery");
+    N4X_ASSERT(std::abs(dst_dur2 - 100.0) < 1e-6, "second day delivered Duranium");
+  }
+
   return 0;
 }

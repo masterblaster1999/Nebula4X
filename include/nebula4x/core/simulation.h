@@ -171,6 +171,13 @@ struct SimConfig {
   //
   // Ships with Ship::auto_freight enabled will, when idle, automatically haul minerals
   // between same-faction colonies to relieve shipyard/construction stalls.
+
+  // If true, auto-freight will try to bundle multiple minerals into a single
+  // trip when pulling from the same source colony and delivering to the same
+  // destination colony. This greatly reduces "one mineral per trip" inefficiency
+  // when a colony is missing several inputs at once (e.g. shipyards with multiple
+  // mineral costs, construction orders, fuel top-ups).
+  bool auto_freight_multi_mineral{true};
   //
   // Minimum tons moved in a single auto-freight task (avoids tiny shipments).
   double auto_freight_min_transfer_tons{1.0};
@@ -325,8 +332,13 @@ class Simulation {
   // When enabled, once the order queue becomes empty it will be refilled from a saved
   // template (captured at enable time or via update).
   //
+  // repeat_count_remaining controls how many times the template will be re-enqueued:
+  //   -1 => infinite repeats
+  //    0 => do not refill again (repeat stops once the current queue finishes)
+  //   >0 => remaining number of refills allowed
+  //
   // Returns false if the ship does not exist or has no queued orders.
-  bool enable_order_repeat(Id ship_id);
+  bool enable_order_repeat(Id ship_id, int repeat_count_remaining = -1);
 
   // Replace the saved repeat template with the ship's current queue.
   // Repeat remains enabled.
@@ -337,6 +349,21 @@ class Simulation {
   // Disable repeating and clear the saved template.
   // Returns false if the ship does not exist.
   bool disable_order_repeat(Id ship_id);
+
+  // Stop repeating but keep the saved template (so it can be restarted later).
+  // Returns false if the ship does not exist.
+  bool stop_order_repeat_keep_template(Id ship_id);
+
+  // Set how many times the repeat template may be re-enqueued.
+  //
+  // Returns false if the ship does not exist.
+  bool set_order_repeat_count(Id ship_id, int repeat_count_remaining);
+
+  // Enable repeating using a previously saved repeat_template.
+  //
+  // If the ship's active queue is empty, it will be immediately populated from the template.
+  // Returns false if the ship does not exist or has no saved template.
+  bool enable_order_repeat_from_template(Id ship_id, int repeat_count_remaining = -1);
 
   // Cancel only the current (front) order.
   // Returns false if the ship does not exist or has no queued orders.
@@ -373,6 +400,23 @@ class Simulation {
   // If append is false, existing orders are cleared first.
   bool apply_order_template_to_ship(Id ship_id, const std::string& name, bool append = true);
   bool apply_order_template_to_fleet(Id fleet_id, const std::string& name, bool append = true);
+
+  // Smart template application: make templates portable across starting systems.
+  //
+  // This recompiles the template at apply time, inserting any necessary TravelViaJump
+  // orders *between* template steps based on the ship's predicted system after any
+  // queued jumps (when append=true). This avoids the common failure mode where
+  // TravelViaJump / colony-body orders are invalid when the template is applied to
+  // a ship in a different system.
+  //
+  // When restrict_to_discovered is true, any auto-routing performed during
+  // compilation will only traverse systems discovered by the ship's faction.
+  bool apply_order_template_to_ship_smart(Id ship_id, const std::string& name, bool append = true,
+                                         bool restrict_to_discovered = false,
+                                         std::string* error = nullptr);
+  bool apply_order_template_to_fleet_smart(Id fleet_id, const std::string& name, bool append = true,
+                                          bool restrict_to_discovered = false,
+                                          std::string* error = nullptr);
 
   // --- Fleet helpers ---
   // Fleets are lightweight groupings of ships (same faction) to make it easier

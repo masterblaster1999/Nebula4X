@@ -137,13 +137,11 @@ void Simulation::tick_combat() {
     if (!ad) continue;
     if (ad->weapon_damage <= 0.0 || ad->weapon_range_mkm <= 0.0) continue;
 
-    // Power gating: if weapons draw power and the ship can't allocate it,
-    // it cannot fire.
+    // Power gating: if weapons are offline (due to power deficit or the
+    // ship's power policy), it cannot fire.
     {
-      const auto p = compute_power_allocation(*ad);
-      if (!p.weapons_online && ad->power_use_weapons > 1e-9) {
-        continue;
-      }
+      const auto p = compute_power_allocation(*ad, attacker.power_policy);
+      if (!p.weapons_online) continue;
     }
 
     Id chosen = kInvalidId;
@@ -561,6 +559,7 @@ void Simulation::tick_combat() {
         if (auto oit = state_.ship_orders.find(tid); oit != state_.ship_orders.end()) {
           oit->second.queue.clear();
           oit->second.repeat = false;
+          oit->second.repeat_count_remaining = 0;
           oit->second.repeat_template.clear();
         }
 

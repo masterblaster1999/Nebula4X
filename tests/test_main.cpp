@@ -34,6 +34,7 @@ int test_research_planner();
 int test_mineral_deposits();
 int test_power_system();
 int test_digests();
+int test_faction_economy_modifiers();
 
 int main() {
   int fails = 0;
@@ -71,6 +72,7 @@ int main() {
   fails += test_combat_events();
   fails += test_shields();
   fails += test_ship_repairs();
+  fails += test_faction_economy_modifiers();
 
   if (fails == 0) {
     std::cout << "All tests passed\n";

@@ -1,4 +1,5 @@
 #include <cmath>
+#include <cstdint>
 #include <iostream>
 
 #include "nebula4x/core/simulation.h"
@@ -122,6 +123,49 @@ int test_power_system() {
   const double hp_online = run_case(10.0);
   N4X_ASSERT(hp_online < 100.0);
   N4X_ASSERT(hp_online > 0.0);
+
+  // --- Power policy: priority + enable toggles ---
+  {
+    // With 3.5 power available and needs Weapons=3 + Sensors=1 (total 4),
+    // default priority keeps weapons online and sheds sensors.
+    nebula4x::ShipPowerPolicy def;
+    const auto p_def = nebula4x::compute_power_allocation(3.5, /*eng*/ 0.0, /*sh*/ 0.0, /*wpn*/ 3.0,
+                                                          /*sen*/ 1.0, def);
+    N4X_ASSERT(p_def.weapons_online);
+    N4X_ASSERT(!p_def.sensors_online);
+
+    // Recon priority powers sensors first, shedding weapons in the same scenario.
+    nebula4x::ShipPowerPolicy recon;
+    recon.priority = {
+        nebula4x::PowerSubsystem::Sensors,
+        nebula4x::PowerSubsystem::Weapons,
+        nebula4x::PowerSubsystem::Engines,
+        nebula4x::PowerSubsystem::Shields,
+    };
+    const auto p_recon = nebula4x::compute_power_allocation(3.5, 0.0, 0.0, 3.0, 1.0, recon);
+    N4X_ASSERT(p_recon.sensors_online);
+    N4X_ASSERT(!p_recon.weapons_online);
+
+    // Explicitly disabling a subsystem forces it offline even if power would be sufficient.
+    nebula4x::ShipPowerPolicy disabled;
+    disabled.sensors_enabled = false;
+    const auto p_disabled = nebula4x::compute_power_allocation(10.0, 0.0, 0.0, 0.0, 1.0, disabled);
+    N4X_ASSERT(!p_disabled.sensors_online);
+
+    // Sanitize removes duplicates and fills missing subsystems.
+    nebula4x::ShipPowerPolicy bad;
+    bad.priority = {
+        nebula4x::PowerSubsystem::Sensors,
+        nebula4x::PowerSubsystem::Sensors,
+        nebula4x::PowerSubsystem::Weapons,
+        nebula4x::PowerSubsystem::Engines,
+    };
+    nebula4x::sanitize_power_policy(bad);
+    N4X_ASSERT(bad.priority[0] == nebula4x::PowerSubsystem::Sensors);
+    N4X_ASSERT(bad.priority[1] == nebula4x::PowerSubsystem::Weapons);
+    N4X_ASSERT(bad.priority[2] == nebula4x::PowerSubsystem::Engines);
+    N4X_ASSERT(bad.priority[3] == nebula4x::PowerSubsystem::Shields);
+  }
 
   return 0;
 }

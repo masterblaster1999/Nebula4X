@@ -1,6 +1,8 @@
 #include "ui/app.h"
 
 #include <imgui.h>
+// DockBuilder* API lives in the internal header (docking branch).
+#include <imgui_internal.h>
 
 #include <algorithm>
 #include <filesystem>

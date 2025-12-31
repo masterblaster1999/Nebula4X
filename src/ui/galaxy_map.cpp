@@ -64,10 +64,10 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   std::unordered_map<Id, int> recent_contact_count;
   if (ui.show_galaxy_intel_alerts && viewer_faction_id != kInvalidId) {
     if (const auto* viewer = find_ptr(s.factions, viewer_faction_id)) {
-      const int today = s.date.days_since_epoch();
+  const std::int64_t today = s.date.days_since_epoch();
       for (const auto& kv : viewer->ship_contacts) {
         const auto& c = kv.second;
-        const int age = today - c.last_seen_day;
+    const std::int64_t age = today - static_cast<std::int64_t>(c.last_seen_day);
         if (age < 0) continue;
         if (age > ui.contact_max_age_days) continue;
         ++recent_contact_count[c.system_id];
@@ -267,7 +267,8 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
     const auto* sh = find_ptr(s.ships, route_ship_id);
     const auto* so = sh ? find_ptr(s.ship_orders, route_ship_id) : nullptr;
     if (sh && so) {
-      const bool templ = so->queue.empty() && so->repeat && !so->repeat_template.empty();
+      const bool templ = so->queue.empty() && so->repeat && !so->repeat_template.empty() &&
+                         so->repeat_count_remaining != 0;
       const auto& q = (templ ? so->repeat_template : so->queue);
 
       std::vector<Id> route_systems;

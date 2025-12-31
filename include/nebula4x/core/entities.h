@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "nebula4x/core/ids.h"
+#include "nebula4x/core/power.h"
 #include "nebula4x/core/vec2.h"
 
 namespace nebula4x {
@@ -278,6 +279,13 @@ struct Ship {
   // Automation: when enabled, the simulation will generate freight (mineral hauling) orders
   // for this ship whenever it is idle (no queued orders).
   bool auto_freight{false};
+
+  // Runtime power policy (enabled subsystems + load shedding priority).
+  //
+  // This is independent of the ship design's static power generation/usage
+  // numbers and allows the player/AI to, for example, disable weapons to keep
+  // sensors online on an underpowered scout.
+  ShipPowerPolicy power_policy{};
 
   // Combat state.
   double hp{0.0};

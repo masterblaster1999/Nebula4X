@@ -3,6 +3,7 @@
 #include <variant>
 #include <algorithm>
 #include <utility>
+#include <vector>
 
 #include "nebula4x/core/simulation.h"
 
@@ -254,6 +255,59 @@ int test_auto_routing() {
     const auto* d2 = nebula4x::find_ptr(sim.state().jump_points, jp2->linked_jump_id);
     N4X_ASSERT(d2);
     N4X_ASSERT(d2->system_id == sol_sys);
+  }
+
+  // --- smart order template application should inject missing travel ---
+  {
+    const auto earth = find_colony_id(sim.state(), "Earth");
+    N4X_ASSERT(earth != nebula4x::kInvalidId);
+
+    const auto outpost_id = find_colony_id(sim.state(), "Centauri Outpost");
+    N4X_ASSERT(outpost_id != nebula4x::kInvalidId);
+
+    std::vector<nebula4x::Order> tpl;
+    tpl.push_back(nebula4x::LoadMineral{earth, "Duranium", 1.0});
+    tpl.push_back(nebula4x::UnloadMineral{outpost_id, "Duranium", 1.0});
+
+    std::string err;
+    N4X_ASSERT(sim.save_order_template("tpl_duranium_run", tpl, /*overwrite=*/true, &err));
+
+    // Create a new ship in Alpha Centauri to ensure the template remains usable from a different starting system.
+    auto& s = sim.state();
+    const nebula4x::Id new_ship_id = nebula4x::allocate_id(s);
+
+    const auto* base_ship = nebula4x::find_ptr(s.ships, ship_id);
+    N4X_ASSERT(base_ship);
+
+    auto new_ship = *base_ship;
+    new_ship.id = new_ship_id;
+    new_ship.name = "Template Runner";
+    new_ship.system_id = cen_sys;
+    new_ship.position_mkm = {0.0, 0.0};
+    s.ships[new_ship_id] = new_ship;
+    s.systems[cen_sys].ships.push_back(new_ship_id);
+
+    err.clear();
+    N4X_ASSERT(sim.apply_order_template_to_ship_smart(new_ship_id, "tpl_duranium_run", /*append=*/false,
+                                                     /*restrict_to_discovered=*/false, &err));
+
+    const auto& q = s.ship_orders.at(new_ship_id).queue;
+    N4X_ASSERT(q.size() == 4);
+
+    N4X_ASSERT(std::holds_alternative<nebula4x::TravelViaJump>(q[0]));
+    N4X_ASSERT(std::holds_alternative<nebula4x::LoadMineral>(q[1]));
+    N4X_ASSERT(std::holds_alternative<nebula4x::TravelViaJump>(q[2]));
+    N4X_ASSERT(std::holds_alternative<nebula4x::UnloadMineral>(q[3]));
+
+    const auto j0 = std::get<nebula4x::TravelViaJump>(q[0]).jump_point_id;
+    const auto* jp0 = nebula4x::find_ptr(s.jump_points, j0);
+    N4X_ASSERT(jp0);
+    N4X_ASSERT(jp0->system_id == cen_sys);
+
+    const auto j2 = std::get<nebula4x::TravelViaJump>(q[2]).jump_point_id;
+    const auto* jp2 = nebula4x::find_ptr(s.jump_points, j2);
+    N4X_ASSERT(jp2);
+    N4X_ASSERT(jp2->system_id == sol_sys);
   }
 
   return 0;

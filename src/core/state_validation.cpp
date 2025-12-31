@@ -374,6 +374,12 @@ std::vector<std::string> validate_game_state(const GameState& s, const ContentDB
 
     validate_order_list(so.queue, "order_queue");
     validate_order_list(so.repeat_template, "repeat_template");
+
+    if (so.repeat_count_remaining < -1) {
+      push(errors,
+           join("ShipOrders for ship ", id_u64(ship_id), " has invalid repeat_count_remaining ",
+                so.repeat_count_remaining));
+    }
   }
 
   // --- Order templates ---
@@ -923,6 +929,16 @@ FixReport fix_game_state(GameState& s, const ContentDB* content) {
         sh.design_id = fallback_design;
       }
     }
+
+    // Sanitize power policy in case a save/mod introduced duplicates or
+    // missing subsystems in the priority list.
+    {
+      const auto before = sh.power_policy.priority;
+      sanitize_power_policy(sh.power_policy);
+      if (sh.power_policy.priority != before) {
+        note(join("Fix: Ship ", id_u64(sid), " had invalid power_policy priority; sanitized"));
+      }
+    }
   }
 
   // --- Colonies ---
@@ -1297,6 +1313,24 @@ FixReport fix_game_state(GameState& s, const ContentDB* content) {
     ShipOrders& so = it->second;
     fix_order_list(so.queue, sid, "order_queue", join("Ship ", id_u64(sid)));
     fix_order_list(so.repeat_template, sid, "repeat_template", join("Ship ", id_u64(sid)));
+
+    if (so.repeat_count_remaining < -1) {
+      note(join("Fix: Ship ", id_u64(sid), " repeat_count_remaining clamped ", so.repeat_count_remaining,
+                " -> -1"));
+      so.repeat_count_remaining = -1;
+    }
+
+    if (!so.repeat && so.repeat_count_remaining != 0) {
+      note(join("Fix: Ship ", id_u64(sid), " repeat_count_remaining reset ", so.repeat_count_remaining,
+                " -> 0 (repeat disabled)"));
+      so.repeat_count_remaining = 0;
+    }
+
+    if (so.repeat && so.repeat_template.empty()) {
+      note(join("Fix: Ship ", id_u64(sid), " repeat disabled (empty repeat_template)"));
+      so.repeat = false;
+      so.repeat_count_remaining = 0;
+    }
     ++it;
   }
 

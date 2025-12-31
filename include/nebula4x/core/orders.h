@@ -143,9 +143,18 @@ struct ShipOrders {
   // If enabled, when the order queue becomes empty it will automatically be
   // refilled from repeat_template.
   //
+  // repeat_count_remaining controls how many times the template will be
+  // re-enqueued once the active queue finishes:
+  //   -1 => infinite repeats
+  //    0 => do not refill again (repeat stops once the current queue finishes)
+  //   >0 => remaining number of refills allowed
+  //
   // This is a lightweight way to support repeating logistics routes/patrols
   // without introducing a new Order variant.
   bool repeat{false};
+
+  int repeat_count_remaining{0};
+
   std::vector<Order> repeat_template;
 };
 

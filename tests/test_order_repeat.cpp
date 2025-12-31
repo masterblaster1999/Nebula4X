@@ -56,6 +56,7 @@ int test_order_repeat() {
   {
     const auto& so = sim.state().ship_orders.at(ship_id);
     N4X_ASSERT(so.repeat);
+    N4X_ASSERT(so.repeat_count_remaining == -1);
     N4X_ASSERT(so.queue.size() == 2);
     N4X_ASSERT(so.repeat_template.size() == 2);
   }
@@ -67,6 +68,7 @@ int test_order_repeat() {
     const auto& so = sim.state().ship_orders.at(ship_id);
     N4X_ASSERT(so.queue.empty());
     N4X_ASSERT(so.repeat);
+    N4X_ASSERT(so.repeat_count_remaining == -1);
     N4X_ASSERT(so.repeat_template.size() == 2);
   }
 
@@ -86,8 +88,71 @@ int test_order_repeat() {
     const auto& so = sim.state().ship_orders.at(ship_id);
     N4X_ASSERT(so.queue.empty());
     N4X_ASSERT(!so.repeat);
+    N4X_ASSERT(so.repeat_count_remaining == 0);
     N4X_ASSERT(so.repeat_template.empty());
   }
+
+  // Finite repeat: allow only a single template refill.
+  N4X_ASSERT(sim.issue_wait_days(ship_id, 1));
+  N4X_ASSERT(sim.issue_wait_days(ship_id, 1));
+  N4X_ASSERT(sim.enable_order_repeat(ship_id, 1));
+  {
+    const auto& so = sim.state().ship_orders.at(ship_id);
+    N4X_ASSERT(so.repeat);
+    N4X_ASSERT(so.repeat_count_remaining == 1);
+    N4X_ASSERT(so.queue.size() == 2);
+    N4X_ASSERT(so.repeat_template.size() == 2);
+  }
+
+  // After two days the queue empties, but repeat remains enabled.
+  sim.advance_days(2);
+  {
+    const auto& so = sim.state().ship_orders.at(ship_id);
+    N4X_ASSERT(so.queue.empty());
+    N4X_ASSERT(so.repeat);
+    N4X_ASSERT(so.repeat_count_remaining == 1);
+  }
+
+  // Next day: template refills once (count becomes 0) and first order executes.
+  sim.advance_days(1);
+  {
+    const auto& so = sim.state().ship_orders.at(ship_id);
+    N4X_ASSERT(so.repeat);
+    N4X_ASSERT(so.repeat_count_remaining == 0);
+    N4X_ASSERT(so.queue.size() == 1);
+  }
+
+  // Finish the last order: queue empty; repeat still on but will stop next tick.
+  sim.advance_days(1);
+  {
+    const auto& so = sim.state().ship_orders.at(ship_id);
+    N4X_ASSERT(so.queue.empty());
+    N4X_ASSERT(so.repeat);
+    N4X_ASSERT(so.repeat_count_remaining == 0);
+  }
+
+  // Next day: repeat auto-stops (template preserved for manual restart).
+  sim.advance_days(1);
+  {
+    const auto& so = sim.state().ship_orders.at(ship_id);
+    N4X_ASSERT(so.queue.empty());
+    N4X_ASSERT(!so.repeat);
+    N4X_ASSERT(so.repeat_count_remaining == 0);
+    N4X_ASSERT(so.repeat_template.size() == 2);
+  }
+
+  // Restart using the saved template.
+  N4X_ASSERT(sim.enable_order_repeat_from_template(ship_id));
+  {
+    const auto& so = sim.state().ship_orders.at(ship_id);
+    N4X_ASSERT(so.repeat);
+    N4X_ASSERT(so.repeat_count_remaining == -1);
+    N4X_ASSERT(so.queue.size() == 2);
+    N4X_ASSERT(so.repeat_template.size() == 2);
+  }
+
+  // Clear again for remaining tests.
+  N4X_ASSERT(sim.clear_orders(ship_id));
 
   // A day later, the queue should remain empty (no refill).
   sim.advance_days(1);
@@ -104,6 +169,7 @@ int test_order_repeat() {
   {
     const auto& so = loaded.ship_orders.at(ship_id);
     N4X_ASSERT(so.repeat);
+    N4X_ASSERT(so.repeat_count_remaining == -1);
     N4X_ASSERT(so.queue.size() == 1);
     N4X_ASSERT(so.repeat_template.size() == 1);
     N4X_ASSERT(std::holds_alternative<nebula4x::WaitDays>(so.queue[0]));

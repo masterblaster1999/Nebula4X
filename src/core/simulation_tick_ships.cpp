@@ -36,6 +36,10 @@ void Simulation::tick_ships() {
 
   const auto ship_ids = sorted_keys(state_.ships);
 
+  auto can_refill_from_repeat = [](const ShipOrders& so) {
+    return so.repeat && !so.repeat_template.empty() && so.repeat_count_remaining != 0;
+  };
+
   // --- Fleet cohesion prepass ---
   //
   // Fleets are intentionally lightweight in the data model, so we do a small
@@ -197,7 +201,7 @@ void Simulation::tick_ships() {
       const Order* ord_ptr = nullptr;
       if (!so.queue.empty()) {
         ord_ptr = &so.queue.front();
-      } else if (so.repeat && !so.repeat_template.empty()) {
+      } else if (can_refill_from_repeat(so)) {
         // Mirror the main tick loop behaviour where empty queues are refilled
         // from the repeat template.
         ord_ptr = &so.repeat_template.front();
@@ -215,10 +219,8 @@ void Simulation::tick_ships() {
       // engines, treat its speed as 0 for cohesion purposes.
       double base_speed_km_s = sh->speed_km_s;
       if (const auto* sd = find_design(sh->design_id)) {
-        const auto p = compute_power_allocation(*sd);
-        if (!p.engines_online && sd->power_use_engines > 1e-9) {
-          base_speed_km_s = 0.0;
-        }
+        const auto p = compute_power_allocation(*sd, sh->power_policy);
+        if (!p.engines_online) base_speed_km_s = 0.0;
       }
 
       const CohortKey key = *key_opt;
@@ -282,7 +284,7 @@ void Simulation::tick_ships() {
       const Order* ord_ptr = nullptr;
       if (!so.queue.empty()) {
         ord_ptr = &so.queue.front();
-      } else if (so.repeat && !so.repeat_template.empty()) {
+      } else if (can_refill_from_repeat(so)) {
         ord_ptr = &so.repeat_template.front();
       } else {
         continue;
@@ -361,7 +363,7 @@ void Simulation::tick_ships() {
       const Order* ord_ptr = nullptr;
       if (!so.queue.empty()) {
         ord_ptr = &so.queue.front();
-      } else if (so.repeat && !so.repeat_template.empty()) {
+      } else if (can_refill_from_repeat(so)) {
         ord_ptr = &so.repeat_template.front();
       } else {
         continue;
@@ -422,7 +424,7 @@ void Simulation::tick_ships() {
             const ShipOrders& so = itso->second;
             if (!so.queue.empty()) {
               lord_ptr = &so.queue.front();
-            } else if (so.repeat && !so.repeat_template.empty()) {
+          } else if (can_refill_from_repeat(so)) {
               lord_ptr = &so.repeat_template.front();
             }
           }
@@ -456,7 +458,15 @@ void Simulation::tick_ships() {
     auto& so = it->second;
 
     if (so.queue.empty() && so.repeat && !so.repeat_template.empty()) {
-      so.queue = so.repeat_template;
+      if (so.repeat_count_remaining == 0) {
+        // Finite-repeat cycle complete: stop repeating (but keep the template).
+        so.repeat = false;
+      } else {
+        so.queue = so.repeat_template;
+        if (so.repeat_count_remaining > 0) {
+          so.repeat_count_remaining -= 1;
+        }
+      }
     }
 
     auto& q = so.queue;
@@ -1217,10 +1227,8 @@ void Simulation::tick_ships() {
     // cannot move this tick.
     double effective_speed_km_s = ship.speed_km_s;
     if (sd) {
-      const auto p = compute_power_allocation(*sd);
-      if (!p.engines_online && sd->power_use_engines > 1e-9) {
-        effective_speed_km_s = 0.0;
-      }
+      const auto p = compute_power_allocation(*sd, ship.power_policy);
+      if (!p.engines_online) effective_speed_km_s = 0.0;
     }
 
     // Fleet speed matching: for ships in the same fleet with the same current

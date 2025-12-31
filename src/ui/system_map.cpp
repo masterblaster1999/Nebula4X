@@ -3,6 +3,7 @@
 #include "ui/map_render.h"
 
 #include "nebula4x/core/fleet_formation.h"
+#include "nebula4x/core/enum_strings.h"
 
 #include <imgui.h>
 
@@ -421,7 +422,8 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
     const auto* so = sh ? find_ptr(s.ship_orders, route_ship_id) : nullptr;
 
     if (sh && sh->system_id == sys->id && so) {
-      const bool templ = so->queue.empty() && so->repeat && !so->repeat_template.empty();
+      const bool templ = so->queue.empty() && so->repeat && !so->repeat_template.empty() &&
+                         so->repeat_count_remaining != 0;
       const auto& q = (templ ? so->repeat_template : so->queue);
 
       auto resolve_target = [&](const nebula4x::Order& ord) -> std::optional<Vec2> {
@@ -596,7 +598,9 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
       if (it == s.ship_orders.end()) return nullptr;
       const ShipOrders& so = it->second;
       if (!so.queue.empty()) return &so.queue.front();
-      if (so.repeat && !so.repeat_template.empty()) return &so.repeat_template.front();
+      if (so.repeat && !so.repeat_template.empty() && so.repeat_count_remaining != 0) {
+        return &so.repeat_template.front();
+      }
       return nullptr;
     };
 
@@ -1080,7 +1084,7 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
             } else {
               ImGui::TextDisabled("Colony: %s", c.name.c_str());
             }
-            ImGui::TextDisabled("Population: %.3f B", c.population_billion);
+            ImGui::TextDisabled("Population: %.3f B", c.population_millions / 1000.0);
             break;
           }
 
@@ -1126,7 +1130,6 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
             ui.system_map_follow_selected = false;
           }
           if (can_issue_orders && ImGui::SmallButton("Travel")) {
-            const bool fleet_mode = ImGui::GetIO().KeyCtrl && selected_fleet != nullptr;
             if (fleet_mode) {
               sim.issue_fleet_travel_via_jump(selected_fleet->id, hovered_id);
             } else if (selected_ship != kInvalidId) {

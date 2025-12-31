@@ -23,7 +23,7 @@ struct ContentDB {
 
 // A single save-game state.
 struct GameState {
-  int save_version{28};
+  int save_version{30};
   Date date;
 
   Id next_id{1};

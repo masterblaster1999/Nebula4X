@@ -191,6 +191,111 @@
           "value": "terraforming_plant"
         }
       ]
+    },
+    {
+      "id": "mining_efficiency_1",
+      "name": "Mining Efficiency",
+      "cost": 600,
+      "prereqs": [
+        "chemistry_1"
+      ],
+      "effects": [
+        {
+          "type": "faction_output_bonus",
+          "value": "mining",
+          "amount": 0.15
+        }
+      ]
+    },
+    {
+      "id": "industrial_efficiency_1",
+      "name": "Industrial Efficiency",
+      "cost": 700,
+      "prereqs": [
+        "chemistry_1"
+      ],
+      "effects": [
+        {
+          "type": "faction_output_bonus",
+          "value": "industry",
+          "amount": 0.10
+        }
+      ]
+    },
+    {
+      "id": "construction_methods_1",
+      "name": "Construction Methods",
+      "cost": 900,
+      "prereqs": [
+        "chemistry_1"
+      ],
+      "effects": [
+        {
+          "type": "faction_output_bonus",
+          "value": "construction",
+          "amount": 0.10
+        }
+      ]
+    },
+    {
+      "id": "research_methods_1",
+      "name": "Research Methodology",
+      "cost": 900,
+      "prereqs": [
+        "chemistry_1"
+      ],
+      "effects": [
+        {
+          "type": "faction_output_bonus",
+          "value": "research",
+          "amount": 0.10
+        }
+      ]
+    },
+    {
+      "id": "shipyard_optimization_1",
+      "name": "Shipyard Optimization",
+      "cost": 1200,
+      "prereqs": [
+        "propulsion_1"
+      ],
+      "effects": [
+        {
+          "type": "faction_output_bonus",
+          "value": "shipyard",
+          "amount": 0.10
+        }
+      ]
+    },
+    {
+      "id": "training_doctrine_1",
+      "name": "Training Doctrine",
+      "cost": 800,
+      "prereqs": [
+        "ground_forces_1"
+      ],
+      "effects": [
+        {
+          "type": "faction_output_bonus",
+          "value": "troop_training",
+          "amount": 0.15
+        }
+      ]
+    },
+    {
+      "id": "terraforming_efficiency_1",
+      "name": "Terraforming Efficiency",
+      "cost": 1200,
+      "prereqs": [
+        "terraforming_1"
+      ],
+      "effects": [
+        {
+          "type": "faction_output_bonus",
+          "value": "terraforming",
+          "amount": 0.20
+        }
+      ]
     }
   ]
 }

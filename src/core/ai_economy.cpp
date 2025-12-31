@@ -8,6 +8,9 @@
 
 #include "nebula4x/core/game_state.h"
 
+// Internal helper for tech-driven economy modifiers.
+#include "simulation_internal.h"
+
 namespace nebula4x {
 namespace {
 
@@ -239,6 +242,16 @@ int mine_target_for_colony(const Simulation& sim, const Colony& c) {
   const int yards = c.installations.count("shipyard") ? c.installations.at("shipyard") : 0;
   if (yards <= 0) return 0;
 
+  // Tech-driven multipliers (e.g. shipyard throughput and mining efficiency)
+  // should be reflected in planning targets; otherwise AIs will under-build
+  // mines after researching economic upgrades.
+  sim_internal::FactionEconomyMultipliers mult;
+  if (const auto* fac = find_ptr(sim.state().factions, c.faction_id)) {
+    mult = sim_internal::compute_faction_economy_multipliers(sim.content(), *fac);
+  }
+  const double shipyard_mult = std::max(0.0, mult.shipyard);
+  const double mining_mult = std::max(0.0, mult.mining);
+
   const auto it_yard = sim.content().installations.find("shipyard");
   const auto it_mine = sim.content().installations.find("automated_mine");
   if (it_yard == sim.content().installations.end() || it_mine == sim.content().installations.end()) return 0;
@@ -246,7 +259,8 @@ int mine_target_for_colony(const Simulation& sim, const Colony& c) {
   const InstallationDef& yard = it_yard->second;
   const InstallationDef& mine = it_mine->second;
 
-  const double rate_per_day = std::max(0.0, yard.build_rate_tons_per_day) * static_cast<double>(yards);
+  const double rate_per_day =
+      std::max(0.0, yard.build_rate_tons_per_day) * static_cast<double>(yards) * shipyard_mult;
   if (rate_per_day <= 1e-9) return 0;
 
   int target = 0;
@@ -256,7 +270,7 @@ int mine_target_for_colony(const Simulation& sim, const Colony& c) {
 
     auto it_prod = mine.produces_per_day.find(mineral);
     if (it_prod == mine.produces_per_day.end()) continue;
-    const double per_day = it_prod->second;
+    const double per_day = it_prod->second * mining_mult;
     if (per_day <= 1e-9) continue;
 
     const int needed = static_cast<int>(std::ceil(required / per_day));

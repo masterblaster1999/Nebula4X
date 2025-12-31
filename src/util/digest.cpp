@@ -530,6 +530,7 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
     d.add_size(so.queue.size());
     for (const auto& o : so.queue) hash_order(d, o);
     d.add_bool(so.repeat);
+    d.add_i64(static_cast<std::int64_t>(so.repeat_count_remaining));
     d.add_size(so.repeat_template.size());
     for (const auto& o : so.repeat_template) hash_order(d, o);
   }
