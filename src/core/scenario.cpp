@@ -170,11 +170,27 @@ GameState make_sol_scenario() {
   // --- Alpha Centauri bodies ---
   (void)add_body(centauri, "Alpha Centauri A", BodyType::Star, 0.0, 1.0, 0.0);
   const Id centauri_prime = add_body(centauri, "Centauri Prime", BodyType::Planet, 110.0, 320.0, 0.4);
-  (void)centauri_prime;
 
   // --- Barnard's Star bodies ---
   (void)add_body(barnard, "Barnard's Star", BodyType::Star, 0.0, 1.0, 0.0);
   const Id barnard_b = add_body(barnard, "Barnard b", BodyType::Planet, 60.0, 233.0, 0.2);
+
+  // Environment for non-Sol colonies (prototype defaults).
+  {
+    auto& cp = s.bodies.at(centauri_prime);
+    cp.surface_temp_k = 285.0;
+    cp.atmosphere_atm = 0.95;
+    cp.terraforming_target_temp_k = cp.surface_temp_k;
+    cp.terraforming_target_atm = cp.atmosphere_atm;
+    cp.terraforming_complete = true;
+
+    auto& bb = s.bodies.at(barnard_b);
+    bb.surface_temp_k = 240.0;
+    bb.atmosphere_atm = 0.20;
+    bb.terraforming_target_temp_k = 288.0;
+    bb.terraforming_target_atm = 1.0;
+    bb.terraforming_complete = false;
+  }
 
   // --- Mineral deposits (finite mining) ---
   //
@@ -196,7 +212,6 @@ GameState make_sol_scenario() {
   seed_deposits(encke, 2.5e4, 1.5e3);
   seed_deposits(centauri_prime, 1.2e6, 1.2e5);
   seed_deposits(barnard_b, 3.0e5, 3.0e4);
-  seed_deposits(barnard_b, 2.0e5, 2.0e4);
 
   // --- Jump points (Sol <-> Alpha Centauri) ---
   const Id jp_sol = allocate_id(s);
@@ -292,6 +307,7 @@ GameState make_sol_scenario() {
         {"construction_factory", 1},
         {"fuel_refinery", 1},
         {"research_lab", 2},
+        {"infrastructure", 3},
         {"terraforming_plant", 1},
     };
     c.ground_forces = 80.0;
@@ -553,6 +569,33 @@ double sample_albedo(std::mt19937& rng, BodyType type) {
     default:
       return rand_real(rng, 0.10, 0.45);
   }
+}
+
+double sample_atmosphere_atm(std::mt19937& rng, BodyType type, double orbit_au, double hz_au, double mass_earths) {
+  // Prototype atmosphere model:
+  // - We mostly care about roughly-Earthlike pressures for habitability.
+  // - Non-rocky bodies (gas giants, asteroids, comets) are treated as effectively 0 atm.
+  if (type == BodyType::GasGiant || type == BodyType::Asteroid || type == BodyType::Comet) return 0.0;
+
+  const double hz = std::max(0.05, hz_au);
+  const double rel = orbit_au / hz;
+  const double d = std::abs(rel - 1.0);
+
+  // "Habitable zone likeness" in [0,1].
+  const double hz_like = clamp01(1.0 - (d / 0.70));
+
+  // Near HZ: choose a broadly Earthlike range; far from HZ: thin/trace atmospheres.
+  double atm = hz_like * rand_real(rng, 0.6, 1.4) + (1.0 - hz_like) * rand_real(rng, 0.0, 0.2);
+
+  // Small bodies struggle to retain atmosphere.
+  const double m = std::max(0.01, mass_earths);
+  const double retention = std::clamp(std::pow(m, 0.35), 0.15, 1.60);
+  atm *= retention;
+
+  // Moons are more likely to have thin atmospheres.
+  if (type == BodyType::Moon) atm *= 0.35;
+
+  return std::max(0.0, atm);
 }
 
 double rocky_radius_km(double mass_earths) {
@@ -930,6 +973,18 @@ GameState make_random_scenario(std::uint32_t seed, int num_systems) {
       }
       pb.surface_temp_k = equilibrium_temp_k(sp.luminosity_solar, orbit_au, sample_albedo(rng, type));
 
+      // Basic atmosphere model (used by the habitability system).
+      pb.atmosphere_atm = sample_atmosphere_atm(rng, type, orbit_au, hz_au, pb.mass_earths);
+
+      // For the forced homeworld orbit, mark terraforming complete so it behaves
+      // as fully habitable regardless of small temperature/atmosphere deviations.
+      if (idx == forced_home_idx) {
+        pb.atmosphere_atm = std::clamp(pb.atmosphere_atm, 0.8, 1.2);
+        pb.terraforming_target_temp_k = pb.surface_temp_k;
+        pb.terraforming_target_atm = pb.atmosphere_atm;
+        pb.terraforming_complete = true;
+      }
+
       // Mineral deposits.
       const double richness = (idx == forced_home_idx) ? 2.1 : 1.0;
       seed_basic_deposits(pid, type, orbit_au, sp.metallicity, richness);
@@ -1001,6 +1056,7 @@ GameState make_random_scenario(std::uint32_t seed, int num_systems) {
         mb.mass_earths = rand_log_uniform(rng, 0.001, moon_hi);
         mb.radius_km = rocky_radius_km(mb.mass_earths);
         mb.surface_temp_k = equilibrium_temp_k(sp.luminosity_solar, orbit_au, sample_albedo(rng, BodyType::Moon));
+        mb.atmosphere_atm = sample_atmosphere_atm(rng, BodyType::Moon, orbit_au, hz_au, mb.mass_earths);
         seed_basic_deposits(mid, BodyType::Moon, orbit_au, sp.metallicity, 0.9);
 
         max_extent_mkm = std::max(max_extent_mkm, orbit_mkm + mr);
@@ -1107,6 +1163,16 @@ GameState make_random_scenario(std::uint32_t seed, int num_systems) {
 
   if (auto* hb = find_ptr(s.bodies, homeworld_body)) {
     hb->orbit_phase_radians = 0.0;
+
+    // Ensure the homeworld is habitable (used by the colony habitability system).
+    // The procedural generator already tries to place a rocky planet near the HZ, but
+    // we still defensively fill in any missing environment values.
+    if (hb->surface_temp_k <= 0.0) hb->surface_temp_k = 288.0;
+    if (hb->atmosphere_atm <= 0.0) hb->atmosphere_atm = 1.0;
+    hb->terraforming_target_temp_k = hb->surface_temp_k;
+    hb->terraforming_target_atm = hb->atmosphere_atm;
+    hb->terraforming_complete = true;
+
     if (auto it = hb->mineral_deposits.find("Duranium"); it != hb->mineral_deposits.end()) it->second *= 1.6;
     if (auto it = hb->mineral_deposits.find("Neutronium"); it != hb->mineral_deposits.end()) it->second *= 1.6;
   }
@@ -1271,6 +1337,15 @@ GameState make_random_scenario(std::uint32_t seed, int num_systems) {
           break;
         }
       }
+    }
+
+    // Ensure the pirate base world is livable so the pirate AI can scale up over time.
+    if (auto* bb = find_ptr(s.bodies, base_body)) {
+      if (bb->surface_temp_k <= 0.0) bb->surface_temp_k = 288.0;
+      if (bb->atmosphere_atm <= 0.0) bb->atmosphere_atm = 1.0;
+      bb->terraforming_target_temp_k = bb->surface_temp_k;
+      bb->terraforming_target_atm = bb->atmosphere_atm;
+      bb->terraforming_complete = true;
     }
 
     Colony c;

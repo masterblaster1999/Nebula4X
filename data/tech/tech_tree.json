@@ -24,6 +24,10 @@
         {
           "type": "unlock_component",
           "value": "colony_module_mk1"
+        },
+        {
+          "type": "unlock_installation",
+          "value": "infrastructure"
         }
       ]
     },
@@ -80,6 +84,21 @@
         {
           "type": "unlock_component",
           "value": "armor_mk2"
+        }
+      ]
+    },
+    {
+      "id": "stealth_1",
+      "name": "Stealth Coatings",
+      "cost": 900,
+      "prereqs": [
+        "armor_1",
+        "sensors_1"
+      ],
+      "effects": [
+        {
+          "type": "unlock_component",
+          "value": "stealth_coating_mk1"
         }
       ]
     },

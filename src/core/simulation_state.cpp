@@ -1,0 +1,478 @@
+#include "nebula4x/core/simulation.h"
+
+#include "simulation_internal.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cctype>
+#include <cstring>
+#include <iomanip>
+#include <limits>
+#include <optional>
+#include <queue>
+#include <sstream>
+#include <stdexcept>
+#include <unordered_map>
+#include <unordered_set>
+
+#include "nebula4x/core/scenario.h"
+#include "nebula4x/core/ai_economy.h"
+#include "nebula4x/util/log.h"
+#include "nebula4x/util/spatial_index.h"
+
+namespace nebula4x {
+namespace {
+using sim_internal::kTwoPi;
+using sim_internal::ascii_to_lower;
+using sim_internal::is_mining_installation;
+using sim_internal::mkm_per_day_from_speed;
+using sim_internal::push_unique;
+using sim_internal::vec_contains;
+using sim_internal::sorted_keys;
+using sim_internal::faction_has_tech;
+using sim_internal::FactionEconomyMultipliers;
+using sim_internal::compute_faction_economy_multipliers;
+using sim_internal::compute_power_allocation;
+} // namespace
+
+void Simulation::apply_design_stats_to_ship(Ship& ship) {
+  const ShipDesign* d = find_design(ship.design_id);
+  if (!d) {
+    ship.speed_km_s = 0.0;
+    if (ship.hp <= 0.0) ship.hp = 1.0;
+    ship.fuel_tons = 0.0;
+    ship.shields = 0.0;
+    return;
+  }
+
+  ship.speed_km_s = d->speed_km_s;
+  if (ship.hp <= 0.0) ship.hp = d->max_hp;
+  ship.hp = std::clamp(ship.hp, 0.0, d->max_hp);
+
+  const double fuel_cap = std::max(0.0, d->fuel_capacity_tons);
+  if (fuel_cap <= 1e-9) {
+    ship.fuel_tons = 0.0;
+  } else {
+    // Initialize fuel for older saves / newly created ships.
+    if (ship.fuel_tons < 0.0) ship.fuel_tons = fuel_cap;
+    ship.fuel_tons = std::clamp(ship.fuel_tons, 0.0, fuel_cap);
+  }
+
+  const double max_sh = std::max(0.0, d->max_shields);
+  if (max_sh <= 1e-9) {
+    ship.shields = 0.0;
+  } else {
+    // Initialize shields for older saves / newly created ships.
+    if (ship.shields < 0.0) ship.shields = max_sh;
+    ship.shields = std::clamp(ship.shields, 0.0, max_sh);
+  }
+
+  const double troop_cap = std::max(0.0, d->troop_capacity);
+  if (troop_cap <= 1e-9) {
+    ship.troops = 0.0;
+  } else {
+    ship.troops = std::clamp(ship.troops, 0.0, troop_cap);
+  }
+
+  const double colonist_cap = std::max(0.0, d->colony_capacity_millions);
+  if (colonist_cap <= 1e-9) {
+    ship.colonists_millions = 0.0;
+  } else {
+    ship.colonists_millions = std::clamp(ship.colonists_millions, 0.0, colonist_cap);
+  }
+}
+
+bool Simulation::upsert_custom_design(ShipDesign design, std::string* error) {
+  auto fail = [&](const std::string& msg) {
+    if (error) *error = msg;
+    return false;
+  };
+
+  if (design.id.empty()) return fail("Design id is empty");
+  if (content_.designs.find(design.id) != content_.designs.end()) {
+    return fail("Design id conflicts with built-in design: " + design.id);
+  }
+  if (design.name.empty()) design.name = design.id;
+
+  double mass = 0.0;
+  double speed = 0.0;
+  double fuel_cap = 0.0;
+  double fuel_use = 0.0;
+  double cargo = 0.0;
+  double sensor = 0.0;
+  double colony_cap = 0.0;
+  double troop_cap = 0.0;
+
+  // Visibility / signature multiplier (product of component multipliers).
+  // 1.0 = normal visibility; lower values are harder to detect.
+  double sig_mult = 1.0;
+
+  double weapon_damage = 0.0;
+  double weapon_range = 0.0;
+  double hp_bonus = 0.0;
+  double max_shields = 0.0;
+  double shield_regen = 0.0;
+
+  // Power budgeting.
+  double power_gen = 0.0;
+  double power_use_total = 0.0;
+  double power_use_engines = 0.0;
+  double power_use_sensors = 0.0;
+  double power_use_weapons = 0.0;
+  double power_use_shields = 0.0;
+
+  for (const auto& cid : design.components) {
+    auto it = content_.components.find(cid);
+    if (it == content_.components.end()) return fail("Unknown component id: " + cid);
+    const auto& c = it->second;
+
+    mass += c.mass_tons;
+    speed = std::max(speed, c.speed_km_s);
+    fuel_cap += c.fuel_capacity_tons;
+    fuel_use += c.fuel_use_per_mkm;
+    cargo += c.cargo_tons;
+    sensor = std::max(sensor, c.sensor_range_mkm);
+    colony_cap += c.colony_capacity_millions;
+    troop_cap += c.troop_capacity;
+
+    const double comp_sig =
+        std::clamp(std::isfinite(c.signature_multiplier) ? c.signature_multiplier : 1.0, 0.0, 1.0);
+    sig_mult *= comp_sig;
+
+    if (c.type == ComponentType::Weapon) {
+      weapon_damage += c.weapon_damage;
+      weapon_range = std::max(weapon_range, c.weapon_range_mkm);
+    }
+
+    if (c.type == ComponentType::Reactor) {
+      power_gen += c.power_output;
+    }
+    power_use_total += c.power_use;
+    if (c.type == ComponentType::Engine) power_use_engines += c.power_use;
+    if (c.type == ComponentType::Sensor) power_use_sensors += c.power_use;
+    if (c.type == ComponentType::Weapon) power_use_weapons += c.power_use;
+    if (c.type == ComponentType::Shield) power_use_shields += c.power_use;
+
+    hp_bonus += c.hp_bonus;
+
+    if (c.type == ComponentType::Shield) {
+      max_shields += c.shield_hp;
+      shield_regen += c.shield_regen_per_day;
+    }
+  }
+
+  design.mass_tons = mass;
+  design.speed_km_s = speed;
+  design.fuel_capacity_tons = fuel_cap;
+  design.fuel_use_per_mkm = fuel_use;
+  design.cargo_tons = cargo;
+  design.sensor_range_mkm = sensor;
+  design.colony_capacity_millions = colony_cap;
+  design.troop_capacity = troop_cap;
+
+  // Clamp to avoid fully-undetectable ships.
+  design.signature_multiplier = std::clamp(sig_mult, 0.05, 1.0);
+
+  design.power_generation = power_gen;
+  design.power_use_total = power_use_total;
+  design.power_use_engines = power_use_engines;
+  design.power_use_sensors = power_use_sensors;
+  design.power_use_weapons = power_use_weapons;
+  design.power_use_shields = power_use_shields;
+  design.weapon_damage = weapon_damage;
+  design.weapon_range_mkm = weapon_range;
+  design.max_shields = max_shields;
+  design.shield_regen_per_day = shield_regen;
+  design.max_hp = std::max(1.0, mass * 2.0 + hp_bonus);
+
+  state_.custom_designs[design.id] = std::move(design);
+  return true;
+}
+
+void Simulation::initialize_unlocks_for_faction(Faction& f) {
+  for (Id cid : sorted_keys(state_.colonies)) {
+    const auto& col = state_.colonies.at(cid);
+    if (col.faction_id != f.id) continue;
+
+    if (const auto* body = find_ptr(state_.bodies, col.body_id)) {
+      push_unique(f.discovered_systems, body->system_id);
+    }
+
+    for (const auto& [inst_id, count] : col.installations) {
+      if (count <= 0) continue;
+      push_unique(f.unlocked_installations, inst_id);
+    }
+  }
+
+  for (Id sid : sorted_keys(state_.ships)) {
+    const auto& ship = state_.ships.at(sid);
+    if (ship.faction_id != f.id) continue;
+
+    push_unique(f.discovered_systems, ship.system_id);
+
+    if (const auto* d = find_design(ship.design_id)) {
+      for (const auto& cid : d->components) push_unique(f.unlocked_components, cid);
+    }
+  }
+
+  for (const auto& tech_id : f.known_techs) {
+    auto tit = content_.techs.find(tech_id);
+    if (tit == content_.techs.end()) continue;
+    for (const auto& eff : tit->second.effects) {
+      if (eff.type == "unlock_component") push_unique(f.unlocked_components, eff.value);
+      if (eff.type == "unlock_installation") push_unique(f.unlocked_installations, eff.value);
+    }
+  }
+}
+
+void Simulation::remove_ship_from_fleets(Id ship_id) {
+  if (ship_id == kInvalidId) return;
+  if (state_.fleets.empty()) return;
+
+  bool changed = false;
+  for (auto& [_, fl] : state_.fleets) {
+    const auto it = std::remove(fl.ship_ids.begin(), fl.ship_ids.end(), ship_id);
+    if (it != fl.ship_ids.end()) {
+      fl.ship_ids.erase(it, fl.ship_ids.end());
+      changed = true;
+    }
+    if (fl.leader_ship_id == ship_id) {
+      fl.leader_ship_id = kInvalidId;
+      changed = true;
+    }
+  }
+
+  if (changed) prune_fleets();
+}
+
+void Simulation::prune_fleets() {
+  if (state_.fleets.empty()) return;
+
+  // Deterministic pruning.
+  const auto fleet_ids = sorted_keys(state_.fleets);
+
+  // Enforce the invariant that a ship may belong to at most one fleet.
+  std::unordered_set<Id> claimed;
+  claimed.reserve(state_.ships.size() * 2);
+
+  for (Id fleet_id : fleet_ids) {
+    auto* fl = find_ptr(state_.fleets, fleet_id);
+    if (!fl) continue;
+
+    std::vector<Id> members;
+    members.reserve(fl->ship_ids.size());
+    for (Id sid : fl->ship_ids) {
+      if (sid == kInvalidId) continue;
+      const auto* sh = find_ptr(state_.ships, sid);
+      if (!sh) continue;
+      if (fl->faction_id != kInvalidId && sh->faction_id != fl->faction_id) continue;
+      members.push_back(sid);
+    }
+
+    std::sort(members.begin(), members.end());
+    members.erase(std::unique(members.begin(), members.end()), members.end());
+
+    std::vector<Id> unique_members;
+    unique_members.reserve(members.size());
+    for (Id sid : members) {
+      if (claimed.insert(sid).second) unique_members.push_back(sid);
+    }
+
+    fl->ship_ids = std::move(unique_members);
+
+    if (!fl->ship_ids.empty()) {
+      if (fl->leader_ship_id == kInvalidId ||
+          std::find(fl->ship_ids.begin(), fl->ship_ids.end(), fl->leader_ship_id) == fl->ship_ids.end()) {
+        fl->leader_ship_id = fl->ship_ids.front();
+      }
+    } else {
+      fl->leader_ship_id = kInvalidId;
+    }
+  }
+
+  for (auto it = state_.fleets.begin(); it != state_.fleets.end();) {
+    if (it->second.ship_ids.empty()) {
+      it = state_.fleets.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
+void Simulation::discover_system_for_faction(Id faction_id, Id system_id) {
+  if (system_id == kInvalidId) return;
+  auto* fac = find_ptr(state_.factions, faction_id);
+  if (!fac) return;
+
+  if (std::find(fac->discovered_systems.begin(), fac->discovered_systems.end(), system_id) !=
+      fac->discovered_systems.end()) {
+    return;
+  }
+
+  fac->discovered_systems.push_back(system_id);
+  invalidate_jump_route_cache();
+
+  const auto* sys = find_ptr(state_.systems, system_id);
+  const std::string sys_name = sys ? sys->name : std::string("(unknown)");
+
+  EventContext ctx;
+  ctx.faction_id = faction_id;
+  ctx.system_id = system_id;
+
+  const std::string msg = fac->name + " discovered system " + sys_name;
+  push_event(EventLevel::Info, EventCategory::Exploration, msg, ctx);
+
+  // Share the discovery with mutual-friendly factions.
+  const auto faction_ids = sorted_keys(state_.factions);
+  for (Id other_id : faction_ids) {
+    if (other_id == faction_id) continue;
+    if (!are_factions_mutual_friendly(faction_id, other_id)) continue;
+    auto* other = find_ptr(state_.factions, other_id);
+    if (!other) continue;
+
+    if (std::find(other->discovered_systems.begin(), other->discovered_systems.end(), system_id) !=
+        other->discovered_systems.end()) {
+      continue;
+    }
+
+    other->discovered_systems.push_back(system_id);
+
+    EventContext ctx2;
+    ctx2.faction_id = other_id;
+    ctx2.faction_id2 = faction_id;
+    ctx2.system_id = system_id;
+
+    const std::string msg2 = "Intel: " + fac->name + " shared discovery of system " + sys_name;
+    push_event(EventLevel::Info, EventCategory::Intel, msg2, ctx2);
+  }
+}
+
+void Simulation::new_game() {
+  state_ = make_sol_scenario();
+  for (auto& [_, ship] : state_.ships) {
+    apply_design_stats_to_ship(ship);
+  }
+  for (auto& [_, f] : state_.factions) initialize_unlocks_for_faction(f);
+  recompute_body_positions();
+  tick_contacts();
+  invalidate_jump_route_cache();
+}
+
+void Simulation::load_game(GameState loaded) {
+  state_ = std::move(loaded);
+
+  {
+    std::uint64_t max_seq = 0;
+    for (const auto& ev : state_.events) max_seq = std::max(max_seq, ev.seq);
+    if (state_.next_event_seq == 0) state_.next_event_seq = 1;
+    if (state_.next_event_seq <= max_seq) state_.next_event_seq = max_seq + 1;
+  }
+
+  if (!state_.custom_designs.empty()) {
+    std::vector<ShipDesign> designs;
+    designs.reserve(state_.custom_designs.size());
+    for (const auto& [_, d] : state_.custom_designs) designs.push_back(d);
+    state_.custom_designs.clear();
+    for (auto& d : designs) {
+      std::string err;
+      if (!upsert_custom_design(d, &err)) {
+        nebula4x::log::warn(std::string("Custom design '") + d.id + "' could not be re-derived: " + err);
+        state_.custom_designs[d.id] = d; 
+      }
+    }
+  }
+
+  for (auto& [_, ship] : state_.ships) {
+    apply_design_stats_to_ship(ship);
+  }
+
+  for (auto& [_, f] : state_.factions) {
+    initialize_unlocks_for_faction(f);
+  }
+
+  // Older saves (or hand-edited JSON) may contain stale fleet references.
+  // Clean them up on load.
+  prune_fleets();
+
+  recompute_body_positions();
+  tick_contacts();
+  invalidate_jump_route_cache();
+}
+
+void Simulation::advance_days(int days) {
+  if (days <= 0) return;
+  for (int i = 0; i < days; ++i) tick_one_day();
+}
+
+namespace {
+
+bool event_matches_stop(const SimEvent& ev, const EventStopCondition& stop) {
+  const bool level_ok = (ev.level == EventLevel::Info && stop.stop_on_info) ||
+                        (ev.level == EventLevel::Warn && stop.stop_on_warn) ||
+                        (ev.level == EventLevel::Error && stop.stop_on_error);
+  if (!level_ok) return false;
+
+  if (stop.filter_category && ev.category != stop.category) return false;
+
+  if (stop.faction_id != kInvalidId) {
+    if (ev.faction_id != stop.faction_id && ev.faction_id2 != stop.faction_id) return false;
+  }
+
+  if (stop.system_id != kInvalidId) {
+    if (ev.system_id != stop.system_id) return false;
+  }
+
+  if (stop.ship_id != kInvalidId) {
+    if (ev.ship_id != stop.ship_id) return false;
+  }
+
+  if (stop.colony_id != kInvalidId) {
+    if (ev.colony_id != stop.colony_id) return false;
+  }
+
+  if (!stop.message_contains.empty()) {
+    const auto it = std::search(
+        ev.message.begin(), ev.message.end(),
+        stop.message_contains.begin(), stop.message_contains.end(),
+        [](char a, char b) {
+          return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
+        });
+    if (it == ev.message.end()) return false;
+  }
+
+  return true;
+}
+
+} // namespace
+
+AdvanceUntilEventResult Simulation::advance_until_event(int max_days, const EventStopCondition& stop) {
+  AdvanceUntilEventResult out;
+  if (max_days <= 0) return out;
+
+  std::uint64_t last_seq = 0;
+  if (state_.next_event_seq > 0) last_seq = state_.next_event_seq - 1;
+
+  for (int i = 0; i < max_days; ++i) {
+    tick_one_day();
+    out.days_advanced += 1;
+
+    const std::uint64_t newest_seq = (state_.next_event_seq > 0) ? (state_.next_event_seq - 1) : 0;
+    if (newest_seq <= last_seq) continue; 
+
+    for (int j = static_cast<int>(state_.events.size()) - 1; j >= 0; --j) {
+      const auto& ev = state_.events[static_cast<std::size_t>(j)];
+      if (ev.seq <= last_seq) break;
+      if (!event_matches_stop(ev, stop)) continue;
+      out.hit = true;
+      out.event = ev; // copy
+      return out;
+    }
+
+    last_seq = newest_seq;
+  }
+
+  return out;
+}
+
+
+} // namespace nebula4x

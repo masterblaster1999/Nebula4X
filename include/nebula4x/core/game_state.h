@@ -23,7 +23,7 @@ struct ContentDB {
 
 // A single save-game state.
 struct GameState {
-  int save_version{30};
+  int save_version{36};
   Date date;
 
   Id next_id{1};
@@ -36,6 +36,10 @@ struct GameState {
   std::unordered_map<Id, Body> bodies;
   std::unordered_map<Id, JumpPoint> jump_points;
   std::unordered_map<Id, Ship> ships;
+
+  // Salvageable wrecks created by ship destruction.
+  std::unordered_map<Id, Wreck> wrecks;
+
   std::unordered_map<Id, Colony> colonies;
   std::unordered_map<Id, Faction> factions;
 

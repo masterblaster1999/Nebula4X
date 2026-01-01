@@ -1,8 +1,39 @@
-# Patch pack notes (generated 2025-12-29 r37)
+# Patch pack notes (generated 2026-01-01 r39)
 
 This patch pack is designed for **GitHub web uploads** (Add file → Upload files).
 
 It is **cumulative**: it contains the union of files changed/added in all rounds so far, so you can apply it in one upload.
+
+## New in this patch pack: Colony habitability + habitation infrastructure
+
+- Core:
+  - Adds a simple, configurable **habitability** score derived from body temperature + atmosphere
+    (uses terraforming targets if set; terraform-complete bodies are treated as fully habitable).
+  - Adds `InstallationDef::habitation_capacity_millions` and a starting installation:
+    **Infrastructure (Habitation Domes)**.
+  - Colonies on hostile worlds require sufficient habitation capacity or their population will **decline**.
+  - Domed/habitat-supported colonies grow more slowly than fully habitable worlds (configurable).
+  - Colony ships now automatically seed a new colony with enough Infrastructure to support the initial
+    population (can be disabled via `SimConfig::seed_habitation_on_colonize`).
+- UI:
+  - Colony tab shows a **Habitability / Life Support** section with required/provided support and shortfall warnings.
+- Content:
+  - `colonization_1` now unlocks `infrastructure`.
+- Scenarios:
+  - Sol: Mars Outpost starts with infrastructure; Alpha Centauri Prime/Barnard b have environment values.
+  - Random scenarios now generate basic planetary atmospheres.
+
+## New in this patch pack: Shared shipyard repairs + auto-repair automation
+
+- Core:
+  - Shipyard repairs now use a **shared per-colony repair capacity pool** (instead of repairing each docked ship at full rate).
+  - Optional repair mineral costs (per HP repaired): `repair_duranium_per_hp` and `repair_neutronium_per_hp` (default 0).
+  - Adds per-ship `repair_priority` (Low/Normal/High) to control allocation when shipyard capacity is limited.
+  - Adds ship automation: `auto_repair` + `auto_repair_threshold_fraction` to route idle damaged ships to a shipyard.
+- UI:
+  - Ship panel: auto-repair toggle + threshold slider, plus a repair priority dropdown.
+- Serialization:
+  - Save schema bumped to **v34** (older saves still load).
 
 ## New in this patch pack: Economy window + mineral reserves + tech tree tier view
 

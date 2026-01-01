@@ -61,6 +61,24 @@ struct AttackShip {
   Vec2 last_known_position_mkm{0.0, 0.0};
 };
 
+// Escort a friendly ship.
+//
+// Notes:
+// - If the target is in another system, the escort will automatically route
+//   through the jump network and transit jump points as needed.
+// - In the destination system, the escort will attempt to maintain a
+//   follow_distance_mkm separation.
+// - This order is indefinite; cancel it manually or when the target no longer
+//   exists.
+struct EscortShip {
+  Id target_ship_id{kInvalidId};
+  double follow_distance_mkm{1.0};
+
+  // When true, cross-system routing will only traverse systems discovered by
+  // the escort's faction.
+  bool restrict_to_discovered{false};
+};
+
 // Wait / do nothing for N simulation days.
 //
 // This is a simple scheduling primitive that lets players insert delays between
@@ -101,11 +119,52 @@ struct UnloadTroops {
   double strength{0.0};
 };
 
+// Load colonists / passengers from an owned colony into this ship.
+//
+// Notes:
+// - Uses the ship design's colony_capacity_millions as passenger capacity.
+// - If millions <= 0, load as many colonists as possible (up to capacity).
+struct LoadColonists {
+  Id colony_id{kInvalidId};
+  double millions{0.0};
+};
+
+// Unload colonists / passengers from this ship into an owned colony.
+// If millions <= 0, unload as many colonists as possible.
+struct UnloadColonists {
+  Id colony_id{kInvalidId};
+  double millions{0.0};
+};
+
 // Invade a hostile colony using embarked troops.
 // The ship will move into docking range of the colony's body and then
 // initiate a ground battle.
 struct InvadeColony {
   Id colony_id{kInvalidId};
+};
+
+// Bombard a colony from orbit.
+//
+// The ship will move to within weapon range of the colony's body and then
+// apply damage each day during Simulation::tick_combat().
+//
+// duration_days:
+//  -1  => bombard indefinitely (until cancelled)
+//   0  => complete immediately
+//  >0  => decrement once per day while bombardment successfully fires
+struct BombardColony {
+  Id colony_id{kInvalidId};
+  int duration_days{-1};
+};
+
+// Salvage minerals from a wreck into this ship's cargo.
+//
+// - If mineral is empty, salvage all minerals until cargo is full or the wreck is empty.
+// - If tons <= 0, salvage as much as possible.
+struct SalvageWreck {
+  Id wreck_id{kInvalidId};
+  std::string mineral;
+  double tons{0.0};
 };
 
 // Transfer minerals from this ship's cargo into another friendly ship.
@@ -115,6 +174,20 @@ struct TransferCargoToShip {
   Id target_ship_id{kInvalidId};
   std::string mineral;
   double tons{0.0};
+};
+
+// Transfer fuel from this ship's tanks into another friendly ship.
+// If tons <= 0, transfer as much as possible (up to target free capacity).
+struct TransferFuelToShip {
+  Id target_ship_id{kInvalidId};
+  double tons{0.0};
+};
+
+// Transfer embarked troops from this ship into another friendly ship.
+// If strength <= 0, transfer as much as possible (up to target free troop capacity).
+struct TransferTroopsToShip {
+  Id target_ship_id{kInvalidId};
+  double strength{0.0};
 };
 
 // Decommission (scrap) a ship at a friendly colony.
@@ -128,13 +201,20 @@ using Order = std::variant<MoveToPoint,
                            OrbitBody,
                            TravelViaJump,
                            AttackShip,
+                           EscortShip,
                            WaitDays,
                            LoadMineral,
                            UnloadMineral,
                            LoadTroops,
                            UnloadTroops,
+                           LoadColonists,
+                           UnloadColonists,
                            InvadeColony,
+                           BombardColony,
+                           SalvageWreck,
                            TransferCargoToShip,
+                           TransferFuelToShip,
+                           TransferTroopsToShip,
                            ScrapShip>;
 
 struct ShipOrders {

@@ -75,6 +75,7 @@ void Simulation::tick_ships() {
     OrbitBody,
     Jump,
     Attack,
+    Escort,
     Load,
     Unload,
     Transfer,
@@ -158,6 +159,11 @@ void Simulation::tick_ships() {
       k.target_id = std::get<AttackShip>(ord).target_ship_id;
       return k;
     }
+    if (std::holds_alternative<EscortShip>(ord)) {
+      k.kind = CohortKind::Escort;
+      k.target_id = std::get<EscortShip>(ord).target_ship_id;
+      return k;
+    }
     if (std::holds_alternative<LoadMineral>(ord)) {
       k.kind = CohortKind::Load;
       k.target_id = std::get<LoadMineral>(ord).colony_id;
@@ -168,9 +174,44 @@ void Simulation::tick_ships() {
       k.target_id = std::get<UnloadMineral>(ord).colony_id;
       return k;
     }
+    if (std::holds_alternative<LoadTroops>(ord)) {
+      k.kind = CohortKind::Load;
+      k.target_id = std::get<LoadTroops>(ord).colony_id;
+      return k;
+    }
+    if (std::holds_alternative<UnloadTroops>(ord)) {
+      k.kind = CohortKind::Unload;
+      k.target_id = std::get<UnloadTroops>(ord).colony_id;
+      return k;
+    }
+    if (std::holds_alternative<LoadColonists>(ord)) {
+      k.kind = CohortKind::Load;
+      k.target_id = std::get<LoadColonists>(ord).colony_id;
+      return k;
+    }
+    if (std::holds_alternative<UnloadColonists>(ord)) {
+      k.kind = CohortKind::Unload;
+      k.target_id = std::get<UnloadColonists>(ord).colony_id;
+      return k;
+    }
     if (std::holds_alternative<TransferCargoToShip>(ord)) {
       k.kind = CohortKind::Transfer;
       k.target_id = std::get<TransferCargoToShip>(ord).target_ship_id;
+      return k;
+    }
+    if (std::holds_alternative<TransferFuelToShip>(ord)) {
+      k.kind = CohortKind::Transfer;
+      k.target_id = std::get<TransferFuelToShip>(ord).target_ship_id;
+      return k;
+    }
+    if (std::holds_alternative<TransferTroopsToShip>(ord)) {
+      k.kind = CohortKind::Transfer;
+      k.target_id = std::get<TransferTroopsToShip>(ord).target_ship_id;
+      return k;
+    }
+    if (std::holds_alternative<SalvageWreck>(ord)) {
+      k.kind = CohortKind::Transfer;
+      k.target_id = std::get<SalvageWreck>(ord).wreck_id;
       return k;
     }
     if (std::holds_alternative<ScrapShip>(ord)) {
@@ -291,9 +332,22 @@ void Simulation::tick_ships() {
       }
 
       const Order& ord = *ord_ptr;
-      if (!std::holds_alternative<TravelViaJump>(ord)) continue;
+      Id jump_id = kInvalidId;
+      if (std::holds_alternative<TravelViaJump>(ord)) {
+        jump_id = std::get<TravelViaJump>(ord).jump_point_id;
+      } else if (std::holds_alternative<EscortShip>(ord)) {
+        const auto& eo = std::get<EscortShip>(ord);
+        const auto* tgt = find_ptr(state_.ships, eo.target_ship_id);
+        if (!tgt) continue;
+        if (tgt->system_id == sh->system_id) continue;
+        const auto plan = plan_jump_route_for_ship_to_pos(ship_id, tgt->system_id, tgt->position_mkm,
+                                                          eo.restrict_to_discovered, /*include_queued_jumps=*/false);
+        if (!plan || plan->jump_ids.empty()) continue;
+        jump_id = plan->jump_ids.front();
+      } else {
+        continue;
+      }
 
-      const Id jump_id = std::get<TravelViaJump>(ord).jump_point_id;
       if (jump_id == kInvalidId) continue;
 
       JumpGroupKey key;
@@ -375,7 +429,8 @@ void Simulation::tick_ships() {
       const auto key_opt = make_cohort_key(it_fleet->second, sh->system_id, ord);
       if (!key_opt) continue;
       const CohortKey key = *key_opt;
-      if (key.kind != CohortKind::MovePoint && key.kind != CohortKind::Attack) continue;
+      if (key.kind != CohortKind::MovePoint && key.kind != CohortKind::Attack && key.kind != CohortKind::Escort)
+        continue;
 
       cohorts[key].push_back(ship_id);
     }
@@ -487,6 +542,11 @@ void Simulation::tick_ships() {
     double desired_range = 0.0; 
     bool attack_has_contact = false;
 
+    // Escort ops (follow another friendly ship; can jump across systems).
+    bool is_escort_op = false;
+    bool escort_is_jump_leg = false;
+    Id escort_jump_id = kInvalidId;
+
     // Cargo vars
     bool is_cargo_op = false;
     // 0=Load, 1=Unload, 2=TransferToShip
@@ -502,6 +562,25 @@ void Simulation::tick_ships() {
     std::string cargo_mineral;
     double cargo_tons = 0.0;
 
+    // Salvage ops (wreck -> ship cargo)
+    bool is_salvage_op = false;
+    SalvageWreck* salvage_ord = nullptr;
+    Id salvage_wreck_id = kInvalidId;
+    std::string salvage_mineral;
+    double salvage_tons = 0.0;
+
+    // Fuel transfer ops (ship-to-ship refueling)
+    bool is_fuel_transfer_op = false;
+    TransferFuelToShip* fuel_transfer_ord = nullptr;
+    Id fuel_target_ship_id = kInvalidId;
+    double fuel_tons = 0.0;
+
+    // Troop transfer ops (ship-to-ship troop movement)
+    bool is_troop_transfer_op = false;
+    TransferTroopsToShip* troop_transfer_ord = nullptr;
+    Id troop_target_ship_id = kInvalidId;
+    double troop_transfer_strength = 0.0;
+
     // Troop ops
     bool is_troop_op = false;
     // 0=LoadTroops, 1=UnloadTroops, 2=Invade
@@ -510,6 +589,15 @@ void Simulation::tick_ships() {
     UnloadTroops* unload_troops_ord = nullptr;
     Id troop_colony_id = kInvalidId;
     double troop_strength = 0.0;
+
+    // Colonist ops (population transport)
+    bool is_colonist_op = false;
+    // 0=LoadColonists, 1=UnloadColonists
+    int colonist_mode = 0;
+    LoadColonists* load_colonists_ord = nullptr;
+    UnloadColonists* unload_colonists_ord = nullptr;
+    Id colonist_colony_id = kInvalidId;
+    double colonist_millions = 0.0;
 
     if (std::holds_alternative<MoveToPoint>(q.front())) {
       target = std::get<MoveToPoint>(q.front()).target_mkm;
@@ -603,6 +691,49 @@ void Simulation::tick_ships() {
         target = ord.last_known_position_mkm;
         desired_range = 0.0;
       }
+    } else if (std::holds_alternative<EscortShip>(q.front())) {
+      auto& ord = std::get<EscortShip>(q.front());
+      is_escort_op = true;
+
+      const Id target_id = ord.target_ship_id;
+      const auto* tgt = find_ptr(state_.ships, target_id);
+      if (!tgt || target_id == ship_id) {
+        q.erase(q.begin());
+        continue;
+      }
+
+      // Allow escorting any mutual-friendly faction (including self).
+      if (!are_factions_mutual_friendly(ship.faction_id, tgt->faction_id)) {
+        q.erase(q.begin());
+        continue;
+      }
+
+      const double follow_mkm = std::max(0.0, ord.follow_distance_mkm);
+      desired_range = (follow_mkm > 1e-12) ? follow_mkm : dock_range;
+
+      if (tgt->system_id == ship.system_id) {
+        target = tgt->position_mkm;
+      } else {
+        const auto plan = plan_jump_route_for_ship_to_pos(ship_id, tgt->system_id, tgt->position_mkm,
+                                                          ord.restrict_to_discovered,
+                                                          /*include_queued_jumps=*/false);
+        if (!plan || plan->jump_ids.empty()) {
+          // No route available (under fog-of-war restrictions or disconnected jump graph).
+          target = ship.position_mkm;
+          desired_range = 0.0;
+        } else {
+          escort_jump_id = plan->jump_ids.front();
+          const auto* jp = find_ptr(state_.jump_points, escort_jump_id);
+          if (!jp || jp->system_id != ship.system_id) {
+            target = ship.position_mkm;
+            desired_range = 0.0;
+          } else {
+            escort_is_jump_leg = true;
+            target = jp->position_mkm;
+            desired_range = 0.0;
+          }
+        }
+      }
     } else if (std::holds_alternative<LoadMineral>(q.front())) {
       auto& ord = std::get<LoadMineral>(q.front());
       is_cargo_op = true;
@@ -612,7 +743,7 @@ void Simulation::tick_ships() {
       cargo_mineral = ord.mineral;
       cargo_tons = ord.tons;
       const auto* colony = find_ptr(state_.colonies, cargo_colony_id);
-      if (!colony || colony->faction_id != ship.faction_id) { q.erase(q.begin()); continue; }
+      if (!colony || !are_factions_mutual_friendly(ship.faction_id, colony->faction_id)) { q.erase(q.begin()); continue; }
       const auto* body = find_ptr(state_.bodies, colony->body_id);
       if (!body || body->system_id != ship.system_id) { q.erase(q.begin()); continue; }
       target = body->position_mkm;
@@ -625,7 +756,7 @@ void Simulation::tick_ships() {
       cargo_mineral = ord.mineral;
       cargo_tons = ord.tons;
       const auto* colony = find_ptr(state_.colonies, cargo_colony_id);
-      if (!colony || colony->faction_id != ship.faction_id) { q.erase(q.begin()); continue; }
+      if (!colony || !are_factions_mutual_friendly(ship.faction_id, colony->faction_id)) { q.erase(q.begin()); continue; }
       const auto* body = find_ptr(state_.bodies, colony->body_id);
       if (!body || body->system_id != ship.system_id) { q.erase(q.begin()); continue; }
       target = body->position_mkm;
@@ -653,6 +784,36 @@ void Simulation::tick_ships() {
       const auto* body = find_ptr(state_.bodies, colony->body_id);
       if (!body || body->system_id != ship.system_id) { q.erase(q.begin()); continue; }
       target = body->position_mkm;
+    } else if (std::holds_alternative<LoadColonists>(q.front())) {
+      auto& ord = std::get<LoadColonists>(q.front());
+      is_colonist_op = true;
+      colonist_mode = 0;
+      load_colonists_ord = &ord;
+      colonist_colony_id = ord.colony_id;
+      colonist_millions = ord.millions;
+
+      const auto* colony = find_ptr(state_.colonies, colonist_colony_id);
+      if (!colony || colony->faction_id != ship.faction_id) { q.erase(q.begin()); continue; }
+      const auto* d = find_design(ship.design_id);
+      if (!d || d->colony_capacity_millions <= 0.0) { q.erase(q.begin()); continue; }
+      const auto* body = find_ptr(state_.bodies, colony->body_id);
+      if (!body || body->system_id != ship.system_id) { q.erase(q.begin()); continue; }
+      target = body->position_mkm;
+    } else if (std::holds_alternative<UnloadColonists>(q.front())) {
+      auto& ord = std::get<UnloadColonists>(q.front());
+      is_colonist_op = true;
+      colonist_mode = 1;
+      unload_colonists_ord = &ord;
+      colonist_colony_id = ord.colony_id;
+      colonist_millions = ord.millions;
+
+      const auto* colony = find_ptr(state_.colonies, colonist_colony_id);
+      if (!colony || colony->faction_id != ship.faction_id) { q.erase(q.begin()); continue; }
+      const auto* d = find_design(ship.design_id);
+      if (!d || d->colony_capacity_millions <= 0.0) { q.erase(q.begin()); continue; }
+      const auto* body = find_ptr(state_.bodies, colony->body_id);
+      if (!body || body->system_id != ship.system_id) { q.erase(q.begin()); continue; }
+      target = body->position_mkm;
     } else if (std::holds_alternative<InvadeColony>(q.front())) {
       auto& ord = std::get<InvadeColony>(q.front());
       is_troop_op = true;
@@ -670,6 +831,37 @@ void Simulation::tick_ships() {
                              /*push_event_on_change=*/true);
       }
       target = body->position_mkm;
+    } else if (std::holds_alternative<BombardColony>(q.front())) {
+      auto& ord = std::get<BombardColony>(q.front());
+      const auto* colony = find_ptr(state_.colonies, ord.colony_id);
+      if (!colony) { q.erase(q.begin()); continue; }
+      if (colony->faction_id == ship.faction_id) { q.erase(q.begin()); continue; }
+      const auto* body = find_ptr(state_.bodies, colony->body_id);
+      if (!body || body->system_id != ship.system_id) { q.erase(q.begin()); continue; }
+
+      const auto* d = find_design(ship.design_id);
+      if (!d || d->weapon_damage <= 0.0 || d->weapon_range_mkm <= 0.0) { q.erase(q.begin()); continue; }
+
+      // Bombardment is an explicit act of hostility.
+      if (!are_factions_hostile(ship.faction_id, colony->faction_id)) {
+        set_diplomatic_status(ship.faction_id, colony->faction_id, DiplomacyStatus::Hostile, /*reciprocal=*/true,
+                             /*push_event_on_change=*/true);
+      }
+
+      target = body->position_mkm;
+      const double frac = std::clamp(cfg_.bombard_standoff_range_fraction, 0.0, 1.0);
+      desired_range = std::max(0.0, d->weapon_range_mkm * frac);
+    } else if (std::holds_alternative<SalvageWreck>(q.front())) {
+      auto& ord = std::get<SalvageWreck>(q.front());
+      is_salvage_op = true;
+      salvage_ord = &ord;
+      salvage_wreck_id = ord.wreck_id;
+      salvage_mineral = ord.mineral;
+      salvage_tons = ord.tons;
+
+      const auto* w = find_ptr(state_.wrecks, salvage_wreck_id);
+      if (!w || w->system_id != ship.system_id) { q.erase(q.begin()); continue; }
+      target = w->position_mkm;
     } else if (std::holds_alternative<TransferCargoToShip>(q.front())) {
       auto& ord = std::get<TransferCargoToShip>(q.front());
       is_cargo_op = true;
@@ -681,6 +873,44 @@ void Simulation::tick_ships() {
       const auto* tgt = find_ptr(state_.ships, cargo_target_ship_id);
       // Valid target check: exists, same system, same faction
       if (!tgt || tgt->system_id != ship.system_id || tgt->faction_id != ship.faction_id) {
+        q.erase(q.begin());
+        continue;
+      }
+      target = tgt->position_mkm;
+    } else if (std::holds_alternative<TransferFuelToShip>(q.front())) {
+      auto& ord = std::get<TransferFuelToShip>(q.front());
+      is_fuel_transfer_op = true;
+      fuel_transfer_ord = &ord;
+      fuel_target_ship_id = ord.target_ship_id;
+      fuel_tons = ord.tons;
+
+      const auto* tgt = find_ptr(state_.ships, fuel_target_ship_id);
+      if (!tgt || tgt->system_id != ship.system_id || tgt->faction_id != ship.faction_id) {
+        q.erase(q.begin());
+        continue;
+      }
+      const auto* src_d = find_design(ship.design_id);
+      const auto* tgt_d = find_design(tgt->design_id);
+      if (!src_d || !tgt_d || src_d->fuel_capacity_tons <= 0.0 || tgt_d->fuel_capacity_tons <= 0.0) {
+        q.erase(q.begin());
+        continue;
+      }
+      target = tgt->position_mkm;
+    } else if (std::holds_alternative<TransferTroopsToShip>(q.front())) {
+      auto& ord = std::get<TransferTroopsToShip>(q.front());
+      is_troop_transfer_op = true;
+      troop_transfer_ord = &ord;
+      troop_target_ship_id = ord.target_ship_id;
+      troop_transfer_strength = ord.strength;
+
+      const auto* tgt = find_ptr(state_.ships, troop_target_ship_id);
+      if (!tgt || tgt->system_id != ship.system_id || tgt->faction_id != ship.faction_id) {
+        q.erase(q.begin());
+        continue;
+      }
+      const auto* src_d = find_design(ship.design_id);
+      const auto* tgt_d = find_design(tgt->design_id);
+      if (!src_d || !tgt_d || src_d->troop_capacity <= 0.0 || tgt_d->troop_capacity <= 0.0) {
         q.erase(q.begin());
         continue;
       }
@@ -697,7 +927,9 @@ void Simulation::tick_ships() {
     // Fleet formation: optionally offset the movement/attack target.
     if (cfg_.fleet_formations && fleet_id != kInvalidId && !formation_offset_mkm.empty()) {
       const bool can_offset = std::holds_alternative<MoveToPoint>(q.front()) ||
-                              std::holds_alternative<AttackShip>(q.front());
+                              std::holds_alternative<AttackShip>(q.front()) ||
+                              (std::holds_alternative<EscortShip>(q.front()) && !escort_is_jump_leg) ||
+                              std::holds_alternative<BombardColony>(q.front());
       if (can_offset) {
         if (auto itoff = formation_offset_mkm.find(ship_id); itoff != formation_offset_mkm.end()) {
           target = target + itoff->second;
@@ -709,11 +941,13 @@ void Simulation::tick_ships() {
     const double dist = delta.length();
 
     const bool is_attack = std::holds_alternative<AttackShip>(q.front());
-    const bool is_jump = std::holds_alternative<TravelViaJump>(q.front());
+    const bool is_escort = is_escort_op;
+    const bool is_jump = std::holds_alternative<TravelViaJump>(q.front()) || escort_is_jump_leg;
     const bool is_move_body = std::holds_alternative<MoveToBody>(q.front());
     const bool is_colonize = std::holds_alternative<ColonizeBody>(q.front());
     const bool is_body = is_move_body || is_colonize;
     const bool is_orbit = std::holds_alternative<OrbitBody>(q.front());
+    const bool is_bombard = std::holds_alternative<BombardColony>(q.front());
     const bool is_scrap = std::holds_alternative<ScrapShip>(q.front());
 
     // Fleet jump coordination: if multiple ships in the same fleet are trying to
@@ -722,7 +956,7 @@ void Simulation::tick_ships() {
     bool is_coordinated_jump_group = false;
     bool allow_jump_transit = true;
     if (is_jump && cfg_.fleet_coordinated_jumps && fleet_id != kInvalidId && !jump_group_state.empty()) {
-      const Id jump_id = std::get<TravelViaJump>(q.front()).jump_point_id;
+      const Id jump_id = escort_is_jump_leg ? escort_jump_id : std::get<TravelViaJump>(q.front()).jump_point_id;
       JumpGroupKey key;
       key.fleet_id = fleet_id;
       key.jump_id = jump_id;
@@ -837,12 +1071,194 @@ void Simulation::tick_ships() {
       return false;
     };
 
+    // Wreck salvage moves minerals from a wreck into this ship's cargo holds.
+    auto do_wreck_salvage = [&]() -> double {
+      auto* w = find_ptr(state_.wrecks, salvage_wreck_id);
+      if (!w) return 0.0;
+      if (w->system_id != ship.system_id) return 0.0;
+
+      const auto* d = find_design(ship.design_id);
+      const double cap = d ? d->cargo_tons : 0.0;
+      const double free = std::max(0.0, cap - cargo_used_tons(ship));
+      if (free <= 1e-9) return 0.0;
+
+      double remaining_request = (salvage_tons > 0.0) ? salvage_tons : 1e300;
+      remaining_request = std::min(remaining_request, free);
+
+      double moved_total = 0.0;
+
+      auto transfer_one = [&](const std::string& min_type, double amount_limit) {
+        if (amount_limit <= 1e-9) return 0.0;
+        auto it_src = w->minerals.find(min_type);
+        const double have = (it_src != w->minerals.end()) ? std::max(0.0, it_src->second) : 0.0;
+        const double take = std::min(have, amount_limit);
+        if (take > 1e-9) {
+          ship.cargo[min_type] += take;
+          it_src->second = std::max(0.0, it_src->second - take);
+          if (it_src->second <= 1e-9) w->minerals.erase(it_src);
+          moved_total += take;
+        }
+        return take;
+      };
+
+      if (!salvage_mineral.empty()) {
+        transfer_one(salvage_mineral, remaining_request);
+      } else {
+        std::vector<std::string> keys;
+        keys.reserve(w->minerals.size());
+        for (const auto& [k, v] : w->minerals) {
+          if (v > 1e-9) keys.push_back(k);
+        }
+        std::sort(keys.begin(), keys.end());
+        for (const auto& k : keys) {
+          if (remaining_request <= 1e-9) break;
+          const double moved = transfer_one(k, remaining_request);
+          remaining_request -= moved;
+        }
+      }
+
+      // If emptied, remove the wreck from the game state.
+      if (w->minerals.empty()) {
+        state_.wrecks.erase(salvage_wreck_id);
+      }
+
+      return moved_total;
+    };
+
+    auto salvage_order_complete = [&](double moved_this_tick) {
+      if (salvage_tons <= 0.0) return true; // as much as possible in one attempt
+
+      if (salvage_ord) {
+        salvage_ord->tons = std::max(0.0, salvage_ord->tons - moved_this_tick);
+        salvage_tons = salvage_ord->tons;
+      }
+
+      if (salvage_tons <= 1e-9) return true;
+      if (moved_this_tick <= 1e-9) return true; // blocked
+      return false;
+    };
+
+    // Fuel transfer is handled similarly to cargo transfer, but operates on
+    // ships' fuel tanks rather than cargo holds.
+    auto do_fuel_transfer = [&]() -> double {
+      auto* tgt = find_ptr(state_.ships, fuel_target_ship_id);
+      if (!tgt) return 0.0;
+      if (tgt->faction_id != ship.faction_id) return 0.0;
+      if (tgt->system_id != ship.system_id) return 0.0;
+
+      const auto* src_d = find_design(ship.design_id);
+      const auto* tgt_d = find_design(tgt->design_id);
+      const double src_cap = src_d ? std::max(0.0, src_d->fuel_capacity_tons) : 0.0;
+      const double tgt_cap = tgt_d ? std::max(0.0, tgt_d->fuel_capacity_tons) : 0.0;
+      if (src_cap <= 1e-9 || tgt_cap <= 1e-9) return 0.0;
+
+      // Clamp for safety: older saves / refits could momentarily violate caps.
+      ship.fuel_tons = std::max(0.0, std::min(ship.fuel_tons, src_cap));
+      tgt->fuel_tons = std::max(0.0, std::min(tgt->fuel_tons, tgt_cap));
+
+      const double free = std::max(0.0, tgt_cap - tgt->fuel_tons);
+      if (free <= 1e-9) return 0.0;
+
+      double remaining_request = (fuel_tons > 0.0) ? fuel_tons : 1e300;
+      remaining_request = std::min(remaining_request, free);
+
+      const double have = std::max(0.0, ship.fuel_tons);
+      const double give = std::min(have, remaining_request);
+      if (give <= 1e-9) return 0.0;
+
+      ship.fuel_tons -= give;
+      tgt->fuel_tons += give;
+      return give;
+    };
+
+    auto fuel_order_complete = [&](double moved_this_tick) {
+      if (fuel_tons <= 0.0) return true; // as much as possible in one attempt
+
+      if (fuel_transfer_ord) {
+        fuel_transfer_ord->tons = std::max(0.0, fuel_transfer_ord->tons - moved_this_tick);
+        fuel_tons = fuel_transfer_ord->tons;
+      }
+
+      if (fuel_tons <= 1e-9) return true;
+
+      // If we couldn't move anything this tick, we are done or blocked.
+      if (moved_this_tick <= 1e-9) return true;
+      return false;
+    };
+
+    // Troop transfer is handled similarly to fuel transfer, but operates on
+    // embarked troops and troop bay capacities.
+    auto do_troop_transfer = [&]() -> double {
+      auto* tgt = find_ptr(state_.ships, troop_target_ship_id);
+      if (!tgt) return 0.0;
+      if (tgt->faction_id != ship.faction_id) return 0.0;
+      if (tgt->system_id != ship.system_id) return 0.0;
+
+      const auto* src_d = find_design(ship.design_id);
+      const auto* tgt_d = find_design(tgt->design_id);
+      const double src_cap = src_d ? std::max(0.0, src_d->troop_capacity) : 0.0;
+      const double tgt_cap = tgt_d ? std::max(0.0, tgt_d->troop_capacity) : 0.0;
+      if (src_cap <= 1e-9 || tgt_cap <= 1e-9) return 0.0;
+
+      // Clamp for safety: older saves / refits could momentarily violate caps.
+      ship.troops = std::max(0.0, std::min(ship.troops, src_cap));
+      tgt->troops = std::max(0.0, std::min(tgt->troops, tgt_cap));
+
+      const double free = std::max(0.0, tgt_cap - tgt->troops);
+      if (free <= 1e-9) return 0.0;
+
+      double remaining_request = (troop_transfer_strength > 0.0) ? troop_transfer_strength : 1e300;
+      remaining_request = std::min(remaining_request, free);
+
+      const double have = std::max(0.0, ship.troops);
+      const double give = std::min(have, remaining_request);
+      if (give <= 1e-9) return 0.0;
+
+      ship.troops -= give;
+      tgt->troops += give;
+      return give;
+    };
+
+    auto troop_transfer_order_complete = [&](double moved_this_tick) {
+      if (troop_transfer_strength <= 0.0) return true; // as much as possible in one attempt
+
+      if (troop_transfer_ord) {
+        troop_transfer_ord->strength = std::max(0.0, troop_transfer_ord->strength - moved_this_tick);
+        troop_transfer_strength = troop_transfer_ord->strength;
+      }
+
+      if (troop_transfer_strength <= 1e-9) return true;
+      if (moved_this_tick <= 1e-9) return true; // blocked
+      return false;
+    };
+
     // --- Docking / Arrival Checks ---
+
+    if (is_fuel_transfer_op && dist <= dock_range) {
+      ship.position_mkm = target;
+      const double moved = do_fuel_transfer();
+      if (fuel_order_complete(moved)) q.erase(q.begin());
+      continue;
+    }
+
+    if (is_troop_transfer_op && dist <= dock_range) {
+      ship.position_mkm = target;
+      const double moved = do_troop_transfer();
+      if (troop_transfer_order_complete(moved)) q.erase(q.begin());
+      continue;
+    }
 
     if (is_cargo_op && dist <= dock_range) {
       ship.position_mkm = target;
       const double moved = do_cargo_transfer();
       if (cargo_order_complete(moved)) q.erase(q.begin());
+      continue;
+    }
+
+    if (is_salvage_op && dist <= dock_range) {
+      ship.position_mkm = target;
+      const double moved = do_wreck_salvage();
+      if (salvage_order_complete(moved)) q.erase(q.begin());
       continue;
     }
     if (is_troop_op && dist <= dock_range) {
@@ -915,6 +1331,72 @@ void Simulation::tick_ships() {
       q.erase(q.begin());
       continue;
     }
+
+    if (is_colonist_op && dist <= dock_range) {
+      ship.position_mkm = target;
+
+      auto* col = find_ptr(state_.colonies, colonist_colony_id);
+      if (!col || col->faction_id != ship.faction_id) {
+        q.erase(q.begin());
+        continue;
+      }
+
+      const auto* design = find_design(ship.design_id);
+      const double cap = design ? std::max(0.0, design->colony_capacity_millions) : 0.0;
+      if (cap <= 1e-9) {
+        q.erase(q.begin());
+        continue;
+      }
+
+      auto transfer_amount = [&](double want, double available, double free_cap) -> double {
+        double take = (want <= 0.0) ? 1e300 : want;
+        take = std::min(take, available);
+        take = std::min(take, free_cap);
+        if (take < 0.0) take = 0.0;
+        return take;
+      };
+
+      double moved = 0.0;
+      if (colonist_mode == 0) {
+        // Load from colony population.
+        const double ship_have = std::max(0.0, ship.colonists_millions);
+        const double free_cap = std::max(0.0, cap - ship_have);
+        moved = transfer_amount(load_colonists_ord ? load_colonists_ord->millions : colonist_millions,
+                                std::max(0.0, col->population_millions), free_cap);
+        if (moved > 1e-9) {
+          ship.colonists_millions = ship_have + moved;
+          col->population_millions = std::max(0.0, col->population_millions - moved);
+        }
+      } else if (colonist_mode == 1) {
+        // Unload into colony population.
+        const double ship_have = std::max(0.0, ship.colonists_millions);
+        moved = transfer_amount(unload_colonists_ord ? unload_colonists_ord->millions : colonist_millions,
+                                ship_have, 1e300);
+        if (moved > 1e-9) {
+          ship.colonists_millions = std::max(0.0, ship_have - moved);
+          col->population_millions += moved;
+        }
+      }
+
+      if (moved > 1e-9) {
+        std::ostringstream ss;
+        if (colonist_mode == 0) {
+          ss << "Ship " << ship.name << " loaded " << moved << "M colonists at colony " << col->name;
+        } else {
+          ss << "Ship " << ship.name << " unloaded " << moved << "M colonists at colony " << col->name;
+        }
+        EventContext ctx;
+        ctx.faction_id = ship.faction_id;
+        ctx.system_id = ship.system_id;
+        ctx.ship_id = ship_id;
+        ctx.colony_id = col->id;
+        push_event(EventLevel::Info, EventCategory::Movement, ss.str(), ctx);
+      }
+
+      q.erase(q.begin());
+      continue;
+    }
+
     if (is_scrap && dist <= dock_range) {
       // Decommission the ship at a friendly colony.
       // - Return carried cargo minerals to the colony stockpile.
@@ -1092,6 +1574,27 @@ void Simulation::tick_ships() {
         new_col.body_id = body->id;
         new_col.population_millions = cap;
 
+        // If habitability is enabled, seed "prefab" habitation infrastructure
+        // so the initial colony has some life support on hostile worlds.
+        //
+        // This models the colony module delivering domes / life support as part
+        // of the colony ship payload.
+        if (cfg_.enable_habitability && cfg_.seed_habitation_on_colonize) {
+          const double hab = body_habitability(body->id);
+          if (hab < 0.999) {
+            constexpr const char* kHabitationInstallationId = "infrastructure";
+            auto it = content_.installations.find(kHabitationInstallationId);
+            if (it != content_.installations.end()) {
+              const double per_unit = it->second.habitation_capacity_millions;
+              if (per_unit > 1e-9) {
+                const double required = cap * std::clamp(1.0 - hab, 0.0, 1.0);
+                const int units = static_cast<int>(std::ceil(required / per_unit));
+                if (units > 0) new_col.installations[kHabitationInstallationId] = units;
+              }
+            }
+          }
+        }
+
         // Transfer all carried cargo minerals to the new colony.
         for (const auto& [mineral, tons] : ship_snapshot.cargo) {
           if (tons > 1e-9) new_col.minerals[mineral] += tons;
@@ -1157,13 +1660,13 @@ void Simulation::tick_ships() {
       continue;
     }
 
-    if (!is_attack && !is_jump && !is_cargo_op && !is_body && !is_orbit && !is_scrap && dist <= arrive_eps) {
+    if (!is_attack && !is_escort && !is_bombard && !is_jump && !is_cargo_op && !is_salvage_op && !is_fuel_transfer_op &&
+        !is_troop_transfer_op && !is_troop_op && !is_colonist_op && !is_body && !is_orbit && !is_scrap && dist <= arrive_eps) {
       q.erase(q.begin());
       continue;
     }
 
-    auto transit_jump = [&]() {
-      const Id jump_id = std::get<TravelViaJump>(q.front()).jump_point_id;
+    auto transit_jump = [&](Id jump_id) {
       const auto* jp = find_ptr(state_.jump_points, jump_id);
       if (!jp || jp->system_id != ship.system_id || jp->linked_jump_id == kInvalidId) return;
 
@@ -1202,8 +1705,9 @@ void Simulation::tick_ships() {
     if (is_jump && dist <= dock_range) {
       ship.position_mkm = target;
       if (!is_coordinated_jump_group || allow_jump_transit) {
-        transit_jump();
-        q.erase(q.begin());
+        const Id jump_id = escort_is_jump_leg ? escort_jump_id : std::get<TravelViaJump>(q.front()).jump_point_id;
+        transit_jump(jump_id);
+        if (!escort_is_jump_leg) q.erase(q.begin());
       }
       continue;
     }
@@ -1218,6 +1722,18 @@ void Simulation::tick_ships() {
           q.erase(q.begin());
           continue;
         }
+      }
+    }
+
+    if (is_bombard) {
+      if (dist <= desired_range + 1e-9) {
+        continue;
+      }
+    }
+
+    if (is_escort && !escort_is_jump_leg) {
+      if (dist <= desired_range + 1e-9) {
+        continue;
       }
     }
 
@@ -1247,7 +1763,7 @@ void Simulation::tick_ships() {
     if (max_step <= 0.0) continue;
 
     double step = max_step;
-    if (is_attack) {
+    if (is_attack || is_bombard || (is_escort && !escort_is_jump_leg)) {
       step = std::min(step, std::max(0.0, dist - desired_range));
       if (step <= 0.0) continue;
     }
@@ -1289,14 +1805,28 @@ void Simulation::tick_ships() {
 
       if (is_jump) {
         if (!is_coordinated_jump_group || allow_jump_transit) {
-          transit_jump();
-          q.erase(q.begin());
+          const Id jump_id = escort_is_jump_leg ? escort_jump_id : std::get<TravelViaJump>(q.front()).jump_point_id;
+          transit_jump(jump_id);
+          if (!escort_is_jump_leg) q.erase(q.begin());
         }
       } else if (is_attack) {
         if (!attack_has_contact) q.erase(q.begin());
+      } else if (is_bombard) {
+        // Bombardment executes in tick_combat; keep the order.
       } else if (is_cargo_op) {
         const double moved = do_cargo_transfer();
         if (cargo_order_complete(moved)) q.erase(q.begin());
+      } else if (is_salvage_op) {
+        const double moved = do_wreck_salvage();
+        if (salvage_order_complete(moved)) q.erase(q.begin());
+      } else if (is_fuel_transfer_op) {
+        const double moved = do_fuel_transfer();
+        if (fuel_order_complete(moved)) q.erase(q.begin());
+      } else if (is_troop_transfer_op) {
+        const double moved = do_troop_transfer();
+        if (troop_transfer_order_complete(moved)) q.erase(q.begin());
+      } else if (is_troop_op) {
+        // Don't pop here; troop orders execute in the dock-range check above.
       } else if (is_scrap) {
           // Re-check scrap logic in case we arrived exactly on this frame
           // For now, simpler to wait for next tick's "in range" check which is cleaner

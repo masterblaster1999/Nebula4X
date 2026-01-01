@@ -31,11 +31,17 @@ target_sources(nebula4x_core
     src/core/research_planner.cpp
     src/core/scenario.cpp
     src/core/simulation.cpp
+    src/core/simulation_state.cpp
+    src/core/simulation_orders.cpp
+    src/core/simulation_tick_core.cpp
+    src/core/simulation_tick_economy.cpp
+    src/core/simulation_tick_ai.cpp
+    src/core/simulation_sensors.cpp
     src/core/simulation_tick_ships.cpp
     src/core/simulation_tick_combat.cpp
     src/core/simulation_tick_ground_combat.cpp
     src/core/simulation_tick_terraforming.cpp
-  src/core/ai_economy.cpp
+    src/core/ai_economy.cpp
     src/core/serialization.cpp
     src/core/tech.cpp
     src/core/state_validation.cpp
@@ -203,6 +209,7 @@ if(NEBULA4X_BUILD_TESTS)
     tests/test_combat_events.cpp
     tests/test_shields.cpp
     tests/test_population_growth.cpp
+  tests/test_population_transport.cpp
     tests/test_ship_repairs.cpp
   )
   target_link_libraries(nebula4x_tests PRIVATE nebula4x::core)

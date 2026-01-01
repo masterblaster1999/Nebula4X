@@ -47,6 +47,10 @@ std::vector<std::string> validate_content_db(const ContentDB& db) {
       push(errors, join("Component '", key, "' has invalid cargo_tons: ", c.cargo_tons));
     if (!is_non_negative(c.sensor_range_mkm))
       push(errors, join("Component '", key, "' has invalid sensor_range_mkm: ", c.sensor_range_mkm));
+    if (!is_non_negative(c.signature_multiplier))
+      push(errors, join("Component '", key, "' has invalid signature_multiplier: ", c.signature_multiplier));
+    else if (c.signature_multiplier > 1.0)
+      push(errors, join("Component '", key, "' has signature_multiplier > 1.0 (expected [0,1]): ", c.signature_multiplier));
     if (!is_non_negative(c.colony_capacity_millions))
       push(errors,
            join("Component '", key, "' has invalid colony_capacity_millions: ", c.colony_capacity_millions));
@@ -100,6 +104,10 @@ std::vector<std::string> validate_content_db(const ContentDB& db) {
       push(errors, join("Design '", key, "' has invalid cargo_tons: ", d.cargo_tons));
     if (!is_non_negative(d.sensor_range_mkm))
       push(errors, join("Design '", key, "' has invalid sensor_range_mkm: ", d.sensor_range_mkm));
+    if (!is_non_negative(d.signature_multiplier))
+      push(errors, join("Design '", key, "' has invalid signature_multiplier: ", d.signature_multiplier));
+    else if (d.signature_multiplier > 1.0)
+      push(errors, join("Design '", key, "' has signature_multiplier > 1.0 (expected [0,1]): ", d.signature_multiplier));
     if (!is_non_negative(d.colony_capacity_millions))
       push(errors,
            join("Design '", key, "' has invalid colony_capacity_millions: ", d.colony_capacity_millions));
@@ -146,12 +154,18 @@ std::vector<std::string> validate_content_db(const ContentDB& db) {
       push(errors, join("Installation '", key, "' has invalid build_rate_tons_per_day: ", inst.build_rate_tons_per_day));
     if (!is_non_negative(inst.sensor_range_mkm))
       push(errors, join("Installation '", key, "' has invalid sensor_range_mkm: ", inst.sensor_range_mkm));
+    if (!is_non_negative(inst.weapon_damage))
+      push(errors, join("Installation '", key, "' has invalid weapon_damage: ", inst.weapon_damage));
+    if (!is_non_negative(inst.weapon_range_mkm))
+      push(errors, join("Installation '", key, "' has invalid weapon_range_mkm: ", inst.weapon_range_mkm));
     if (!is_non_negative(inst.research_points_per_day))
       push(errors, join("Installation '", key, "' has invalid research_points_per_day: ", inst.research_points_per_day));
     if (!is_non_negative(inst.terraforming_points_per_day))
       push(errors, join("Installation '", key, "' has invalid terraforming_points_per_day: ", inst.terraforming_points_per_day));
     if (!is_non_negative(inst.troop_training_points_per_day))
       push(errors, join("Installation '", key, "' has invalid troop_training_points_per_day: ", inst.troop_training_points_per_day));
+    if (!is_non_negative(inst.habitation_capacity_millions))
+      push(errors, join("Installation '", key, "' has invalid habitation_capacity_millions: ", inst.habitation_capacity_millions));
     if (!is_non_negative(inst.fortification_points))
       push(errors, join("Installation '", key, "' has invalid fortification_points: ", inst.fortification_points));
 

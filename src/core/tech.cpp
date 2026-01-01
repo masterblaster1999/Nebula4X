@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <filesystem>
 #include <sstream>
 #include <stdexcept>
@@ -383,6 +384,18 @@ ComponentDef parse_component_def(const std::string& cid, const json::Object& cj)
   c.type = parse_component_type(find_key(cj, "type") ? find_key(cj, "type")->string_value("") : "");
   if (const auto* m = find_key(cj, "mass_tons")) c.mass_tons = m->number_value(0.0);
 
+  // Optional: sensor signature / visibility multiplier.
+  // 1.0 = normal visibility; lower values are harder to detect.
+  if (const auto* v_sig = find_key(cj, "signature_multiplier")) {
+    c.signature_multiplier = v_sig->number_value(1.0);
+  }
+  if (const auto* v_sig2 = find_key(cj, "stealth_multiplier")) {
+    if (c.signature_multiplier == 1.0) c.signature_multiplier = v_sig2->number_value(1.0);
+  }
+  if (const auto* v_sig3 = find_key(cj, "signature")) {
+    if (c.signature_multiplier == 1.0) c.signature_multiplier = v_sig3->number_value(1.0);
+  }
+
   // Optional stats
   if (const auto* v_speed = find_key(cj, "speed_km_s")) c.speed_km_s = v_speed->number_value(0.0);
 
@@ -544,6 +557,26 @@ InstallationDef parse_installation_def(const std::string& inst_id, const json::O
     if (def.sensor_range_mkm <= 0.0) def.sensor_range_mkm = sr2_v->number_value(0.0);
   }
 
+  // Optional: orbital / planetary weapon platform.
+  // Preferred keys:
+  //   weapon_damage, weapon_range_mkm
+  // Back-compat / author-friendly aliases:
+  //   damage (alias for weapon_damage)
+  //   weapon_range (alias for weapon_range_mkm)
+  if (const auto* wd_v = find_key(vo, "weapon_damage")) {
+    def.weapon_damage = wd_v->number_value(0.0);
+  }
+  if (const auto* dmg_v = find_key(vo, "damage")) {
+    if (def.weapon_damage <= 0.0) def.weapon_damage = dmg_v->number_value(0.0);
+  }
+
+  if (const auto* wr_v = find_key(vo, "weapon_range_mkm")) {
+    def.weapon_range_mkm = wr_v->number_value(0.0);
+  }
+  if (const auto* wr2_v = find_key(vo, "weapon_range")) {
+    if (def.weapon_range_mkm <= 0.0) def.weapon_range_mkm = wr2_v->number_value(0.0);
+  }
+
   if (const auto* rp_v = find_key(vo, "research_points_per_day")) {
     def.research_points_per_day = rp_v->number_value(0.0);
   }
@@ -553,6 +586,19 @@ InstallationDef parse_installation_def(const std::string& inst_id, const json::O
   }
   if (const auto* tr_v = find_key(vo, "troop_training_points_per_day")) {
     def.troop_training_points_per_day = tr_v->number_value(0.0);
+  }
+
+  // Optional: habitation / life support capacity.
+  // Preferred key: habitation_capacity_millions
+  // Aliases: habitation_capacity, life_support_capacity_millions
+  if (const auto* hc_v = find_key(vo, "habitation_capacity_millions")) {
+    def.habitation_capacity_millions = hc_v->number_value(0.0);
+  }
+  if (const auto* hc2_v = find_key(vo, "habitation_capacity")) {
+    if (def.habitation_capacity_millions <= 0.0) def.habitation_capacity_millions = hc2_v->number_value(0.0);
+  }
+  if (const auto* ls_v = find_key(vo, "life_support_capacity_millions")) {
+    if (def.habitation_capacity_millions <= 0.0) def.habitation_capacity_millions = ls_v->number_value(0.0);
   }
   if (const auto* fort_v = find_key(vo, "fortification_points")) {
     def.fortification_points = fort_v->number_value(0.0);
@@ -584,6 +630,11 @@ ShipDesign parse_design_def(const json::Object& o,
   double sensor = 0.0;
   double colony_cap = 0.0;
   double troop_cap = 0.0;
+
+  // Visibility / signature multiplier (product of component multipliers).
+  // 1.0 = normal visibility; lower values are harder to detect.
+  double sig_mult = 1.0;
+
   double weapon_damage = 0.0;
   double weapon_range = 0.0;
   double hp_bonus = 0.0;
@@ -613,6 +664,10 @@ ShipDesign parse_design_def(const json::Object& o,
     sensor = std::max(sensor, c.sensor_range_mkm);
     colony_cap += c.colony_capacity_millions;
     troop_cap += c.troop_capacity;
+
+    const double comp_sig =
+        std::clamp(std::isfinite(c.signature_multiplier) ? c.signature_multiplier : 1.0, 0.0, 1.0);
+    sig_mult *= comp_sig;
 
     if (c.type == ComponentType::Weapon) {
       weapon_damage += c.weapon_damage;
@@ -644,6 +699,8 @@ ShipDesign parse_design_def(const json::Object& o,
   d.sensor_range_mkm = sensor;
   d.colony_capacity_millions = colony_cap;
   d.troop_capacity = troop_cap;
+  // Clamp to avoid fully-undetectable ships.
+  d.signature_multiplier = std::clamp(sig_mult, 0.05, 1.0);
 
   d.power_generation = power_gen;
   d.power_use_total = power_use_total;

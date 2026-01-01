@@ -46,6 +46,7 @@ static double clamp01(double x) {
 void Simulation::tick_combat() {
   std::unordered_map<Id, double> incoming_damage;
   std::unordered_map<Id, std::vector<Id>> attackers_for_target;
+  std::unordered_map<Id, std::vector<Id>> colony_attackers_for_target;
 
   const bool do_boarding = cfg_.enable_boarding && cfg_.boarding_range_mkm > 1e-9;
 
@@ -57,6 +58,51 @@ void Simulation::tick_combat() {
   // without scanning every ship in the entire simulation.
   std::unordered_map<Id, SpatialIndex2D> system_index;
   system_index.reserve(state_.systems.size());
+
+  // Precompute colony weapon platforms (planetary defenses).
+  //
+  // We treat each colony as having at most one aggregated "battery": all
+  // installations with weapon stats contribute damage, and range is the
+  // maximum range across those installations.
+  struct ColonyBattery {
+    Id colony_id{kInvalidId};
+    Id faction_id{kInvalidId};
+    Id system_id{kInvalidId};
+    Vec2 position_mkm{0.0, 0.0};
+    double weapon_damage{0.0};
+    double weapon_range_mkm{0.0};
+  };
+
+  std::vector<ColonyBattery> colony_batteries;
+  colony_batteries.reserve(state_.colonies.size());
+
+  for (const auto& [cid, col] : state_.colonies) {
+    const auto* body = find_ptr(state_.bodies, col.body_id);
+    if (!body) continue;
+
+    double dmg = 0.0;
+    double range = 0.0;
+    for (const auto& [inst_id, count] : col.installations) {
+      if (count <= 0) continue;
+      const auto it = content_.installations.find(inst_id);
+      if (it == content_.installations.end()) continue;
+      const auto& def = it->second;
+      if (def.weapon_damage <= 0.0 || def.weapon_range_mkm <= 0.0) continue;
+      dmg += def.weapon_damage * static_cast<double>(count);
+      range = std::max(range, def.weapon_range_mkm);
+    }
+
+    if (dmg > 1e-9 && range > 1e-9) {
+      ColonyBattery b;
+      b.colony_id = cid;
+      b.faction_id = col.faction_id;
+      b.system_id = body->system_id;
+      b.position_mkm = body->position_mkm;
+      b.weapon_damage = dmg;
+      b.weapon_range_mkm = range;
+      colony_batteries.push_back(b);
+    }
+  }
 
   auto index_for_system = [&](Id system_id) -> SpatialIndex2D& {
     auto it = system_index.find(system_id);
@@ -127,6 +173,21 @@ void Simulation::tick_combat() {
     return std::get<AttackShip>(oit->second.queue.front()).target_ship_id;
   };
 
+  auto bombard_order_ptr = [&](Id attacker_id) -> BombardColony* {
+    auto oit = state_.ship_orders.find(attacker_id);
+    if (oit == state_.ship_orders.end()) return nullptr;
+    if (oit->second.queue.empty()) return nullptr;
+    if (!std::holds_alternative<BombardColony>(oit->second.queue.front())) return nullptr;
+    return &std::get<BombardColony>(oit->second.queue.front());
+  };
+
+  auto fmt1 = [](double x) {
+    std::ostringstream ss;
+    ss.setf(std::ios::fixed);
+    ss << std::setprecision(1) << x;
+    return ss.str();
+  };
+
   // --- weapon fire ---
   for (Id aid : ship_ids) {
     const auto* attacker_ptr = find_ptr(state_.ships, aid);
@@ -142,6 +203,181 @@ void Simulation::tick_combat() {
     {
       const auto p = compute_power_allocation(*ad, attacker.power_policy);
       if (!p.weapons_online) continue;
+    }
+
+    // --- Orbital bombardment ---
+    // If the current order is BombardColony and the target is in range, use
+    // this ship's daily weapon fire to damage the colony.
+    {
+      BombardColony* bo = bombard_order_ptr(aid);
+      if (bo) {
+        // Sanity: duration 0 means "complete immediately".
+        if (bo->duration_days == 0) {
+          auto itq = state_.ship_orders.find(aid);
+          if (itq != state_.ship_orders.end() && !itq->second.queue.empty() &&
+              std::holds_alternative<BombardColony>(itq->second.queue.front())) {
+            itq->second.queue.erase(itq->second.queue.begin());
+          }
+        } else {
+          Colony* col = find_ptr(state_.colonies, bo->colony_id);
+          if (!col || col->faction_id == attacker.faction_id) {
+            // Target vanished or changed hands.
+            auto itq = state_.ship_orders.find(aid);
+            if (itq != state_.ship_orders.end() && !itq->second.queue.empty() &&
+                std::holds_alternative<BombardColony>(itq->second.queue.front())) {
+              itq->second.queue.erase(itq->second.queue.begin());
+            }
+          } else {
+            const Body* body = find_ptr(state_.bodies, col->body_id);
+            if (body && body->system_id == attacker.system_id) {
+              const double dist = (body->position_mkm - attacker.position_mkm).length();
+              if (dist <= ad->weapon_range_mkm + 1e-9) {
+                // Apply damage in the order: ground forces -> installations -> population.
+                double remaining = std::max(0.0, ad->weapon_damage);
+                double killed_ground = 0.0;
+                double pop_loss_m = 0.0;
+                std::vector<std::pair<std::string, int>> destroyed;
+
+                const double gf_per_dmg = std::max(0.0, cfg_.bombard_ground_strength_per_damage);
+                if (remaining > 1e-12 && gf_per_dmg > 1e-12 && col->ground_forces > 1e-12) {
+                  const double possible = remaining * gf_per_dmg;
+                  killed_ground = std::min(col->ground_forces, possible);
+                  col->ground_forces = std::max(0.0, col->ground_forces - killed_ground);
+                  remaining -= killed_ground / gf_per_dmg;
+                  remaining = std::max(0.0, remaining);
+
+                  // Keep any ongoing ground battle in sync.
+                  auto itb = state_.ground_battles.find(col->id);
+                  if (itb != state_.ground_battles.end()) {
+                    itb->second.defender_strength = std::max(0.0, itb->second.defender_strength - killed_ground);
+                  }
+                }
+
+                const double hp_per_cost = std::max(0.0, cfg_.bombard_installation_hp_per_construction_cost);
+                if (remaining > 1e-12 && !col->installations.empty()) {
+                  struct Cand {
+                    std::string id;
+                    int count{0};
+                    int pri{3};
+                    double hp{1.0};
+                  };
+                  std::vector<Cand> cands;
+                  cands.reserve(col->installations.size());
+
+                  for (const auto& [inst_id, count] : col->installations) {
+                    if (count <= 0) continue;
+                    Cand c;
+                    c.id = inst_id;
+                    c.count = count;
+                    c.pri = 3;
+                    c.hp = 1.0;
+                    if (auto it = content_.installations.find(inst_id); it != content_.installations.end()) {
+                      const auto& def = it->second;
+                      if (def.weapon_damage > 0.0 && def.weapon_range_mkm > 0.0) {
+                        c.pri = 0;
+                      } else if (def.fortification_points > 0.0) {
+                        c.pri = 1;
+                      } else if (def.sensor_range_mkm > 0.0) {
+                        c.pri = 2;
+                      }
+                      c.hp = std::max(1.0, static_cast<double>(def.construction_cost) * hp_per_cost);
+                    }
+                    cands.push_back(std::move(c));
+                  }
+
+                  std::sort(cands.begin(), cands.end(), [&](const Cand& a, const Cand& b) {
+                    if (a.pri != b.pri) return a.pri < b.pri;
+                    return a.id < b.id;
+                  });
+
+                  for (auto& c : cands) {
+                    if (remaining <= 1e-12) break;
+                    if (c.count <= 0) continue;
+                    if (c.hp <= 1e-12) c.hp = 1.0;
+
+                    const int can_kill = static_cast<int>(std::floor((remaining + 1e-9) / c.hp));
+                    const int kill = std::min(c.count, std::max(0, can_kill));
+                    if (kill <= 0) continue;
+
+                    auto itc = col->installations.find(c.id);
+                    if (itc != col->installations.end()) {
+                      itc->second -= kill;
+                      if (itc->second <= 0) col->installations.erase(itc);
+                    }
+                    remaining -= static_cast<double>(kill) * c.hp;
+                    remaining = std::max(0.0, remaining);
+                    destroyed.push_back({c.id, kill});
+                  }
+                }
+
+                const double pop_per_dmg = std::max(0.0, cfg_.bombard_population_millions_per_damage);
+                if (remaining > 1e-12 && pop_per_dmg > 1e-12 && col->population_millions > 1e-12) {
+                  pop_loss_m = std::min(col->population_millions, remaining * pop_per_dmg);
+                  col->population_millions = std::max(0.0, col->population_millions - pop_loss_m);
+                  remaining = 0.0;
+                }
+
+                const bool did_effect = (killed_ground > 1e-12) || (!destroyed.empty()) || (pop_loss_m > 1e-12);
+                if (did_effect) {
+                  const auto* sys = find_ptr(state_.systems, attacker.system_id);
+                  const std::string sys_name = sys ? sys->name : std::string("(unknown)");
+
+                  int destroyed_total = 0;
+                  for (const auto& p : destroyed) destroyed_total += p.second;
+
+                  std::string msg = "Bombardment: Ship " + attacker.name + " bombarded " + col->name;
+                  msg += " in " + sys_name + " (";
+                  bool first = true;
+                  if (killed_ground > 1e-12) {
+                    msg += "killed " + fmt1(killed_ground) + " ground";
+                    first = false;
+                  }
+                  if (destroyed_total > 0) {
+                    if (!first) msg += ", ";
+                    msg += "destroyed " + std::to_string(destroyed_total) + " installations";
+                    first = false;
+                  }
+                  if (pop_loss_m > 1e-12) {
+                    if (!first) msg += ", ";
+                    msg += "casualties " + fmt1(pop_loss_m) + "M";
+                    first = false;
+                  }
+                  msg += ")";
+
+                  EventContext ctx;
+                  ctx.faction_id = attacker.faction_id;
+                  ctx.faction_id2 = col->faction_id;
+                  ctx.system_id = attacker.system_id;
+                  ctx.ship_id = aid;
+                  ctx.colony_id = col->id;
+                  push_event(EventLevel::Info, EventCategory::Combat, msg, ctx);
+
+                  // Also notify the defender.
+                  EventContext ctx2 = ctx;
+                  ctx2.faction_id = col->faction_id;
+                  ctx2.faction_id2 = attacker.faction_id;
+                  push_event(EventLevel::Info, EventCategory::Combat, msg, ctx2);
+                }
+
+                // Tick down duration only when we actually fired.
+                if (bo->duration_days > 0) {
+                  bo->duration_days -= 1;
+                  if (bo->duration_days == 0) {
+                    auto itq = state_.ship_orders.find(aid);
+                    if (itq != state_.ship_orders.end() && !itq->second.queue.empty() &&
+                        std::holds_alternative<BombardColony>(itq->second.queue.front())) {
+                      itq->second.queue.erase(itq->second.queue.begin());
+                    }
+                  }
+                }
+
+                // This ship spent its weapon fire on bombardment.
+                continue;
+              }
+            }
+          }
+        }
+      }
     }
 
     Id chosen = kInvalidId;
@@ -207,15 +443,42 @@ void Simulation::tick_combat() {
     }
   }
 
+  // --- planetary / colony defenses ---
+  for (const auto& bat : colony_batteries) {
+    if (bat.weapon_damage <= 1e-12 || bat.weapon_range_mkm <= 1e-12) continue;
+
+    const auto& detected_hostiles = detected_hostiles_for(bat.faction_id, bat.system_id);
+    if (detected_hostiles.empty()) continue;
+
+    auto& idx = index_for_system(bat.system_id);
+    const auto nearby = idx.query_radius(bat.position_mkm, bat.weapon_range_mkm, 0.0);
+
+    Id chosen = kInvalidId;
+    double chosen_dist = 1e300;
+    for (Id tid : nearby) {
+      if (!std::binary_search(detected_hostiles.begin(), detected_hostiles.end(), tid)) continue;
+
+      const auto* tgt = find_ptr(state_.ships, tid);
+      if (!tgt) continue;
+      if (tgt->system_id != bat.system_id) continue;
+
+      const double dist = (tgt->position_mkm - bat.position_mkm).length();
+      if (dist > bat.weapon_range_mkm + 1e-9) continue;
+
+      if (dist + 1e-9 < chosen_dist || (std::abs(dist - chosen_dist) <= 1e-9 && (chosen == kInvalidId || tid < chosen))) {
+        chosen = tid;
+        chosen_dist = dist;
+      }
+    }
+
+    if (chosen != kInvalidId) {
+      incoming_damage[chosen] += bat.weapon_damage;
+      colony_attackers_for_target[chosen].push_back(bat.colony_id);
+    }
+  }
+
   // If nothing happened and boarding is disabled, exit early.
   if (incoming_damage.empty() && !do_boarding) return;
-
-  auto fmt1 = [](double x) {
-    std::ostringstream ss;
-    ss.setf(std::ios::fixed);
-    ss << std::setprecision(1) << x;
-    return ss.str();
-  };
 
   // --- apply damage ---
   std::vector<Id> destroyed;
@@ -320,11 +583,36 @@ void Simulation::tick_combat() {
           }
         }
 
+        // Colony attacker (planetary defenses).
+        Id attacker_colony_id = kInvalidId;
+        Id attacker_col_fid = kInvalidId;
+        std::string attacker_col_name;
+        std::string attacker_col_fac_name;
+        std::size_t colony_attackers_count = 0;
+
+        if (auto itc = colony_attackers_for_target.find(tid); itc != colony_attackers_for_target.end()) {
+          auto& vec = itc->second;
+          std::sort(vec.begin(), vec.end());
+          vec.erase(std::unique(vec.begin(), vec.end()), vec.end());
+          colony_attackers_count = vec.size();
+          if (!vec.empty()) {
+            attacker_colony_id = vec.front();
+            if (const auto* col = find_ptr(state_.colonies, attacker_colony_id)) {
+              attacker_col_fid = col->faction_id;
+              attacker_col_name = col->name;
+              if (const auto* af = find_ptr(state_.factions, attacker_col_fid)) attacker_col_fac_name = af->name;
+            }
+          }
+        }
+
+        const Id effective_attacker_fid = (attacker_fid != kInvalidId) ? attacker_fid : attacker_col_fid;
+
         EventContext ctx;
         ctx.faction_id = tgt->faction_id;
-        ctx.faction_id2 = attacker_fid;
+        ctx.faction_id2 = effective_attacker_fid;
         ctx.system_id = tgt->system_id;
         ctx.ship_id = tid;
+        if (attacker_ship_id == kInvalidId && attacker_colony_id != kInvalidId) ctx.colony_id = attacker_colony_id;
 
         std::string msg;
         if (hull_dmg > 1e-12) {
@@ -344,11 +632,26 @@ void Simulation::tick_combat() {
         msg += "HP " + fmt1(std::max(0.0, tgt->hp)) + "/" + fmt1(max_hp) + ")";
         msg += " in " + sys_name;
 
-        if (attacker_ship_id != kInvalidId) {
-          msg += " (attacked by " + (attacker_ship_name.empty() ? (std::string("Ship ") + std::to_string(attacker_ship_id))
-                                                            : attacker_ship_name);
-          if (!attacker_fac_name.empty()) msg += " / " + attacker_fac_name;
-          if (attackers_count > 1) msg += " +" + std::to_string(attackers_count - 1) + " more";
+        if (attacker_ship_id != kInvalidId || attacker_colony_id != kInvalidId) {
+          msg += " (attacked by ";
+          bool first = true;
+
+          if (attacker_ship_id != kInvalidId) {
+            msg += (attacker_ship_name.empty() ? (std::string("Ship ") + std::to_string(attacker_ship_id))
+                                               : attacker_ship_name);
+            if (!attacker_fac_name.empty()) msg += " / " + attacker_fac_name;
+            if (attackers_count > 1) msg += " +" + std::to_string(attackers_count - 1) + " more";
+            first = false;
+          }
+
+          if (attacker_colony_id != kInvalidId) {
+            if (!first) msg += ", ";
+            msg += "Colony defenses at " + (attacker_col_name.empty() ? (std::string("Colony ") + std::to_string(attacker_colony_id))
+                                                                      : attacker_col_name);
+            if (!attacker_col_fac_name.empty()) msg += " / " + attacker_col_fac_name;
+            if (colony_attackers_count > 1) msg += " +" + std::to_string(colony_attackers_count - 1) + " more";
+          }
+
           msg += ")";
         }
 
@@ -407,25 +710,130 @@ void Simulation::tick_combat() {
         }
       }
 
+      // Colony attacker (planetary defenses).
+      Id attacker_colony_id = kInvalidId;
+      Id attacker_col_fid = kInvalidId;
+      std::string attacker_col_name;
+      std::string attacker_col_fac_name;
+      std::size_t colony_attackers_count = 0;
+
+      if (auto itc = colony_attackers_for_target.find(dead_id);
+          itc != colony_attackers_for_target.end()) {
+        auto& vec = itc->second;
+        std::sort(vec.begin(), vec.end());
+        vec.erase(std::unique(vec.begin(), vec.end()), vec.end());
+        colony_attackers_count = vec.size();
+        if (!vec.empty()) {
+          attacker_colony_id = vec.front();
+          if (const auto* col = find_ptr(state_.colonies, attacker_colony_id)) {
+            attacker_col_fid = col->faction_id;
+            attacker_col_name = col->name;
+            if (const auto* af = find_ptr(state_.factions, attacker_col_fid)) attacker_col_fac_name = af->name;
+          }
+        }
+      }
+
+      const Id effective_attacker_fid = (attacker_fid != kInvalidId) ? attacker_fid : attacker_col_fid;
+
       EventContext ctx;
       ctx.faction_id = victim_fid;
-      ctx.faction_id2 = attacker_fid;
+      ctx.faction_id2 = effective_attacker_fid;
       ctx.system_id = sys_id;
       ctx.ship_id = dead_id;
+      if (attacker_ship_id == kInvalidId && attacker_colony_id != kInvalidId) ctx.colony_id = attacker_colony_id;
 
       std::string msg = "Ship destroyed: " + victim.name;
       msg += " (" + victim_fac_name + ")";
       msg += " in " + sys_name;
 
-      if (attacker_ship_id != kInvalidId) {
-        msg += " (killed by " + (attacker_ship_name.empty() ? std::string("Ship ") + std::to_string(attacker_ship_id)
-                                                           : attacker_ship_name);
-        if (!attacker_fac_name.empty()) msg += " / " + attacker_fac_name;
-        if (attackers_count > 1) msg += " +" + std::to_string(attackers_count - 1) + " more";
+      if (attacker_ship_id != kInvalidId || attacker_colony_id != kInvalidId) {
+        msg += " (killed by ";
+        bool first = true;
+
+        if (attacker_ship_id != kInvalidId) {
+          msg += (attacker_ship_name.empty() ? (std::string("Ship ") + std::to_string(attacker_ship_id)) : attacker_ship_name);
+          if (!attacker_fac_name.empty()) msg += " / " + attacker_fac_name;
+          if (attackers_count > 1) msg += " +" + std::to_string(attackers_count - 1) + " more";
+          first = false;
+        }
+
+        if (attacker_colony_id != kInvalidId) {
+          if (!first) msg += ", ";
+          msg += "Colony defenses at " + (attacker_col_name.empty() ? (std::string("Colony ") + std::to_string(attacker_colony_id))
+                                                                    : attacker_col_name);
+          if (!attacker_col_fac_name.empty()) msg += " / " + attacker_col_fac_name;
+          if (colony_attackers_count > 1) msg += " +" + std::to_string(colony_attackers_count - 1) + " more";
+        }
+
         msg += ")";
       }
 
       death_events.push_back(DestructionEvent{std::move(msg), ctx});
+
+      // Spawn a salvageable wreck at the destruction site.
+      //
+      // Wreck mineral contents are a coarse approximation:
+      //  - A fraction of the destroyed ship's carried cargo.
+      //  - A fraction of the destroyed ship's hull mass converted using the (default) shipyard
+      //    build_costs_per_ton (fallback: Duranium/Neutronium).
+      if (cfg_.enable_wrecks) {
+        std::unordered_map<std::string, double> salvage;
+
+        const double cargo_frac = std::clamp(cfg_.wreck_cargo_salvage_fraction, 0.0, 1.0);
+        if (cargo_frac > 1e-9) {
+          for (const auto& [mineral, tons] : victim.cargo) {
+            if (tons > 1e-9) salvage[mineral] += tons * cargo_frac;
+          }
+        }
+
+        const double hull_frac = std::max(0.0, cfg_.wreck_hull_salvage_fraction);
+        if (hull_frac > 1e-9) {
+          double mass_tons = 0.0;
+          if (const auto* d = find_design(victim.design_id)) {
+            mass_tons = std::max(0.0, d->mass_tons);
+          }
+          const double hull_tons = mass_tons * hull_frac;
+
+          // Prefer an explicit shipyard mineral recipe if available.
+          const InstallationDef* yard = nullptr;
+          if (auto it_y = content_.installations.find("shipyard"); it_y != content_.installations.end()) {
+            yard = &it_y->second;
+          }
+
+          if (yard && !yard->build_costs_per_ton.empty()) {
+            for (const auto& [mineral, cost_per_ton] : yard->build_costs_per_ton) {
+              if (cost_per_ton > 1e-12) salvage[mineral] += hull_tons * cost_per_ton;
+            }
+          } else {
+            salvage["Duranium"] += hull_tons * 1.0;
+            salvage["Neutronium"] += hull_tons * 0.1;
+          }
+        }
+
+        // Prune non-positive / non-finite entries.
+        for (auto it = salvage.begin(); it != salvage.end();) {
+          const double v = it->second;
+          if (!(v > 1e-9) || std::isnan(v) || std::isinf(v)) {
+            it = salvage.erase(it);
+          } else {
+            ++it;
+          }
+        }
+
+        if (!salvage.empty()) {
+          Wreck w;
+          w.id = allocate_id(state_);
+          w.name = "Wreck: " + victim.name;
+          w.system_id = victim.system_id;
+          w.position_mkm = victim.position_mkm;
+          w.minerals = std::move(salvage);
+          w.source_ship_id = victim.id;
+          w.source_faction_id = victim.faction_id;
+          w.source_design_id = victim.design_id;
+          w.created_day = state_.date.days_since_epoch();
+          state_.wrecks[w.id] = std::move(w);
+        }
+      }
     }
 
     for (Id dead_id : destroyed) {

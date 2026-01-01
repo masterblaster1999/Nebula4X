@@ -2,6 +2,8 @@
 
 #include "ui/map_render.h"
 
+#include "core/simulation_sensors.h"
+
 #include <imgui.h>
 
 #include <algorithm>
@@ -74,50 +76,6 @@ Vec2 to_world_radar(const ImVec2& screen_px, const ImVec2& center_px, double px_
   return Vec2{x, y};
 }
 
-struct SensorSourceViz {
-  Vec2 pos_mkm{0.0, 0.0};
-  double range_mkm{0.0};
-  bool is_colony{false};
-  Id ref_id{kInvalidId};
-};
-
-std::vector<SensorSourceViz> gather_sensor_sources_for_ui(const Simulation& sim, Id faction_id, Id system_id) {
-  std::vector<SensorSourceViz> sources;
-  const auto& s = sim.state();
-  const auto* sys = find_ptr(s.systems, system_id);
-  if (!sys) return sources;
-
-  // Friendly ship sensors in this system.
-  for (Id sid : sys->ships) {
-    const auto* sh = find_ptr(s.ships, sid);
-    if (!sh) continue;
-    if (sh->faction_id != faction_id) continue;
-    const auto* d = sim.find_design(sh->design_id);
-    const double range = d ? d->sensor_range_mkm : 0.0;
-    if (range <= 0.0) continue;
-    sources.push_back(SensorSourceViz{sh->position_mkm, range, false, sh->id});
-  }
-
-  // Friendly colony-based sensors in this system.
-  for (const auto& [cid, c] : s.colonies) {
-    if (c.faction_id != faction_id) continue;
-    const auto* body = find_ptr(s.bodies, c.body_id);
-    if (!body || body->system_id != system_id) continue;
-
-    double best = 0.0;
-    for (const auto& [inst_id, count] : c.installations) {
-      if (count <= 0) continue;
-      const auto it = sim.content().installations.find(inst_id);
-      if (it == sim.content().installations.end()) continue;
-      best = std::max(best, it->second.sensor_range_mkm);
-    }
-
-    if (best > 0.0) sources.push_back(SensorSourceViz{body->position_mkm, best, true, cid});
-  }
-
-  return sources;
-}
-
 double compute_auto_range_mkm(const Simulation& sim, Id viewer_faction_id, const StarSystem& sys, bool fog_of_war,
                               int contact_max_age_days) {
   const auto& s = sim.state();
@@ -167,7 +125,7 @@ double compute_auto_range_mkm(const Simulation& sim, Id viewer_faction_id, const
 
   // Sensor ranges (so the radar can "fit" the coverage rings).
   if (viewer_faction_id != kInvalidId) {
-    for (const auto& src : gather_sensor_sources_for_ui(sim, viewer_faction_id, sys.id)) {
+    for (const auto& src : sim_sensors::gather_sensor_sources(sim, viewer_faction_id, sys.id)) {
       const double d = src.pos_mkm.length() + std::max(0.0, src.range_mkm);
       if (std::isfinite(d)) maxd = std::max(maxd, d);
     }
@@ -427,9 +385,9 @@ void draw_intel_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& sele
     }
 
     // Gather render data.
-    std::vector<SensorSourceViz> sensor_sources;
+    std::vector<sim_sensors::SensorSource> sensor_sources;
     if (ui.intel_radar_show_sensors && viewer_faction_id != kInvalidId) {
-      sensor_sources = gather_sensor_sources_for_ui(sim, viewer_faction_id, sys->id);
+      sensor_sources = sim_sensors::gather_sensor_sources(sim, viewer_faction_id, sys->id);
     }
 
     std::vector<Contact> contacts;

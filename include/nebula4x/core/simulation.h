@@ -20,6 +20,47 @@ struct SimConfig {
   // Applied once per simulated day in tick_colonies().
   double population_growth_rate_per_year{0.01};
 
+  // --- Colony habitability / life support ---
+  //
+  // When enabled, colonies compute a simple "habitability" score for their body
+  // based on the body's surface temperature and atmosphere. Colonies on hostile
+  // worlds may require habitation / life support installations to sustain their
+  // population.
+  bool enable_habitability{true};
+
+  // Ideal environment values used for habitability calculations when a body has
+  // no terraforming targets set.
+  double habitability_ideal_temp_k{288.0};
+  double habitability_ideal_atm{1.0};
+
+  // Linear tolerance bands for habitability scoring.
+  // If abs(temp_k - ideal_temp_k) >= habitability_temp_tolerance_k => temp factor = 0.
+  double habitability_temp_tolerance_k{50.0};
+  // If abs(atm - ideal_atm) >= habitability_atm_tolerance => atmosphere factor = 0.
+  double habitability_atm_tolerance{0.5};
+
+  // Growth multiplier applied when a colony is living under artificial habitats
+  // on a hostile world but has sufficient habitation capacity.
+  //
+  // The final growth rate is scaled by the computed habitability (so perfectly
+  // hostile worlds may still have near-zero growth even when supported).
+  double habitation_supported_growth_multiplier{0.25};
+
+  // Population decline rate applied when a colony does not have sufficient
+  // habitation capacity. The effective decline is scaled by the shortfall
+  // fraction (0..1).
+  double habitation_shortfall_decline_rate_per_year{0.25};
+
+  // Only emit a warning event when the shortfall fraction is at or above this.
+  double habitation_shortfall_event_min_fraction{0.10};
+
+  // Global throttle for habitation shortfall warnings (days).
+  int habitation_shortfall_event_interval_days{30};
+
+  // When colonizing a body, automatically seed the new colony with enough
+  // "Infrastructure" to support the initial population (if possible).
+  bool seed_habitation_on_colonize{true};
+
   // When interacting with moving orbital bodies (colonies), ships need a tolerance
   // for being considered "in orbit / docked".
   //
@@ -50,13 +91,37 @@ struct SimConfig {
   // Ship repair rate when docked at a friendly colony with a shipyard.
   //
   // A ship is considered docked if it is within docking_range_mkm of the colony's body.
-  // Each day, a docked ship repairs (repair_hp_per_day_per_shipyard * shipyard_count)
-  // hitpoints, capped to the design max HP.
+  // Each day, the colony provides (repair_hp_per_day_per_shipyard * shipyard_count) total repair
+  // capacity, shared across all docked damaged ships (allocated by RepairPriority). Repairs are
+  // capped to each ship's design max HP.
   //
   // 0.0 disables repairs.
   double repair_hp_per_day_per_shipyard{0.5};
 
-  // Master toggle for space combat.
+  // Mineral costs for repairs (tons per HP repaired).
+  //
+  // If non-zero, repairs will consume minerals from the colony stockpile. If a colony lacks the
+  // required minerals, its repair throughput is reduced accordingly.
+  //
+  // 0.0 means "free" repairs for that mineral.
+  double repair_duranium_per_hp{0.0};
+  double repair_neutronium_per_hp{0.0};
+
+  // --- Sensor modes / EMCON ---
+  //
+  // Ships can operate their sensors in different modes (see SensorMode):
+  //  - Passive: shorter sensor range, but harder to detect (lower signature).
+  //  - Normal: baseline.
+  //  - Active: longer sensor range, but easier to detect (higher signature).
+  //
+  // These multipliers are only applied when a ship's sensors are online
+  // (subject to ShipPowerPolicy and available power).
+  double sensor_mode_passive_range_multiplier{0.6};
+  double sensor_mode_active_range_multiplier{1.5};
+  double sensor_mode_passive_signature_multiplier{0.8};
+  double sensor_mode_active_signature_multiplier{1.5};
+
+// Master toggle for space combat.
   //
   // When disabled, tick_combat() is skipped. Ships will still move and can still
   // carry out non-combat orders; ground combat/invasions are unaffected.
@@ -108,6 +173,49 @@ struct SimConfig {
   // If a damaged ship's remaining HP fraction is <= this value, log the damage
   // event as Warn (otherwise Info).
   double combat_damage_event_warn_remaining_fraction{0.25};
+
+  // --- Wrecks / salvage ---
+  // When enabled, destroyed ships may leave salvageable wrecks.
+  bool enable_wrecks{true};
+
+  // Fraction of a destroyed ship's hull mass converted into salvage minerals.
+  // Hull salvage uses shipyard build_costs_per_ton (if available) as a proxy
+  // for mineral composition.
+  double wreck_hull_salvage_fraction{0.25};
+
+  // Fraction of a destroyed ship's carried cargo that remains recoverable.
+  double wreck_cargo_salvage_fraction{0.75};
+
+  // Optional decay: if > 0, wrecks older than this many days are removed.
+  // 0 disables decay.
+  int wreck_decay_days{0};
+
+  // --- Orbital bombardment (ship -> colony) ---
+  //
+  // Ships executing BombardColony orders convert their weapon_damage into
+  // daily "orbital strike" damage applied to the target colony.
+  //
+  // Damage is applied in the following order:
+  //  1) Defender ground forces
+  //  2) Installations (destroyed based on a derived "HP" value)
+  //  3) Population
+  //
+  // Fraction of weapon range to hold at when bombarding (0..1).
+  //
+  // Example: 0.9 means "try to stay at 90% of max range".
+  double bombard_standoff_range_fraction{0.9};
+
+  // Ground force strength removed per 1 point of bombardment damage.
+  double bombard_ground_strength_per_damage{1.0};
+
+  // Installation HP derived from construction_cost.
+  //
+  // installation_hp = max(1.0, construction_cost * bombard_installation_hp_per_construction_cost)
+  double bombard_installation_hp_per_construction_cost{0.02};
+
+  // Population loss (in millions) per 1 point of *remaining* bombardment damage
+  // after troops and installations.
+  double bombard_population_millions_per_damage{0.05};
 
   // --- Ground combat / troops ---
   // How much ground force "strength" is produced per training point per day.
@@ -259,6 +367,9 @@ enum class LogisticsNeedKind {
   // expressed as a desired buffer stockpile at the colony.
   IndustryInput,
 
+  // User-defined mineral stockpile targets (see Colony::mineral_targets).
+  StockpileTarget,
+
   // Fuel required to top up docked ships (and optionally maintain a buffer).
   Fuel,
 };
@@ -293,8 +404,29 @@ struct JumpRoutePlan {
   std::vector<Id> systems;   // start -> ... -> destination
   std::vector<Id> jump_ids;  // one per hop (systems.size() - 1)
 
+  // Jump-network travel only (straight-line in-system travel to each exit jump point).
+  //
+  // Jump transit itself is instantaneous in the prototype, so distance/eta ignore the
+  // "jump" and account only for movement to reach the jump points.
   double distance_mkm{0.0};
   double eta_days{0.0};
+
+  // Optional goal position support:
+  // When has_goal_pos is true, the planner prefers routes that also minimize the
+  // final in-system travel needed after arriving in the destination system.
+  //
+  // arrival_pos_mkm is where the ship would appear in the destination system after
+  // the final jump (or the start position for same-system plans).
+  bool has_goal_pos{false};
+  Vec2 goal_pos_mkm{0.0, 0.0};
+  Vec2 arrival_pos_mkm{0.0, 0.0};
+
+  // Additional in-system distance from arrival_pos_mkm to goal_pos_mkm.
+  double final_leg_mkm{0.0};
+
+  // Convenience totals (distance_mkm + final_leg_mkm) and their ETA.
+  double total_distance_mkm{0.0};
+  double total_eta_days{0.0};
 };
 
 class Simulation {
@@ -456,11 +588,19 @@ class Simulation {
   bool issue_fleet_travel_via_jump(Id fleet_id, Id jump_point_id);
   bool issue_fleet_travel_to_system(Id fleet_id, Id target_system_id, bool restrict_to_discovered = false);
   bool issue_fleet_attack_ship(Id fleet_id, Id target_ship_id, bool restrict_to_discovered = false);
+  bool issue_fleet_escort_ship(Id fleet_id, Id target_ship_id, double follow_distance_mkm = 1.0,
+                               bool restrict_to_discovered = false);
+
+  // Bombard a colony from orbit using every fleet ship that has weapons.
+  bool issue_fleet_bombard_colony(Id fleet_id, Id colony_id, int duration_days = -1,
+                                  bool restrict_to_discovered = false);
 
   bool issue_fleet_load_mineral(Id fleet_id, Id colony_id, const std::string& mineral, double tons = 0.0,
                                 bool restrict_to_discovered = false);
   bool issue_fleet_unload_mineral(Id fleet_id, Id colony_id, const std::string& mineral, double tons = 0.0,
                                   bool restrict_to_discovered = false);
+  bool issue_fleet_salvage_wreck(Id fleet_id, Id wreck_id, const std::string& mineral, double tons = 0.0,
+                                 bool restrict_to_discovered = false);
   bool issue_fleet_transfer_cargo_to_ship(Id fleet_id, Id target_ship_id, const std::string& mineral, double tons = 0.0,
                                           bool restrict_to_discovered = false);
   bool issue_fleet_scrap_ship(Id fleet_id, Id colony_id, bool restrict_to_discovered = false);
@@ -501,7 +641,12 @@ class Simulation {
   // faction has already discovered (useful for fog-of-war UI).
   //
   // Returns false if no route is known/available.
-  bool issue_travel_to_system(Id ship_id, Id target_system_id, bool restrict_to_discovered = false);
+  //
+  // If goal_pos_mkm is provided, the planner will prefer routes that also minimize
+  // the additional in-system travel needed after arriving in the destination system
+  // (useful when your next queued order is to move to a specific body/colony/ship).
+  bool issue_travel_to_system(Id ship_id, Id target_system_id, bool restrict_to_discovered = false,
+                            std::optional<Vec2> goal_pos_mkm = std::nullopt);
   // Attack a hostile ship.
   //
   // If the target is in another system, the simulation will auto-enqueue TravelViaJump steps
@@ -511,6 +656,13 @@ class Simulation {
   // When restrict_to_discovered is true, jump routing will only traverse systems discovered
   // by the attacker's faction.
   bool issue_attack_ship(Id attacker_ship_id, Id target_ship_id, bool restrict_to_discovered = false);
+
+  // Escort a friendly ship. The escort will track across the jump network if needed.
+  //
+  // follow_distance_mkm:
+  //  Desired separation in-system. If <= 0, the sim uses docking_range_mkm.
+  bool issue_escort_ship(Id escort_ship_id, Id target_ship_id, double follow_distance_mkm = 1.0,
+                         bool restrict_to_discovered = false);
 
   // Cargo / logistics (prototype).
   // Load/unload colony minerals into a ship's cargo hold.
@@ -527,6 +679,16 @@ class Simulation {
   bool issue_unload_mineral(Id ship_id, Id colony_id, const std::string& mineral, double tons = 0.0,
                             bool restrict_to_discovered = false);
 
+  // Salvage / wrecks.
+  // Load minerals from a wreck into a ship's cargo hold.
+  // - mineral == "" means "all minerals".
+  // - tons <= 0 means "as much as possible".
+  //
+  // If the wreck is in another system, the simulation will automatically
+  // enqueue TravelViaJump steps before the salvage order.
+  bool issue_salvage_wreck(Id ship_id, Id wreck_id, const std::string& mineral, double tons = 0.0,
+                           bool restrict_to_discovered = false);
+
   // Troops / invasion (prototype).
   // Load/unload colony ground forces into a ship's troop bays.
   // - strength <= 0 means "as much as possible".
@@ -541,8 +703,30 @@ class Simulation {
   bool issue_unload_troops(Id ship_id, Id colony_id, double strength = 0.0,
                            bool restrict_to_discovered = false);
 
+  // Population / colonists (prototype).
+  // Load/unload colony population into a ship with colony module capacity.
+  // - millions <= 0 means "as much as possible".
+  //
+  // If the colony is in another system, the simulation will automatically
+  // enqueue TravelViaJump steps before the load/unload order.
+  //
+  // When restrict_to_discovered is true, jump routing will only traverse
+  // systems discovered by the ship's faction.
+  bool issue_load_colonists(Id ship_id, Id colony_id, double millions = 0.0,
+                            bool restrict_to_discovered = false);
+  bool issue_unload_colonists(Id ship_id, Id colony_id, double millions = 0.0,
+                              bool restrict_to_discovered = false);
+
   // Invade a hostile colony (combat is resolved on the ground).
   bool issue_invade_colony(Id ship_id, Id colony_id, bool restrict_to_discovered = false);
+
+  // Bombard a colony from orbit (space-to-ground fire).
+  //
+  // duration_days:
+  //  -1 => bombard indefinitely (until cancelled)
+  //  >0 => decrement once per day while the ship is in range and successfully fires
+  bool issue_bombard_colony(Id ship_id, Id colony_id, int duration_days = -1,
+                            bool restrict_to_discovered = false);
 
   // Colony troop training (prototype).
   // Adds strength to the colony's training queue; training consumes time
@@ -564,6 +748,28 @@ class Simulation {
   // Transfer cargo directly to another ship in space.
   bool issue_transfer_cargo_to_ship(Id ship_id, Id target_ship_id, const std::string& mineral, double tons = 0.0,
                                     bool restrict_to_discovered = false);
+
+  // Transfer fuel directly to another ship in space.
+  //
+  // This enables ship-to-ship refueling (tanker operations). Fuel is moved from
+  // the source ship's fuel tanks into the target ship's fuel tanks.
+  //
+  // - tons <= 0 means "as much as possible" (up to target free fuel capacity).
+  // - Both ships must belong to the same faction.
+  bool issue_transfer_fuel_to_ship(Id ship_id, Id target_ship_id, double tons = 0.0,
+                                   bool restrict_to_discovered = false);
+
+  // Transfer embarked troops directly to another ship in space.
+  //
+  // This enables ship-to-ship troop movement between friendly transports.
+  // Troops are moved from the source ship's troop bays into the target ship's
+  // troop bays.
+  //
+  // - strength <= 0 means "as much as possible" (up to target free troop capacity).
+  // - Both ships must belong to the same faction.
+  // - Both ships must have non-zero troop capacity.
+  bool issue_transfer_troops_to_ship(Id ship_id, Id target_ship_id, double strength = 0.0,
+                                     bool restrict_to_discovered = false);
 
   // Decommission a ship at a friendly colony, recovering some mineral cost.
   bool issue_scrap_ship(Id ship_id, Id colony_id, bool restrict_to_discovered = false);
@@ -600,6 +806,11 @@ bool move_construction_order(Id colony_id, int from_index, int to_index);
   bool is_installation_buildable_for_faction(Id faction_id, const std::string& installation_id) const;
   double construction_points_per_day(const Colony& colony) const;
 
+  // Colony habitability / life support helpers (pure queries)
+  double body_habitability(Id body_id) const;
+  double habitation_capacity_millions(const Colony& colony) const;
+  double required_habitation_capacity_millions(const Colony& colony) const;
+
   // Logistics helpers (pure queries)
   // Compute per-colony mineral shortfalls that would stall shipyard/construction.
   std::vector<LogisticsNeed> logistics_needs_for_faction(Id faction_id) const;
@@ -611,6 +822,10 @@ bool move_construction_order(Id colony_id, int from_index, int to_index);
   // Backward compatibility: if no stance is defined, the relationship defaults to Hostile.
   DiplomacyStatus diplomatic_status(Id from_faction_id, Id to_faction_id) const;
   bool are_factions_hostile(Id from_faction_id, Id to_faction_id) const;
+  // True if both factions consider each other Friendly (mutual friendliness).
+  // Self is always friendly.
+  bool are_factions_mutual_friendly(Id a_faction_id, Id b_faction_id) const;
+
 
   // Set a diplomatic stance. If reciprocal is true, also sets the inverse (B->A).
   //
@@ -643,6 +858,19 @@ bool move_construction_order(Id colony_id, int from_index, int to_index);
   std::optional<JumpRoutePlan> plan_jump_route_for_fleet(Id fleet_id, Id target_system_id,
                                                         bool restrict_to_discovered = false,
                                                         bool include_queued_jumps = false) const;
+
+  // Goal-aware jump route planning:
+  // Like plan_jump_route_for_ship/fleet, but also considers the final in-system leg
+  // inside the destination system when selecting the entry jump point.
+  //
+  // The returned plan includes final_leg_mkm and total_eta_days.
+  std::optional<JumpRoutePlan> plan_jump_route_for_ship_to_pos(Id ship_id, Id target_system_id, Vec2 goal_pos_mkm,
+                                                              bool restrict_to_discovered = false,
+                                                              bool include_queued_jumps = false) const;
+  std::optional<JumpRoutePlan> plan_jump_route_for_fleet_to_pos(Id fleet_id, Id target_system_id, Vec2 goal_pos_mkm,
+                                                               bool restrict_to_discovered = false,
+                                                               bool include_queued_jumps = false) const;
+
 
 
   // Player design creation. Designs are stored in GameState::custom_designs and are saved.
@@ -691,13 +919,21 @@ struct JumpRouteCacheKey {
   Id target_system_id{kInvalidId};
   bool restrict_to_discovered{false};
 
+  // Optional goal position included in the cache key (used for goal-aware routing).
+  bool has_goal_pos{false};
+  std::uint64_t goal_pos_x_bits{0};
+  std::uint64_t goal_pos_y_bits{0};
+
   bool operator==(const JumpRouteCacheKey& o) const {
     return start_system_id == o.start_system_id &&
            start_pos_x_bits == o.start_pos_x_bits &&
            start_pos_y_bits == o.start_pos_y_bits &&
            faction_id == o.faction_id &&
            target_system_id == o.target_system_id &&
-           restrict_to_discovered == o.restrict_to_discovered;
+           restrict_to_discovered == o.restrict_to_discovered &&
+           has_goal_pos == o.has_goal_pos &&
+           goal_pos_x_bits == o.goal_pos_x_bits &&
+           goal_pos_y_bits == o.goal_pos_y_bits;
   }
 };
 
@@ -713,6 +949,9 @@ struct JumpRouteCacheKeyHash {
     mix(h, std::hash<Id>()(k.faction_id));
     mix(h, std::hash<Id>()(k.target_system_id));
     mix(h, std::hash<bool>()(k.restrict_to_discovered));
+    mix(h, std::hash<bool>()(k.has_goal_pos));
+    mix(h, std::hash<std::uint64_t>()(k.goal_pos_x_bits));
+    mix(h, std::hash<std::uint64_t>()(k.goal_pos_y_bits));
     return h;
   }
 };
@@ -726,7 +965,8 @@ using JumpRouteCacheMap = std::unordered_map<JumpRouteCacheKey, JumpRouteCacheEn
 
 std::optional<JumpRoutePlan> plan_jump_route_cached(Id start_system_id, Vec2 start_pos_mkm, Id faction_id,
                                                    double speed_km_s, Id target_system_id,
-                                                   bool restrict_to_discovered) const;
+                                                   bool restrict_to_discovered,
+                                                   std::optional<Vec2> goal_pos_mkm = std::nullopt) const;
 
 void ensure_jump_route_cache_current() const;
 void invalidate_jump_route_cache() const;

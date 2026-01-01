@@ -17,10 +17,14 @@ Nebula4X is an **open-source, turn-based space 4X** prototype in **C++20**, insp
 - **Fuel**: refineries can convert minerals into fuel; ships consume fuel when moving; colonies can stockpile fuel.
 - **Power (prototype)**: reactors generate power, some components draw power, and subsystems load-shed deterministically when power is insufficient.
 - Day-based turn advancement
-- Colony **population growth/decline** (simple, configurable)
+- Colony **population growth/decline** (configurable)
+- **Habitability & habitation infrastructure (prototype)**: colonies compute a simple habitability score
+  from body temperature + atmosphere; hostile worlds require "Infrastructure" (habitation capacity) to
+  prevent population decline; terraforming improves habitability
 - **Shipyard repairs**: docked ships repair HP at friendly colonies with shipyards (configurable)
 - Shipyard construction (optionally) consumes minerals per ton built (see `data/blueprints/starting_blueprints.json`)
 - **Colony construction queue**: build installations using construction points + mineral build costs (also configured in JSON)
+- **Installation targets (auto-build)**: set desired installation counts per colony; the sim auto-queues construction to reach them
 - Orders:
   - move-to-point / move-to-body
   - **orbit body** (station keep)
@@ -28,6 +32,7 @@ Nebula4X is an **open-source, turn-based space 4X** prototype in **C++20**, insp
   - **attack ship** (simple targeting)
   - **wait days** (simple scheduling)
   - **load/unload minerals** (prototype cargo logistics)
+  - **salvage wrecks** (recover minerals from destroyed ships)
   - **auto-freight minerals when idle** (optional ship automation; routes supplies from surplus colonies to stalled queues)
 - Per-colony **mineral reserves**: protect local stockpiles from auto-freight exports (UI configurable)
   - **ship-to-ship cargo transfer**
@@ -36,6 +41,8 @@ Nebula4X is an **open-source, turn-based space 4X** prototype in **C++20**, insp
   - **order templates** (saved library of named order queues you can apply to ships/fleets)
 - **Jump points + multi-system state**
 - **Sensors + intel**: in-system detection + last-known contact snapshots (saved)
+- **Stealth signatures (prototype)**: ship designs have a *signature multiplier* (derived from components) that scales effective detection range (lower signature = harder to detect).
+- **EMCON sensor modes**: ships can run sensors in Passive/Normal/Active modes; this changes sensor range and detectability at runtime.
 - **Exploration**: factions track discovered star systems; entering a new system reveals it
 - **Research system**:
   - tech definitions (JSON)
@@ -45,6 +52,7 @@ Nebula4X is an **open-source, turn-based space 4X** prototype in **C++20**, insp
 - **Basic combat prototype**:
   - armed ships auto-fire once/day at hostiles within weapon range
   - damage + ship destruction
+  - destroyed ships can leave salvageable wrecks (optional; configurable)
 - JSON save/load (versioned)
 - Persistent event log (saved): build/research/jump/combat notifications
 
@@ -62,16 +70,18 @@ Nebula4X is an **open-source, turn-based space 4X** prototype in **C++20**, insp
   - issuing an **Attack** order against a non-hostile faction will automatically set the stance to **Hostile** once contact is confirmed
 - **Log tab**: view/filter/clear the saved event log; copy visible entries; export CSV/JSON
 - **Jump point markers on the system map**
+  - **Wreck markers on the system map** (salvageable debris)
 - **Ship tab**: quick orders (move, jump travel, attack) + cargo load/unload
+  - **Wreck salvage**: queue salvage orders for known wrecks
   - **Automation**: optional *Auto-explore when idle* toggle (seeks frontier + jumps into undiscovered systems)
-  - **Automation**: optional *Auto-freight minerals when idle* toggle (hauls minerals to relieve shipyard/construction stalls)
+  - **Automation**: optional *Auto-freight minerals when idle* toggle (hauls minerals to relieve shipyard/construction stalls and meet colony stockpile targets)
   - **Order queue editor**: drag+drop reorder, duplicate/delete
   - **Order templates library**: save/apply/rename/delete; apply to ship or selected fleet
 - **Fleet tab**: create/rename/disband fleets; add/remove ships; set leader; issue bulk fleet orders (move/orbit/travel/attack/load/unload)
   - toggle **repeat orders** for simple looping routes
 - **Colony tab**: manage shipyard queue + build installations via construction queue
 - **Economy window**: global **Industry / Mining / Tech Tree** overview (View → Economy)
-- Colony tab supports editing **mineral reserves** used by auto-freight
+- Colony tab supports editing **mineral reserves**, **stockpile targets**, and **installation targets** (auto-build)
 - **Research tab**: choose projects, queue, see progress; set faction control/AI profile
   - **Tech browser**: search/filter all techs (known / locked / researchable)
   - **Research plan preview**: shows prerequisite chain + total cost

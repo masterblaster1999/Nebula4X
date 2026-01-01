@@ -4,6 +4,7 @@
 
 #include "nebula4x/core/fleet_formation.h"
 #include "nebula4x/core/enum_strings.h"
+#include "nebula4x/core/power.h"
 
 #include <imgui.h>
 
@@ -441,7 +442,11 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
                 const auto* jp = find_ptr(s.jump_points, o.jump_point_id);
                 if (!jp || jp->system_id != sys->id) return std::nullopt;
                 return jp->position_mkm;
-              } else if constexpr (std::is_same_v<T, nebula4x::AttackShip> || std::is_same_v<T, nebula4x::TransferCargoToShip>) {
+              } else if constexpr (std::is_same_v<T, nebula4x::AttackShip> ||
+                                   std::is_same_v<T, nebula4x::EscortShip> ||
+                                   std::is_same_v<T, nebula4x::TransferCargoToShip> ||
+                                   std::is_same_v<T, nebula4x::TransferFuelToShip> ||
+                                   std::is_same_v<T, nebula4x::TransferTroopsToShip>) {
                 if (const auto* tgt = find_ptr(s.ships, o.target_ship_id); tgt && tgt->system_id == sys->id) {
                   return tgt->position_mkm;
                 }
@@ -449,9 +454,15 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
                   if (o.has_last_known) return o.last_known_position_mkm;
                 }
                 return std::nullopt;
+              } else if constexpr (std::is_same_v<T, nebula4x::SalvageWreck>) {
+                const auto* w = find_ptr(s.wrecks, o.wreck_id);
+                if (!w || w->system_id != sys->id) return std::nullopt;
+                return w->position_mkm;
               } else if constexpr (std::is_same_v<T, nebula4x::LoadMineral> || std::is_same_v<T, nebula4x::UnloadMineral>
                                    || std::is_same_v<T, nebula4x::LoadTroops> || std::is_same_v<T, nebula4x::UnloadTroops>
-                                   || std::is_same_v<T, nebula4x::InvadeColony> || std::is_same_v<T, nebula4x::ScrapShip>) {
+                                   || std::is_same_v<T, nebula4x::LoadColonists> || std::is_same_v<T, nebula4x::UnloadColonists>
+                                   || std::is_same_v<T, nebula4x::InvadeColony> || std::is_same_v<T, nebula4x::BombardColony>
+                                   || std::is_same_v<T, nebula4x::ScrapShip>) {
                 const auto* c = find_ptr(s.colonies, o.colony_id);
                 if (!c) return std::nullopt;
                 const auto* b = find_ptr(s.bodies, c->body_id);
@@ -540,7 +551,19 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
     // Selected ship sensor range overlay
     if (ui.show_selected_sensor_range && is_selected) {
       if (d && d->sensor_range_mkm > 0.0) {
-        draw->AddCircle(p, static_cast<float>(d->sensor_range_mkm * scale * zoom), IM_COL32(0, 170, 255, 80), 0, 1.0f);
+        // Match actual detection: if sensors are disabled or powered down, indicate it.
+        const auto pa = compute_power_allocation(d->power_generation, d->power_use_engines, d->power_use_shields,
+                                                 d->power_use_weapons, d->power_use_sensors, sh->power_policy);
+        const float alpha = std::clamp(ui.map_route_opacity, 0.0f, 1.0f);
+        const ImU32 col = pa.sensors_online
+                              ? modulate_alpha(IM_COL32(0, 170, 255, 255), 0.31f * alpha)
+                              : modulate_alpha(IM_COL32(255, 90, 90, 255), 0.22f * alpha);
+        double mult = 1.0;
+        if (sh->sensor_mode == SensorMode::Passive) mult = sim.cfg().sensor_mode_passive_range_multiplier;
+        else if (sh->sensor_mode == SensorMode::Active) mult = sim.cfg().sensor_mode_active_range_multiplier;
+        if (!std::isfinite(mult) || mult < 0.0) mult = 0.0;
+        const double r_mkm = std::max(0.0, d->sensor_range_mkm) * mult;
+        draw->AddCircle(p, static_cast<float>(r_mkm * scale * zoom), col, 0, 1.0f);
       }
     }
 
@@ -567,6 +590,16 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
     if (!selected_fleet_members.empty() && selected_fleet_members.count(sid)) {
       draw->AddCircle(p, 13.0f, IM_COL32(0, 160, 255, 200), 0, 1.5f);
     }
+  }
+
+  // Wreck markers (salvageable debris)
+  for (const auto& [wid, w] : s.wrecks) {
+    if (w.system_id != sys->id) continue;
+    const ImVec2 p = world_to_screen(w.position_mkm);
+    const float r = 5.0f;
+    const ImU32 c = IM_COL32(160, 160, 160, 200);
+    draw->AddLine(ImVec2(p.x - r, p.y - r), ImVec2(p.x + r, p.y + r), c, 2.0f);
+    draw->AddLine(ImVec2(p.x - r, p.y + r), ImVec2(p.x + r, p.y - r), c, 2.0f);
   }
 
   // Fleet formation preview: when enabled, visualize the *per-ship* target points
@@ -973,7 +1006,7 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
     constexpr float kHoverRadiusPx = 18.0f;
     const float hover_d2 = kHoverRadiusPx * kHoverRadiusPx;
 
-    enum class HoverKind { None, Ship, Body, Jump };
+    enum class HoverKind { None, Ship, Wreck, Body, Jump };
     HoverKind kind = HoverKind::None;
     Id hovered_id = kInvalidId;
     float best_d2 = hover_d2;
@@ -999,6 +1032,21 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
         best_d2 = d2;
         kind = HoverKind::Ship;
         hovered_id = sid;
+      }
+    }
+
+    if (kind == HoverKind::None) {
+      for (const auto& [wid, w] : s.wrecks) {
+        if (w.system_id != sys->id) continue;
+        const ImVec2 p = to_screen(w.position_mkm, center, scale, zoom, pan);
+        const float dx = mp.x - p.x;
+        const float dy = mp.y - p.y;
+        const float d2 = dx * dx + dy * dy;
+        if (d2 <= best_d2) {
+          best_d2 = d2;
+          kind = HoverKind::Wreck;
+          hovered_id = wid;
+        }
       }
     }
 
@@ -1067,6 +1115,27 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
           if (ImGui::SmallButton("Center")) {
             pan = Vec2{-sh->position_mkm.x, -sh->position_mkm.y};
             ui.system_map_follow_selected = false;
+          }
+        }
+      } else if (kind == HoverKind::Wreck) {
+        const auto* w = find_ptr(s.wrecks, hovered_id);
+        if (w) {
+          ImGui::Text("%s", w->name.c_str());
+          if (const auto* sys2 = find_ptr(s.systems, w->system_id)) {
+            ImGui::TextDisabled("System: %s", sys2->name.c_str());
+          }
+          double total = 0.0;
+          for (const auto& [_, t] : w->minerals) total += t;
+          ImGui::TextDisabled("Salvage: %.1f tons", total);
+          // Show up to 6 minerals (largest first).
+          std::vector<std::pair<std::string, double>> items;
+          items.reserve(w->minerals.size());
+          for (const auto& [m, t] : w->minerals) items.emplace_back(m, t);
+          std::sort(items.begin(), items.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+          int shown = 0;
+          for (const auto& [m, t] : items) {
+            if (shown++ >= 6) break;
+            ImGui::BulletText("%s: %.1f", m.c_str(), t);
           }
         }
       } else if (kind == HoverKind::Body) {

@@ -125,6 +125,11 @@ static void hash_order(Digest64& d, const Order& ord) {
           d.add_u64(o.target_ship_id);
           d.add_bool(o.has_last_known);
           hash_vec2(d, o.last_known_position_mkm);
+        } else if constexpr (std::is_same_v<T, EscortShip>) {
+          d.add_u64(19);
+          d.add_u64(o.target_ship_id);
+          d.add_double(o.follow_distance_mkm);
+          d.add_bool(o.restrict_to_discovered);
         } else if constexpr (std::is_same_v<T, WaitDays>) {
           d.add_u64(7);
           d.add_i64(o.days_remaining);
@@ -146,14 +151,39 @@ static void hash_order(Digest64& d, const Order& ord) {
           d.add_u64(13);
           d.add_u64(o.colony_id);
           d.add_double(o.strength);
+        } else if constexpr (std::is_same_v<T, LoadColonists>) {
+          d.add_u64(20);
+          d.add_u64(o.colony_id);
+          d.add_double(o.millions);
+        } else if constexpr (std::is_same_v<T, UnloadColonists>) {
+          d.add_u64(21);
+          d.add_u64(o.colony_id);
+          d.add_double(o.millions);
         } else if constexpr (std::is_same_v<T, InvadeColony>) {
           d.add_u64(14);
           d.add_u64(o.colony_id);
+        } else if constexpr (std::is_same_v<T, BombardColony>) {
+          d.add_u64(17);
+          d.add_u64(o.colony_id);
+          d.add_i64(o.duration_days);
+        } else if constexpr (std::is_same_v<T, SalvageWreck>) {
+          d.add_u64(18);
+          d.add_u64(o.wreck_id);
+          d.add_string(o.mineral);
+          d.add_double(o.tons);
         } else if constexpr (std::is_same_v<T, TransferCargoToShip>) {
           d.add_u64(10);
           d.add_u64(o.target_ship_id);
           d.add_string(o.mineral);
           d.add_double(o.tons);
+        } else if constexpr (std::is_same_v<T, TransferFuelToShip>) {
+          d.add_u64(15);
+          d.add_u64(o.target_ship_id);
+          d.add_double(o.tons);
+        } else if constexpr (std::is_same_v<T, TransferTroopsToShip>) {
+          d.add_u64(16);
+          d.add_u64(o.target_ship_id);
+          d.add_double(o.strength);
         } else if constexpr (std::is_same_v<T, ScrapShip>) {
           d.add_u64(11);
           d.add_u64(o.colony_id);
@@ -213,6 +243,7 @@ static void hash_ship_design(Digest64& d, const ShipDesign& sd) {
   d.add_double(sd.fuel_use_per_mkm);
   d.add_double(sd.cargo_tons);
   d.add_double(sd.sensor_range_mkm);
+  d.add_double(sd.signature_multiplier);
   d.add_double(sd.colony_capacity_millions);
   d.add_double(sd.troop_capacity);
   d.add_double(sd.power_generation);
@@ -238,6 +269,7 @@ static void hash_component_def(Digest64& d, const ComponentDef& c) {
   d.add_double(c.fuel_capacity_tons);
   d.add_double(c.cargo_tons);
   d.add_double(c.sensor_range_mkm);
+  d.add_double(c.signature_multiplier);
   d.add_double(c.colony_capacity_millions);
   d.add_double(c.troop_capacity);
   d.add_double(c.power_output);
@@ -407,10 +439,40 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
     hash_string_double_map(d, sh.cargo);
     d.add_bool(sh.auto_explore);
     d.add_bool(sh.auto_freight);
+    d.add_bool(sh.auto_refuel);
+    d.add_double(sh.auto_refuel_threshold_fraction);
+    d.add_bool(sh.auto_repair);
+    d.add_double(sh.auto_repair_threshold_fraction);
+    d.add_u8(static_cast<std::uint8_t>(sh.repair_priority));
+    d.add_u8(static_cast<std::uint8_t>(sh.sensor_mode));
+    // Ship power policy affects combat + detection; include it in the digest.
+    d.add_bool(sh.power_policy.engines_enabled);
+    d.add_bool(sh.power_policy.shields_enabled);
+    d.add_bool(sh.power_policy.weapons_enabled);
+    d.add_bool(sh.power_policy.sensors_enabled);
+    for (PowerSubsystem ss : sh.power_policy.priority) {
+      d.add_u8(static_cast<std::uint8_t>(ss));
+    }
     d.add_double(sh.hp);
     d.add_double(sh.fuel_tons);
     d.add_double(sh.shields);
     d.add_double(sh.troops);
+    d.add_double(sh.colonists_millions);
+  }
+
+  // Wrecks
+  d.add_size(s.wrecks.size());
+  for (Id wid : sorted_keys(s.wrecks)) {
+    const auto& w = s.wrecks.at(wid);
+    d.add_u64(wid);
+    d.add_string(w.name);
+    d.add_u64(w.system_id);
+    hash_vec2(d, w.position_mkm);
+    hash_string_double_map(d, w.minerals);
+    d.add_u64(w.source_ship_id);
+    d.add_u64(w.source_faction_id);
+    d.add_string(w.source_design_id);
+    d.add_i64(w.created_day);
   }
 
   // Colonies
@@ -424,6 +486,8 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
     d.add_double(c.population_millions);
     hash_string_double_map(d, c.minerals);
     hash_string_double_map(d, c.mineral_reserves);
+    hash_string_double_map(d, c.mineral_targets);
+    hash_string_int_map(d, c.installation_targets);
     hash_string_int_map(d, c.installations);
     d.add_double(c.ground_forces);
     d.add_double(c.troop_training_queue);
@@ -433,6 +497,7 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
       d.add_string(bo.design_id);
       d.add_double(bo.tons_remaining);
       d.add_u64(bo.refit_ship_id);
+      d.add_bool(bo.auto_queued);
     }
 
     d.add_size(c.construction_queue.size());
@@ -441,6 +506,7 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
       d.add_i64(io.quantity_remaining);
       d.add_bool(io.minerals_paid);
       d.add_double(io.cp_remaining);
+      d.add_bool(io.auto_queued);
     }
   }
 
@@ -472,6 +538,8 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
     auto ui = sorted_unique_copy(f.unlocked_installations);
     d.add_size(ui.size());
     for (const auto& iid : ui) d.add_string(iid);
+    hash_string_int_map(d, f.ship_design_targets);
+
 
     auto disc = sorted_unique_copy(f.discovered_systems);
     d.add_size(disc.size());

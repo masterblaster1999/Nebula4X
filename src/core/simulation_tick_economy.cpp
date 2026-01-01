@@ -1,0 +1,1145 @@
+#include "nebula4x/core/simulation.h"
+
+#include "simulation_internal.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cctype>
+#include <cstring>
+#include <iomanip>
+#include <limits>
+#include <optional>
+#include <queue>
+#include <sstream>
+#include <stdexcept>
+#include <unordered_map>
+#include <unordered_set>
+
+#include "nebula4x/core/scenario.h"
+#include "nebula4x/core/ai_economy.h"
+#include "nebula4x/util/log.h"
+#include "nebula4x/util/spatial_index.h"
+
+namespace nebula4x {
+namespace {
+using sim_internal::kTwoPi;
+using sim_internal::ascii_to_lower;
+using sim_internal::is_mining_installation;
+using sim_internal::mkm_per_day_from_speed;
+using sim_internal::push_unique;
+using sim_internal::vec_contains;
+using sim_internal::sorted_keys;
+using sim_internal::faction_has_tech;
+using sim_internal::FactionEconomyMultipliers;
+using sim_internal::compute_faction_economy_multipliers;
+using sim_internal::compute_power_allocation;
+} // namespace
+
+void Simulation::tick_colonies() {
+  // Precompute faction-wide economy modifiers once per tick for determinism
+  // and to avoid repeated tech scanning in inner loops.
+  std::unordered_map<Id, FactionEconomyMultipliers> fac_mult;
+  fac_mult.reserve(state_.factions.size());
+  for (Id fid : sorted_keys(state_.factions)) {
+    fac_mult.emplace(fid, compute_faction_economy_multipliers(content_, state_.factions.at(fid)));
+  }
+
+  const FactionEconomyMultipliers default_mult;
+  auto mult_for = [&](Id fid) -> const FactionEconomyMultipliers& {
+    auto it = fac_mult.find(fid);
+    if (it == fac_mult.end()) return default_mult;
+    return it->second;
+  };
+
+  // Aggregate mining requests so that multiple colonies on the same body share
+  // finite deposits fairly (proportional allocation) and deterministically.
+  //
+  // Structure: body_id -> mineral -> [(colony_id, requested_tons_per_day), ...]
+  std::unordered_map<Id, std::unordered_map<std::string, std::vector<std::pair<Id, double>>>> mine_reqs;
+  mine_reqs.reserve(state_.colonies.size());
+
+  for (Id cid : sorted_keys(state_.colonies)) {
+    auto& colony = state_.colonies.at(cid);
+
+    const double mining_mult = std::max(0.0, mult_for(colony.faction_id).mining);
+
+    // --- Installation-based production ---
+    for (const auto& [inst_id, count] : colony.installations) {
+      if (count <= 0) continue;
+      const auto dit = content_.installations.find(inst_id);
+      if (dit == content_.installations.end()) continue;
+
+      const InstallationDef& def = dit->second;
+      if (def.produces_per_day.empty()) continue;
+
+      if (is_mining_installation(def)) {
+        // Mining: convert produces_per_day into a request against body deposits.
+        const Id body_id = colony.body_id;
+
+        // If the body is missing (invalid save / hand-edited state), fall back to
+        // the older "unlimited" behaviour to avoid silently losing resources.
+        if (body_id == kInvalidId || state_.bodies.find(body_id) == state_.bodies.end()) {
+          for (const auto& [mineral, per_day] : def.produces_per_day) {
+            colony.minerals[mineral] += per_day * static_cast<double>(count) * mining_mult;
+          }
+          continue;
+        }
+        for (const auto& [mineral, per_day] : def.produces_per_day) {
+          const double req = per_day * static_cast<double>(count) * mining_mult;
+          if (req <= 1e-12) continue;
+          mine_reqs[body_id][mineral].push_back({cid, req});
+        }
+      }
+    }
+
+    // --- Population growth/decline ---
+    //
+    // This intentionally does not generate events for *normal* growth/decline
+    // (would be too spammy). However, if habitability is enabled we will emit
+    // throttled warning events for severe habitation shortfalls.
+    if (colony.population_millions > 0.0) {
+      double pop = colony.population_millions;
+
+      const double base_per_day = cfg_.population_growth_rate_per_year / 365.25;
+      if (std::fabs(base_per_day) > 1e-12) {
+        double growth_mult = 1.0;
+        if (cfg_.enable_habitability) {
+          const double hab = body_habitability(colony.body_id);
+          if (hab >= 0.999) {
+            growth_mult = 1.0;
+          } else {
+            // Hostile worlds: growth is slower even when supported.
+            growth_mult = std::max(0.0, cfg_.habitation_supported_growth_multiplier) * std::clamp(hab, 0.0, 1.0);
+          }
+        }
+        pop *= (1.0 + base_per_day * growth_mult);
+      }
+
+      if (cfg_.enable_habitability) {
+        const double hab = body_habitability(colony.body_id);
+        if (hab < 0.999) {
+          const double required = std::max(0.0, pop) * std::clamp(1.0 - hab, 0.0, 1.0);
+          const double have = habitation_capacity_millions(colony);
+          if (required > 1e-9 && have + 1e-9 < required) {
+            const double shortfall_frac = std::clamp(1.0 - (have / required), 0.0, 1.0);
+            const double decline_per_day = std::max(0.0, cfg_.habitation_shortfall_decline_rate_per_year) / 365.25;
+            pop *= (1.0 - decline_per_day * shortfall_frac);
+
+            // Throttled warning events so the player understands why population is dropping.
+            if (shortfall_frac >= std::max(0.0, cfg_.habitation_shortfall_event_min_fraction)) {
+              const int interval = std::max(0, cfg_.habitation_shortfall_event_interval_days);
+              if (interval <= 0 || (state_.date.days_since_epoch() % interval) == 0) {
+                const auto* body = find_ptr(state_.bodies, colony.body_id);
+                const std::string body_name = body ? body->name : std::string("(unknown body)");
+                std::ostringstream ss;
+                ss << "Habitation shortfall at colony '" << colony.name << "' (" << body_name
+                   << "): need " << required << "M support, have " << have << "M (habitability "
+                   << std::fixed << std::setprecision(2) << (hab * 100.0) << "%). Population is declining.";
+
+                EventContext ctx;
+                ctx.faction_id = colony.faction_id;
+                ctx.colony_id = colony.id;
+                push_event(EventLevel::Warn, EventCategory::General, ss.str(), ctx);
+              }
+            }
+          }
+        }
+      }
+
+      if (!std::isfinite(pop)) pop = 0.0;
+      colony.population_millions = std::max(0.0, pop);
+    }
+  }
+
+  // --- Execute mining extraction against finite deposits ---
+  if (!mine_reqs.empty()) {
+    std::vector<Id> body_ids;
+    body_ids.reserve(mine_reqs.size());
+    for (const auto& [bid, _] : mine_reqs) body_ids.push_back(bid);
+    std::sort(body_ids.begin(), body_ids.end());
+
+    for (Id bid : body_ids) {
+      Body* body = find_ptr(state_.bodies, bid);
+      if (!body) continue;
+
+      auto& per_mineral = mine_reqs.at(bid);
+      std::vector<std::string> minerals;
+      minerals.reserve(per_mineral.size());
+      for (const auto& [m, _] : per_mineral) minerals.push_back(m);
+      std::sort(minerals.begin(), minerals.end());
+
+      for (const std::string& mineral : minerals) {
+        auto it_list = per_mineral.find(mineral);
+        if (it_list == per_mineral.end()) continue;
+        auto& list = it_list->second;
+        if (list.empty()) continue;
+
+        // Total requested extraction for this mineral on this body.
+        double total_req = 0.0;
+        for (const auto& [_, req] : list) {
+          if (req > 0.0) total_req += req;
+        }
+        if (total_req <= 1e-12) continue;
+
+        // If the deposit key is missing, treat it as unlimited for back-compat.
+        auto it_dep = body->mineral_deposits.find(mineral);
+        if (it_dep == body->mineral_deposits.end()) {
+          for (const auto& [colony_id, req] : list) {
+            if (req <= 1e-12) continue;
+            if (auto* c = find_ptr(state_.colonies, colony_id)) {
+              c->minerals[mineral] += req;
+            }
+          }
+          continue;
+        }
+
+        const double before_raw = it_dep->second;
+        const double before = std::max(0.0, before_raw);
+        if (before <= 1e-9) {
+          it_dep->second = 0.0;
+          continue;
+        }
+
+        if (before + 1e-9 >= total_req) {
+          // Enough deposit to satisfy everyone fully.
+          for (const auto& [colony_id, req] : list) {
+            if (req <= 1e-12) continue;
+            if (auto* c = find_ptr(state_.colonies, colony_id)) {
+              c->minerals[mineral] += req;
+            }
+          }
+          it_dep->second = std::max(0.0, before - total_req);
+        } else {
+          // Not enough deposit: allocate proportionally.
+          const double ratio = before / total_req;
+          for (const auto& [colony_id, req] : list) {
+            if (req <= 1e-12) continue;
+            if (auto* c = find_ptr(state_.colonies, colony_id)) {
+              c->minerals[mineral] += req * ratio;
+            }
+          }
+          it_dep->second = 0.0;
+        }
+
+        // Depletion warning (once, at the moment a deposit hits zero).
+        if (before > 1e-9 && it_dep->second <= 1e-9) {
+          Id best_cid = kInvalidId;
+          Id best_fid = kInvalidId;
+          for (const auto& [colony_id, req] : list) {
+            if (req <= 1e-12) continue;
+            if (best_cid == kInvalidId || colony_id < best_cid) {
+              best_cid = colony_id;
+              if (const Colony* c = find_ptr(state_.colonies, colony_id)) {
+                best_fid = c->faction_id;
+              }
+            }
+          }
+
+          EventContext ctx;
+          ctx.system_id = body->system_id;
+          ctx.colony_id = best_cid;
+          ctx.faction_id = best_fid;
+
+          const std::string msg = "Mineral deposit depleted on " + body->name + ": " + mineral;
+          push_event(EventLevel::Warn, EventCategory::Construction, msg, ctx);
+        }
+      }
+    }
+
+  }
+
+  // --- Execute non-mining industry production/consumption ---
+  //
+  // This stage runs *after* mining extraction so that freshly mined minerals can
+  // be consumed by industry in the same day.
+  for (Id cid : sorted_keys(state_.colonies)) {
+    Colony& colony = state_.colonies.at(cid);
+
+    const double industry_mult = std::max(0.0, mult_for(colony.faction_id).industry);
+
+    // Deterministic processing: installation iteration order of unordered_map is unspecified.
+    std::vector<std::string> inst_ids;
+    inst_ids.reserve(colony.installations.size());
+    for (const auto& [inst_id, _] : colony.installations) inst_ids.push_back(inst_id);
+    std::sort(inst_ids.begin(), inst_ids.end());
+
+    for (const std::string& inst_id : inst_ids) {
+      auto it_count = colony.installations.find(inst_id);
+      if (it_count == colony.installations.end()) continue;
+      const int count = std::max(0, it_count->second);
+      if (count <= 0) continue;
+
+      const auto it_def = content_.installations.find(inst_id);
+      if (it_def == content_.installations.end()) continue;
+      const InstallationDef& def = it_def->second;
+
+      // Mining is handled above against finite deposits.
+      if (is_mining_installation(def)) continue;
+
+      if (def.produces_per_day.empty() && def.consumes_per_day.empty()) continue;
+
+      // Compute the fraction of full-rate operation we can support with available inputs.
+      double frac = 1.0;
+      for (const auto& [mineral, per_day_raw] : def.consumes_per_day) {
+        const double per_day = std::max(0.0, per_day_raw);
+        if (per_day <= 1e-12) continue;
+
+        const double req = per_day * static_cast<double>(count);
+
+        const double have = [&]() {
+          const auto it = colony.minerals.find(mineral);
+          if (it == colony.minerals.end()) return 0.0;
+          return std::max(0.0, it->second);
+        }();
+
+        if (req > 1e-12) frac = std::min(frac, have / req);
+      }
+
+      frac = std::clamp(frac, 0.0, 1.0);
+      if (frac <= 1e-12) continue;
+
+      // Consume inputs first (based on the computed fraction), then produce outputs.
+      for (const auto& [mineral, per_day_raw] : def.consumes_per_day) {
+        const double per_day = std::max(0.0, per_day_raw);
+        if (per_day <= 1e-12) continue;
+        const double amt = per_day * static_cast<double>(count) * frac;
+        if (amt <= 1e-12) continue;
+
+        double& stock = colony.minerals[mineral]; // creates entry if missing
+        stock = std::max(0.0, stock - amt);
+        if (stock <= 1e-9) stock = 0.0;
+      }
+
+      for (const auto& [mineral, per_day_raw] : def.produces_per_day) {
+        const double per_day = std::max(0.0, per_day_raw);
+        if (per_day <= 1e-12) continue;
+        const double amt = per_day * static_cast<double>(count) * frac * industry_mult;
+        if (amt <= 1e-12) continue;
+        colony.minerals[mineral] += amt;
+      }
+    }
+  }
+}
+
+
+void Simulation::tick_research() {
+  std::unordered_map<Id, FactionEconomyMultipliers> fac_mult;
+  fac_mult.reserve(state_.factions.size());
+  for (Id fid : sorted_keys(state_.factions)) {
+    fac_mult.emplace(fid, compute_faction_economy_multipliers(content_, state_.factions.at(fid)));
+  }
+
+  const FactionEconomyMultipliers default_mult;
+  auto mult_for = [&](Id fid) -> const FactionEconomyMultipliers& {
+    auto it = fac_mult.find(fid);
+    if (it == fac_mult.end()) return default_mult;
+    return it->second;
+  };
+
+  for (Id cid : sorted_keys(state_.colonies)) {
+    auto& col = state_.colonies.at(cid);
+    double rp_per_day = 0.0;
+    for (const auto& [inst_id, count] : col.installations) {
+      const auto dit = content_.installations.find(inst_id);
+      if (dit == content_.installations.end()) continue;
+      rp_per_day += dit->second.research_points_per_day * static_cast<double>(count);
+    }
+    if (rp_per_day <= 0.0) continue;
+    rp_per_day *= std::max(0.0, mult_for(col.faction_id).research);
+    if (rp_per_day <= 0.0) continue;
+    auto fit = state_.factions.find(col.faction_id);
+    if (fit == state_.factions.end()) continue;
+    fit->second.research_points += rp_per_day;
+  }
+
+  auto prereqs_met = [&](const Faction& f, const TechDef& t) {
+    for (const auto& p : t.prereqs) {
+      if (!faction_has_tech(f, p)) return false;
+    }
+    return true;
+  };
+
+  for (Id fid : sorted_keys(state_.factions)) {
+    auto& fac = state_.factions.at(fid);
+    auto enqueue_unique = [&](const std::string& tech_id) {
+      if (tech_id.empty()) return;
+      if (faction_has_tech(fac, tech_id)) return;
+      if (std::find(fac.research_queue.begin(), fac.research_queue.end(), tech_id) != fac.research_queue.end()) return;
+      fac.research_queue.push_back(tech_id);
+    };
+
+    auto clean_queue = [&]() {
+      auto keep = [&](const std::string& id) {
+        if (id.empty()) return false;
+        if (faction_has_tech(fac, id)) return false;
+        return (content_.techs.find(id) != content_.techs.end());
+      };
+      fac.research_queue.erase(std::remove_if(fac.research_queue.begin(), fac.research_queue.end(),
+                                             [&](const std::string& id) { return !keep(id); }),
+                               fac.research_queue.end());
+    };
+
+    auto select_next_available = [&]() {
+      clean_queue();
+      fac.active_research_id.clear();
+      fac.active_research_progress = 0.0;
+
+      for (std::size_t i = 0; i < fac.research_queue.size(); ++i) {
+        const std::string& id = fac.research_queue[i];
+        const auto it = content_.techs.find(id);
+        if (it == content_.techs.end()) continue;
+        if (!prereqs_met(fac, it->second)) continue;
+
+        fac.active_research_id = id;
+        fac.active_research_progress = 0.0;
+        fac.research_queue.erase(fac.research_queue.begin() + static_cast<std::ptrdiff_t>(i));
+        return;
+      }
+    };
+
+    if (!fac.active_research_id.empty()) {
+      if (faction_has_tech(fac, fac.active_research_id)) {
+        fac.active_research_id.clear();
+        fac.active_research_progress = 0.0;
+      } else {
+        const auto it = content_.techs.find(fac.active_research_id);
+        if (it == content_.techs.end()) {
+          fac.active_research_id.clear();
+          fac.active_research_progress = 0.0;
+        } else if (!prereqs_met(fac, it->second)) {
+          enqueue_unique(fac.active_research_id);
+          fac.active_research_id.clear();
+          fac.active_research_progress = 0.0;
+        }
+      }
+    }
+
+    if (fac.active_research_id.empty()) select_next_available();
+
+    for (;;) {
+      if (fac.active_research_id.empty()) break;
+      const auto it2 = content_.techs.find(fac.active_research_id);
+      if (it2 == content_.techs.end()) {
+        fac.active_research_id.clear();
+        fac.active_research_progress = 0.0;
+        select_next_available();
+        continue;
+      }
+
+      const TechDef& tech = it2->second;
+      if (faction_has_tech(fac, tech.id)) {
+        fac.active_research_id.clear();
+        fac.active_research_progress = 0.0;
+        select_next_available();
+        continue;
+      }
+
+      if (!prereqs_met(fac, tech)) {
+        enqueue_unique(tech.id);
+        fac.active_research_id.clear();
+        fac.active_research_progress = 0.0;
+        select_next_available();
+        continue;
+      }
+
+      const double remaining = std::max(0.0, tech.cost - fac.active_research_progress);
+
+      if (remaining <= 0.0) {
+        fac.known_techs.push_back(tech.id);
+        for (const auto& eff : tech.effects) {
+          if (eff.type == "unlock_component") {
+            push_unique(fac.unlocked_components, eff.value);
+          } else if (eff.type == "unlock_installation") {
+            push_unique(fac.unlocked_installations, eff.value);
+          }
+        }
+        {
+          const std::string msg = "Research complete for " + fac.name + ": " + tech.name;
+          log::info(msg);
+          EventContext ctx;
+          ctx.faction_id = fac.id;
+          push_event(EventLevel::Info, EventCategory::Research, msg, ctx);
+        }
+        fac.active_research_id.clear();
+        fac.active_research_progress = 0.0;
+        select_next_available();
+        continue;
+      }
+
+      if (fac.research_points <= 0.0) break;
+      const double spend = std::min(fac.research_points, remaining);
+      fac.research_points -= spend;
+      fac.active_research_progress += spend;
+    }
+  }
+}
+
+
+void Simulation::tick_shipyards() {
+  const auto it_def = content_.installations.find("shipyard");
+  if (it_def == content_.installations.end()) return;
+
+  std::unordered_map<Id, FactionEconomyMultipliers> fac_mult;
+  fac_mult.reserve(state_.factions.size());
+  for (Id fid : sorted_keys(state_.factions)) {
+    fac_mult.emplace(fid, compute_faction_economy_multipliers(content_, state_.factions.at(fid)));
+  }
+
+  const FactionEconomyMultipliers default_mult;
+  auto mult_for = [&](Id fid) -> const FactionEconomyMultipliers& {
+    auto it = fac_mult.find(fid);
+    if (it == fac_mult.end()) return default_mult;
+    return it->second;
+  };
+
+  const InstallationDef& shipyard_def = it_def->second;
+  const double base_rate = shipyard_def.build_rate_tons_per_day;
+  if (base_rate <= 0.0) return;
+
+  const auto& costs_per_ton = shipyard_def.build_costs_per_ton;
+
+  auto max_build_by_minerals = [&](const Colony& colony, double desired_tons) {
+    double max_tons = desired_tons;
+    for (const auto& [mineral, cost_per_ton] : costs_per_ton) {
+      if (cost_per_ton <= 0.0) continue;
+      const auto it = colony.minerals.find(mineral);
+      const double available = (it == colony.minerals.end()) ? 0.0 : it->second;
+      max_tons = std::min(max_tons, available / cost_per_ton);
+    }
+    return max_tons;
+  };
+
+  auto consume_minerals = [&](Colony& colony, double built_tons) {
+    for (const auto& [mineral, cost_per_ton] : costs_per_ton) {
+      if (cost_per_ton <= 0.0) continue;
+      const double cost = built_tons * cost_per_ton;
+      colony.minerals[mineral] = std::max(0.0, colony.minerals[mineral] - cost);
+    }
+  };
+
+
+  // --- Auto-build ship design targets (auto-shipyards) ---
+  //
+  // Factions can define desired counts of ship designs to maintain in
+  // Faction::ship_design_targets. The simulation will automatically enqueue
+  // build orders (marked auto_queued=true) across the faction's colonies that
+  // have shipyards, without touching manual orders.
+  //
+  // Targets count *existing ships* plus *manual new-build orders* across the
+  // faction. Auto orders are adjusted to cover the remaining gap.
+  for (Id fid : sorted_keys(state_.factions)) {
+    auto& fac = state_.factions.at(fid);
+    if (fac.ship_design_targets.empty()) continue;
+
+    // Find all colonies belonging to this faction with at least one shipyard.
+    std::vector<Id> yard_colonies;
+    yard_colonies.reserve(state_.colonies.size());
+    for (Id cid2 : sorted_keys(state_.colonies)) {
+      const auto& colony = state_.colonies.at(cid2);
+      if (colony.faction_id != fid) continue;
+      const auto it_yard = colony.installations.find("shipyard");
+      const int yards = (it_yard != colony.installations.end()) ? it_yard->second : 0;
+      if (yards <= 0) continue;
+      yard_colonies.push_back(cid2);
+    }
+    if (yard_colonies.empty()) continue;
+
+    auto target_for = [&](const std::string& design_id) -> int {
+      auto it = fac.ship_design_targets.find(design_id);
+      if (it == fac.ship_design_targets.end()) return 0;
+      return it->second;
+    };
+
+    auto can_cancel_auto = [&](const BuildOrder& bo) -> bool {
+      if (!bo.auto_queued) return false;
+      if (bo.is_refit()) return false;
+      const ShipDesign* d = find_design(bo.design_id);
+      if (!d) return true;
+      const double initial = std::max(1.0, d->mass_tons);
+      return bo.tons_remaining >= initial - 1e-9;
+    };
+
+    // Remove stale auto orders whose design is no longer targeted (or is invalid/unbuildable),
+    // but never cancel an order that has already started construction.
+    for (Id cid2 : yard_colonies) {
+      auto& colony = state_.colonies.at(cid2);
+      for (int i = static_cast<int>(colony.shipyard_queue.size()) - 1; i >= 0; --i) {
+        const auto& bo = colony.shipyard_queue[static_cast<size_t>(i)];
+        if (!bo.auto_queued || bo.is_refit()) continue;
+
+        const int t = target_for(bo.design_id);
+        const bool design_ok = (find_design(bo.design_id) != nullptr) && is_design_buildable_for_faction(fid, bo.design_id);
+        if (t <= 0 || !design_ok) {
+          if (can_cancel_auto(bo)) {
+            colony.shipyard_queue.erase(colony.shipyard_queue.begin() + i);
+          }
+        }
+      }
+    }
+
+    // Count current ships and pending build orders by design.
+    std::unordered_map<std::string, int> have;
+    have.reserve(state_.ships.size());
+    for (const auto& [sid, sh] : state_.ships) {
+      if (sh.faction_id != fid) continue;
+      if (sh.design_id.empty()) continue;
+      have[sh.design_id] += 1;
+    }
+
+    std::unordered_map<std::string, int> manual_pending;
+    std::unordered_map<std::string, int> auto_pending;
+    for (Id cid2 : yard_colonies) {
+      const auto& colony = state_.colonies.at(cid2);
+      for (const auto& bo : colony.shipyard_queue) {
+        if (bo.is_refit()) continue;
+        if (bo.design_id.empty()) continue;
+        if (bo.auto_queued) auto_pending[bo.design_id] += 1;
+        else manual_pending[bo.design_id] += 1;
+      }
+    }
+
+    auto yard_eta = [&](Id cid2) -> double {
+      const auto& colony = state_.colonies.at(cid2);
+      const auto it_yard = colony.installations.find("shipyard");
+      const int yards = (it_yard != colony.installations.end()) ? it_yard->second : 0;
+      const double shipyard_mult = std::max(0.0, mult_for(fid).shipyard);
+      const double rate = base_rate * static_cast<double>(yards) * shipyard_mult;
+      if (rate <= 1e-9) return std::numeric_limits<double>::infinity();
+
+      double load_tons = 0.0;
+      for (const auto& bo : colony.shipyard_queue) {
+        load_tons += std::max(0.0, bo.tons_remaining);
+      }
+      return load_tons / rate;
+    };
+
+    auto pick_best_yard = [&]() -> Id {
+      Id best = kInvalidId;
+      double best_eta = std::numeric_limits<double>::infinity();
+      for (Id cid2 : yard_colonies) {
+        const double eta = yard_eta(cid2);
+        if (eta < best_eta - 1e-9 || (std::abs(eta - best_eta) <= 1e-9 && cid2 < best)) {
+          best = cid2;
+          best_eta = eta;
+        }
+      }
+      return best;
+    };
+
+    // Ensure auto pending matches the target gap for each design.
+    std::vector<std::string> design_ids;
+    design_ids.reserve(fac.ship_design_targets.size());
+    for (const auto& [did, t] : fac.ship_design_targets) {
+      if (t > 0) design_ids.push_back(did);
+    }
+    std::sort(design_ids.begin(), design_ids.end());
+    design_ids.erase(std::unique(design_ids.begin(), design_ids.end()), design_ids.end());
+
+    for (const auto& design_id : design_ids) {
+      const int target = std::max(0, target_for(design_id));
+      if (target <= 0) continue;
+
+      const ShipDesign* d = find_design(design_id);
+      if (!d) continue;
+      if (!is_design_buildable_for_faction(fid, design_id)) continue;
+
+      const int have_n = (have.find(design_id) != have.end()) ? have[design_id] : 0;
+      const int man_n = (manual_pending.find(design_id) != manual_pending.end()) ? manual_pending[design_id] : 0;
+      const int cur_auto = (auto_pending.find(design_id) != auto_pending.end()) ? auto_pending[design_id] : 0;
+
+      const int required_auto = std::max(0, target - (have_n + man_n));
+
+      // Trim excess cancelable auto orders.
+      int to_remove = std::max(0, cur_auto - required_auto);
+      if (to_remove > 0) {
+        for (auto it = yard_colonies.rbegin(); it != yard_colonies.rend() && to_remove > 0; ++it) {
+          auto& colony = state_.colonies.at(*it);
+          for (int i = static_cast<int>(colony.shipyard_queue.size()) - 1; i >= 0 && to_remove > 0; --i) {
+            const auto& bo = colony.shipyard_queue[static_cast<size_t>(i)];
+            if (!bo.auto_queued || bo.is_refit()) continue;
+            if (bo.design_id != design_id) continue;
+            if (!can_cancel_auto(bo)) continue;
+            colony.shipyard_queue.erase(colony.shipyard_queue.begin() + i);
+            to_remove -= 1;
+            auto_pending[design_id] -= 1;
+          }
+        }
+      }
+
+      // Add missing auto orders.
+      const int now_auto = (auto_pending.find(design_id) != auto_pending.end()) ? auto_pending[design_id] : 0;
+      int to_add = std::max(0, required_auto - now_auto);
+      if (to_add <= 0) continue;
+
+      const double initial_tons = std::max(1.0, d->mass_tons);
+      for (int k = 0; k < to_add; ++k) {
+        const Id best = pick_best_yard();
+        if (best == kInvalidId) break;
+        auto& colony = state_.colonies.at(best);
+        BuildOrder bo;
+        bo.design_id = design_id;
+        bo.tons_remaining = initial_tons;
+        bo.auto_queued = true;
+        colony.shipyard_queue.push_back(bo);
+        auto_pending[design_id] += 1;
+      }
+    }
+  }
+
+  for (Id cid : sorted_keys(state_.colonies)) {
+    auto& colony = state_.colonies.at(cid);
+    const auto it_yard = colony.installations.find("shipyard");
+    const int yards = (it_yard != colony.installations.end()) ? it_yard->second : 0;
+    if (yards <= 0) continue;
+
+    const double shipyard_mult = std::max(0.0, mult_for(colony.faction_id).shipyard);
+    double capacity_tons = base_rate * static_cast<double>(yards) * shipyard_mult;
+
+    while (capacity_tons > 1e-9 && !colony.shipyard_queue.empty()) {
+      auto& bo = colony.shipyard_queue.front();
+      const bool is_refit = bo.is_refit();
+
+      const auto* body = find_ptr(state_.bodies, colony.body_id);
+
+      // If this is a refit order, ensure the target ship exists and is docked.
+      // Refit orders are front-of-queue and will stall the shipyard until the ship arrives.
+      Ship* refit_ship = nullptr;
+      if (is_refit) {
+        if (!body) {
+          const std::string msg = "Shipyard refit stalled (missing colony body): " + colony.name;
+          nebula4x::log::error(msg);
+          EventContext ctx;
+          ctx.faction_id = colony.faction_id;
+          ctx.colony_id = colony.id;
+          push_event(EventLevel::Error, EventCategory::Shipyard, msg, ctx);
+          colony.shipyard_queue.erase(colony.shipyard_queue.begin());
+          continue;
+        }
+
+        refit_ship = find_ptr(state_.ships, bo.refit_ship_id);
+        if (!refit_ship) {
+          const std::string msg = "Shipyard refit target ship not found; dropping order at " + colony.name;
+          nebula4x::log::warn(msg);
+          EventContext ctx;
+          ctx.faction_id = colony.faction_id;
+          ctx.colony_id = colony.id;
+          push_event(EventLevel::Warn, EventCategory::Shipyard, msg, ctx);
+          colony.shipyard_queue.erase(colony.shipyard_queue.begin());
+          continue;
+        }
+
+        if (refit_ship->faction_id != colony.faction_id) {
+          const std::string msg = "Shipyard refit target ship faction mismatch; dropping order at " + colony.name;
+          nebula4x::log::warn(msg);
+          EventContext ctx;
+          ctx.faction_id = colony.faction_id;
+          ctx.colony_id = colony.id;
+          ctx.ship_id = refit_ship->id;
+          push_event(EventLevel::Warn, EventCategory::Shipyard, msg, ctx);
+          colony.shipyard_queue.erase(colony.shipyard_queue.begin());
+          continue;
+        }
+
+        if (!is_ship_docked_at_colony(refit_ship->id, colony.id)) {
+          // Stall until the ship arrives. (No event spam.)
+          break;
+        }
+
+        // Prototype drydock behavior: refitting ships are pinned to the colony body and cannot
+        // execute other queued orders while their refit is being processed.
+        refit_ship->position_mkm = body->position_mkm;
+        state_.ship_orders[refit_ship->id].queue.clear();
+        refit_ship->auto_explore = false;
+        refit_ship->auto_freight = false;
+      }
+
+      double build_tons = std::min(capacity_tons, bo.tons_remaining);
+
+      if (!costs_per_ton.empty()) {
+        build_tons = max_build_by_minerals(colony, build_tons);
+      }
+
+      if (build_tons <= 1e-9) break;
+
+      if (!costs_per_ton.empty()) consume_minerals(colony, build_tons);
+      bo.tons_remaining -= build_tons;
+      capacity_tons -= build_tons;
+
+      if (bo.tons_remaining > 1e-9) break;
+
+      // --- Completion ---
+      if (is_refit) {
+        const auto* target = find_design(bo.design_id);
+        if (!target || !refit_ship) {
+          const std::string msg = std::string("Shipyard refit failed (unknown design or missing ship): ") + bo.design_id;
+          nebula4x::log::warn(msg);
+          EventContext ctx;
+          ctx.faction_id = colony.faction_id;
+          ctx.colony_id = colony.id;
+          if (refit_ship) ctx.ship_id = refit_ship->id;
+          push_event(EventLevel::Warn, EventCategory::Shipyard, msg, ctx);
+        } else {
+          // Apply the new design. Treat a completed refit as a full overhaul (fully repaired).
+          refit_ship->design_id = bo.design_id;
+          refit_ship->hp = std::max(1.0, target->max_hp);
+          apply_design_stats_to_ship(*refit_ship);
+
+          if (body) refit_ship->position_mkm = body->position_mkm;
+
+          // If the refit reduces cargo capacity, move excess cargo back into colony stockpiles.
+          const double cap = std::max(0.0, target->cargo_tons);
+          double used = 0.0;
+          for (const auto& [_, tons] : refit_ship->cargo) used += std::max(0.0, tons);
+
+          if (used > cap + 1e-9) {
+            double excess = used - cap;
+            for (const auto& mineral : sorted_keys(refit_ship->cargo)) {
+              if (excess <= 1e-9) break;
+              auto it = refit_ship->cargo.find(mineral);
+              if (it == refit_ship->cargo.end()) continue;
+              const double have = std::max(0.0, it->second);
+              if (have <= 1e-9) continue;
+
+              const double move = std::min(have, excess);
+              it->second -= move;
+              colony.minerals[mineral] += move;
+              excess -= move;
+
+              if (it->second <= 1e-9) refit_ship->cargo.erase(it);
+            }
+          }
+
+          const std::string msg =
+              "Refit ship " + refit_ship->name + " -> " + target->name + " (" + refit_ship->design_id + ") at " + colony.name;
+          nebula4x::log::info(msg);
+          EventContext ctx;
+          ctx.faction_id = colony.faction_id;
+          ctx.system_id = refit_ship->system_id;
+          ctx.ship_id = refit_ship->id;
+          ctx.colony_id = colony.id;
+          push_event(EventLevel::Info, EventCategory::Shipyard, msg, ctx);
+        }
+
+        colony.shipyard_queue.erase(colony.shipyard_queue.begin());
+        continue;
+      }
+
+      // Build new ship.
+      const auto* design = find_design(bo.design_id);
+      if (!design) {
+        const std::string msg = std::string("Unknown design in build queue: ") + bo.design_id;
+        nebula4x::log::warn(msg);
+        EventContext ctx;
+        ctx.faction_id = colony.faction_id;
+        ctx.colony_id = colony.id;
+        push_event(EventLevel::Warn, EventCategory::Shipyard, msg, ctx);
+      } else if (!body) {
+        const std::string msg = "Shipyard build failed (missing colony body): " + colony.name;
+        nebula4x::log::error(msg);
+        EventContext ctx;
+        ctx.faction_id = colony.faction_id;
+        ctx.colony_id = colony.id;
+        push_event(EventLevel::Error, EventCategory::Shipyard, msg, ctx);
+      } else if (auto* sys = find_ptr(state_.systems, body->system_id); !sys) {
+        const std::string msg = "Shipyard build failed (missing system): colony=" + colony.name;
+        nebula4x::log::error(msg);
+        EventContext ctx;
+        ctx.faction_id = colony.faction_id;
+        ctx.colony_id = colony.id;
+        push_event(EventLevel::Error, EventCategory::Shipyard, msg, ctx);
+      } else {
+        Ship sh;
+        sh.id = allocate_id(state_);
+        sh.faction_id = colony.faction_id;
+        sh.system_id = body->system_id;
+        sh.design_id = bo.design_id;
+        sh.position_mkm = body->position_mkm;
+        sh.fuel_tons = 0.0;
+        apply_design_stats_to_ship(sh);
+        sh.name = design->name + " #" + std::to_string(sh.id);
+        state_.ships[sh.id] = sh;
+        state_.ship_orders[sh.id] = ShipOrders{};
+        state_.systems[sh.system_id].ships.push_back(sh.id);
+
+        const std::string msg = "Built ship " + sh.name + " (" + sh.design_id + ") at " + colony.name;
+        nebula4x::log::info(msg);
+        EventContext ctx;
+        ctx.faction_id = colony.faction_id;
+        ctx.system_id = sh.system_id;
+        ctx.ship_id = sh.id;
+        ctx.colony_id = colony.id;
+        push_event(EventLevel::Info, EventCategory::Shipyard, msg, ctx);
+      }
+
+      colony.shipyard_queue.erase(colony.shipyard_queue.begin());
+    }
+  }
+}
+
+void Simulation::tick_construction() {
+  for (Id cid : sorted_keys(state_.colonies)) {
+    auto& colony = state_.colonies.at(cid);
+
+    Id colony_system_id = kInvalidId;
+    if (auto* b = find_ptr(state_.bodies, colony.body_id)) colony_system_id = b->system_id;
+
+    double cp_available = construction_points_per_day(colony);
+    if (cp_available <= 1e-9) continue;
+
+    auto can_pay_minerals = [&](const InstallationDef& def) {
+      for (const auto& [mineral, cost] : def.build_costs) {
+        if (cost <= 0.0) continue;
+        const auto it = colony.minerals.find(mineral);
+        const double have = (it == colony.minerals.end()) ? 0.0 : it->second;
+        if (have + 1e-9 < cost) return false;
+      }
+      return true;
+    };
+
+    auto pay_minerals = [&](const InstallationDef& def) {
+      for (const auto& [mineral, cost] : def.build_costs) {
+        if (cost <= 0.0) continue;
+        colony.minerals[mineral] = std::max(0.0, colony.minerals[mineral] - cost);
+      }
+    };
+
+
+    // Auto-build installation targets.
+    //
+    // Colony::installation_targets lets the player declare desired counts of
+    // installations to maintain. The simulation will automatically manage
+    // *auto-queued* construction orders to reach those counts.
+    //
+    // Rules:
+    // - Manually-queued construction orders are never modified.
+    // - Auto-queued orders are created/trimmed to match:
+    //     target - (current installations + manual pending)
+    // - Lowering/removing a target will only prune *pending* auto-queued units;
+    //   it will not cancel a unit already in-progress (minerals paid or CP spent).
+    if (!colony.installation_targets.empty()) {
+      auto target_for = [&](const std::string& inst_id) -> int {
+        auto it = colony.installation_targets.find(inst_id);
+        if (it == colony.installation_targets.end()) return 0;
+        return std::max(0, it->second);
+      };
+
+      auto committed_units = [&](const InstallationBuildOrder& ord) -> int {
+        // If we're already building the current unit (minerals paid or CP started),
+        // treat one unit as committed and do not prune it.
+        const bool in_prog = ord.minerals_paid || ord.cp_remaining > 1e-9;
+        return in_prog ? 1 : 0;
+      };
+
+      // 1) Prune auto-queued orders whose target is now zero/missing.
+      for (int i = static_cast<int>(colony.construction_queue.size()) - 1; i >= 0; --i) {
+        auto& ord = colony.construction_queue[static_cast<std::size_t>(i)];
+        if (!ord.auto_queued) continue;
+        if (target_for(ord.installation_id) > 0) continue;
+
+        const int committed = std::min(std::max(0, ord.quantity_remaining), committed_units(ord));
+        if (ord.quantity_remaining > committed) {
+          ord.quantity_remaining = committed;
+        }
+        if (ord.quantity_remaining <= 0) {
+          colony.construction_queue.erase(colony.construction_queue.begin() + i);
+        }
+      }
+
+      // 2) Compute pending quantities by installation id, split by manual vs auto.
+      std::unordered_map<std::string, int> manual_pending;
+      std::unordered_map<std::string, int> auto_pending;
+      manual_pending.reserve(colony.construction_queue.size() * 2);
+      auto_pending.reserve(colony.construction_queue.size() * 2);
+
+      for (const auto& ord : colony.construction_queue) {
+        if (ord.installation_id.empty()) continue;
+        const int qty = std::max(0, ord.quantity_remaining);
+        if (qty <= 0) continue;
+        if (ord.auto_queued) {
+          auto_pending[ord.installation_id] += qty;
+        } else {
+          manual_pending[ord.installation_id] += qty;
+        }
+      }
+
+      // Sorted keys for determinism.
+      std::vector<std::string> ids;
+      ids.reserve(colony.installation_targets.size());
+      for (const auto& [inst_id, _] : colony.installation_targets) ids.push_back(inst_id);
+      std::sort(ids.begin(), ids.end());
+      ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+
+      for (const auto& inst_id : ids) {
+        if (inst_id.empty()) continue;
+        const int target = target_for(inst_id);
+        if (target <= 0) continue;
+
+        const int have = [&]() -> int {
+          auto it = colony.installations.find(inst_id);
+          return (it == colony.installations.end()) ? 0 : std::max(0, it->second);
+        }();
+
+        const int man = manual_pending[inst_id];
+        const int aut = auto_pending[inst_id];
+
+        const int required_auto = std::max(0, target - (have + man));
+
+        // 3) Trim excess auto-queued units for this installation id.
+        if (aut > required_auto) {
+          int remove = aut - required_auto;
+          for (int i = static_cast<int>(colony.construction_queue.size()) - 1; i >= 0 && remove > 0; --i) {
+            auto& ord = colony.construction_queue[static_cast<std::size_t>(i)];
+            if (!ord.auto_queued) continue;
+            if (ord.installation_id != inst_id) continue;
+
+            const int committed = std::min(std::max(0, ord.quantity_remaining), committed_units(ord));
+            const int cancelable = std::max(0, ord.quantity_remaining - committed);
+            if (cancelable <= 0) continue;
+
+            const int take = std::min(cancelable, remove);
+            ord.quantity_remaining -= take;
+            remove -= take;
+
+            if (ord.quantity_remaining <= 0) {
+              colony.construction_queue.erase(colony.construction_queue.begin() + i);
+            }
+          }
+        }
+
+        // 4) Add missing auto-queued units.
+        //
+        // Recompute current auto pending for this id after trimming.
+        int aut_after = 0;
+        for (const auto& ord : colony.construction_queue) {
+          if (!ord.auto_queued) continue;
+          if (ord.installation_id != inst_id) continue;
+          aut_after += std::max(0, ord.quantity_remaining);
+        }
+
+        const int missing = std::max(0, required_auto - aut_after);
+        if (missing > 0) {
+          // Only auto-queue installations the faction can build.
+          if (is_installation_buildable_for_faction(colony.faction_id, inst_id)) {
+            InstallationBuildOrder ord;
+            ord.installation_id = inst_id;
+            ord.quantity_remaining = missing;
+            ord.auto_queued = true;
+            colony.construction_queue.push_back(ord);
+          }
+        }
+      }
+    }
+
+    // Construction queue processing:
+    //
+    // Previous behavior was strictly "front-of-queue only" which meant a single
+    // unaffordable order (missing minerals) could block the entire queue forever.
+    //
+    // New behavior:
+    // - The sim will *skip* stalled orders (can't pay minerals) and continue trying
+    //   later orders in the same day. This prevents total queue lock-ups.
+    // - If construction points remain, the sim may also apply CP to multiple queued
+    //   orders in a single day (a simple form of parallelization).
+    //
+    // This keeps the model simple while making colony production far less brittle.
+    auto& q = colony.construction_queue;
+
+    int safety_steps = 0;
+    constexpr int kMaxSteps = 100000;
+
+    while (cp_available > 1e-9 && !q.empty() && safety_steps++ < kMaxSteps) {
+      bool progressed_any = false;
+
+      for (std::size_t i = 0; i < q.size() && cp_available > 1e-9;) {
+        auto& ord = q[i];
+
+        if (ord.quantity_remaining <= 0) {
+          q.erase(q.begin() + static_cast<std::ptrdiff_t>(i));
+          progressed_any = true;
+          continue;
+        }
+
+        auto it_def = content_.installations.find(ord.installation_id);
+        if (it_def == content_.installations.end()) {
+          q.erase(q.begin() + static_cast<std::ptrdiff_t>(i));
+          progressed_any = true;
+          continue;
+        }
+        const InstallationDef& def = it_def->second;
+
+        auto complete_one = [&]() {
+          colony.installations[def.id] += 1;
+          ord.quantity_remaining -= 1;
+          ord.minerals_paid = false;
+          ord.cp_remaining = 0.0;
+
+          const std::string msg = "Constructed " + def.name + " at " + colony.name;
+          EventContext ctx;
+          ctx.faction_id = colony.faction_id;
+          ctx.system_id = colony_system_id;
+          ctx.colony_id = colony.id;
+          push_event(EventLevel::Info, EventCategory::Construction, msg, ctx);
+
+          progressed_any = true;
+
+          if (ord.quantity_remaining <= 0) {
+            q.erase(q.begin() + static_cast<std::ptrdiff_t>(i));
+            return;
+          }
+
+          // Keep i the same so we can immediately attempt the next unit of this
+          // same order in the same day (if we still have CP and minerals).
+        };
+
+        // If we haven't started the current unit, attempt to pay minerals.
+        if (!ord.minerals_paid) {
+          if (!can_pay_minerals(def)) {
+            // Stalled: skip this order for now (do not block the whole queue).
+            ++i;
+            continue;
+          }
+
+          pay_minerals(def);
+          ord.minerals_paid = true;
+          ord.cp_remaining = std::max(0.0, def.construction_cost);
+          progressed_any = true;
+
+          if (ord.cp_remaining <= 1e-9) {
+            // Instant build (0 CP cost).
+            complete_one();
+            continue;
+          }
+        } else {
+          // Defensive repair: if an in-progress unit was loaded with cp_remaining == 0
+          // but the definition has a CP cost, restore the remaining CP from the def.
+          if (ord.cp_remaining <= 1e-9 && def.construction_cost > 0.0) {
+            ord.cp_remaining = def.construction_cost;
+          }
+        }
+
+        // Spend CP on the in-progress unit.
+        if (ord.minerals_paid && ord.cp_remaining > 1e-9) {
+          const double spend = std::min(cp_available, ord.cp_remaining);
+          ord.cp_remaining -= spend;
+          cp_available -= spend;
+          progressed_any = true;
+
+          if (ord.cp_remaining <= 1e-9) {
+            complete_one();
+            continue;
+          }
+        }
+
+        ++i;
+      }
+
+      // If we made no progress in an entire scan of the queue, stop to avoid an
+      // infinite loop (e.g. all remaining orders are stalled on minerals).
+      if (!progressed_any) break;
+    }
+  }
+}
+
+
+
+} // namespace nebula4x

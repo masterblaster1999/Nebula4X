@@ -246,6 +246,12 @@ ShipDesign derive_preview_design(const ContentDB& c, ShipDesign d) {
   double cargo = 0.0;
   double sensor = 0.0;
   double colony_cap = 0.0;
+  double troop_cap = 0.0;
+
+  // Visibility / signature multiplier (product of component multipliers).
+  // 1.0 = normal visibility; lower values are harder to detect.
+  double sig_mult = 1.0;
+
   double weapon_damage = 0.0;
   double weapon_range = 0.0;
   double hp_bonus = 0.0;
@@ -271,6 +277,11 @@ ShipDesign derive_preview_design(const ContentDB& c, ShipDesign d) {
     cargo += comp.cargo_tons;
     sensor = std::max(sensor, comp.sensor_range_mkm);
     colony_cap += comp.colony_capacity_millions;
+    troop_cap += comp.troop_capacity;
+
+    const double comp_sig =
+        std::clamp(std::isfinite(comp.signature_multiplier) ? comp.signature_multiplier : 1.0, 0.0, 1.0);
+    sig_mult *= comp_sig;
     if (comp.type == ComponentType::Weapon) {
       weapon_damage += comp.weapon_damage;
       weapon_range = std::max(weapon_range, comp.weapon_range_mkm);
@@ -299,6 +310,8 @@ ShipDesign derive_preview_design(const ContentDB& c, ShipDesign d) {
   d.cargo_tons = cargo;
   d.sensor_range_mkm = sensor;
   d.colony_capacity_millions = colony_cap;
+  d.troop_capacity = troop_cap;
+  d.signature_multiplier = std::clamp(sig_mult, 0.05, 1.0);
 
   d.power_generation = power_gen;
   d.power_use_total = power_use_total;
@@ -952,9 +965,77 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
             ImGui::PopID();
           }
           ImGui::Text("Cargo: %.0f / %.0f t", cargo_used_tons, d->cargo_tons);
-          ImGui::Text("Sensor: %.0f mkm", d->sensor_range_mkm);
+
+          const bool has_sensors = (d->sensor_range_mkm > 1e-9);
+          if (has_sensors) {
+            int mode_i = static_cast<int>(sh->sensor_mode);
+            const char* modes[] = {"Passive", "Normal", "Active"};
+            if (ImGui::Combo("Sensor mode##sensor_mode", &mode_i, modes, IM_ARRAYSIZE(modes))) {
+              mode_i = std::clamp(mode_i, 0, 2);
+              sh->sensor_mode = static_cast<SensorMode>(mode_i);
+            }
+
+            const Id fleet_id = sim.fleet_for_ship(sh->id);
+            if (fleet_id != kInvalidId) {
+              ImGui::SameLine();
+              if (ImGui::SmallButton("Apply to Fleet##sensor_mode_fleet")) {
+                if (auto* fl = find_ptr(s.fleets, fleet_id)) {
+                  for (Id sid : fl->ship_ids) {
+                    if (auto* other = find_ptr(s.ships, sid)) other->sensor_mode = sh->sensor_mode;
+                  }
+                }
+              }
+            }
+
+            const double gen = std::max(0.0, d->power_generation);
+            const auto p = compute_power_allocation(gen, d->power_use_engines, d->power_use_shields,
+                                                    d->power_use_weapons, d->power_use_sensors, sh->power_policy);
+
+            // Effective sensor range is only meaningful when sensors are online.
+            double range_eff = 0.0;
+            if (p.sensors_online) {
+              double mult = 1.0;
+              if (sh->sensor_mode == SensorMode::Passive) mult = sim.cfg().sensor_mode_passive_range_multiplier;
+              else if (sh->sensor_mode == SensorMode::Active) mult = sim.cfg().sensor_mode_active_range_multiplier;
+              if (!std::isfinite(mult) || mult < 0.0) mult = 0.0;
+              range_eff = std::max(0.0, d->sensor_range_mkm) * mult;
+            }
+
+            // Effective signature includes both design stealth and EMCON.
+            double sig_eff = std::clamp(std::isfinite(d->signature_multiplier) ? d->signature_multiplier : 1.0, 0.0, 1.0);
+
+            const SensorMode sig_mode = sh->power_policy.sensors_enabled ? sh->sensor_mode : SensorMode::Passive;
+            double sig_mult = 1.0;
+            if (sig_mode == SensorMode::Passive) sig_mult = sim.cfg().sensor_mode_passive_signature_multiplier;
+            else if (sig_mode == SensorMode::Active) sig_mult = sim.cfg().sensor_mode_active_signature_multiplier;
+            if (!std::isfinite(sig_mult) || sig_mult < 0.0) sig_mult = 0.0;
+
+            sig_eff *= sig_mult;
+            const double max_sig = std::max(1.0, std::isfinite(sim.cfg().sensor_mode_active_signature_multiplier)
+                                                    ? sim.cfg().sensor_mode_active_signature_multiplier
+                                                    : 1.0);
+            sig_eff = std::clamp(sig_eff, 0.0, max_sig);
+
+            ImGui::Text("Sensor: %.0f mkm (effective %.0f mkm)", d->sensor_range_mkm, range_eff);
+            ImGui::Text("Signature: %.0f%% (effective %.0f%%)", d->signature_multiplier * 100.0, sig_eff * 100.0);
+
+            if (!sh->power_policy.sensors_enabled) {
+              ImGui::TextDisabled("Note: Sensors disabled by power policy -> signature treated as Passive.");
+            } else if (!p.sensors_online) {
+              ImGui::TextDisabled("Note: Sensors offline due to power availability / load shedding.");
+            }
+          } else {
+            ImGui::Text("Sensor: 0 mkm");
+            ImGui::Text("Signature: %.0f%%", d->signature_multiplier * 100.0);
+            ImGui::TextDisabled("Sensor mode: (no sensors)");
+          }
           if (d->colony_capacity_millions > 0.0) {
             ImGui::Text("Colony capacity: %.0f M", d->colony_capacity_millions);
+            if (sh->colonists_millions > 0.0) {
+              ImGui::Text("Colonists: %.1f / %.1f M", sh->colonists_millions, d->colony_capacity_millions);
+            } else {
+              ImGui::TextDisabled("Colonists: 0 / %.1f M", d->colony_capacity_millions);
+            }
           } else {
             ImGui::TextDisabled("Colony capacity: (none)");
           }
@@ -1069,6 +1150,86 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
           ImGui::EndDisabled();
           ImGui::SameLine();
           ImGui::TextDisabled("(requires a cargo hold)");
+        }
+
+        const bool can_auto_refuel = (d && d->fuel_capacity_tons > 0.0);
+        if (!can_auto_refuel) ImGui::BeginDisabled();
+        if (ImGui::Checkbox("Auto-refuel when low fuel (idle)", &sh->auto_refuel)) {
+          // No mutual exclusion: this is a safety automation that can coexist
+          // with auto-explore/auto-freight.
+          sh->auto_refuel_threshold_fraction =
+              std::clamp(sh->auto_refuel_threshold_fraction, 0.0, 1.0);
+        }
+        if (ImGui::IsItemHovered()) {
+          ImGui::SetTooltip(
+              "When enabled, if this ship is idle and its fuel level drops below the configured threshold,\n"
+              "it will automatically route to the nearest friendly colony to refuel.");
+        }
+
+        if (can_auto_refuel && sh->auto_refuel) {
+          float thresh_pct = static_cast<float>(sh->auto_refuel_threshold_fraction * 100.0);
+          if (ImGui::SliderFloat("Refuel threshold", &thresh_pct, 0.0f, 100.0f, "%.0f%%")) {
+            sh->auto_refuel_threshold_fraction =
+                std::clamp(static_cast<double>(thresh_pct) / 100.0, 0.0, 1.0);
+          }
+          if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "Auto-refuel triggers when fuel is below this fraction of capacity.\n"
+                "Example: 25%% = refuel when below 25%%.");
+          }
+        }
+
+        if (!can_auto_refuel) {
+          ImGui::EndDisabled();
+          ImGui::SameLine();
+          ImGui::TextDisabled("(requires fuel tanks)");
+        }
+
+        const bool can_auto_repair = (d && d->max_hp > 0.0);
+        if (!can_auto_repair) ImGui::BeginDisabled();
+        if (ImGui::Checkbox("Auto-repair when damaged (idle)", &sh->auto_repair)) {
+          // Like auto-refuel, this is a safety automation that can coexist with other modes.
+          sh->auto_repair_threshold_fraction =
+              std::clamp(sh->auto_repair_threshold_fraction, 0.0, 1.0);
+        }
+        if (ImGui::IsItemHovered()) {
+          ImGui::SetTooltip(
+              "When enabled, if this ship is idle and its HP drops below the configured threshold,\n"
+              "it will automatically route to the nearest mutual-friendly shipyard for repairs.");
+        }
+
+        if (can_auto_repair && sh->auto_repair) {
+          float thresh_pct = static_cast<float>(sh->auto_repair_threshold_fraction * 100.0);
+          if (ImGui::SliderFloat("Repair threshold", &thresh_pct, 0.0f, 100.0f, "%.0f%%")) {
+            sh->auto_repair_threshold_fraction =
+                std::clamp(static_cast<double>(thresh_pct) / 100.0, 0.0, 1.0);
+          }
+          if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "Auto-repair triggers when HP is below this fraction of max HP.\n"
+                "Example: 75%% = seek repairs when below 75%%.");
+          }
+        }
+
+        if (!can_auto_repair) {
+          ImGui::EndDisabled();
+          ImGui::SameLine();
+          ImGui::TextDisabled("(requires a valid design)");
+        }
+
+        // Repair scheduling priority when docked at a shipyard.
+        {
+          int rp = static_cast<int>(sh->repair_priority);
+          const char* labels[] = {"Low", "Normal", "High"};
+          if (ImGui::Combo("Repair priority", &rp, labels, IM_ARRAYSIZE(labels))) {
+            rp = std::clamp(rp, 0, 2);
+            sh->repair_priority = static_cast<RepairPriority>(rp);
+          }
+          if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "When multiple damaged ships are docked at the same shipyard, repair capacity is\n"
+                "allocated in priority order. Higher priority ships are repaired first.");
+          }
         }
 
         if (in_fleet) {
@@ -1511,13 +1672,57 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
             }
             ImGui::TextDisabled("Colony is in a different system %s. Order will auto-route via jump points.",
                                 dest_label.c_str());
+
+            const bool restrict = ui.fog_of_war;
+            if (const auto plan = sim.plan_jump_route_for_ship_to_pos(selected_ship, sel_col_body->system_id,
+                                                                     sel_col_body->position_mkm, restrict,
+                                                                     /*include_queued_jumps=*/true)) {
+              ImGui::TextDisabled("Estimated travel time to colony: %.1f days", plan->total_eta_days);
+            } else {
+              ImGui::TextDisabled("No known route to this colony.");
+            }
           }
 
-          const bool friendly = (sel_col->faction_id == sh->faction_id);
+          const bool friendly = sim.are_factions_mutual_friendly(sh->faction_id, sel_col->faction_id);
+          const bool own_colony = (sel_col->faction_id == sh->faction_id);
           if (!friendly) {
             ImGui::Spacing();
             ImGui::TextDisabled("This colony is not friendly.");
             ImGui::Text("Defenders: %.1f", sel_col->ground_forces);
+
+            // --- Orbital bombardment ---
+            {
+              const auto* d2 = sim.find_design(sh->design_id);
+              const double w_dmg = d2 ? d2->weapon_damage : 0.0;
+              const double w_range = d2 ? d2->weapon_range_mkm : 0.0;
+
+              ImGui::Spacing();
+              ImGui::Text("Orbital bombardment");
+              if (d2) {
+                ImGui::TextDisabled("Weapons: %.1f dmg/day, range %.1f mkm", w_dmg, w_range);
+              } else {
+                ImGui::TextDisabled("Weapons: (unknown design)");
+              }
+
+              static int bombard_days = 7;
+              ImGui::InputInt("Bombard days (-1 = indefinite)", &bombard_days);
+
+              const bool can_bombard = (w_dmg > 1e-9 && w_range > 1e-9);
+              if (!can_bombard) ImGui::BeginDisabled();
+              if (ImGui::Button("Bombard")) {
+                if (can_bombard) {
+                  if (!sim.issue_bombard_colony(selected_ship, selected_colony, bombard_days, ui.fog_of_war)) {
+                    nebula4x::log::warn("Couldn't queue bombard order (no known route?).");
+                  }
+                }
+              }
+              if (!can_bombard) {
+                ImGui::EndDisabled();
+                if (ImGui::IsItemHovered()) {
+                  ImGui::SetTooltip("Ship has no weapons.");
+                }
+              }
+            }
 
             const auto* d2 = sim.find_design(sh->design_id);
             const double cap2 = d2 ? d2->troop_capacity : 0.0;
@@ -1575,10 +1780,17 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
               }
             }
             ImGui::SameLine();
+            if (!own_colony) ImGui::BeginDisabled();
             if (ImGui::Button("Scrap Ship")) {
-              if (!sim.issue_scrap_ship(selected_ship, selected_colony, ui.fog_of_war)) {
-                nebula4x::log::warn("Couldn't queue scrap order.");
+              if (own_colony) {
+                if (!sim.issue_scrap_ship(selected_ship, selected_colony, ui.fog_of_war)) {
+                  nebula4x::log::warn("Couldn't queue scrap order.");
+                }
               }
+            }
+            if (!own_colony) {
+              ImGui::EndDisabled();
+              if (ImGui::IsItemHovered()) ImGui::SetTooltip("Scrapping requires an owned colony.");
             }
 
             // --- Troops ---
@@ -1595,6 +1807,10 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
             if (cap2 <= 1e-9) {
               ImGui::TextDisabled("(This design has no troop bays.)");
             } else {
+              if (!own_colony) {
+                ImGui::TextDisabled("(Troop transfer requires an owned colony.)");
+                ImGui::BeginDisabled();
+              }
               if (ImGui::Button("Load Troops")) {
                 if (!sim.issue_load_troops(selected_ship, selected_colony, troop_amount, ui.fog_of_war)) {
                   nebula4x::log::warn("Couldn't queue load troops order.");
@@ -1606,7 +1822,168 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
                   nebula4x::log::warn("Couldn't queue unload troops order.");
                 }
               }
+              if (!own_colony) {
+                ImGui::EndDisabled();
+              }
             }
+          }
+
+          // --- Colonists ---
+          ImGui::Separator();
+          ImGui::Text("Colonists");
+          const double cap_col = d2 ? d2->colony_capacity_millions : 0.0;
+          ImGui::Text("Embarked: %.1f / %.1f M", sh->colonists_millions, cap_col);
+          ImGui::Text("Colony population: %.1f M", sel_col->population_millions);
+
+          static double colonist_amount = 0.0;
+          ImGui::InputDouble("Millions##Colonists (0 = max)", &colonist_amount, 10.0, 50.0, "%.1f");
+
+          if (cap_col <= 1e-9) {
+            ImGui::TextDisabled("(This design has no colony modules / passenger capacity.)");
+          } else {
+            if (!own_colony) {
+              ImGui::TextDisabled("(Colonist transfer requires an owned colony.)");
+              ImGui::BeginDisabled();
+            }
+            if (ImGui::Button("Load Colonists")) {
+              if (!sim.issue_load_colonists(selected_ship, selected_colony, colonist_amount, ui.fog_of_war)) {
+                nebula4x::log::warn("Couldn't queue load colonists order.");
+              }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Unload Colonists")) {
+              if (!sim.issue_unload_colonists(selected_ship, selected_colony, colonist_amount, ui.fog_of_war)) {
+                nebula4x::log::warn("Couldn't queue unload colonists order.");
+              }
+            }
+            if (!own_colony) ImGui::EndDisabled();
+          }
+        }
+
+        // --- Wreck salvage ---
+        {
+          ImGui::Separator();
+          ImGui::TextUnformatted("Wreck salvage");
+          ImGui::TextDisabled(
+              "Queue a salvage order to collect minerals from a wreck (auto-routes via jump points).\n"
+              "If 'Tons' is 0, the ship will take as much as it can in one pass.");
+
+          const auto* sh_design = sim.find_design(sh->design_id);
+          const double cargo_cap = sh_design ? sh_design->cargo_tons : 0.0;
+          const double cargo_used = [&]() {
+            double u = 0.0;
+            for (const auto& [_, v] : sh->cargo) u += v;
+            return u;
+          }();
+          ImGui::Text("Cargo: %.1f / %.1f", cargo_used, cargo_cap);
+
+          if (cargo_cap <= 1e-6) {
+            ImGui::TextDisabled("(This design has no cargo holds.)");
+          }
+
+          // Build a list of known wrecks (respecting fog-of-war).
+          std::vector<Id> wreck_ids;
+          std::vector<std::string> wreck_labels;
+          wreck_ids.reserve(s.wrecks.size());
+          wreck_labels.reserve(s.wrecks.size());
+
+          const Id viewer_faction_id = ui.player_faction_id;
+          for (const auto& [wid, w] : s.wrecks) {
+            if (ui.fog_of_war && !sim.is_system_discovered_by_faction(viewer_faction_id, w.system_id)) {
+              continue;
+            }
+            const auto* wsys = find_ptr(s.systems, w.system_id);
+            const std::string sys_name = wsys ? wsys->name : std::string("Unknown System");
+            double total = 0.0;
+            for (const auto& [_, v] : w.minerals) total += v;
+            std::string label = sys_name + ": " + (w.name.empty() ? ("Wreck " + std::to_string(wid)) : w.name);
+            label += " (" + fmt::format("{:.1f}", total) + " t)";
+            wreck_ids.push_back(wid);
+            wreck_labels.push_back(std::move(label));
+          }
+
+          // Stable ordering for the combo.
+          std::vector<size_t> order;
+          order.reserve(wreck_ids.size());
+          for (size_t i = 0; i < wreck_ids.size(); ++i) order.push_back(i);
+          std::sort(order.begin(), order.end(), [&](size_t a, size_t b) { return wreck_labels[a] < wreck_labels[b]; });
+
+          static Id salvage_wreck_id = kInvalidId;
+          static std::string salvage_mineral;
+          static double salvage_tons = 0.0;
+
+          if (!order.empty()) {
+            bool found = false;
+            for (size_t idx : order) {
+              if (wreck_ids[idx] == salvage_wreck_id) {
+                found = true;
+                break;
+              }
+            }
+            if (!found) salvage_wreck_id = wreck_ids[order.front()];
+          } else {
+            salvage_wreck_id = kInvalidId;
+          }
+
+          if (order.empty()) {
+            ImGui::TextDisabled("(No known wrecks.)");
+          } else {
+            // Wreck combo
+            const auto current_label = [&]() -> std::string {
+              for (size_t idx : order) {
+                if (wreck_ids[idx] == salvage_wreck_id) return wreck_labels[idx];
+              }
+              return wreck_labels[order.front()];
+            }();
+
+            if (ImGui::BeginCombo("Wreck##salvage", current_label.c_str())) {
+              for (size_t idx : order) {
+                const bool selected = (wreck_ids[idx] == salvage_wreck_id);
+                if (ImGui::Selectable(wreck_labels[idx].c_str(), selected)) {
+                  salvage_wreck_id = wreck_ids[idx];
+                  salvage_mineral.clear();
+                }
+                if (selected) ImGui::SetItemDefaultFocus();
+              }
+              ImGui::EndCombo();
+            }
+
+            // Mineral combo (depends on selected wreck)
+            std::vector<std::string> minerals;
+            if (const auto* w = find_ptr(s.wrecks, salvage_wreck_id)) {
+              minerals.reserve(w->minerals.size());
+              for (const auto& [k, v] : w->minerals) {
+                if (v > 1e-9) minerals.push_back(k);
+              }
+              std::sort(minerals.begin(), minerals.end());
+            }
+            const std::string mineral_label = salvage_mineral.empty() ? std::string("<All>") : salvage_mineral;
+            if (ImGui::BeginCombo("Mineral##salvage", mineral_label.c_str())) {
+              if (ImGui::Selectable("<All>", salvage_mineral.empty())) {
+                salvage_mineral.clear();
+              }
+              for (const auto& m : minerals) {
+                const bool selected = (salvage_mineral == m);
+                if (ImGui::Selectable(m.c_str(), selected)) {
+                  salvage_mineral = m;
+                }
+                if (selected) ImGui::SetItemDefaultFocus();
+              }
+              ImGui::EndCombo();
+            }
+
+            ImGui::InputDouble("Tons##salvage (0 = max)", &salvage_tons, 10.0, 100.0, "%.1f");
+            if (salvage_tons < 0.0) salvage_tons = 0.0;
+
+            const bool can_issue = (salvage_wreck_id != kInvalidId) && (cargo_cap > 1e-6);
+            if (!can_issue) ImGui::BeginDisabled();
+            if (ImGui::Button("Salvage")) {
+              if (!sim.issue_salvage_wreck(selected_ship, salvage_wreck_id, salvage_mineral, salvage_tons,
+                                           ui.fog_of_war)) {
+                nebula4x::log::warn("Couldn't queue salvage wreck order.");
+              }
+            }
+            if (!can_issue) ImGui::EndDisabled();
           }
         }
 
@@ -1674,7 +2051,119 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
                     }
                 }
             }
+
+            // --- Fuel Transfer (Ship-to-Ship Refueling) ---
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Text("Fuel Transfer");
+            ImGui::TextDisabled("Transfers fuel from this ship's tanks to the target ship (ship-to-ship refueling).");
+            ImGui::TextDisabled("Both ships must have fuel tanks. Tons <= 0 transfers as much as possible.");
+
+            static double ship_transfer_fuel_tons = 0.0;
+
+            if (target_ship_idx < 0) {
+              ImGui::TextDisabled("Select a target ship above to enable fuel transfer.");
+            } else {
+              const Id target_id = friendly_ships[target_ship_idx].first;
+              const auto* tgt = find_ptr(s.ships, target_id);
+
+              const auto* src_d = sim.find_design(sh->design_id);
+              const auto* tgt_d = tgt ? sim.find_design(tgt->design_id) : nullptr;
+              const double src_cap = src_d ? std::max(0.0, src_d->fuel_capacity_tons) : 0.0;
+              const double tgt_cap = tgt_d ? std::max(0.0, tgt_d->fuel_capacity_tons) : 0.0;
+
+              if (!tgt) {
+                ImGui::TextDisabled("Target ship no longer exists.");
+              } else if (src_cap <= 1e-9 || tgt_cap <= 1e-9) {
+                ImGui::TextDisabled("Fuel transfer unavailable: one or both ships have no fuel capacity.");
+              } else {
+                ImGui::Text("Source fuel: %.1f / %.1f", sh->fuel_tons, src_cap);
+                ImGui::Text("Target fuel: %.1f / %.1f", tgt->fuel_tons, tgt_cap);
+
+                ImGui::InputDouble("Tons##Fuel (0 = max)", &ship_transfer_fuel_tons, 10.0, 100.0, "%.1f");
+
+                if (ImGui::Button("Transfer Fuel to Target")) {
+                  if (!sim.issue_transfer_fuel_to_ship(selected_ship, target_id, ship_transfer_fuel_tons, ui.fog_of_war)) {
+                    nebula4x::log::warn("Couldn't queue fuel transfer order.");
+                  }
+                }
+              }
+            }
+        // --- Troop Transfer (Ship-to-Ship) ---
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Text("Troop Transfer");
+            ImGui::TextDisabled("Transfers embarked troops from this ship to the target ship.");
+            ImGui::TextDisabled("Both ships must have troop bays. Strength <= 0 transfers as much as possible.");
+
+            static double ship_transfer_troops_strength = 0.0;
+
+            if (target_ship_idx < 0) {
+              ImGui::TextDisabled("Select a target ship above to enable troop transfer.");
+            } else {
+              const Id target_id = friendly_ships[target_ship_idx].first;
+              const auto* tgt = find_ptr(s.ships, target_id);
+
+              const auto* src_d = sim.find_design(sh->design_id);
+              const auto* tgt_d = tgt ? sim.find_design(tgt->design_id) : nullptr;
+              const double src_cap = src_d ? std::max(0.0, src_d->troop_capacity) : 0.0;
+              const double tgt_cap = tgt_d ? std::max(0.0, tgt_d->troop_capacity) : 0.0;
+
+              if (!tgt) {
+                ImGui::TextDisabled("Target ship no longer exists.");
+              } else if (src_cap <= 1e-9 || tgt_cap <= 1e-9) {
+                ImGui::TextDisabled("Troop transfer unavailable: one or both ships have no troop capacity.");
+              } else {
+                ImGui::Text("Source troops: %.1f / %.1f", sh->troops, src_cap);
+                ImGui::Text("Target troops: %.1f / %.1f", tgt->troops, tgt_cap);
+
+                ImGui::InputDouble("Strength##TroopTransfer (0 = max)", &ship_transfer_troops_strength, 10.0, 100.0,
+                                   "%.1f");
+
+                if (ImGui::Button("Transfer Troops to Target")) {
+                  if (!sim.issue_transfer_troops_to_ship(selected_ship, target_id, ship_transfer_troops_strength,
+                                                         ui.fog_of_war)) {
+                    nebula4x::log::warn("Couldn't queue troop transfer order.");
+                  }
+                }
+              }
+            }
+
+            // --- Escort / Follow ---
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Text("Escort / Follow");
+            ImGui::TextDisabled(
+                "Follows the target ship, maintaining a separation. Cross-system escort will route via jump points.");
+
+            static double escort_follow_mkm = 1.0;
+            if (!std::isfinite(escort_follow_mkm) || escort_follow_mkm < 0.0) escort_follow_mkm = 1.0;
+            ImGui::InputDouble("Follow distance (mkm)##Escort", &escort_follow_mkm, 0.1, 1.0, "%.2f");
+
+            if (target_ship_idx < 0) {
+              ImGui::TextDisabled("Select a target ship above to enable escort.");
+            } else {
+              const Id target_id = friendly_ships[target_ship_idx].first;
+
+              if (ImGui::Button("Queue Escort Order")) {
+                if (!sim.issue_escort_ship(selected_ship, target_id, escort_follow_mkm, ui.fog_of_war)) {
+                  nebula4x::log::warn("Couldn't queue escort order.");
+                }
+              }
+
+              const Id fleet_id = sim.fleet_for_ship(selected_ship);
+              if (fleet_id != kInvalidId) {
+                ImGui::SameLine();
+                if (ImGui::Button("Fleet: Queue Escort")) {
+                  if (!sim.issue_fleet_escort_ship(fleet_id, target_id, escort_follow_mkm, ui.fog_of_war)) {
+                    nebula4x::log::warn("Couldn't queue fleet escort order.");
+                  }
+                }
+              }
+            }
+
         }
+
 
 
         ImGui::Separator();
@@ -2246,6 +2735,31 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
           }
         }
 
+        // --- Habitability / Life support ---
+        ImGui::Separator();
+        ImGui::Text("Habitability / Life Support");
+        if (!sim.config().enable_habitability) {
+          ImGui::TextDisabled("Disabled in SimConfig.");
+        } else if (!b) {
+          ImGui::TextDisabled("Body missing.");
+        } else {
+          const double hab = sim.body_habitability(b->id);
+          const double required = sim.required_habitation_capacity_millions(*colony);
+          const double have = sim.habitation_capacity_millions(*colony);
+
+          ImGui::Text("Habitability: %.1f%%", hab * 100.0);
+          if (required <= 1e-6) {
+            ImGui::TextDisabled("No habitation support required.");
+          } else {
+            ImGui::Text("Habitation support: %.0fM / %.0fM required", have, required);
+            if (have + 1e-6 < required) {
+              ImGui::Text("Shortfall: %.0fM (population will decline)", required - have);
+            } else {
+              ImGui::TextDisabled("Supported (domed). Population grows slowly unless the world is terraformed.");
+            }
+          }
+        }
+
 
         ImGui::Separator();
         if (ImGui::TreeNodeEx("Mineral reserves (auto-freight)", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -2335,6 +2849,96 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
         }
 
 
+        // --- Mineral targets (auto-freight import) ---
+        ImGui::Separator();
+        if (ImGui::TreeNodeEx("Mineral targets (auto-freight import)", ImGuiTreeNodeFlags_DefaultOpen)) {
+          ImGui::TextDisabled("Auto-freight will try to import minerals to reach these target stockpiles (tons).");
+          ImGui::TextDisabled("Targets also act as a soft export floor (like a reserve).");
+          ImGui::TextDisabled("Effective export floor = max(local queue reserve, manual reserve, target).");
+
+          // Sorted list of minerals mentioned in stockpiles, reserves, or targets.
+          std::vector<std::string> minerals;
+          minerals.reserve(colony->minerals.size() + colony->mineral_reserves.size() + colony->mineral_targets.size());
+          for (const auto& [k, _] : colony->minerals) minerals.push_back(k);
+          for (const auto& [k, _] : colony->mineral_reserves) minerals.push_back(k);
+          for (const auto& [k, _] : colony->mineral_targets) minerals.push_back(k);
+          std::sort(minerals.begin(), minerals.end());
+          minerals.erase(std::unique(minerals.begin(), minerals.end()), minerals.end());
+
+          const ImGuiTableFlags tflags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
+                                         ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_Resizable;
+          if (ImGui::BeginTable("colony_targets_table", 4, tflags)) {
+            ImGui::TableSetupColumn("Mineral", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("Stockpile", ImGuiTableColumnFlags_WidthFixed, 90.0f);
+            ImGui::TableSetupColumn("Target", ImGuiTableColumnFlags_WidthFixed, 110.0f);
+            ImGui::TableSetupColumn("Edit", ImGuiTableColumnFlags_WidthFixed, 40.0f);
+            ImGui::TableHeadersRow();
+
+            for (const auto& mineral : minerals) {
+              ImGui::TableNextRow();
+
+              ImGui::TableSetColumnIndex(0);
+              ImGui::TextUnformatted(mineral.c_str());
+
+              ImGui::TableSetColumnIndex(1);
+              const auto it_have = colony->minerals.find(mineral);
+              const double have = (it_have == colony->minerals.end()) ? 0.0 : it_have->second;
+              ImGui::Text("%.1f", have);
+
+              ImGui::TableSetColumnIndex(2);
+              double target = 0.0;
+              if (auto it = colony->mineral_targets.find(mineral); it != colony->mineral_targets.end()) {
+                target = it->second;
+              }
+              ImGui::PushID((std::string("tgt_") + mineral).c_str());
+              ImGui::SetNextItemWidth(100.0f);
+              if (ImGui::InputDouble("##target", &target, 0.0, 0.0, "%.1f")) {
+                target = std::max(0.0, target);
+                if (target <= 1e-9) {
+                  colony->mineral_targets.erase(mineral);
+                } else {
+                  colony->mineral_targets[mineral] = target;
+                }
+              }
+
+              ImGui::TableSetColumnIndex(3);
+              if (ImGui::SmallButton("X")) {
+                colony->mineral_targets.erase(mineral);
+              }
+              ImGui::PopID();
+            }
+
+            ImGui::EndTable();
+          }
+
+          static char add_target_mineral[64] = "";
+          static double add_target_tons = 0.0;
+
+          ImGui::Separator();
+          ImGui::Text("Add / set target");
+          ImGui::InputText("Mineral##add_target_mineral", add_target_mineral, IM_ARRAYSIZE(add_target_mineral));
+          ImGui::InputDouble("Tons##add_target_tons", &add_target_tons, 0.0, 0.0, "%.1f");
+          add_target_tons = std::max(0.0, add_target_tons);
+
+          if (ImGui::SmallButton("Set target")) {
+            const std::string m(add_target_mineral);
+            if (!m.empty()) {
+              if (add_target_tons <= 1e-9) {
+                colony->mineral_targets.erase(m);
+              } else {
+                colony->mineral_targets[m] = add_target_tons;
+              }
+            }
+          }
+          ImGui::SameLine();
+          if (ImGui::SmallButton("Clear all##targets")) {
+            colony->mineral_targets.clear();
+          }
+
+          ImGui::TreePop();
+        }
+
+
         // Body-level mineral deposits (finite mining).
         ImGui::Separator();
         ImGui::Text("Body deposits");
@@ -2397,6 +3001,119 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
           } else {
             ImGui::BulletText("%s: %d", nm.c_str(), v);
           }
+        if (ImGui::TreeNode("Installation targets (auto-build)")) {
+          ImGui::TextDisabled("The simulation will auto-queue construction orders to reach these counts.");
+          ImGui::TextDisabled("Auto-queued orders are marked [AUTO] in the construction queue.");
+          ImGui::SameLine();
+          if (ImGui::SmallButton("Clear all targets")) {
+            colony->installation_targets.clear();
+          }
+
+          // Pending quantities from the construction queue (split manual vs auto).
+          std::unordered_map<std::string, int> pending_manual;
+          std::unordered_map<std::string, int> pending_auto;
+          pending_manual.reserve(colony->construction_queue.size() * 2);
+          pending_auto.reserve(colony->construction_queue.size() * 2);
+          for (const auto& ord : colony->construction_queue) {
+            if (ord.installation_id.empty()) continue;
+            const int qty = std::max(0, ord.quantity_remaining);
+            if (qty <= 0) continue;
+            if (ord.auto_queued) {
+              pending_auto[ord.installation_id] += qty;
+            } else {
+              pending_manual[ord.installation_id] += qty;
+            }
+          }
+
+          // Buildable (unlocked) installations for this colony's faction.
+          const auto* fac_for_colony_targets = find_ptr(s.factions, colony->faction_id);
+          std::vector<std::string> buildable;
+          if (fac_for_colony_targets) {
+            for (const auto& id : fac_for_colony_targets->unlocked_installations) {
+              if (!sim.is_installation_buildable_for_faction(fac_for_colony_targets->id, id)) continue;
+              buildable.push_back(id);
+            }
+          } else {
+            for (const auto& [id, _] : sim.content().installations) buildable.push_back(id);
+          }
+          std::sort(buildable.begin(), buildable.end());
+          buildable.erase(std::unique(buildable.begin(), buildable.end()), buildable.end());
+
+          // Union: buildable + already targeted + already installed.
+          std::vector<std::string> all_ids = buildable;
+          for (const auto& [id, _] : colony->installation_targets) all_ids.push_back(id);
+          for (const auto& [id, _] : colony->installations) all_ids.push_back(id);
+          std::sort(all_ids.begin(), all_ids.end());
+          all_ids.erase(std::unique(all_ids.begin(), all_ids.end()), all_ids.end());
+
+          const ImGuiTableFlags tflags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
+                                         ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_Resizable;
+          if (ImGui::BeginTable("colony_installation_targets_table", 6, tflags)) {
+            ImGui::TableSetupColumn("Installation", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("Have", ImGuiTableColumnFlags_WidthFixed, 48.0f);
+            ImGui::TableSetupColumn("Manual Q", ImGuiTableColumnFlags_WidthFixed, 64.0f);
+            ImGui::TableSetupColumn("Auto Q", ImGuiTableColumnFlags_WidthFixed, 56.0f);
+            ImGui::TableSetupColumn("Target", ImGuiTableColumnFlags_WidthFixed, 64.0f);
+            ImGui::TableSetupColumn("Need", ImGuiTableColumnFlags_WidthFixed, 56.0f);
+            ImGui::TableHeadersRow();
+
+            for (const auto& id : all_ids) {
+              const auto itdef = sim.content().installations.find(id);
+              const std::string nm2 = (itdef == sim.content().installations.end()) ? id : itdef->second.name;
+
+              const int have = [&]() -> int {
+                auto it = colony->installations.find(id);
+                return (it == colony->installations.end()) ? 0 : it->second;
+              }();
+
+              const int man = pending_manual[id];
+              const int aut = pending_auto[id];
+
+              int tgt = 0;
+              if (auto it = colony->installation_targets.find(id); it != colony->installation_targets.end()) tgt = it->second;
+              tgt = std::max(0, tgt);
+
+              const int need = std::max(0, tgt - (have + man + aut));
+
+              ImGui::TableNextRow();
+              ImGui::TableSetColumnIndex(0);
+              ImGui::Text("%s", nm2.c_str());
+              if (!sim.is_installation_buildable_for_faction(colony->faction_id, id)) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("(locked)");
+              }
+
+              ImGui::TableSetColumnIndex(1);
+              ImGui::Text("%d", have);
+
+              ImGui::TableSetColumnIndex(2);
+              ImGui::Text("%d", man);
+
+              ImGui::TableSetColumnIndex(3);
+              ImGui::Text("%d", aut);
+
+              ImGui::TableSetColumnIndex(4);
+              ImGui::PushID(id.c_str());
+              int edit = tgt;
+              ImGui::SetNextItemWidth(56.0f);
+              if (ImGui::DragInt("##tgt", &edit, 1.0f, 0, 100000)) {
+                edit = std::max(0, edit);
+                if (edit == 0) colony->installation_targets.erase(id);
+                else colony->installation_targets[id] = edit;
+              }
+              ImGui::PopID();
+
+              ImGui::TableSetColumnIndex(5);
+              ImGui::Text("%d", need);
+            }
+
+            ImGui::EndTable();
+          }
+
+          ImGui::TreePop();
+        }
+
+
         }
 
         ImGui::Separator();
@@ -2438,7 +3155,8 @@ if (colony->construction_queue.empty()) {
       const auto& ord = colony->construction_queue[static_cast<std::size_t>(i)];
       const auto it = sim.content().installations.find(ord.installation_id);
       const InstallationDef* def = (it == sim.content().installations.end()) ? nullptr : &it->second;
-      const std::string nm = def ? def->name : ord.installation_id;
+      std::string nm = def ? def->name : ord.installation_id;
+      if (ord.auto_queued) nm += " [AUTO]";
 
       ImGui::TableNextRow();
 
@@ -2671,6 +3389,10 @@ if (colony->shipyard_queue.empty()) {
             refit_ship ? refit_ship->name : ("Ship #" + std::to_string(static_cast<int>(bo.refit_ship_id)));
         nm = "REFIT: " + ship_nm + " -> " + design_nm;
       }
+      if (bo.auto_queued && !is_refit) {
+        nm = "[AUTO] " + nm;
+      }
+
 
       ImGui::TableNextRow();
 
@@ -3036,8 +3758,8 @@ if (colony->shipyard_queue.empty()) {
         ImGui::SeparatorText("Auto-freight");
         ImGui::TextWrapped(
             "Enable Auto-freight on cargo ships to have them automatically haul minerals between your colonies "
-            "whenever they are idle. Auto-freight tries to relieve mineral shortages that stall shipyards or "
-            "unpaid construction orders.");
+            "whenever they are idle. Auto-freight tries to relieve mineral shortages that stall shipyards, "
+            "unpaid construction orders, and colony stockpile targets (set in Colony Details).");
 
         if (ImGui::Button("Enable auto-freight for all freighters")) {
           for (auto& [sid, ship] : s.ships) {
@@ -3079,6 +3801,9 @@ if (colony->shipyard_queue.empty()) {
               break;
             case LogisticsNeedKind::IndustryInput:
               reason = "Industry";
+              break;
+            case LogisticsNeedKind::StockpileTarget:
+              reason = "Target";
               break;
             case LogisticsNeedKind::Fuel:
               reason = "Fuel";
@@ -3187,6 +3912,149 @@ if (colony->shipyard_queue.empty()) {
           ImGui::EndTable();
         }
         if (shown == 0) ImGui::TextDisabled("No ships have Auto-freight enabled.");
+
+        ImGui::SeparatorText("Auto-shipyards");
+        ImGui::TextWrapped(
+            "Set desired counts of ship designs to maintain. The simulation will automatically enqueue shipyard build orders "
+            "(marked [AUTO] in shipyard queues) across your colonies to reach these targets. Manual build/refit orders are never modified.");
+
+        int shipyard_colonies = 0;
+        int shipyard_installations = 0;
+        for (const auto& [cid2, c2] : s.colonies) {
+          if (c2.faction_id != selected_faction_id) continue;
+          const auto it_yard = c2.installations.find("shipyard");
+          const int yards = (it_yard != c2.installations.end()) ? it_yard->second : 0;
+          if (yards <= 0) continue;
+          shipyard_colonies += 1;
+          shipyard_installations += yards;
+        }
+        if (shipyard_installations <= 0) {
+          ImGui::TextDisabled("No shipyards owned by this faction.");
+        } else {
+          ImGui::TextDisabled("%d shipyard colony(ies), %d shipyard installation(s).", shipyard_colonies, shipyard_installations);
+        }
+
+        if (ImGui::Button("Clear ship build targets")) {
+          selected_faction->ship_design_targets.clear();
+        }
+
+        // Add / update a target.
+        {
+          const auto buildable = sorted_buildable_design_ids(sim, selected_faction_id);
+          static int ship_target_design_idx = 0;
+          static int ship_target_count = 1;
+          if (buildable.empty()) {
+            ImGui::TextDisabled("No buildable ship designs.");
+          } else {
+            if (ship_target_design_idx < 0 || ship_target_design_idx >= static_cast<int>(buildable.size())) ship_target_design_idx = 0;
+            const std::string& did = buildable[static_cast<std::size_t>(ship_target_design_idx)];
+            if (ImGui::BeginCombo("Design##ship_targets", did.c_str())) {
+              for (int i = 0; i < static_cast<int>(buildable.size()); ++i) {
+                const bool is_selected = (i == ship_target_design_idx);
+                if (ImGui::Selectable(buildable[static_cast<std::size_t>(i)].c_str(), is_selected)) ship_target_design_idx = i;
+                if (is_selected) ImGui::SetItemDefaultFocus();
+              }
+              ImGui::EndCombo();
+            }
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(90.0f);
+            ImGui::InputInt("Target##ship_targets", &ship_target_count);
+            if (ship_target_count < 0) ship_target_count = 0;
+            ImGui::SameLine();
+            if (ImGui::Button("Set##ship_targets")) {
+              if (ship_target_count <= 0) selected_faction->ship_design_targets.erase(did);
+              else selected_faction->ship_design_targets[did] = ship_target_count;
+            }
+          }
+        }
+
+        // Compute current counts and pending shipyard builds.
+        std::unordered_map<std::string, int> have_by_design;
+        have_by_design.reserve(s.ships.size());
+        for (const auto& [sid, sh] : s.ships) {
+          if (sh.faction_id != selected_faction_id) continue;
+          if (sh.design_id.empty()) continue;
+          have_by_design[sh.design_id] += 1;
+        }
+
+        std::unordered_map<std::string, int> pending_manual_by_design;
+        std::unordered_map<std::string, int> pending_auto_by_design;
+        for (const auto& [cid2, c2] : s.colonies) {
+          if (c2.faction_id != selected_faction_id) continue;
+          const auto it_yard = c2.installations.find("shipyard");
+          const int yards = (it_yard != c2.installations.end()) ? it_yard->second : 0;
+          if (yards <= 0) continue;
+          for (const auto& bo : c2.shipyard_queue) {
+            if (bo.refit_ship_id != kInvalidId) continue;
+            if (bo.design_id.empty()) continue;
+            if (bo.auto_queued) pending_auto_by_design[bo.design_id] += 1;
+            else pending_manual_by_design[bo.design_id] += 1;
+          }
+        }
+
+        if (selected_faction->ship_design_targets.empty()) {
+          ImGui::TextDisabled("No ship design targets set.");
+        } else if (ImGui::BeginTable("ship_design_targets_table", 6, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
+          ImGui::TableSetupColumn("Design", ImGuiTableColumnFlags_WidthStretch);
+          ImGui::TableSetupColumn("Target", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+          ImGui::TableSetupColumn("Have", ImGuiTableColumnFlags_WidthFixed, 60.0f);
+          ImGui::TableSetupColumn("Pending (M)", ImGuiTableColumnFlags_WidthFixed, 95.0f);
+          ImGui::TableSetupColumn("Pending (A)", ImGuiTableColumnFlags_WidthFixed, 95.0f);
+          ImGui::TableSetupColumn("Need (A)", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+          ImGui::TableHeadersRow();
+
+          std::vector<std::string> ids;
+          ids.reserve(selected_faction->ship_design_targets.size());
+          for (const auto& [did, t] : selected_faction->ship_design_targets) {
+            if (t > 0) ids.push_back(did);
+          }
+          std::sort(ids.begin(), ids.end());
+          ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+
+          for (const auto& did : ids) {
+            auto it = selected_faction->ship_design_targets.find(did);
+            if (it == selected_faction->ship_design_targets.end()) continue;
+            int target = it->second;
+            if (target <= 0) continue;
+
+            const int have_n = (have_by_design.find(did) != have_by_design.end()) ? have_by_design[did] : 0;
+            const int man_n = (pending_manual_by_design.find(did) != pending_manual_by_design.end()) ? pending_manual_by_design[did] : 0;
+            const int auto_n = (pending_auto_by_design.find(did) != pending_auto_by_design.end()) ? pending_auto_by_design[did] : 0;
+            const int need_auto = std::max(0, target - (have_n + man_n));
+
+            ImGui::TableNextRow();
+
+            ImGui::TableSetColumnIndex(0);
+            const auto* d = sim.find_design(did);
+            if (d) {
+              ImGui::Text("%s (%s)", d->name.c_str(), did.c_str());
+            } else {
+              ImGui::TextDisabled("%s", did.c_str());
+            }
+
+            ImGui::TableSetColumnIndex(1);
+            ImGui::PushID(did.c_str());
+            ImGui::SetNextItemWidth(60.0f);
+            int t_edit = target;
+            if (ImGui::InputInt("##target", &t_edit)) {
+              if (t_edit < 0) t_edit = 0;
+              if (t_edit <= 0) selected_faction->ship_design_targets.erase(did);
+              else selected_faction->ship_design_targets[did] = t_edit;
+            }
+            ImGui::PopID();
+
+            ImGui::TableSetColumnIndex(2);
+            ImGui::Text("%d", have_n);
+            ImGui::TableSetColumnIndex(3);
+            ImGui::Text("%d", man_n);
+            ImGui::TableSetColumnIndex(4);
+            ImGui::Text("%d", auto_n);
+            ImGui::TableSetColumnIndex(5);
+            ImGui::Text("%d", need_auto);
+          }
+
+          ImGui::EndTable();
+        }
       }
       ImGui::EndTabItem();
     }
@@ -3553,9 +4421,11 @@ if (colony->shipyard_queue.empty()) {
 
         ImGui::Separator();
         ImGui::TextWrapped(
-            "Diplomatic stances are currently used as simple rules-of-engagement: ships will only auto-engage "
-            "factions they consider Hostile. Issuing an Attack order against a non-hostile faction will automatically "
-            "set the relationship to Hostile once contact is confirmed.");
+            "Diplomatic stances are used for rules-of-engagement: ships will only auto-engage factions they consider "
+            "Hostile. Issuing an Attack order against a non-hostile faction will automatically set the relationship "
+            "to Hostile once contact is confirmed.\n\n"
+            "Mutual Friendly stances also enable cooperation: allied sensor coverage + discovered systems are shared, "
+            "and ships may refuel/repair/transfer minerals at allied colonies.");
 
         static bool reciprocal = true;
         ImGui::Checkbox("Reciprocal edits (set both directions)", &reciprocal);
@@ -3713,6 +4583,7 @@ if (colony->shipyard_queue.empty()) {
             const double cargo_used_tons = 0.0;
             ImGui::Text("Cargo: %.0f / %.0f t", cargo_used_tons, d->cargo_tons);
             ImGui::Text("Sensor: %.0f mkm", d->sensor_range_mkm);
+            ImGui::Text("Signature: %.0f%%", d->signature_multiplier * 100.0);
             if (d->colony_capacity_millions > 0.0) {
               ImGui::Text("Colony capacity: %.0f M", d->colony_capacity_millions);
             }
@@ -4028,6 +4899,7 @@ if (colony->shipyard_queue.empty()) {
         }
         ImGui::Text("Cargo: %.0f t", preview.cargo_tons);
         ImGui::Text("Sensor: %.0f mkm", preview.sensor_range_mkm);
+        ImGui::Text("Signature: %.0f%%", preview.signature_multiplier * 100.0);
         if (preview.colony_capacity_millions > 0.0)
           ImGui::Text("Colony capacity: %.0f M", preview.colony_capacity_millions);
         if (preview.weapon_damage > 0.0) ImGui::Text("Weapons: %.1f (range %.1f)", preview.weapon_damage, preview.weapon_range_mkm);

@@ -62,6 +62,36 @@ enum class DiplomacyStatus : std::uint8_t {
 
 
 
+// Sensor emissions control / operating mode.
+//
+// Sensor mode affects two things:
+//  1) The *range* of this ship's sensors when acting as a sensor source.
+//  2) The ship's *detectability* (signature multiplier) when it is the target.
+//
+// This is a lightweight "EMCON"-style mechanic meant to create scouting tradeoffs:
+//  - Passive: harder to detect, but shorter sensor range.
+//  - Normal: baseline.
+//  - Active: longer sensor range, but easier to detect.
+enum class SensorMode : std::uint8_t {
+  Passive = 0,
+  Normal = 1,
+  Active = 2,
+};
+
+
+// Repair priority for shipyard repairs.
+//
+// When multiple damaged ships are docked at the same colony, shipyard repair
+// capacity is allocated in priority order (High -> Normal -> Low).
+enum class RepairPriority : std::uint8_t {
+  Low = 0,
+  Normal = 1,
+  High = 2,
+};
+
+
+
+
 struct Body {
   Id id{kInvalidId};
   std::string name;
@@ -132,6 +162,15 @@ struct ComponentDef {
 
   double mass_tons{0.0};
 
+  // Visibility / sensor signature multiplier.
+  //
+  // Ship designs derive a signature multiplier from their components. Sensor detection then scales effective detection ranges using:
+  //   effective_range = sensor_range_mkm * target_signature_multiplier
+  //
+  // 1.0 = normal visibility. Lower values are harder to detect.
+  double signature_multiplier{1.0};
+
+
   // Type-specific stats (0 means "not applicable").
   double speed_km_s{0.0};          // engine
   double fuel_use_per_mkm{0.0};    // engine (tons per million km)
@@ -171,6 +210,9 @@ struct ShipDesign {
   double fuel_use_per_mkm{0.0};
   double cargo_tons{0.0};
   double sensor_range_mkm{0.0};
+  // Visibility / sensor signature multiplier for this design.
+  // 1.0 = normal; lower values are harder to detect.
+  double signature_multiplier{1.0};
   double colony_capacity_millions{0.0};
 
   // Power budgeting.
@@ -236,6 +278,19 @@ struct InstallationDef {
   // Optional: in-system sensor range (used by sensor stations / ground radar).
   double sensor_range_mkm{0.0};
 
+  // Optional: orbital / planetary weapon platform.
+  //
+  // If weapon_damage > 0 and weapon_range_mkm > 0, colonies that have this
+  // installation will automatically fire at detected hostile ships that enter
+  // range during Simulation::tick_combat(). Damage is applied as normal weapon
+  // damage (shields absorb first, then hull).
+  //
+  // Damage is expressed in the same abstract units as ShipDesign::weapon_damage
+  // and is applied once per day per colony as an aggregated battery across all
+  // qualifying installations.
+  double weapon_damage{0.0};
+  double weapon_range_mkm{0.0};
+
   // Only used by research labs.
   double research_points_per_day{0.0};
 
@@ -244,6 +299,16 @@ struct InstallationDef {
 
   // Optional: troop training (points per day).
   double troop_training_points_per_day{0.0};
+
+  // Optional: habitation / life support capacity.
+  //
+  // Expressed as population in *millions* that can be supported in fully hostile
+  // conditions (habitability = 0.0). The simulation uses this in combination
+  // with the computed body habitability to determine whether a colony has
+  // sufficient housing / life support to sustain its population.
+  //
+  // See: SimConfig::enable_habitability.
+  double habitation_capacity_millions{0.0};
 
   // Optional: fortifications (static defense value).
   double fortification_points{0.0};
@@ -272,6 +337,10 @@ struct Ship {
   // Interpreted relative to the ship design's troop_capacity.
   double troops{0.0};
 
+  // Embarked colonists / passengers (population, in millions).
+  // Interpreted relative to the ship design's colony_capacity_millions.
+  double colonists_millions{0.0};
+
   // Automation: when enabled, the simulation will generate exploration orders
   // for this ship whenever it is idle (no queued orders).
   bool auto_explore{false};
@@ -280,12 +349,54 @@ struct Ship {
   // for this ship whenever it is idle (no queued orders).
   bool auto_freight{false};
 
+  // Automation: when enabled, the simulation will route this ship to refuel when
+  // it is low on fuel and idle.
+  //
+  // Notes:
+  // - Refueling itself is handled by Simulation::tick_refuel(), but auto-refuel
+  //   is responsible for generating movement orders to reach a friendly colony.
+  // - This is intentionally compatible with Auto-explore/Auto-freight: when fuel
+  //   is low, auto-refuel will queue a refuel trip first, then the ship can
+  //   resume its other automation once refueled.
+  bool auto_refuel{false};
+
+  // Fraction of fuel capacity at which auto-refuel triggers.
+  //
+  // Example: 0.25 means "refuel when below 25%".
+  double auto_refuel_threshold_fraction{0.25};
+
+  // Automation: when enabled, the simulation will route this ship to a friendly
+  // shipyard for repairs when it is damaged and idle.
+  //
+  // Notes:
+  // - Repairs themselves are handled by Simulation::tick_repairs().
+  // - Auto-refuel runs first, so ships will prefer to resolve low-fuel situations
+  //   before attempting to seek repairs.
+  bool auto_repair{false};
+
+  // Fraction of max HP at which auto-repair triggers.
+  //
+  // Example: 0.75 means "seek repairs when below 75% HP".
+  double auto_repair_threshold_fraction{0.75};
+
+  // Repair scheduling priority when docked at a shipyard.
+  // Higher priority ships are repaired first when shipyard capacity is limited.
+  RepairPriority repair_priority{RepairPriority::Normal};
+
+
   // Runtime power policy (enabled subsystems + load shedding priority).
   //
   // This is independent of the ship design's static power generation/usage
   // numbers and allows the player/AI to, for example, disable weapons to keep
   // sensors online on an underpowered scout.
   ShipPowerPolicy power_policy{};
+
+  // Sensor emissions control (EMCON).
+  //
+  // This setting modifies both this ship's sensor range (when acting as a sensor source)
+  // and its detectability (signature multiplier) when targeted by others.
+  SensorMode sensor_mode{SensorMode::Normal};
+
 
   // Combat state.
   double hp{0.0};
@@ -303,6 +414,32 @@ struct Ship {
   double shields{-1.0};
 };
 
+// A destroyed ship may leave a salvageable wreck.
+//
+// Wrecks are intentionally lightweight (a position + a bag of minerals). The
+// first implementation treats salvage as recoverable minerals rather than
+// persistent component objects.
+struct Wreck {
+  Id id{kInvalidId};
+  std::string name;
+  Id system_id{kInvalidId};
+
+  // Position in-system (million km).
+  Vec2 position_mkm{0.0, 0.0};
+
+  // Salvageable minerals stored in this wreck (tons keyed by mineral name).
+  // Empty means "no salvage".
+  std::unordered_map<std::string, double> minerals;
+
+  // Optional metadata for UI / debugging.
+  Id source_ship_id{kInvalidId};
+  Id source_faction_id{kInvalidId};
+  std::string source_design_id;
+
+  // Creation day (Date::days_since_epoch) for optional decay / analytics.
+  int created_day{0};
+};
+
 struct BuildOrder {
   // Shipyard queue entry.
   //
@@ -314,6 +451,10 @@ struct BuildOrder {
   // The ship being refitted (optional).
   Id refit_ship_id{kInvalidId};
 
+  // If true, this build order was auto-queued by faction ship design targets.
+  // (Only meaningful for new builds; refit orders are always manual.)
+  bool auto_queued{false};
+
   bool is_refit() const { return refit_ship_id != kInvalidId; }
 };
 
@@ -321,6 +462,8 @@ struct BuildOrder {
 struct InstallationBuildOrder {
   std::string installation_id;
   int quantity_remaining{0};
+  // If true, this order was auto-queued by colony installation targets.
+  bool auto_queued{false};
 
   // Progress state for the current unit being built.
   bool minerals_paid{false};
@@ -343,6 +486,29 @@ struct Colony {
   // Auto-freight will not export minerals below these values.
   // Missing entries imply a reserve of 0.
   std::unordered_map<std::string, double> mineral_reserves;
+
+  // Desired stockpile targets (UI/auto-freight).
+  //
+  // When non-zero, auto-freight will attempt to *import* minerals to reach these
+  // amounts at the colony, and will also avoid exporting below this target.
+  //
+  // This is complementary to mineral_reserves:
+  // - mineral_reserves: 'never export below X'
+  // - mineral_targets:  'try to keep at least X on-hand (import if needed)'
+  //
+  // Missing entries imply a target of 0.
+  std::unordered_map<std::string, double> mineral_targets;
+
+  // Desired installation counts (auto-build).
+  //
+  // When targets are set, the simulation will automatically enqueue construction
+  // orders (marked InstallationBuildOrder::auto_queued) to build up to the desired
+  // counts without consuming or reordering manually-queued construction.
+  //
+  // Targets never demolish installations. Lowering a target will only prune
+  // auto-queued *pending* units (and will not cancel a unit already in-progress).
+  // Missing entries imply a target of 0.
+  std::unordered_map<std::string, int> installation_targets;
 
   // Installation counts
   std::unordered_map<std::string, int> installations;
@@ -424,6 +590,13 @@ struct Faction {
   // Unlock lists (primarily for UI filtering / validation).
   std::vector<std::string> unlocked_components;
   std::vector<std::string> unlocked_installations;
+
+  // Automation: desired counts of ship designs to maintain.
+  //
+  // When non-empty, the simulation will automatically manage *auto-queued*
+  // shipyard build orders across this faction's colonies to reach these targets.
+  // Manual build/refit orders are never modified.
+  std::unordered_map<std::string, int> ship_design_targets;
 
   // Exploration / map knowledge.
   // Systems this faction has discovered. Seeded from starting ships/colonies and

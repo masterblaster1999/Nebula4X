@@ -122,11 +122,16 @@ int test_state_validation() {
     st.ship_orders[ship_a].queue.push_back(nebula4x::OrbitBody{body_id, 1});
     st.ship_orders[ship_a].queue.push_back(
         nebula4x::TransferCargoToShip{ship_b, "Duranium", 10.0});
+    st.ship_orders[ship_a].queue.push_back(
+        nebula4x::TransferFuelToShip{ship_b, 5.0});
+    st.ship_orders[ship_a].queue.push_back(
+        nebula4x::TransferTroopsToShip{ship_b, 5.0});
+    st.ship_orders[ship_a].queue.push_back(nebula4x::EscortShip{ship_b, 1.0, false});
     st.ship_orders[ship_a].queue.push_back(nebula4x::ScrapShip{colony_id});
 
     const auto errors = nebula4x::validate_game_state(st, &content);
     if (!errors.empty()) {
-      std::cerr << "Unexpected errors for valid Orbit/Transfer/Scrap orders:\n";
+      std::cerr << "Unexpected errors for valid Orbit/Transfer/Escort/FuelTransfer/Scrap orders:\n";
       for (const auto& e : errors) std::cerr << "  - " << e << "\n";
       return 1;
     }
@@ -142,23 +147,40 @@ int test_state_validation() {
     st.ship_orders[ship_id].queue.push_back(nebula4x::OrbitBody{st.bodies.begin()->first, -2});
     st.ship_orders[ship_id].queue.push_back(
         nebula4x::TransferCargoToShip{static_cast<nebula4x::Id>(999999), "Duranium", 1.0});
+    st.ship_orders[ship_id].queue.push_back(
+        nebula4x::TransferFuelToShip{static_cast<nebula4x::Id>(999999), 1.0});
+    st.ship_orders[ship_id].queue.push_back(
+        nebula4x::TransferTroopsToShip{static_cast<nebula4x::Id>(999999), 1.0});
+    st.ship_orders[ship_id].queue.push_back(
+        nebula4x::EscortShip{static_cast<nebula4x::Id>(999999), 1.0, false});
     st.ship_orders[ship_id].queue.push_back(nebula4x::ScrapShip{static_cast<nebula4x::Id>(999999)});
 
     const auto errors = nebula4x::validate_game_state(st, &content);
     bool has_orbit_missing_body = false;
     bool has_orbit_bad_duration = false;
     bool has_transfer_missing_ship = false;
+    bool has_fuel_transfer_missing_ship = false;
+    bool has_troop_transfer_missing_ship = false;
+    bool has_escort_missing_ship = false;
     bool has_scrap_missing_colony = false;
     for (const auto& e : errors) {
       if (e.find("OrbitBody references missing body_id") != std::string::npos) has_orbit_missing_body = true;
       if (e.find("OrbitBody has invalid duration_days") != std::string::npos) has_orbit_bad_duration = true;
       if (e.find("TransferCargoToShip references missing target_ship_id") != std::string::npos)
         has_transfer_missing_ship = true;
+      if (e.find("TransferFuelToShip references missing target_ship_id") != std::string::npos)
+        has_fuel_transfer_missing_ship = true;
+      if (e.find("TransferTroopsToShip references missing target_ship_id") != std::string::npos)
+        has_troop_transfer_missing_ship = true;
+      if (e.find("EscortShip references missing target_ship_id") != std::string::npos) has_escort_missing_ship = true;
       if (e.find("ScrapShip references missing colony_id") != std::string::npos) has_scrap_missing_colony = true;
     }
     N4X_ASSERT(has_orbit_missing_body);
     N4X_ASSERT(has_orbit_bad_duration);
     N4X_ASSERT(has_transfer_missing_ship);
+    N4X_ASSERT(has_fuel_transfer_missing_ship);
+    N4X_ASSERT(has_troop_transfer_missing_ship);
+    N4X_ASSERT(has_escort_missing_ship);
     N4X_ASSERT(has_scrap_missing_colony);
   }
 
@@ -207,6 +229,15 @@ int test_state_validation() {
       ev.ship_id = static_cast<nebula4x::Id>(999999);
       ev.message = "Test";
       st.events.push_back(ev);
+    }
+
+
+    // Add broken installation targets (auto-build) to exercise fixer/validator.
+    if (!st.colonies.empty()) {
+      const auto cid = st.colonies.begin()->first;
+      st.colonies[cid].installation_targets[""] = 1;
+      st.colonies[cid].installation_targets["definitely_not_an_installation"] = 2;
+      st.colonies[cid].installation_targets["automated_mine"] = -3;
     }
 
     const auto before = nebula4x::validate_game_state(st, &content);

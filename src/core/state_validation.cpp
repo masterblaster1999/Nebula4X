@@ -76,6 +76,7 @@ std::vector<std::string> validate_game_state(const GameState& s, const ContentDB
   auto has_body = [&](Id id) { return s.bodies.find(id) != s.bodies.end(); };
   auto has_jump = [&](Id id) { return s.jump_points.find(id) != s.jump_points.end(); };
   auto has_ship = [&](Id id) { return s.ships.find(id) != s.ships.end(); };
+  auto has_wreck = [&](Id id) { return s.wrecks.find(id) != s.wrecks.end(); };
   auto has_colony = [&](Id id) { return s.colonies.find(id) != s.colonies.end(); };
   auto has_faction = [&](Id id) { return s.factions.find(id) != s.factions.end(); };
 
@@ -107,6 +108,12 @@ std::vector<std::string> validate_game_state(const GameState& s, const ContentDB
     bump_max(id);
     if (sh.id != kInvalidId && sh.id != id) {
       push(errors, join("Ship id mismatch: key=", id_u64(id), " value.id=", id_u64(sh.id)));
+    }
+  }
+  for (const auto& [id, w] : s.wrecks) {
+    bump_max(id);
+    if (w.id != kInvalidId && w.id != id) {
+      push(errors, join("Wreck id mismatch: key=", id_u64(id), " value.id=", id_u64(w.id)));
     }
   }
   for (const auto& [id, c] : s.colonies) {
@@ -266,6 +273,65 @@ std::vector<std::string> validate_game_state(const GameState& s, const ContentDB
              join("Ship ", id_u64(sid), " ('", sh.name, "') references unknown design_id '", sh.design_id, "'"));
       }
     }
+
+    // SensorMode validation.
+    {
+      const int sm = static_cast<int>(sh.sensor_mode);
+      if (sm < 0 || sm > 2) {
+        push(errors,
+             join("Ship ", id_u64(sid), " ('", sh.name, "') has invalid sensor_mode ", sm));
+      }
+    }
+
+    // Auto-* threshold validation.
+    {
+      if (!std::isfinite(sh.auto_refuel_threshold_fraction) || sh.auto_refuel_threshold_fraction < 0.0 ||
+          sh.auto_refuel_threshold_fraction > 1.0) {
+        push(errors,
+             join("Ship ", id_u64(sid), " ('", sh.name, "') has invalid auto_refuel_threshold_fraction ",
+                  sh.auto_refuel_threshold_fraction));
+      }
+      if (!std::isfinite(sh.auto_repair_threshold_fraction) || sh.auto_repair_threshold_fraction < 0.0 ||
+          sh.auto_repair_threshold_fraction > 1.0) {
+        push(errors,
+             join("Ship ", id_u64(sid), " ('", sh.name, "') has invalid auto_repair_threshold_fraction ",
+                  sh.auto_repair_threshold_fraction));
+      }
+    }
+
+    // RepairPriority validation.
+    {
+      const int rp = static_cast<int>(sh.repair_priority);
+      if (rp < 0 || rp > 2) {
+        push(errors,
+             join("Ship ", id_u64(sid), " ('", sh.name, "') has invalid repair_priority ", rp));
+      }
+    }
+
+  }
+
+  // --- Wrecks ---
+  for (const auto& [wid, w] : s.wrecks) {
+    if (w.system_id == kInvalidId || !has_system(w.system_id)) {
+      push(errors,
+           join("Wreck ", id_u64(wid), " ('", w.name, "') references unknown system_id ", id_u64(w.system_id)));
+    }
+    if (w.minerals.empty()) {
+      push(errors, join("Wreck ", id_u64(wid), " ('", w.name, "') has no minerals"));
+    }
+    for (const auto& [m, tons] : w.minerals) {
+      if (m.empty()) {
+        push(errors, join("Wreck ", id_u64(wid), " has empty mineral key"));
+      }
+      if (!std::isfinite(tons) || tons < 0.0) {
+        push(errors,
+             join("Wreck ", id_u64(wid), " ('", w.name, "') has invalid mineral tons for '", m,
+                  "': ", tons));
+      }
+    }
+    if (w.created_day < 0) {
+      push(errors, join("Wreck ", id_u64(wid), " ('", w.name, "') has negative created_day ", w.created_day));
+    }
   }
 
   // --- Ship orders ---
@@ -320,6 +386,18 @@ std::vector<std::string> validate_game_state(const GameState& s, const ContentDB
                 } else if (ord.target_ship_id == ship_id) {
                   push(errors, prefix() + "AttackShip targets itself");
                 }
+              } else if constexpr (std::is_same_v<T, EscortShip>) {
+                if (ord.target_ship_id == kInvalidId) {
+                  push(errors, prefix() + "EscortShip has invalid target_ship_id");
+                } else if (!has_ship(ord.target_ship_id)) {
+                  push(errors,
+                       prefix() + join("EscortShip references missing target_ship_id ", id_u64(ord.target_ship_id)));
+                } else if (ord.target_ship_id == ship_id) {
+                  push(errors, prefix() + "EscortShip targets itself");
+                }
+                if (!std::isfinite(ord.follow_distance_mkm) || ord.follow_distance_mkm < 0.0) {
+                  push(errors, prefix() + join("EscortShip has invalid follow_distance_mkm ", ord.follow_distance_mkm));
+                }
               } else if constexpr (std::is_same_v<T, WaitDays>) {
                 if (ord.days_remaining < 0) {
                   push(errors, prefix() + join("WaitDays has negative days_remaining ", ord.days_remaining));
@@ -335,6 +413,60 @@ std::vector<std::string> validate_game_state(const GameState& s, const ContentDB
                   push(errors, prefix() + "UnloadMineral has invalid colony_id");
                 } else if (!has_colony(ord.colony_id)) {
                   push(errors, prefix() + join("UnloadMineral references missing colony_id ", id_u64(ord.colony_id)));
+                }
+              } else if constexpr (std::is_same_v<T, LoadTroops>) {
+                if (ord.colony_id == kInvalidId) {
+                  push(errors, prefix() + "LoadTroops has invalid colony_id");
+                } else if (!has_colony(ord.colony_id)) {
+                  push(errors, prefix() + join("LoadTroops references missing colony_id ", id_u64(ord.colony_id)));
+                }
+              } else if constexpr (std::is_same_v<T, UnloadTroops>) {
+                if (ord.colony_id == kInvalidId) {
+                  push(errors, prefix() + "UnloadTroops has invalid colony_id");
+                } else if (!has_colony(ord.colony_id)) {
+                  push(errors, prefix() + join("UnloadTroops references missing colony_id ", id_u64(ord.colony_id)));
+                }
+              } else if constexpr (std::is_same_v<T, LoadColonists>) {
+                if (ord.colony_id == kInvalidId) {
+                  push(errors, prefix() + "LoadColonists has invalid colony_id");
+                } else if (!has_colony(ord.colony_id)) {
+                  push(errors, prefix() + join("LoadColonists references missing colony_id ", id_u64(ord.colony_id)));
+                }
+                if (!std::isfinite(ord.millions) || ord.millions < 0.0) {
+                  push(errors, prefix() + join("LoadColonists has invalid millions ", ord.millions));
+                }
+              } else if constexpr (std::is_same_v<T, UnloadColonists>) {
+                if (ord.colony_id == kInvalidId) {
+                  push(errors, prefix() + "UnloadColonists has invalid colony_id");
+                } else if (!has_colony(ord.colony_id)) {
+                  push(errors, prefix() + join("UnloadColonists references missing colony_id ", id_u64(ord.colony_id)));
+                }
+                if (!std::isfinite(ord.millions) || ord.millions < 0.0) {
+                  push(errors, prefix() + join("UnloadColonists has invalid millions ", ord.millions));
+                }
+              } else if constexpr (std::is_same_v<T, InvadeColony>) {
+                if (ord.colony_id == kInvalidId) {
+                  push(errors, prefix() + "InvadeColony has invalid colony_id");
+                } else if (!has_colony(ord.colony_id)) {
+                  push(errors, prefix() + join("InvadeColony references missing colony_id ", id_u64(ord.colony_id)));
+                }
+              } else if constexpr (std::is_same_v<T, BombardColony>) {
+                if (ord.colony_id == kInvalidId) {
+                  push(errors, prefix() + "BombardColony has invalid colony_id");
+                } else if (!has_colony(ord.colony_id)) {
+                  push(errors, prefix() + join("BombardColony references missing colony_id ", id_u64(ord.colony_id)));
+                }
+                if (ord.duration_days < -1) {
+                  push(errors, prefix() + join("BombardColony has invalid duration_days ", ord.duration_days));
+                }
+              } else if constexpr (std::is_same_v<T, SalvageWreck>) {
+                if (ord.wreck_id == kInvalidId) {
+                  push(errors, prefix() + "SalvageWreck has invalid wreck_id");
+                } else if (!has_wreck(ord.wreck_id)) {
+                  push(errors, prefix() + join("SalvageWreck references missing wreck_id ", id_u64(ord.wreck_id)));
+                }
+                if (!std::isfinite(ord.tons) || ord.tons < 0.0) {
+                  push(errors, prefix() + join("SalvageWreck has invalid tons ", ord.tons));
                 }
               } else if constexpr (std::is_same_v<T, OrbitBody>) {
                 if (ord.body_id == kInvalidId) {
@@ -354,6 +486,26 @@ std::vector<std::string> validate_game_state(const GameState& s, const ContentDB
                                        id_u64(ord.target_ship_id)));
                 } else if (ord.target_ship_id == ship_id) {
                   push(errors, prefix() + "TransferCargoToShip targets itself");
+                }
+              } else if constexpr (std::is_same_v<T, TransferFuelToShip>) {
+                if (ord.target_ship_id == kInvalidId) {
+                  push(errors, prefix() + "TransferFuelToShip has invalid target_ship_id");
+                } else if (!has_ship(ord.target_ship_id)) {
+                  push(errors,
+                       prefix() + join("TransferFuelToShip references missing target_ship_id ",
+                                       id_u64(ord.target_ship_id)));
+                } else if (ord.target_ship_id == ship_id) {
+                  push(errors, prefix() + "TransferFuelToShip targets itself");
+                }
+              } else if constexpr (std::is_same_v<T, TransferTroopsToShip>) {
+                if (ord.target_ship_id == kInvalidId) {
+                  push(errors, prefix() + "TransferTroopsToShip has invalid target_ship_id");
+                } else if (!has_ship(ord.target_ship_id)) {
+                  push(errors,
+                       prefix() + join("TransferTroopsToShip references missing target_ship_id ",
+                                       id_u64(ord.target_ship_id)));
+                } else if (ord.target_ship_id == ship_id) {
+                  push(errors, prefix() + "TransferTroopsToShip targets itself");
                 }
               } else if constexpr (std::is_same_v<T, ScrapShip>) {
                 if (ord.colony_id == kInvalidId) {
@@ -430,6 +582,16 @@ std::vector<std::string> validate_game_state(const GameState& s, const ContentDB
                 push(errors,
                      prefix() + join("AttackShip references missing target_ship_id ", id_u64(ord.target_ship_id)));
               }
+            } else if constexpr (std::is_same_v<T, EscortShip>) {
+              if (ord.target_ship_id == kInvalidId) {
+                push(errors, prefix() + "EscortShip has invalid target_ship_id");
+              } else if (!has_ship(ord.target_ship_id)) {
+                push(errors,
+                     prefix() + join("EscortShip references missing target_ship_id ", id_u64(ord.target_ship_id)));
+              }
+              if (!std::isfinite(ord.follow_distance_mkm) || ord.follow_distance_mkm < 0.0) {
+                push(errors, prefix() + join("EscortShip has invalid follow_distance_mkm ", ord.follow_distance_mkm));
+              }
             } else if constexpr (std::is_same_v<T, WaitDays>) {
               if (ord.days_remaining < 0) {
                 push(errors, prefix() + join("WaitDays has negative days_remaining ", ord.days_remaining));
@@ -446,6 +608,60 @@ std::vector<std::string> validate_game_state(const GameState& s, const ContentDB
               } else if (!has_colony(ord.colony_id)) {
                 push(errors, prefix() + join("UnloadMineral references missing colony_id ", id_u64(ord.colony_id)));
               }
+            } else if constexpr (std::is_same_v<T, LoadTroops>) {
+              if (ord.colony_id == kInvalidId) {
+                push(errors, prefix() + "LoadTroops has invalid colony_id");
+              } else if (!has_colony(ord.colony_id)) {
+                push(errors, prefix() + join("LoadTroops references missing colony_id ", id_u64(ord.colony_id)));
+              }
+            } else if constexpr (std::is_same_v<T, UnloadTroops>) {
+              if (ord.colony_id == kInvalidId) {
+                push(errors, prefix() + "UnloadTroops has invalid colony_id");
+              } else if (!has_colony(ord.colony_id)) {
+                push(errors, prefix() + join("UnloadTroops references missing colony_id ", id_u64(ord.colony_id)));
+              }
+            } else if constexpr (std::is_same_v<T, LoadColonists>) {
+              if (ord.colony_id == kInvalidId) {
+                push(errors, prefix() + "LoadColonists has invalid colony_id");
+              } else if (!has_colony(ord.colony_id)) {
+                push(errors, prefix() + join("LoadColonists references missing colony_id ", id_u64(ord.colony_id)));
+              }
+              if (!std::isfinite(ord.millions) || ord.millions < 0.0) {
+                push(errors, prefix() + join("LoadColonists has invalid millions ", ord.millions));
+              }
+            } else if constexpr (std::is_same_v<T, UnloadColonists>) {
+              if (ord.colony_id == kInvalidId) {
+                push(errors, prefix() + "UnloadColonists has invalid colony_id");
+              } else if (!has_colony(ord.colony_id)) {
+                push(errors, prefix() + join("UnloadColonists references missing colony_id ", id_u64(ord.colony_id)));
+              }
+              if (!std::isfinite(ord.millions) || ord.millions < 0.0) {
+                push(errors, prefix() + join("UnloadColonists has invalid millions ", ord.millions));
+              }
+            } else if constexpr (std::is_same_v<T, InvadeColony>) {
+              if (ord.colony_id == kInvalidId) {
+                push(errors, prefix() + "InvadeColony has invalid colony_id");
+              } else if (!has_colony(ord.colony_id)) {
+                push(errors, prefix() + join("InvadeColony references missing colony_id ", id_u64(ord.colony_id)));
+              }
+            } else if constexpr (std::is_same_v<T, BombardColony>) {
+              if (ord.colony_id == kInvalidId) {
+                push(errors, prefix() + "BombardColony has invalid colony_id");
+              } else if (!has_colony(ord.colony_id)) {
+                push(errors, prefix() + join("BombardColony references missing colony_id ", id_u64(ord.colony_id)));
+              }
+              if (ord.duration_days < -1) {
+                push(errors, prefix() + join("BombardColony has invalid duration_days ", ord.duration_days));
+              }
+            } else if constexpr (std::is_same_v<T, SalvageWreck>) {
+              if (ord.wreck_id == kInvalidId) {
+                push(errors, prefix() + "SalvageWreck has invalid wreck_id");
+              } else if (!has_wreck(ord.wreck_id)) {
+                push(errors, prefix() + join("SalvageWreck references missing wreck_id ", id_u64(ord.wreck_id)));
+              }
+              if (!std::isfinite(ord.tons) || ord.tons < 0.0) {
+                push(errors, prefix() + join("SalvageWreck has invalid tons ", ord.tons));
+              }
             } else if constexpr (std::is_same_v<T, OrbitBody>) {
               if (ord.body_id == kInvalidId) {
                 push(errors, prefix() + "OrbitBody has invalid body_id");
@@ -461,6 +677,22 @@ std::vector<std::string> validate_game_state(const GameState& s, const ContentDB
               } else if (!has_ship(ord.target_ship_id)) {
                 push(errors,
                      prefix() + join("TransferCargoToShip references missing target_ship_id ",
+                                     id_u64(ord.target_ship_id)));
+              }
+            } else if constexpr (std::is_same_v<T, TransferFuelToShip>) {
+              if (ord.target_ship_id == kInvalidId) {
+                push(errors, prefix() + "TransferFuelToShip has invalid target_ship_id");
+              } else if (!has_ship(ord.target_ship_id)) {
+                push(errors,
+                     prefix() + join("TransferFuelToShip references missing target_ship_id ",
+                                     id_u64(ord.target_ship_id)));
+              }
+            } else if constexpr (std::is_same_v<T, TransferTroopsToShip>) {
+              if (ord.target_ship_id == kInvalidId) {
+                push(errors, prefix() + "TransferTroopsToShip has invalid target_ship_id");
+              } else if (!has_ship(ord.target_ship_id)) {
+                push(errors,
+                     prefix() + join("TransferTroopsToShip references missing target_ship_id ",
                                      id_u64(ord.target_ship_id)));
               }
             } else if constexpr (std::is_same_v<T, ScrapShip>) {
@@ -546,6 +778,8 @@ std::vector<std::string> validate_game_state(const GameState& s, const ContentDB
                join("Colony ", id_u64(cid), " construction_queue[", i, "] has negative cp_remaining: ", io.cp_remaining));
         }
       }
+    }
+
     // Validate mineral stockpiles.
     for (const auto& [mineral, tons] : c.minerals) {
       if (mineral.empty()) {
@@ -581,7 +815,38 @@ std::vector<std::string> validate_game_state(const GameState& s, const ContentDB
       }
     }
 
+    // Validate mineral stockpile targets (auto-freight import).
+    for (const auto& [mineral, tons] : c.mineral_targets) {
+      if (mineral.empty()) {
+        push(errors, join("Colony ", id_u64(cid), " ('", c.name, "') has an empty mineral key in mineral_targets"));
+        continue;
+      }
+      if (!std::isfinite(tons)) {
+        push(errors, join("Colony ", id_u64(cid), " ('", c.name, "') has non-finite target for '", mineral, "': ", tons));
+        continue;
+      }
+      if (tons < -1e-6) {
+        push(errors, join("Colony ", id_u64(cid), " ('", c.name, "') has negative target for '", mineral, "': ", tons));
+      }
     }
+
+    // Validate installation targets (auto-build).
+    for (const auto& [inst_id, target] : c.installation_targets) {
+      if (inst_id.empty()) {
+        push(errors, join("Colony ", id_u64(cid), " ('", c.name, "') has an empty installation key in installation_targets"));
+        continue;
+      }
+      if (target < 0) {
+        push(errors, join("Colony ", id_u64(cid), " ('", c.name, "') has negative installation target for '", inst_id,
+                          "': ", target));
+      }
+      if (content && !installation_exists(*content, inst_id)) {
+        push(errors, join("Colony ", id_u64(cid), " ('", c.name, "') installation_targets references unknown installation_id '",
+                          inst_id, "'"));
+      }
+    }
+
+
   }
 
   // --- Factions ---
@@ -652,6 +917,22 @@ std::vector<std::string> validate_game_state(const GameState& s, const ContentDB
                join("Faction ", id_u64(fid), " ('", f.name, "') unlocked_installations contains unknown installation '",
                     i_id, "'"));
         }
+      }
+    }
+
+    // Ship design targets (auto-shipyards).
+    for (const auto& [design_id, target] : f.ship_design_targets) {
+      if (design_id.empty()) {
+        push(errors, join("Faction ", id_u64(fid), " ('", f.name, "') has an empty key in ship_design_targets"));
+        continue;
+      }
+      if (target < 0) {
+        push(errors, join("Faction ", id_u64(fid), " ('", f.name, "') has negative ship design target for '", design_id, "': ",
+                          target));
+      }
+      if (content && !design_exists(s, *content, design_id)) {
+        push(errors, join("Faction ", id_u64(fid), " ('", f.name, "') ship_design_targets references unknown design_id '",
+                          design_id, "'"));
       }
     }
   }
@@ -769,6 +1050,7 @@ FixReport fix_game_state(GameState& s, const ContentDB* content) {
   auto has_body = [&](Id id) { return s.bodies.find(id) != s.bodies.end(); };
   auto has_jump = [&](Id id) { return s.jump_points.find(id) != s.jump_points.end(); };
   auto has_ship = [&](Id id) { return s.ships.find(id) != s.ships.end(); };
+  auto has_wreck = [&](Id id) { return s.wrecks.find(id) != s.wrecks.end(); };
   auto has_colony = [&](Id id) { return s.colonies.find(id) != s.colonies.end(); };
   auto has_faction = [&](Id id) { return s.factions.find(id) != s.factions.end(); };
 
@@ -795,6 +1077,12 @@ FixReport fix_game_state(GameState& s, const ContentDB* content) {
     if (sh.id != id) {
       note(join("Fix: Ship id mismatch: key=", id_u64(id), " value.id=", id_u64(sh.id)));
       sh.id = id;
+    }
+  }
+  for (auto& [id, w] : s.wrecks) {
+    if (w.id != id) {
+      note(join("Fix: Wreck id mismatch: key=", id_u64(id), " value.id=", id_u64(w.id)));
+      w.id = id;
     }
   }
   for (auto& [id, c] : s.colonies) {
@@ -939,6 +1227,93 @@ FixReport fix_game_state(GameState& s, const ContentDB* content) {
         note(join("Fix: Ship ", id_u64(sid), " had invalid power_policy priority; sanitized"));
       }
     }
+
+    // Clamp persisted sensor_mode.
+    {
+      const int sm = static_cast<int>(sh.sensor_mode);
+      if (sm < 0 || sm > 2) {
+        note(join("Fix: Ship ", id_u64(sid), " had invalid sensor_mode; clamped to Normal"));
+        sh.sensor_mode = SensorMode::Normal;
+      }
+    }
+
+    // Clamp persisted repair_priority.
+    {
+      const int rp = static_cast<int>(sh.repair_priority);
+      if (rp < 0 || rp > 2) {
+        note(join("Fix: Ship ", id_u64(sid), " had invalid repair_priority; set to Normal"));
+        sh.repair_priority = RepairPriority::Normal;
+      }
+    }
+
+    // Clamp persisted auto_* thresholds.
+    {
+      if (!std::isfinite(sh.auto_refuel_threshold_fraction)) {
+        note(join("Fix: Ship ", id_u64(sid), " had NaN/inf auto_refuel_threshold_fraction; set to 0.25"));
+        sh.auto_refuel_threshold_fraction = 0.25;
+      }
+      const double before_refuel = sh.auto_refuel_threshold_fraction;
+      sh.auto_refuel_threshold_fraction = std::clamp(sh.auto_refuel_threshold_fraction, 0.0, 1.0);
+      if (sh.auto_refuel_threshold_fraction != before_refuel) {
+        note(join("Fix: Ship ", id_u64(sid), " had out-of-range auto_refuel_threshold_fraction; clamped"));
+      }
+
+      if (!std::isfinite(sh.auto_repair_threshold_fraction)) {
+        note(join("Fix: Ship ", id_u64(sid), " had NaN/inf auto_repair_threshold_fraction; set to 0.75"));
+        sh.auto_repair_threshold_fraction = 0.75;
+      }
+      const double before_repair = sh.auto_repair_threshold_fraction;
+      sh.auto_repair_threshold_fraction = std::clamp(sh.auto_repair_threshold_fraction, 0.0, 1.0);
+      if (sh.auto_repair_threshold_fraction != before_repair) {
+        note(join("Fix: Ship ", id_u64(sid), " had out-of-range auto_repair_threshold_fraction; clamped"));
+      }
+    }
+  }
+
+  // --- Wrecks ---
+  {
+    const int now = s.date.days_since_epoch();
+    for (Id wid : sorted_keys(s.wrecks)) {
+      auto it = s.wrecks.find(wid);
+      if (it == s.wrecks.end()) continue;
+      auto& w = it->second;
+
+      if (w.system_id == kInvalidId || !has_system(w.system_id)) {
+        note(join("Fix: Wreck ", id_u64(wid), " ('", w.name, "') referenced missing system_id ", id_u64(w.system_id),
+                  "; removed"));
+        s.wrecks.erase(it);
+        continue;
+      }
+
+      if (w.name.empty()) {
+        note(join("Fix: Wreck ", id_u64(wid), " had empty name; set"));
+        w.name = join("Wreck ", id_u64(wid));
+      }
+
+      if (w.created_day <= 0 || w.created_day > now) {
+        note(join("Fix: Wreck ", id_u64(wid), " had invalid created_day ", w.created_day, "; set to ", now));
+        w.created_day = now;
+      }
+
+      for (auto mit = w.minerals.begin(); mit != w.minerals.end(); ) {
+        double v = mit->second;
+        if (!std::isfinite(v) || v <= 1e-9) {
+          mit = w.minerals.erase(mit);
+          continue;
+        }
+        if (v < 0.0) {
+          note(join("Fix: Wreck ", id_u64(wid), " mineral '", mit->first, "' had negative value ", v, "; clamped"));
+          v = 0.0;
+          mit->second = v;
+        }
+        ++mit;
+      }
+
+      if (w.minerals.empty()) {
+        note(join("Fix: Wreck ", id_u64(wid), " ('", w.name, "') had no salvage; removed"));
+        s.wrecks.erase(it);
+      }
+    }
   }
 
   // --- Colonies ---
@@ -1001,6 +1376,35 @@ FixReport fix_game_state(GameState& s, const ContentDB* content) {
         }
         ++it2;
       }
+      for (auto it2 = c.mineral_targets.begin(); it2 != c.mineral_targets.end();) {
+        if (it2->first.empty()) {
+          note(join("Fix: Colony ", id_u64(cid), " had empty mineral key in mineral_targets; removed"));
+          it2 = c.mineral_targets.erase(it2);
+          continue;
+        }
+        if (!std::isfinite(it2->second) || it2->second < 0.0) {
+          const double old = it2->second;
+          it2->second = std::max(0.0, std::isfinite(it2->second) ? it2->second : 0.0);
+          note(join("Fix: Colony ", id_u64(cid), " mineral_targets['", it2->first, "'] clamped ", old, " -> ", it2->second));
+        }
+        ++it2;
+      }
+
+      for (auto it2 = c.installation_targets.begin(); it2 != c.installation_targets.end();) {
+        if (it2->first.empty()) {
+          note(join("Fix: Colony ", id_u64(cid), " had empty installation key in installation_targets; removed"));
+          it2 = c.installation_targets.erase(it2);
+          continue;
+        }
+        if (it2->second < 0) {
+          const int old = it2->second;
+          it2->second = std::max(0, it2->second);
+          note(join("Fix: Colony ", id_u64(cid), " installation_targets['", it2->first, "'] clamped ", old, " -> ",
+                    it2->second));
+        }
+        ++it2;
+      }
+
 
       if (content) {
         // Installations: remove unknown ids and clamp negative counts.
@@ -1022,6 +1426,25 @@ FixReport fix_game_state(GameState& s, const ContentDB* content) {
           }
           ++it3;
         }
+
+        // Installation targets: remove unknown installation ids and clamp negatives.
+        for (auto it3 = c.installation_targets.begin(); it3 != c.installation_targets.end();) {
+          const std::string& inst_id = it3->first;
+          const int target = it3->second;
+          if (inst_id.empty() || !installation_exists(*content, inst_id)) {
+            note(join("Fix: Colony ", id_u64(cid), " removed unknown installation target id '", inst_id, "'"));
+            it3 = c.installation_targets.erase(it3);
+            continue;
+          }
+          if (target < 0) {
+            const int old = target;
+            it3->second = std::max(0, target);
+            note(join("Fix: Colony ", id_u64(cid), " installation_targets['", inst_id, "'] clamped ", old, " -> ",
+                      it3->second));
+          }
+          ++it3;
+        }
+
 
         // Shipyard queue: drop entries with unknown designs.
         for (std::size_t i = 0; i < c.shipyard_queue.size();) {
@@ -1251,6 +1674,17 @@ FixReport fix_game_state(GameState& s, const ContentDB* content) {
                 keep = false;
                 drop(i, "AttackShip invalid target_ship_id");
               }
+            } else if constexpr (std::is_same_v<T, EscortShip>) {
+              if (ord.target_ship_id == kInvalidId || !has_ship(ord.target_ship_id) ||
+                  (self_ship_id != kInvalidId && ord.target_ship_id == self_ship_id)) {
+                keep = false;
+                drop(i, "EscortShip invalid target_ship_id");
+              }
+              if (!std::isfinite(ord.follow_distance_mkm) || ord.follow_distance_mkm < 0.0) {
+                note(join("Fix: ", owner, " ", list_name, "[", i, "] EscortShip follow_distance_mkm clamped ",
+                          ord.follow_distance_mkm, " -> 1.0"));
+                ord.follow_distance_mkm = 1.0;
+              }
             } else if constexpr (std::is_same_v<T, WaitDays>) {
               if (ord.days_remaining < 0) {
                 note(join("Fix: ", owner, " ", list_name, "[", i, "] WaitDays clamped ", ord.days_remaining,
@@ -1267,6 +1701,61 @@ FixReport fix_game_state(GameState& s, const ContentDB* content) {
                 keep = false;
                 drop(i, "UnloadMineral invalid colony_id");
               }
+            } else if constexpr (std::is_same_v<T, LoadTroops>) {
+              if (ord.colony_id == kInvalidId || !has_colony(ord.colony_id)) {
+                keep = false;
+                drop(i, "LoadTroops invalid colony_id");
+              }
+            } else if constexpr (std::is_same_v<T, UnloadTroops>) {
+              if (ord.colony_id == kInvalidId || !has_colony(ord.colony_id)) {
+                keep = false;
+                drop(i, "UnloadTroops invalid colony_id");
+              }
+            } else if constexpr (std::is_same_v<T, LoadColonists>) {
+              if (ord.colony_id == kInvalidId || !has_colony(ord.colony_id)) {
+                keep = false;
+                drop(i, "LoadColonists invalid colony_id");
+              }
+              if (!std::isfinite(ord.millions) || ord.millions < 0.0) {
+                note(join("Fix: ", owner, " ", list_name, "[", i, "] LoadColonists millions clamped ", ord.millions,
+                          " -> 0"));
+                ord.millions = 0.0;
+              }
+            } else if constexpr (std::is_same_v<T, UnloadColonists>) {
+              if (ord.colony_id == kInvalidId || !has_colony(ord.colony_id)) {
+                keep = false;
+                drop(i, "UnloadColonists invalid colony_id");
+              }
+              if (!std::isfinite(ord.millions) || ord.millions < 0.0) {
+                note(join("Fix: ", owner, " ", list_name, "[", i, "] UnloadColonists millions clamped ", ord.millions,
+                          " -> 0"));
+                ord.millions = 0.0;
+              }
+            } else if constexpr (std::is_same_v<T, InvadeColony>) {
+              if (ord.colony_id == kInvalidId || !has_colony(ord.colony_id)) {
+                keep = false;
+                drop(i, "InvadeColony invalid colony_id");
+              }
+            } else if constexpr (std::is_same_v<T, BombardColony>) {
+              if (ord.colony_id == kInvalidId || !has_colony(ord.colony_id)) {
+                keep = false;
+                drop(i, "BombardColony invalid colony_id");
+              }
+              if (ord.duration_days < -1) {
+                note(join("Fix: ", owner, " ", list_name, "[", i, "] BombardColony duration clamped ",
+                          ord.duration_days, " -> -1"));
+                ord.duration_days = -1;
+              }
+            } else if constexpr (std::is_same_v<T, SalvageWreck>) {
+              if (ord.wreck_id == kInvalidId || !has_wreck(ord.wreck_id)) {
+                keep = false;
+                drop(i, "SalvageWreck invalid wreck_id");
+              }
+              if (!std::isfinite(ord.tons) || ord.tons < 0.0) {
+                note(join("Fix: ", owner, " ", list_name, "[", i, "] SalvageWreck tons clamped ", ord.tons,
+                          " -> 0"));
+                ord.tons = 0.0;
+              }
             } else if constexpr (std::is_same_v<T, OrbitBody>) {
               if (ord.body_id == kInvalidId || !has_body(ord.body_id)) {
                 keep = false;
@@ -1282,6 +1771,18 @@ FixReport fix_game_state(GameState& s, const ContentDB* content) {
                   (self_ship_id != kInvalidId && ord.target_ship_id == self_ship_id)) {
                 keep = false;
                 drop(i, "TransferCargoToShip invalid target_ship_id");
+              }
+            } else if constexpr (std::is_same_v<T, TransferFuelToShip>) {
+              if (ord.target_ship_id == kInvalidId || !has_ship(ord.target_ship_id) ||
+                  (self_ship_id != kInvalidId && ord.target_ship_id == self_ship_id)) {
+                keep = false;
+                drop(i, "TransferFuelToShip invalid target_ship_id");
+              }
+            } else if constexpr (std::is_same_v<T, TransferTroopsToShip>) {
+              if (ord.target_ship_id == kInvalidId || !has_ship(ord.target_ship_id) ||
+                  (self_ship_id != kInvalidId && ord.target_ship_id == self_ship_id)) {
+                keep = false;
+                drop(i, "TransferTroopsToShip invalid target_ship_id");
               }
             } else if constexpr (std::is_same_v<T, ScrapShip>) {
               if (ord.colony_id == kInvalidId || !has_colony(ord.colony_id)) {
@@ -1506,6 +2007,7 @@ FixReport fix_game_state(GameState& s, const ContentDB* content) {
   for (const auto& [id, _] : s.bodies) bump_max(id);
   for (const auto& [id, _] : s.jump_points) bump_max(id);
   for (const auto& [id, _] : s.ships) bump_max(id);
+  for (const auto& [id, _] : s.wrecks) bump_max(id);
   for (const auto& [id, _] : s.colonies) bump_max(id);
   for (const auto& [id, _] : s.factions) bump_max(id);
   for (const auto& [id, _] : s.fleets) bump_max(id);

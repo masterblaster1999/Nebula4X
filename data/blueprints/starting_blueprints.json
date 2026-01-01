@@ -116,6 +116,13 @@
       "speed_km_s": 45,
       "fuel_use_per_mkm": 0.25,
       "power_use": 3
+    },
+    "stealth_coating_mk1": {
+      "name": "Stealth Coating Mk.I",
+      "type": "armor",
+      "mass_tons": 15,
+      "hp_bonus": 5,
+      "signature_multiplier": 0.5
     }
   },
   "designs": [
@@ -303,6 +310,18 @@
         "cargo_mk1",
         "fuel_tank_mk1"
       ]
+    },
+    {
+      "id": "stealth_scout",
+      "name": "Stealth Scout",
+      "role": "surveyor",
+      "components": [
+        "engine_ion_mk2",
+        "reactor_mk2",
+        "sensor_mk2",
+        "stealth_coating_mk1",
+        "fuel_tank_mk1"
+      ]
     }
   ],
   "installations": {
@@ -326,6 +345,15 @@
       "build_costs": {
         "Duranium": 1000,
         "Neutronium": 100
+      }
+    },
+    "infrastructure": {
+      "name": "Infrastructure (Habitation Domes)",
+      "habitation_capacity_millions": 100.0,
+      "construction_cost": 250,
+      "build_costs": {
+        "Duranium": 700,
+        "Neutronium": 70
       }
     },
     "fuel_refinery": {
@@ -386,6 +414,8 @@
     "planetary_fortress": {
       "name": "Planetary Fortress",
       "fortification_points": 50,
+      "weapon_damage": 6.0,
+      "weapon_range_mkm": 8.0,
       "construction_cost": 600,
       "build_costs": {
         "Duranium": 2000,

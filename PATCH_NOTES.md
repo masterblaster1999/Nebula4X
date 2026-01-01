@@ -1,10 +1,67 @@
-# Patch notes (generated 2025-12-29 r37)
+# Patch notes (generated 2026-01-01 r40)
 
 This patch pack contains only the files that changed.
 
 Apply by copying the files over the repo (drag/drop into GitHub's "Upload files"), preserving folder paths.
 
 ## Summary of changes
+
+### r40: Population transport (colonists)
+
+- Core:
+  - Adds ship-borne **colonists / passengers**: `Ship::colonists_millions`.
+  - Adds new ship orders:
+    - **LoadColonists(colony_id, millions)** (0 = load max)
+    - **UnloadColonists(colony_id, millions)** (0 = unload max)
+  - Transfers occur when the ship is within docking range of an **owned** colony.
+  - Uses the ship design's `colony_capacity_millions` (colony modules) as passenger capacity.
+- UI:
+  - Ship details now show embarked colonists for ships with colony modules.
+  - Ship↔Colony interactions add **Load/Unload Colonists** controls.
+- Serialization / compatibility:
+  - Save schema bumped to **v36** to persist embarked colonists and the new order types.
+  - Fixes a prior mismatch where `GameState::save_version` and the serialization version constant diverged.
+- Tests:
+  - Adds `test_population_transport` covering load/unload behavior and capacity limits.
+
+### r39: Colony habitability + habitation infrastructure
+
+- Core:
+  - Adds a simple, configurable **habitability** model derived from body temperature + atmosphere
+    (uses terraforming targets if set; terraform-complete bodies are treated as fully habitable).
+  - Adds optional colony life support via installation stat **habitation_capacity_millions**.
+    - If a colony is on a hostile world and is short on habitation capacity, population declines
+      proportionally to the shortfall (configurable).
+    - If fully supported, growth is reduced (configurable) until the world is terraformed.
+  - Colonization seeds "prefab" habitation infrastructure on new colonies (uses `SimConfig::habitation_installation_id`).
+- Content:
+  - Adds a new starting installation: **Infrastructure (Habitation Domes)**.
+  - `colonization_1` now unlocks the `infrastructure` installation.
+- UI:
+  - Colony tab shows a new **Habitability / Life Support** section with habitability %, required vs provided support, and shortfall warnings.
+- Scenarios:
+  - Sol: Mars Outpost starts with infrastructure; Alpha Centauri Prime and Barnard b now have environment values.
+  - Random scenario: procedural bodies now include a basic atmosphere model; forced homeworld is marked terraform-complete.
+
+## Compatibility notes
+
+- Save schema is unchanged (still v34).
+
+### r38: Shared shipyard repairs + auto-repair automation
+
+- Core:
+  - Shipyard repairs are no longer applied per-ship per-yard. Instead, each colony provides a **single repair capacity pool**
+    per day: `repair_hp_per_day_per_shipyard * shipyard_count`, shared among all docked damaged ships.
+  - Adds optional **repair mineral costs** (per HP repaired): `repair_duranium_per_hp` and `repair_neutronium_per_hp`.
+    (Defaults to 0 = free repairs.)
+  - Adds per-ship **repair priority** (Low/Normal/High) to control which ships get repaired first when capacity is limited.
+  - Adds ship automation: **auto-repair when damaged (idle)** with a configurable HP threshold.
+- UI:
+  - Ship panel: new auto-repair toggle + threshold slider, plus a repair priority dropdown.
+- State validation:
+  - Clamps auto-refuel/auto-repair thresholds to [0,1] and sanitizes invalid persisted repair priority values.
+- Serialization:
+  - Save schema bumped to **v34** (older saves still load; new fields default safely).
 
 ### r37: Economy window + mineral reserves + tech tree tier view
 

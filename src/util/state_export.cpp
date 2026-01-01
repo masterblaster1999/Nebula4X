@@ -58,6 +58,17 @@ const char* body_type_label(BodyType t) {
   return "unknown";
 }
 
+
+
+const char* sensor_mode_label(SensorMode m) {
+  switch (m) {
+    case SensorMode::Passive: return "passive";
+    case SensorMode::Normal: return "normal";
+    case SensorMode::Active: return "active";
+  }
+  return "normal";
+}
+
 const ShipDesign* find_design(const GameState& s, const ContentDB* content, const std::string& id) {
   if (id.empty()) return nullptr;
 
@@ -142,12 +153,15 @@ std::string ships_to_json(const GameState& state, const ContentDB* content) {
     obj["shields"] = std::max(0.0, sh.shields);
     obj["fuel_tons"] = std::max(0.0, sh.fuel_tons);
     obj["troops"] = std::max(0.0, sh.troops);
+    obj["colonists_millions"] = std::max(0.0, sh.colonists_millions);
 
     obj["design_mass_tons"] = d ? d->mass_tons : 0.0;
     obj["design_fuel_capacity_tons"] = d ? d->fuel_capacity_tons : 0.0;
     obj["design_fuel_use_per_mkm"] = d ? d->fuel_use_per_mkm : 0.0;
     obj["design_cargo_tons"] = d ? d->cargo_tons : 0.0;
     obj["design_sensor_range_mkm"] = d ? d->sensor_range_mkm : 0.0;
+    obj["sensor_mode"] = sensor_mode_label(sh.sensor_mode);
+  obj["design_signature_multiplier"] = d ? d->signature_multiplier : 1.0;
     obj["design_colony_capacity_millions"] = d ? d->colony_capacity_millions : 0.0;
     obj["design_troop_capacity"] = d ? d->troop_capacity : 0.0;
     obj["design_power_generation"] = d ? d->power_generation : 0.0;
@@ -298,6 +312,22 @@ std::string colonies_to_json(const GameState& state, const ContentDB* content) {
       obj["mineral_reserves"] = std::move(reserves);
     }
 
+    if (!c.mineral_targets.empty()) {
+      json::Object targets;
+      for (const auto& k : sorted_keys(c.mineral_targets)) {
+        targets[k] = c.mineral_targets.at(k);
+      }
+      obj["mineral_targets"] = std::move(targets);
+    }
+
+    if (!c.installation_targets.empty()) {
+      json::Object targets;
+      for (const auto& k : sorted_keys(c.installation_targets)) {
+        targets[k] = static_cast<double>(c.installation_targets.at(k));
+      }
+      obj["installation_targets"] = std::move(targets);
+    }
+
     // Installations as an array (id/name/count) for ease of consumption.
     json::Array inst_arr;
     inst_arr.reserve(c.installations.size());
@@ -370,6 +400,8 @@ std::string colonies_to_json(const GameState& state, const ContentDB* content) {
       bo_obj["design_id"] = bo.design_id;
       bo_obj["design"] = design_name(state, content, bo.design_id);
       bo_obj["tons_remaining"] = bo.tons_remaining;
+      if (bo.refit_ship_id != kInvalidId) bo_obj["refit_ship_id"] = static_cast<double>(bo.refit_ship_id);
+      if (bo.auto_queued) bo_obj["auto_queued"] = true;
       shipyard_q.emplace_back(std::move(bo_obj));
     }
     obj["shipyard_queue"] = std::move(shipyard_q);
@@ -384,6 +416,7 @@ std::string colonies_to_json(const GameState& state, const ContentDB* content) {
       io_obj["quantity_remaining"] = static_cast<double>(io.quantity_remaining);
       io_obj["minerals_paid"] = io.minerals_paid;
       io_obj["cp_remaining"] = io.cp_remaining;
+      io_obj["auto_queued"] = io.auto_queued;
       constr_q.emplace_back(std::move(io_obj));
     }
     obj["construction_queue"] = std::move(constr_q);

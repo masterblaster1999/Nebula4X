@@ -16,7 +16,7 @@ using json::Array;
 using json::Object;
 using json::Value;
 
-constexpr int kCurrentSaveVersion = 30;
+constexpr int kCurrentSaveVersion = 36;
 
 Object ship_power_policy_to_json(const ShipPowerPolicy& p) {
   Object o;
@@ -138,6 +138,38 @@ DiplomacyStatus diplomacy_status_from_string(const std::string& s) {
   return DiplomacyStatus::Hostile;
 }
 
+
+
+const char* sensor_mode_to_string(SensorMode m) {
+  switch (m) {
+    case SensorMode::Passive: return "passive";
+    case SensorMode::Normal: return "normal";
+    case SensorMode::Active: return "active";
+  }
+  return "normal";
+}
+
+SensorMode sensor_mode_from_string(const std::string& s) {
+  if (s == "passive" || s == "emcon" || s == "silent") return SensorMode::Passive;
+  if (s == "active" || s == "ping") return SensorMode::Active;
+  return SensorMode::Normal;
+}
+
+const char* repair_priority_to_string(RepairPriority p) {
+  switch (p) {
+    case RepairPriority::Low: return "low";
+    case RepairPriority::Normal: return "normal";
+    case RepairPriority::High: return "high";
+  }
+  return "normal";
+}
+
+RepairPriority repair_priority_from_string(const std::string& s) {
+  if (s == "low" || s == "l") return RepairPriority::Low;
+  if (s == "high" || s == "h" || s == "urgent") return RepairPriority::High;
+  return RepairPriority::Normal;
+}
+
 const char* fleet_formation_to_string(FleetFormation f) {
   switch (f) {
     case FleetFormation::None: return "none";
@@ -228,6 +260,11 @@ Value order_to_json(const Order& order) {
             obj["has_last_known"] = true;
             obj["last_known_position_mkm"] = vec2_to_json(o.last_known_position_mkm);
           }
+        } else if constexpr (std::is_same_v<T, EscortShip>) {
+          obj["type"] = std::string("escort_ship");
+          obj["target_ship_id"] = static_cast<double>(o.target_ship_id);
+          obj["follow_distance_mkm"] = o.follow_distance_mkm;
+          if (o.restrict_to_discovered) obj["restrict_to_discovered"] = true;
         } else if constexpr (std::is_same_v<T, WaitDays>) {
           obj["type"] = std::string("wait_days");
           obj["days_remaining"] = static_cast<double>(o.days_remaining);
@@ -249,14 +286,39 @@ Value order_to_json(const Order& order) {
           obj["type"] = std::string("unload_troops");
           obj["colony_id"] = static_cast<double>(o.colony_id);
           obj["strength"] = o.strength;
+        } else if constexpr (std::is_same_v<T, LoadColonists>) {
+          obj["type"] = std::string("load_colonists");
+          obj["colony_id"] = static_cast<double>(o.colony_id);
+          obj["millions"] = o.millions;
+        } else if constexpr (std::is_same_v<T, UnloadColonists>) {
+          obj["type"] = std::string("unload_colonists");
+          obj["colony_id"] = static_cast<double>(o.colony_id);
+          obj["millions"] = o.millions;
         } else if constexpr (std::is_same_v<T, InvadeColony>) {
           obj["type"] = std::string("invade_colony");
           obj["colony_id"] = static_cast<double>(o.colony_id);
+        } else if constexpr (std::is_same_v<T, BombardColony>) {
+          obj["type"] = std::string("bombard_colony");
+          obj["colony_id"] = static_cast<double>(o.colony_id);
+          obj["duration_days"] = static_cast<double>(o.duration_days);
+        } else if constexpr (std::is_same_v<T, SalvageWreck>) {
+          obj["type"] = std::string("salvage_wreck");
+          obj["wreck_id"] = static_cast<double>(o.wreck_id);
+          if (!o.mineral.empty()) obj["mineral"] = o.mineral;
+          obj["tons"] = o.tons;
         } else if constexpr (std::is_same_v<T, TransferCargoToShip>) {
           obj["type"] = std::string("transfer_cargo_to_ship");
           obj["target_ship_id"] = static_cast<double>(o.target_ship_id);
           if (!o.mineral.empty()) obj["mineral"] = o.mineral;
           obj["tons"] = o.tons;
+        } else if constexpr (std::is_same_v<T, TransferFuelToShip>) {
+          obj["type"] = std::string("transfer_fuel_to_ship");
+          obj["target_ship_id"] = static_cast<double>(o.target_ship_id);
+          obj["tons"] = o.tons;
+        } else if constexpr (std::is_same_v<T, TransferTroopsToShip>) {
+          obj["type"] = std::string("transfer_troops_to_ship");
+          obj["target_ship_id"] = static_cast<double>(o.target_ship_id);
+          obj["strength"] = o.strength;
         } else if constexpr (std::is_same_v<T, ScrapShip>) {
           obj["type"] = std::string("scrap_ship");
           obj["colony_id"] = static_cast<double>(o.colony_id);
@@ -309,6 +371,21 @@ Order order_from_json(const Value& v) {
     }
     return a;
   }
+  if (type == "escort_ship") {
+    EscortShip e;
+    e.target_ship_id = static_cast<Id>(o.at("target_ship_id").int_value());
+    if (auto it = o.find("follow_distance_mkm"); it != o.end()) {
+      e.follow_distance_mkm = it->second.number_value(1.0);
+    } else if (auto it2 = o.find("follow_mkm"); it2 != o.end()) {
+      // Backward compatible alias.
+      e.follow_distance_mkm = it2->second.number_value(1.0);
+    }
+    if (!std::isfinite(e.follow_distance_mkm) || e.follow_distance_mkm < 0.0) e.follow_distance_mkm = 1.0;
+    if (auto it3 = o.find("restrict_to_discovered"); it3 != o.end()) {
+      e.restrict_to_discovered = it3->second.bool_value(false);
+    }
+    return e;
+  }
   if (type == "wait_days") {
     WaitDays w;
     if (auto dr_it = o.find("days_remaining"); dr_it != o.end()) {
@@ -344,16 +421,56 @@ Order order_from_json(const Value& v) {
     if (auto it = o.find("strength"); it != o.end()) u.strength = it->second.number_value(0.0);
     return u;
   }
+  if (type == "load_colonists") {
+    LoadColonists l;
+    l.colony_id = static_cast<Id>(o.at("colony_id").int_value(kInvalidId));
+    if (auto it = o.find("millions"); it != o.end()) l.millions = it->second.number_value(0.0);
+    return l;
+  }
+  if (type == "unload_colonists") {
+    UnloadColonists u;
+    u.colony_id = static_cast<Id>(o.at("colony_id").int_value(kInvalidId));
+    if (auto it = o.find("millions"); it != o.end()) u.millions = it->second.number_value(0.0);
+    return u;
+  }
   if (type == "invade_colony") {
     InvadeColony i;
     i.colony_id = static_cast<Id>(o.at("colony_id").int_value(kInvalidId));
     return i;
+  }
+  if (type == "bombard_colony") {
+    BombardColony b;
+    b.colony_id = static_cast<Id>(o.at("colony_id").int_value(kInvalidId));
+    // Optional: older/forward-compatible saves may omit this.
+    if (auto it = o.find("duration_days"); it != o.end()) {
+      b.duration_days = static_cast<int>(it->second.int_value(-1));
+    }
+    return b;
+  }
+  if (type == "salvage_wreck") {
+    SalvageWreck s;
+    s.wreck_id = static_cast<Id>(o.at("wreck_id").int_value(kInvalidId));
+    if (auto it = o.find("mineral"); it != o.end()) s.mineral = it->second.string_value();
+    if (auto it = o.find("tons"); it != o.end()) s.tons = it->second.number_value(0.0);
+    return s;
   }
   if (type == "transfer_cargo_to_ship") {
     TransferCargoToShip t;
     t.target_ship_id = static_cast<Id>(o.at("target_ship_id").int_value(kInvalidId));
     if (auto m_it = o.find("mineral"); m_it != o.end()) t.mineral = m_it->second.string_value();
     if (auto t_it = o.find("tons"); t_it != o.end()) t.tons = t_it->second.number_value(0.0);
+    return t;
+  }
+  if (type == "transfer_fuel_to_ship") {
+    TransferFuelToShip t;
+    t.target_ship_id = static_cast<Id>(o.at("target_ship_id").int_value(kInvalidId));
+    if (auto t_it = o.find("tons"); t_it != o.end()) t.tons = t_it->second.number_value(0.0);
+    return t;
+  }
+  if (type == "transfer_troops_to_ship") {
+    TransferTroopsToShip t;
+    t.target_ship_id = static_cast<Id>(o.at("target_ship_id").int_value(kInvalidId));
+    if (auto s_it = o.find("strength"); s_it != o.end()) t.strength = s_it->second.number_value(0.0);
     return t;
   }
   if (type == "scrap_ship") {
@@ -510,16 +627,44 @@ std::string serialize_game_to_json(const GameState& s) {
     o["design_id"] = sh.design_id;
     o["auto_explore"] = sh.auto_explore;
     o["auto_freight"] = sh.auto_freight;
+    o["auto_refuel"] = sh.auto_refuel;
+    o["auto_refuel_threshold_fraction"] = sh.auto_refuel_threshold_fraction;
+    o["auto_repair"] = sh.auto_repair;
+    o["auto_repair_threshold_fraction"] = sh.auto_repair_threshold_fraction;
+    if (sh.repair_priority != RepairPriority::Normal) {
+      o["repair_priority"] = repair_priority_to_string(sh.repair_priority);
+    }
     o["power_policy"] = ship_power_policy_to_json(sh.power_policy);
+    if (sh.sensor_mode != SensorMode::Normal) o["sensor_mode"] = sensor_mode_to_string(sh.sensor_mode);
     o["speed_km_s"] = sh.speed_km_s;
     o["hp"] = sh.hp;
     o["fuel_tons"] = sh.fuel_tons;
     o["shields"] = sh.shields;
     o["cargo"] = map_string_double_to_json(sh.cargo);
     if (sh.troops > 0.0) o["troops"] = sh.troops;
+    if (sh.colonists_millions > 0.0) o["colonists_millions"] = sh.colonists_millions;
     ships.push_back(o);
   }
   root["ships"] = ships;
+
+  // Wrecks
+  Array wrecks;
+  wrecks.reserve(s.wrecks.size());
+  for (Id id : sorted_keys(s.wrecks)) {
+    const auto& w = s.wrecks.at(id);
+    Object o;
+    o["id"] = static_cast<double>(id);
+    o["name"] = w.name;
+    o["system_id"] = static_cast<double>(w.system_id);
+    o["position_mkm"] = vec2_to_json(w.position_mkm);
+    o["minerals"] = map_string_double_to_json(w.minerals);
+    if (w.source_ship_id != kInvalidId) o["source_ship_id"] = static_cast<double>(w.source_ship_id);
+    if (w.source_faction_id != kInvalidId) o["source_faction_id"] = static_cast<double>(w.source_faction_id);
+    if (!w.source_design_id.empty()) o["source_design_id"] = w.source_design_id;
+    if (w.created_day != 0) o["created_day"] = static_cast<double>(w.created_day);
+    wrecks.push_back(o);
+  }
+  root["wrecks"] = wrecks;
 
   // Colonies
   Array colonies;
@@ -536,6 +681,12 @@ std::string serialize_game_to_json(const GameState& s) {
     if (!c.mineral_reserves.empty()) {
       o["mineral_reserves"] = map_string_double_to_json(c.mineral_reserves);
     }
+    if (!c.mineral_targets.empty()) {
+      o["mineral_targets"] = map_string_double_to_json(c.mineral_targets);
+    }
+    if (!c.installation_targets.empty()) {
+      o["installation_targets"] = map_string_int_to_json(c.installation_targets);
+    }
     o["installations"] = map_string_int_to_json(c.installations);
     if (c.ground_forces > 0.0) o["ground_forces"] = c.ground_forces;
     if (c.troop_training_queue > 0.0) o["troop_training_queue"] = c.troop_training_queue;
@@ -548,6 +699,7 @@ std::string serialize_game_to_json(const GameState& s) {
       if (bo.refit_ship_id != kInvalidId) {
         qo["refit_ship_id"] = static_cast<double>(bo.refit_ship_id);
       }
+      if (bo.auto_queued) qo["auto_queued"] = true;
       q.push_back(qo);
     }
     o["shipyard_queue"] = q;
@@ -559,6 +711,7 @@ std::string serialize_game_to_json(const GameState& s) {
       qo["quantity_remaining"] = static_cast<double>(ord.quantity_remaining);
       qo["minerals_paid"] = ord.minerals_paid;
       qo["cp_remaining"] = ord.cp_remaining;
+      qo["auto_queued"] = ord.auto_queued;
       cq.push_back(qo);
     }
     o["construction_queue"] = cq;
@@ -583,6 +736,10 @@ std::string serialize_game_to_json(const GameState& s) {
     o["known_techs"] = string_vector_to_json(sorted_unique_copy(f.known_techs));
     o["unlocked_components"] = string_vector_to_json(sorted_unique_copy(f.unlocked_components));
     o["unlocked_installations"] = string_vector_to_json(sorted_unique_copy(f.unlocked_installations));
+    if (!f.ship_design_targets.empty()) {
+      o["ship_design_targets"] = map_string_int_to_json(f.ship_design_targets);
+    }
+
 
     // Diplomatic relations (optional; omitted when empty or default-hostile).
     if (!f.relations.empty()) {
@@ -884,14 +1041,51 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     sh.design_id = o.at("design_id").string_value();
     if (auto it = o.find("auto_explore"); it != o.end()) sh.auto_explore = it->second.bool_value(false);
     if (auto it = o.find("auto_freight"); it != o.end()) sh.auto_freight = it->second.bool_value(false);
+    if (auto it = o.find("auto_refuel"); it != o.end()) sh.auto_refuel = it->second.bool_value(false);
+    if (auto it = o.find("auto_refuel_threshold_fraction"); it != o.end()) {
+      sh.auto_refuel_threshold_fraction = it->second.number_value(sh.auto_refuel_threshold_fraction);
+    }
+    if (auto it = o.find("auto_repair"); it != o.end()) sh.auto_repair = it->second.bool_value(false);
+    if (auto it = o.find("auto_repair_threshold_fraction"); it != o.end()) {
+      sh.auto_repair_threshold_fraction = it->second.number_value(sh.auto_repair_threshold_fraction);
+    }
+    if (auto it = o.find("repair_priority"); it != o.end()) {
+      sh.repair_priority = repair_priority_from_string(it->second.string_value("normal"));
+    }
     if (auto it = o.find("power_policy"); it != o.end()) sh.power_policy = ship_power_policy_from_json(it->second);
+    if (auto it = o.find("sensor_mode"); it != o.end()) {
+      sh.sensor_mode = sensor_mode_from_string(it->second.string_value("normal"));
+    }
     sh.speed_km_s = o.at("speed_km_s").number_value(0.0);
     sh.hp = o.at("hp").number_value(0.0);
     if (auto it = o.find("fuel_tons"); it != o.end()) sh.fuel_tons = it->second.number_value(-1.0);
     if (auto it = o.find("shields"); it != o.end()) sh.shields = it->second.number_value(-1.0);
     if (auto it = o.find("cargo"); it != o.end()) sh.cargo = map_string_double_from_json(it->second);
     if (auto it = o.find("troops"); it != o.end()) sh.troops = it->second.number_value(0.0);
+    if (auto it = o.find("colonists_millions"); it != o.end()) sh.colonists_millions = it->second.number_value(0.0);
     s.ships[sh.id] = sh;
+  }
+
+  // Wrecks (optional in older saves)
+  if (auto it = root.find("wrecks"); it != root.end()) {
+    for (const auto& wv : it->second.array()) {
+      const auto& o = wv.object();
+      Wreck w;
+      w.id = static_cast<Id>(o.at("id").int_value());
+      w.name = o.at("name").string_value();
+      w.system_id = static_cast<Id>(o.at("system_id").int_value(kInvalidId));
+      w.position_mkm = vec2_from_json(o.at("position_mkm"));
+      if (auto im = o.find("minerals"); im != o.end()) w.minerals = map_string_double_from_json(im->second);
+      if (auto is = o.find("source_ship_id"); is != o.end()) {
+        w.source_ship_id = static_cast<Id>(is->second.int_value(kInvalidId));
+      }
+      if (auto ifa = o.find("source_faction_id"); ifa != o.end()) {
+        w.source_faction_id = static_cast<Id>(ifa->second.int_value(kInvalidId));
+      }
+      if (auto id = o.find("source_design_id"); id != o.end()) w.source_design_id = id->second.string_value();
+      if (auto ic = o.find("created_day"); ic != o.end()) w.created_day = static_cast<int>(ic->second.int_value(0));
+      s.wrecks[w.id] = w;
+    }
   }
 
   // Colonies
@@ -907,6 +1101,12 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     if (auto it = o.find("mineral_reserves"); it != o.end()) {
       c.mineral_reserves = map_string_double_from_json(it->second);
     }
+    if (auto it = o.find("mineral_targets"); it != o.end()) {
+      c.mineral_targets = map_string_double_from_json(it->second);
+    }
+    if (auto it = o.find("installation_targets"); it != o.end()) {
+      c.installation_targets = map_string_int_from_json(it->second);
+    }
     c.installations = map_string_int_from_json(o.at("installations"));
 
     if (auto it = o.find("ground_forces"); it != o.end()) c.ground_forces = it->second.number_value(0.0);
@@ -921,6 +1121,7 @@ GameState deserialize_game_from_json(const std::string& json_text) {
         if (auto it = qo.find("refit_ship_id"); it != qo.end()) {
           bo.refit_ship_id = static_cast<Id>(it->second.int_value(kInvalidId));
         }
+        if (auto it = qo.find("auto_queued"); it != qo.end()) bo.auto_queued = it->second.bool_value(false);
         c.shipyard_queue.push_back(bo);
       }
     }
@@ -933,6 +1134,7 @@ GameState deserialize_game_from_json(const std::string& json_text) {
         ord.quantity_remaining = static_cast<int>(qo.at("quantity_remaining").int_value(0));
         if (auto it = qo.find("minerals_paid"); it != qo.end()) ord.minerals_paid = it->second.bool_value(false);
         if (auto it = qo.find("cp_remaining"); it != qo.end()) ord.cp_remaining = it->second.number_value(0.0);
+        if (auto it = qo.find("auto_queued"); it != qo.end()) ord.auto_queued = it->second.bool_value(false);
         c.construction_queue.push_back(ord);
       }
     }
@@ -959,6 +1161,10 @@ GameState deserialize_game_from_json(const std::string& json_text) {
 
     if (auto it = o.find("unlocked_components"); it != o.end()) f.unlocked_components = string_vector_from_json(it->second);
     if (auto it = o.find("unlocked_installations"); it != o.end()) f.unlocked_installations = string_vector_from_json(it->second);
+    if (auto it = o.find("ship_design_targets"); it != o.end()) {
+      f.ship_design_targets = map_string_int_from_json(it->second);
+    }
+
 
     // Diplomatic relations (optional in saves; if missing, default stance is Hostile).
     if (auto it = o.find("relations"); it != o.end()) {
