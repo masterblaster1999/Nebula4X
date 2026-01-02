@@ -130,7 +130,13 @@ double design_score_for_role(const ShipDesign& d, ShipRole role) {
     case ShipRole::Surveyor:
       return d.sensor_range_mkm * 100.0 + d.speed_km_s * 20.0;
     case ShipRole::Freighter:
-      return d.cargo_tons * 10.0 + d.speed_km_s * 5.0;
+      // Freight ships are scored primarily by throughput (cargo) and speed.
+      //
+      // However, colony ships and troop transports often share the same role in
+      // content because they are "civilian hulls". For logistics planning, we
+      // prefer dedicated freighters so that colonizers/transports are not
+      // accidentally consumed by other automation.
+      return d.cargo_tons * 10.0 + d.speed_km_s * 5.0 - d.colony_capacity_millions * 0.1 - d.troop_capacity * 0.1;
     default:
       return 0.0;
   }
@@ -145,6 +151,76 @@ std::string best_design_for_role(const Simulation& sim, Id faction_id, ShipRole 
     if (!sim.is_design_buildable_for_faction(faction_id, id)) return;
 
     const double score = design_score_for_role(d, role);
+    if (best.empty() || score > best_score + 1e-9 || (std::abs(score - best_score) <= 1e-9 && id < best)) {
+      best = id;
+      best_score = score;
+    }
+  };
+
+  for (const auto& id : sorted_keys(sim.content().designs)) consider(id, sim.content().designs.at(id));
+  for (const auto& id : sorted_keys(sim.state().custom_designs)) consider(id, sim.state().custom_designs.at(id));
+
+  return best;
+}
+
+bool design_is_colonizer(const ShipDesign& d) {
+  return d.colony_capacity_millions > 0.0;
+}
+
+int count_colonizer_ships(const Simulation& sim, Id faction_id) {
+  int n = 0;
+  for (const auto& [_, sh] : sim.state().ships) {
+    if (sh.faction_id != faction_id) continue;
+    const auto* d = sim.find_design(sh.design_id);
+    if (!d) continue;
+    if (design_is_colonizer(*d)) n += 1;
+  }
+  return n;
+}
+
+int count_queued_colonizer_ships(const Simulation& sim, Id faction_id) {
+  int n = 0;
+  for (const auto& [_, c] : sim.state().colonies) {
+    if (c.faction_id != faction_id) continue;
+    for (const auto& bo : c.shipyard_queue) {
+      if (bo.is_refit()) continue;
+      const auto* d = sim.find_design(bo.design_id);
+      if (!d) continue;
+      if (design_is_colonizer(*d)) n += 1;
+    }
+  }
+  return n;
+}
+
+bool faction_has_colonization_target(const Simulation& sim, Id faction_id) {
+  std::unordered_set<Id> colonized_bodies;
+  colonized_bodies.reserve(sim.state().colonies.size() * 2 + 8);
+  for (const auto& [_, c] : sim.state().colonies) colonized_bodies.insert(c.body_id);
+
+  for (Id bid : sorted_keys(sim.state().bodies)) {
+    const auto* b = find_ptr(sim.state().bodies, bid);
+    if (!b) continue;
+    if (b->system_id == kInvalidId) continue;
+    if (!sim.is_system_discovered_by_faction(faction_id, b->system_id)) continue;
+    if (colonized_bodies.count(bid)) continue;
+
+    // Keep this conservative: only consider obvious colonizable bodies.
+    if (b->type != BodyType::Planet && b->type != BodyType::Moon && b->type != BodyType::Asteroid) continue;
+    return true;
+  }
+  return false;
+}
+
+std::string best_colonizer_design(const Simulation& sim, Id faction_id) {
+  std::string best;
+  double best_score = -1.0;
+
+  auto consider = [&](const std::string& id, const ShipDesign& d) {
+    if (!design_is_colonizer(d)) return;
+    if (!sim.is_design_buildable_for_faction(faction_id, id)) return;
+
+    // Prefer higher colony capacity, then speed.
+    const double score = d.colony_capacity_millions * 1000.0 + d.speed_km_s * 20.0 + d.cargo_tons * 0.1;
     if (best.empty() || score > best_score + 1e-9 || (std::abs(score - best_score) <= 1e-9 && id < best)) {
       best = id;
       best_score = score;
@@ -180,8 +256,9 @@ void ensure_research_plan(const Simulation& sim, Faction& f) {
 
   std::vector<std::string> recommended;
   if (f.control == FactionControl::AI_Explorer) {
-    recommended = {"chemistry_1", "nuclear_1", "propulsion_1", "sensors_1", "armor_1",
-                   "weapons_1",   "reactors_2", "propulsion_2"};
+    recommended = {"chemistry_1",    "nuclear_1",   "propulsion_1", "colonization_1",
+                   "sensors_1",      "armor_1",     "weapons_1",    "reactors_2",
+                   "propulsion_2"};
   } else if (f.control == FactionControl::AI_Pirate) {
     // Pirates need chemistry -> nuclear -> propulsion to start upgrading hulls.
     recommended = {"chemistry_1", "nuclear_1", "propulsion_1", "weapons_1", "sensors_1",
@@ -334,8 +411,20 @@ void enable_ship_automation_for_faction(Simulation& sim, Id faction_id, const Fa
 
     if (d->role == ShipRole::Surveyor) {
       sh->auto_explore = true;
+      sh->auto_freight = false;
+      sh->auto_colonize = false;
     } else if (d->role == ShipRole::Freighter) {
-      sh->auto_freight = true;
+      // Prefer dedicated cargo hulls for logistics. If the ship has a colony
+      // module, treat it as a colonizer instead.
+      if (d->colony_capacity_millions > 0.0) {
+        sh->auto_colonize = true;
+        sh->auto_freight = false;
+        sh->auto_explore = false;
+      } else {
+        sh->auto_freight = true;
+        sh->auto_explore = false;
+        sh->auto_colonize = false;
+      }
     }
   }
 }
@@ -375,6 +464,25 @@ void ensure_shipbuilding_pipeline(Simulation& sim, Id faction_id, const Faction&
   if (desired.freighters > have_f) needs.push_back({ShipRole::Freighter, desired.freighters - have_f});
   if (desired.combatants > have_c) needs.push_back({ShipRole::Combatant, desired.combatants - have_c});
 
+  // Enqueue a small number of ships (typically 1/day) so the AI doesn't explode
+  // the queue and so design upgrades can take effect.
+  int budget = 1;
+
+  // Explorer AI: keep at least one colonizer available when there are
+  // discovered uncolonized bodies. We avoid stealing the daily build slot
+  // from early exploration by only doing this once surveyors are satisfied.
+  if (f.control == FactionControl::AI_Explorer && budget > 0) {
+    const int total_colonizers = count_colonizer_ships(sim, faction_id) + count_queued_colonizer_ships(sim, faction_id);
+    if (total_colonizers < 1 && desired.surveyors <= have_s && faction_has_colonization_target(sim, faction_id)) {
+      const std::string best = best_colonizer_design(sim, faction_id);
+      if (!best.empty()) {
+        (void)sim.enqueue_build(colony_id, best);
+        budget -= 1;
+      }
+    }
+  }
+
+  if (budget <= 0) return;
   if (needs.empty()) return;
 
   auto role_prio = [&](ShipRole r) {
@@ -395,7 +503,6 @@ void ensure_shipbuilding_pipeline(Simulation& sim, Id faction_id, const Faction&
 
   // Enqueue a small number of ships (typically 1/day) so the AI doesn't explode
   // the queue and so design upgrades can take effect.
-  int budget = 1;
   for (const auto& need : needs) {
     if (budget <= 0) break;
     if (need.missing <= 0) continue;

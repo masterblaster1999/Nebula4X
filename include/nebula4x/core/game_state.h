@@ -23,8 +23,14 @@ struct ContentDB {
 
 // A single save-game state.
 struct GameState {
-  int save_version{36};
+  int save_version{41};
   Date date;
+
+  // Hour-of-day within the current Date (0..23).
+  //
+  // This enables sub-day turn ticks (e.g. 1h, 6h, 12h) while keeping most
+  // simulation systems on a daily cadence.
+  int hour_of_day{0};
 
   Id next_id{1};
 
@@ -39,6 +45,9 @@ struct GameState {
 
   // Salvageable wrecks created by ship destruction.
   std::unordered_map<Id, Wreck> wrecks;
+
+  // In-flight missile salvos.
+  std::unordered_map<Id, MissileSalvo> missile_salvos;
 
   std::unordered_map<Id, Colony> colonies;
   std::unordered_map<Id, Faction> factions;

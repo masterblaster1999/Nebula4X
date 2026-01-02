@@ -18,7 +18,8 @@ double step_toward(double cur, double target, double max_step) {
 
 } // namespace
 
-void Simulation::tick_terraforming() {
+void Simulation::tick_terraforming(double dt_days) {
+  if (dt_days <= 0.0) return;
   // Aggregate terraforming points per body from colonies.
   // (Multiple colonies on the same body is unusual, but supported.)
   std::unordered_map<Id, double> points_by_body;
@@ -26,7 +27,7 @@ void Simulation::tick_terraforming() {
   for (const auto& [_, col] : state_.colonies) {
     const double pts = std::max(0.0, terraforming_points_per_day(col));
     if (pts <= 1e-9) continue;
-    points_by_body[col.body_id] += pts;
+    points_by_body[col.body_id] += pts * dt_days;
   }
 
   const double dT_per_pt = std::max(0.0, cfg_.terraforming_temp_k_per_point_day);

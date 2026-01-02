@@ -150,6 +150,7 @@ std::string ships_to_json(const GameState& state, const ContentDB* content) {
 
     obj["speed_km_s"] = sh.speed_km_s;
     obj["hp"] = sh.hp;
+    obj["missile_cooldown_days"] = std::max(0.0, sh.missile_cooldown_days);
     obj["shields"] = std::max(0.0, sh.shields);
     obj["fuel_tons"] = std::max(0.0, sh.fuel_tons);
     obj["troops"] = std::max(0.0, sh.troops);
@@ -161,7 +162,20 @@ std::string ships_to_json(const GameState& state, const ContentDB* content) {
     obj["design_cargo_tons"] = d ? d->cargo_tons : 0.0;
     obj["design_sensor_range_mkm"] = d ? d->sensor_range_mkm : 0.0;
     obj["sensor_mode"] = sensor_mode_label(sh.sensor_mode);
-  obj["design_signature_multiplier"] = d ? d->signature_multiplier : 1.0;
+
+    // Automation flags (useful for debugging/analysis tooling).
+    obj["auto_explore"] = sh.auto_explore;
+    obj["auto_freight"] = sh.auto_freight;
+    obj["auto_salvage"] = sh.auto_salvage;
+    obj["auto_colonize"] = sh.auto_colonize;
+    obj["auto_refuel"] = sh.auto_refuel;
+    obj["auto_refuel_threshold_fraction"] = sh.auto_refuel_threshold_fraction;
+    obj["auto_tanker"] = sh.auto_tanker;
+    obj["auto_tanker_reserve_fraction"] = sh.auto_tanker_reserve_fraction;
+    obj["auto_repair"] = sh.auto_repair;
+    obj["auto_repair_threshold_fraction"] = sh.auto_repair_threshold_fraction;
+
+    obj["design_signature_multiplier"] = d ? d->signature_multiplier : 1.0;
     obj["design_colony_capacity_millions"] = d ? d->colony_capacity_millions : 0.0;
     obj["design_troop_capacity"] = d ? d->troop_capacity : 0.0;
     obj["design_power_generation"] = d ? d->power_generation : 0.0;
@@ -175,6 +189,14 @@ std::string ships_to_json(const GameState& state, const ContentDB* content) {
     obj["design_shield_regen_per_day"] = d ? d->shield_regen_per_day : 0.0;
     obj["design_weapon_damage"] = d ? d->weapon_damage : 0.0;
     obj["design_weapon_range_mkm"] = d ? d->weapon_range_mkm : 0.0;
+
+    obj["design_missile_damage"] = d ? d->missile_damage : 0.0;
+    obj["design_missile_range_mkm"] = d ? d->missile_range_mkm : 0.0;
+    obj["design_missile_speed_mkm_per_day"] = d ? d->missile_speed_mkm_per_day : 0.0;
+    obj["design_missile_reload_days"] = d ? d->missile_reload_days : 0.0;
+
+    obj["design_point_defense_damage"] = d ? d->point_defense_damage : 0.0;
+    obj["design_point_defense_range_mkm"] = d ? d->point_defense_range_mkm : 0.0;
 
     // Runtime power settings
     obj["power_policy_engines_enabled"] = sh.power_policy.engines_enabled;

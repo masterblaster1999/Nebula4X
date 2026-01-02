@@ -43,6 +43,10 @@ struct ColonizeBody {
 struct OrbitBody {
   Id body_id{kInvalidId};
   int duration_days{-1};
+
+  // Accumulated time spent orbiting (in days).
+  // Used to make duration_days behave consistently under sub-day turn ticks.
+  double progress_days{0.0};
 };
 
 // Move to a jump point and transit to the linked system when reached.
@@ -85,6 +89,10 @@ struct EscortShip {
 // other queued orders.
 struct WaitDays {
   int days_remaining{0};
+
+  // Accumulated time waited (in days).
+  // Used to make days_remaining behave consistently under sub-day turn ticks.
+  double progress_days{0.0};
 };
 
 // Load minerals from a friendly colony into this ship's cargo.
@@ -155,6 +163,10 @@ struct InvadeColony {
 struct BombardColony {
   Id colony_id{kInvalidId};
   int duration_days{-1};
+
+  // Accumulated time spent bombarding (in days).
+  // Used to make duration_days behave consistently under sub-day turn ticks.
+  double progress_days{0.0};
 };
 
 // Salvage minerals from a wreck into this ship's cargo.

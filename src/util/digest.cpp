@@ -358,6 +358,7 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
 
   d.add_i64(s.save_version);
   d.add_i64(s.date.days_since_epoch());
+  d.add_i64(s.hour_of_day);
   d.add_u64(s.next_id);
   d.add_u64(s.next_event_seq);
 
@@ -439,8 +440,12 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
     hash_string_double_map(d, sh.cargo);
     d.add_bool(sh.auto_explore);
     d.add_bool(sh.auto_freight);
+    d.add_bool(sh.auto_salvage);
+    d.add_bool(sh.auto_colonize);
     d.add_bool(sh.auto_refuel);
     d.add_double(sh.auto_refuel_threshold_fraction);
+    d.add_bool(sh.auto_tanker);
+    d.add_double(sh.auto_tanker_reserve_fraction);
     d.add_bool(sh.auto_repair);
     d.add_double(sh.auto_repair_threshold_fraction);
     d.add_u8(static_cast<std::uint8_t>(sh.repair_priority));
@@ -454,6 +459,8 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
       d.add_u8(static_cast<std::uint8_t>(ss));
     }
     d.add_double(sh.hp);
+    d.add_double(sh.missile_cooldown_days);
+    d.add_double(sh.boarding_cooldown_days);
     d.add_double(sh.fuel_tons);
     d.add_double(sh.shields);
     d.add_double(sh.troops);
@@ -473,6 +480,24 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
     d.add_u64(w.source_faction_id);
     d.add_string(w.source_design_id);
     d.add_i64(w.created_day);
+  }
+
+  // Missile salvos
+  d.add_size(s.missile_salvos.size());
+  for (Id mid : sorted_keys(s.missile_salvos)) {
+    const auto& ms = s.missile_salvos.at(mid);
+    d.add_u64(mid);
+    d.add_u64(ms.system_id);
+    d.add_u64(ms.attacker_ship_id);
+    d.add_u64(ms.attacker_faction_id);
+    d.add_u64(ms.target_ship_id);
+    d.add_u64(ms.target_faction_id);
+    d.add_double(ms.damage);
+    d.add_double(ms.damage_initial);
+    d.add_double(ms.eta_days_total);
+    d.add_double(ms.eta_days_remaining);
+    hash_vec2(d, ms.launch_pos_mkm);
+    hash_vec2(d, ms.target_pos_mkm);
   }
 
   // Colonies
@@ -544,6 +569,10 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
     auto disc = sorted_unique_copy(f.discovered_systems);
     d.add_size(disc.size());
     for (Id sid : disc) d.add_u64(sid);
+
+    auto sjp = sorted_unique_copy(f.surveyed_jump_points);
+    d.add_size(sjp.size());
+    for (Id jid : sjp) d.add_u64(jid);
 
     d.add_size(f.ship_contacts.size());
     for (Id sid : sorted_keys(f.ship_contacts)) {
@@ -629,6 +658,7 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
     for (const auto* e : ev) {
       d.add_u64(e->seq);
       d.add_i64(e->day);
+      d.add_i64(static_cast<std::int64_t>(e->hour));
       d.add_enum(e->level);
       d.add_enum(e->category);
       d.add_u64(e->faction_id);

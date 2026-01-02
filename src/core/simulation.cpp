@@ -128,6 +128,7 @@ std::optional<JumpRoutePlan> compute_jump_route_plan(const Simulation& sim, Id s
   // If we're restricted to a faction's discovered map (fog-of-war), prebuild a fast membership set.
   const Faction* fac = nullptr;
   std::unordered_set<Id> discovered;
+  std::unordered_set<Id> surveyed_jumps;
   if (restrict_to_discovered) {
     fac = find_ptr(s.factions, faction_id);
     if (fac) {
@@ -135,6 +136,9 @@ std::optional<JumpRoutePlan> compute_jump_route_plan(const Simulation& sim, Id s
       for (Id sid : fac->discovered_systems) discovered.insert(sid);
       // Ensure the starting system is always considered allowed.
       discovered.insert(start_system_id);
+
+      surveyed_jumps.reserve(fac->surveyed_jump_points.size() * 2 + 8);
+      for (Id jid : fac->surveyed_jump_points) surveyed_jumps.insert(jid);
     }
   }
 
@@ -143,6 +147,13 @@ std::optional<JumpRoutePlan> compute_jump_route_plan(const Simulation& sim, Id s
     // Backward-compat: if the faction doesn't exist, don't block routing.
     if (!fac) return true;
     return discovered.contains(sys_id);
+  };
+
+  auto allow_jump = [&](Id jump_id) {
+    if (!restrict_to_discovered) return true;
+    // Backward-compat: if the faction doesn't exist, don't block routing.
+    if (!fac) return true;
+    return surveyed_jumps.contains(jump_id);
   };
 
   if (restrict_to_discovered && !allow_system(target_system_id)) return std::nullopt;
@@ -257,6 +268,7 @@ std::optional<JumpRoutePlan> compute_jump_route_plan(const Simulation& sim, Id s
 
     const std::vector<Id>& outgoing = outgoing_jumps(cur.node.system_id);
     for (Id jid : outgoing) {
+      if (!allow_jump(jid)) continue;
       const auto* jp = find_ptr(s.jump_points, jid);
       if (!jp) continue;
       if (jp->system_id != cur.node.system_id) continue;
@@ -687,6 +699,16 @@ bool Simulation::is_system_discovered_by_faction(Id viewer_faction_id, Id system
          fac->discovered_systems.end();
 }
 
+bool Simulation::is_jump_point_surveyed_by_faction(Id viewer_faction_id, Id jump_point_id) const {
+  if (jump_point_id == kInvalidId) return false;
+  // When there is no "viewer" (e.g. omniscient mode / tools), treat all links as known.
+  if (viewer_faction_id == kInvalidId) return true;
+  const auto* fac = find_ptr(state_.factions, viewer_faction_id);
+  if (!fac) return true;
+  return std::find(fac->surveyed_jump_points.begin(), fac->surveyed_jump_points.end(), jump_point_id) !=
+         fac->surveyed_jump_points.end();
+}
+
 
 void Simulation::ensure_jump_route_cache_current() const {
   const std::int64_t day = state_.date.days_since_epoch();
@@ -928,6 +950,8 @@ bool Simulation::set_diplomatic_status(Id from_faction_id, Id to_faction_id, Dip
   if (now_mutual_friendly && !was_mutual_friendly) {
     int added_a_systems = 0;
     int added_b_systems = 0;
+    int added_a_jumps = 0;
+    int added_b_jumps = 0;
     int merged_a_contacts = 0;
     int merged_b_contacts = 0;
 
@@ -960,28 +984,46 @@ bool Simulation::set_diplomatic_status(Id from_faction_id, Id to_faction_id, Dip
       }
     };
 
+    auto merge_jump_surveys = [&](Faction& dst, const Faction& src, int& added) {
+      for (Id jid : src.surveyed_jump_points) {
+        if (jid == kInvalidId) continue;
+        if (std::find(dst.surveyed_jump_points.begin(), dst.surveyed_jump_points.end(), jid) !=
+            dst.surveyed_jump_points.end()) {
+          continue;
+        }
+        dst.surveyed_jump_points.push_back(jid);
+        added += 1;
+      }
+    };
+
     merge_systems(*a, *b, added_a_systems);
     merge_systems(*b, *a, added_b_systems);
-    if (added_a_systems + added_b_systems > 0) invalidate_jump_route_cache();
+
+    merge_jump_surveys(*a, *b, added_a_jumps);
+    merge_jump_surveys(*b, *a, added_b_jumps);
+
+    if (added_a_systems + added_b_systems + added_a_jumps + added_b_jumps > 0) invalidate_jump_route_cache();
 
     merge_contacts(*a, *b, merged_a_contacts);
     merge_contacts(*b, *a, merged_b_contacts);
 
     if (push_event_on_change) {
-      if (added_a_systems > 0 || merged_a_contacts > 0) {
+    if (added_a_systems > 0 || added_a_jumps > 0 || merged_a_contacts > 0) {
         EventContext ctx;
         ctx.faction_id = from_faction_id;
         ctx.faction_id2 = to_faction_id;
         const std::string msg = "Intel sharing with " + b->name + ": +" + std::to_string(added_a_systems) +
-                                " systems, +" + std::to_string(merged_a_contacts) + " contacts";
+                                " systems, +" + std::to_string(added_a_jumps) + " jump surveys, +" +
+                                std::to_string(merged_a_contacts) + " contacts";
         push_event(EventLevel::Info, EventCategory::Intel, msg, ctx);
       }
-      if (added_b_systems > 0 || merged_b_contacts > 0) {
+    if (added_b_systems > 0 || added_b_jumps > 0 || merged_b_contacts > 0) {
         EventContext ctx;
         ctx.faction_id = to_faction_id;
         ctx.faction_id2 = from_faction_id;
         const std::string msg = "Intel sharing with " + a->name + ": +" + std::to_string(added_b_systems) +
-                                " systems, +" + std::to_string(merged_b_contacts) + " contacts";
+                                " systems, +" + std::to_string(added_b_jumps) + " jump surveys, +" +
+                                std::to_string(merged_b_contacts) + " contacts";
         push_event(EventLevel::Info, EventCategory::Intel, msg, ctx);
       }
     }

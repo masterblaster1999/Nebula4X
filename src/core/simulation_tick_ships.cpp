@@ -3,6 +3,7 @@
 #include "nebula4x/core/fleet_formation.h"
 
 #include "simulation_internal.h"
+#include "simulation_sensors.h"
 
 #include <algorithm>
 #include <cmath>
@@ -24,7 +25,8 @@ using sim_internal::sorted_keys;
 using sim_internal::compute_power_allocation;
 } // namespace
 
-void Simulation::tick_ships() {
+void Simulation::tick_ships(double dt_days) {
+  dt_days = std::clamp(dt_days, 0.0, 10.0);
   auto cargo_used_tons = [](const Ship& s) {
     double used = 0.0;
     for (const auto& [_, tons] : s.cargo) used += std::max(0.0, tons);
@@ -533,7 +535,12 @@ void Simulation::tick_ships() {
         q.erase(q.begin());
         continue;
       }
-      ord.days_remaining -= 1;
+      // Accumulate fractional days so sub-day ticks don't consume a full day.
+      ord.progress_days = std::max(0.0, ord.progress_days) + dt_days;
+      while (ord.days_remaining > 0 && ord.progress_days >= 1.0 - 1e-12) {
+        ord.days_remaining -= 1;
+        ord.progress_days -= 1.0;
+      }
       if (ord.days_remaining <= 0) q.erase(q.begin());
       continue;
     }
@@ -1651,7 +1658,11 @@ void Simulation::tick_ships() {
       ship.position_mkm = target; // snap to body
       auto& ord = std::get<OrbitBody>(q.front());
       if (ord.duration_days > 0) {
-        ord.duration_days--;
+        ord.progress_days = std::max(0.0, ord.progress_days) + dt_days;
+        while (ord.duration_days > 0 && ord.progress_days >= 1.0 - 1e-12) {
+          ord.duration_days -= 1;
+          ord.progress_days -= 1.0;
+        }
       }
       if (ord.duration_days == 0) {
         q.erase(q.begin());
@@ -1672,6 +1683,10 @@ void Simulation::tick_ships() {
 
       const auto* dest = find_ptr(state_.jump_points, jp->linked_jump_id);
       if (!dest) return;
+
+      // Mark both ends as surveyed for the transiting faction (fog-of-war routing).
+      survey_jump_point_for_faction(ship.faction_id, jp->id);
+      survey_jump_point_for_faction(ship.faction_id, dest->id);
 
       const Id old_sys = ship.system_id;
       const Id new_sys = dest->system_id;
@@ -1759,7 +1774,7 @@ void Simulation::tick_ships() {
       }
     }
 
-    const double max_step = mkm_per_day_from_speed(effective_speed_km_s, cfg_.seconds_per_day);
+    const double max_step = mkm_per_day_from_speed(effective_speed_km_s, cfg_.seconds_per_day) * dt_days;
     if (max_step <= 0.0) continue;
 
     double step = max_step;
@@ -1842,6 +1857,37 @@ void Simulation::tick_ships() {
     const Vec2 dir = delta.normalized();
     ship.position_mkm += dir * step;
     burn_fuel(step);
+  }
+
+  // Jump-point surveys: ships record nearby jump points for fog-of-war routing.
+  // (Surveyors can do this from farther away using their sensor range.)
+  for (Id ship_id : ship_ids) {
+    const auto* sh = find_ptr(state_.ships, ship_id);
+    if (!sh) continue;
+    if (sh->hp <= 0.0) continue;
+    if (sh->faction_id == kInvalidId) continue;
+    if (sh->system_id == kInvalidId) continue;
+
+    const auto* sys = find_ptr(state_.systems, sh->system_id);
+    if (!sys) continue;
+
+    const auto* sd = find_design(sh->design_id);
+    double range_mkm = std::max(0.0, cfg_.docking_range_mkm);
+    if (sd && sd->role == ShipRole::Surveyor) {
+      range_mkm = std::max(range_mkm, sim_sensors::sensor_range_mkm_with_mode(*this, *sh, *sd));
+    }
+    if (range_mkm <= 0.0) continue;
+
+    for (Id jid : sys->jump_points) {
+      if (jid == kInvalidId) continue;
+      if (is_jump_point_surveyed_by_faction(sh->faction_id, jid)) continue;
+      const auto* jp = find_ptr(state_.jump_points, jid);
+      if (!jp) continue;
+      const double dist = (sh->position_mkm - jp->position_mkm).length();
+      if (dist <= range_mkm + 1e-9) {
+        survey_jump_point_for_faction(sh->faction_id, jid);
+      }
+    }
   }
 }
 

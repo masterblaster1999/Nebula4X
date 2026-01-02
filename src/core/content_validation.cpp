@@ -64,6 +64,18 @@ std::vector<std::string> validate_content_db(const ContentDB& db) {
       push(errors, join("Component '", key, "' has invalid weapon_damage: ", c.weapon_damage));
     if (!is_non_negative(c.weapon_range_mkm))
       push(errors, join("Component '", key, "' has invalid weapon_range_mkm: ", c.weapon_range_mkm));
+    if (!is_non_negative(c.missile_damage))
+      push(errors, join("Component '", key, "' has invalid missile_damage: ", c.missile_damage));
+    if (!is_non_negative(c.missile_range_mkm))
+      push(errors, join("Component '", key, "' has invalid missile_range_mkm: ", c.missile_range_mkm));
+    if (!is_non_negative(c.missile_speed_mkm_per_day))
+      push(errors, join("Component '", key, "' has invalid missile_speed_mkm_per_day: ", c.missile_speed_mkm_per_day));
+    if (!is_non_negative(c.missile_reload_days))
+      push(errors, join("Component '", key, "' has invalid missile_reload_days: ", c.missile_reload_days));
+    if (!is_non_negative(c.point_defense_damage))
+      push(errors, join("Component '", key, "' has invalid point_defense_damage: ", c.point_defense_damage));
+    if (!is_non_negative(c.point_defense_range_mkm))
+      push(errors, join("Component '", key, "' has invalid point_defense_range_mkm: ", c.point_defense_range_mkm));
     if (!is_non_negative(c.hp_bonus))
       push(errors, join("Component '", key, "' has invalid hp_bonus: ", c.hp_bonus));
     if (!is_non_negative(c.shield_hp))
@@ -135,6 +147,19 @@ std::vector<std::string> validate_content_db(const ContentDB& db) {
       push(errors, join("Design '", key, "' has invalid weapon_damage: ", d.weapon_damage));
     if (!is_non_negative(d.weapon_range_mkm))
       push(errors, join("Design '", key, "' has invalid weapon_range_mkm: ", d.weapon_range_mkm));
+    if (!is_non_negative(d.missile_damage))
+      push(errors, join("Design '", key, "' has invalid missile_damage: ", d.missile_damage));
+    if (!is_non_negative(d.missile_range_mkm))
+      push(errors, join("Design '", key, "' has invalid missile_range_mkm: ", d.missile_range_mkm));
+    if (!is_non_negative(d.missile_speed_mkm_per_day))
+      push(errors,
+           join("Design '", key, "' has invalid missile_speed_mkm_per_day: ", d.missile_speed_mkm_per_day));
+    if (!is_non_negative(d.missile_reload_days))
+      push(errors, join("Design '", key, "' has invalid missile_reload_days: ", d.missile_reload_days));
+    if (!is_non_negative(d.point_defense_damage))
+      push(errors, join("Design '", key, "' has invalid point_defense_damage: ", d.point_defense_damage));
+    if (!is_non_negative(d.point_defense_range_mkm))
+      push(errors, join("Design '", key, "' has invalid point_defense_range_mkm: ", d.point_defense_range_mkm));
   }
 
   // --- Installations ---

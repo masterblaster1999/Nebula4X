@@ -13,6 +13,7 @@
 
 #include "nebula4x/util/log.h"
 #include "nebula4x/util/spatial_index.h"
+#include "nebula4x/util/time.h"
 
 namespace nebula4x {
 namespace {
@@ -43,7 +44,8 @@ static double clamp01(double x) {
 
 } // namespace
 
-void Simulation::tick_combat() {
+void Simulation::tick_combat(double dt_days) {
+  dt_days = std::clamp(dt_days, 0.0, 10.0);
   std::unordered_map<Id, double> incoming_damage;
   std::unordered_map<Id, std::vector<Id>> attackers_for_target;
   std::unordered_map<Id, std::vector<Id>> colony_attackers_for_target;
@@ -188,15 +190,302 @@ void Simulation::tick_combat() {
     return ss.str();
   };
 
+
+  // --- missiles (time-of-flight salvos) ---
+
+  // Tick down missile cooldowns by the elapsed time.
+  for (Id sid : ship_ids) {
+    auto* sh = find_ptr(state_.ships, sid);
+    if (!sh) continue;
+    if (sh->missile_cooldown_days > 0.0) {
+      sh->missile_cooldown_days = std::max(0.0, sh->missile_cooldown_days - dt_days);
+    }
+    if (sh->boarding_cooldown_days > 0.0) {
+      sh->boarding_cooldown_days = std::max(0.0, sh->boarding_cooldown_days - dt_days);
+    }
+  }
+
+  // Tick in-flight salvos and apply continuous point defense + impacts.
+  if (!state_.missile_salvos.empty()) {
+    const auto missile_ids = sorted_keys(state_.missile_salvos);
+
+    // Compute a global maximum PD range so we can cap spatial queries.
+    double max_pd_range_mkm = 0.0;
+    for (Id sid : ship_ids) {
+      const auto* sh = find_ptr(state_.ships, sid);
+      if (!sh) continue;
+      const auto* d = find_design(sh->design_id);
+      if (!d) continue;
+      if (d->point_defense_damage > 0.0 && d->point_defense_range_mkm > 0.0) {
+        max_pd_range_mkm = std::max(max_pd_range_mkm, d->point_defense_range_mkm);
+      }
+    }
+
+    struct SalvoPos {
+      Id id{kInvalidId};
+      Vec2 pos_mkm{0.0, 0.0};
+    };
+
+    // Phase 1: advance timers and compute in-system positions.
+    std::unordered_map<Id, std::vector<SalvoPos>> salvos_by_system;
+    salvos_by_system.reserve(state_.systems.size());
+
+    std::vector<Id> erase_salvos;
+    erase_salvos.reserve(state_.missile_salvos.size());
+
+    for (Id mid : missile_ids) {
+      auto it = state_.missile_salvos.find(mid);
+      if (it == state_.missile_salvos.end()) continue;
+      auto& ms = it->second;
+
+      const auto* tgt = find_ptr(state_.ships, ms.target_ship_id);
+      if (!tgt || tgt->hp <= 0.0 || tgt->system_id == kInvalidId || tgt->system_id != ms.system_id) {
+        // Target vanished or escaped the system.
+        erase_salvos.push_back(mid);
+        continue;
+      }
+
+      // Backfill/sanitize for legacy saves.
+      if (ms.damage_initial <= 1e-12) ms.damage_initial = ms.damage;
+      if (ms.eta_days_total <= 1e-12) ms.eta_days_total = std::max(1e-6, ms.eta_days_remaining);
+      if (ms.launch_pos_mkm.length() <= 1e-12) {
+        if (const auto* sh = find_ptr(state_.ships, ms.attacker_ship_id)) ms.launch_pos_mkm = sh->position_mkm;
+      }
+      if (ms.target_pos_mkm.length() <= 1e-12) ms.target_pos_mkm = tgt->position_mkm;
+
+      ms.eta_days_remaining -= dt_days;
+
+      const double total = std::max(1e-6, ms.eta_days_total);
+      const double rem = std::max(0.0, ms.eta_days_remaining);
+      const double frac = clamp01(1.0 - rem / total);
+      const Vec2 pos = ms.launch_pos_mkm + (ms.target_pos_mkm - ms.launch_pos_mkm) * frac;
+      salvos_by_system[ms.system_id].push_back(SalvoPos{mid, pos});
+    }
+
+    // Phase 2: continuous point defense during this tick.
+    // Map: defender ship id -> salvos it can engage this tick.
+    std::unordered_map<Id, std::vector<Id>> pd_engagements;
+    pd_engagements.reserve(state_.ships.size());
+
+    if (max_pd_range_mkm > 1e-9 && dt_days > 0.0) {
+      for (auto& [sys_id, salvos] : salvos_by_system) {
+        if (salvos.empty()) continue;
+        auto& idx = index_for_system(sys_id);
+
+        for (const auto& sp : salvos) {
+          const auto it = state_.missile_salvos.find(sp.id);
+          if (it == state_.missile_salvos.end()) continue;
+          const auto& ms = it->second;
+
+          const auto nearby = idx.query_radius(sp.pos_mkm, max_pd_range_mkm, 0.0);
+          for (Id did : nearby) {
+            const auto* def = find_ptr(state_.ships, did);
+            if (!def) continue;
+            if (def->hp <= 0.0) continue;
+
+            // Only defend if (a) not hostile to the target and (b) hostile to the attacker.
+            if (are_factions_hostile(def->faction_id, ms.target_faction_id)) continue;
+            if (!are_factions_hostile(def->faction_id, ms.attacker_faction_id)) continue;
+
+            const auto* dd = find_design(def->design_id);
+            if (!dd) continue;
+            if (dd->point_defense_damage <= 0.0 || dd->point_defense_range_mkm <= 0.0) continue;
+
+            const double dist = (def->position_mkm - sp.pos_mkm).length();
+            if (dist > dd->point_defense_range_mkm + 1e-9) continue;
+
+            const auto p = compute_power_allocation(*dd, def->power_policy);
+            if (!p.weapons_online) continue;
+
+            pd_engagements[did].push_back(sp.id);
+          }
+        }
+      }
+    }
+
+    // Apply PD damage as a rate integrated over dt_days, splitting per-defender
+    // across all salvos in range.
+    for (Id did : sorted_keys(pd_engagements)) {
+      auto it_vec = pd_engagements.find(did);
+      if (it_vec == pd_engagements.end()) continue;
+      auto& mids = it_vec->second;
+      std::sort(mids.begin(), mids.end());
+      mids.erase(std::unique(mids.begin(), mids.end()), mids.end());
+      if (mids.empty()) continue;
+
+      const auto* def = find_ptr(state_.ships, did);
+      if (!def) continue;
+      const auto* dd = find_design(def->design_id);
+      if (!dd) continue;
+      if (dd->point_defense_damage <= 0.0) continue;
+
+      const double pd_available = std::max(0.0, dd->point_defense_damage) * dt_days;
+      if (pd_available <= 1e-12) continue;
+
+      const double share = pd_available / static_cast<double>(mids.size());
+      if (share <= 1e-12) continue;
+
+      for (Id mid : mids) {
+        auto it = state_.missile_salvos.find(mid);
+        if (it == state_.missile_salvos.end()) continue;
+        auto& ms = it->second;
+        if (ms.damage <= 0.0) continue;
+
+        const double intercept = std::min(ms.damage, share);
+        ms.damage = std::max(0.0, ms.damage - intercept);
+      }
+    }
+
+    // Phase 3: impacts and early interceptions.
+    struct Agg {
+      double payload{0.0};
+      double intercepted{0.0};
+      double damage{0.0};
+      int salvos{0};
+      Id system_id{kInvalidId};
+      std::vector<Id> attacker_factions;
+    };
+
+    std::unordered_map<Id, Agg> impacts;
+    std::unordered_map<Id, Agg> interceptions;
+    impacts.reserve(state_.missile_salvos.size());
+    interceptions.reserve(state_.missile_salvos.size());
+
+    for (Id mid : missile_ids) {
+      const auto it = state_.missile_salvos.find(mid);
+      if (it == state_.missile_salvos.end()) continue;
+      const auto& ms = it->second;
+
+      const auto* tgt = find_ptr(state_.ships, ms.target_ship_id);
+      if (!tgt || tgt->hp <= 0.0 || tgt->system_id == kInvalidId || tgt->system_id != ms.system_id) {
+        erase_salvos.push_back(mid);
+        continue;
+      }
+
+      const double payload = std::max(0.0, (ms.damage_initial > 1e-12) ? ms.damage_initial : ms.damage);
+      const double remaining = std::max(0.0, ms.damage);
+      const double intercepted_total = std::max(0.0, payload - remaining);
+
+      if (ms.eta_days_remaining <= 1e-9) {
+        auto& a = impacts[ms.target_ship_id];
+        a.payload += payload;
+        a.intercepted += intercepted_total;
+        a.damage += remaining;
+        a.salvos += 1;
+        a.system_id = ms.system_id;
+        a.attacker_factions.push_back(ms.attacker_faction_id);
+
+        if (remaining > 1e-9) {
+          incoming_damage[ms.target_ship_id] += remaining;
+          attackers_for_target[ms.target_ship_id].push_back(ms.attacker_ship_id);
+        }
+        erase_salvos.push_back(mid);
+      } else if (remaining <= 1e-9) {
+        auto& a = interceptions[ms.target_ship_id];
+        a.payload += payload;
+        a.intercepted += payload;
+        a.salvos += 1;
+        a.system_id = ms.system_id;
+        a.attacker_factions.push_back(ms.attacker_faction_id);
+        erase_salvos.push_back(mid);
+      }
+    }
+
+    auto ship_label = [](const Ship& s) -> std::string {
+      if (!s.name.empty()) return s.name;
+      return "Ship " + std::to_string(static_cast<unsigned long long>(s.id));
+    };
+
+    for (auto& [target_id, agg] : impacts) {
+      auto* target = find_ptr(state_.ships, target_id);
+      if (!target) continue;
+      if (agg.payload <= 1e-9) continue;
+
+      std::sort(agg.attacker_factions.begin(), agg.attacker_factions.end());
+      agg.attacker_factions.erase(std::unique(agg.attacker_factions.begin(), agg.attacker_factions.end()),
+                                  agg.attacker_factions.end());
+
+      const Id primary_attacker_fid = agg.attacker_factions.empty() ? kInvalidId : agg.attacker_factions.front();
+
+      const std::string msg =
+          "Missile impacts on " + ship_label(*target) + ": payload " + fmt1(agg.payload) + ", intercepted " +
+          fmt1(agg.intercepted) + ", damage " + fmt1(agg.damage) + ".";
+
+      // Defender event.
+      push_event(EventLevel::Info, EventCategory::Combat, msg,
+                 EventContext{.faction_id = target->faction_id,
+                              .faction_id2 = primary_attacker_fid,
+                              .system_id = agg.system_id,
+                              .ship_id = target_id,
+                              .colony_id = kInvalidId});
+
+      // Attacker events (one per faction).
+      for (Id afid : agg.attacker_factions) {
+        if (afid == kInvalidId) continue;
+        push_event(EventLevel::Info, EventCategory::Combat, msg,
+                   EventContext{.faction_id = afid,
+                                .faction_id2 = target->faction_id,
+                                .system_id = agg.system_id,
+                                .ship_id = target_id,
+                                .colony_id = kInvalidId});
+      }
+    }
+
+    for (auto& [target_id, agg] : interceptions) {
+      auto* target = find_ptr(state_.ships, target_id);
+      if (!target) continue;
+      if (agg.payload <= 1e-9) continue;
+
+      std::sort(agg.attacker_factions.begin(), agg.attacker_factions.end());
+      agg.attacker_factions.erase(std::unique(agg.attacker_factions.begin(), agg.attacker_factions.end()),
+                                  agg.attacker_factions.end());
+      const Id primary_attacker_fid = agg.attacker_factions.empty() ? kInvalidId : agg.attacker_factions.front();
+
+      const std::string msg = "Missiles intercepted en route to " + ship_label(*target) + ": salvos " +
+                              std::to_string(agg.salvos) + ", payload " + fmt1(agg.payload) + ".";
+
+      // Defender event.
+      push_event(EventLevel::Info, EventCategory::Combat, msg,
+                 EventContext{.faction_id = target->faction_id,
+                              .faction_id2 = primary_attacker_fid,
+                              .system_id = agg.system_id,
+                              .ship_id = target_id,
+                              .colony_id = kInvalidId});
+
+      // Attacker events.
+      for (Id afid : agg.attacker_factions) {
+        if (afid == kInvalidId) continue;
+        push_event(EventLevel::Info, EventCategory::Combat, msg,
+                   EventContext{.faction_id = afid,
+                                .faction_id2 = target->faction_id,
+                                .system_id = agg.system_id,
+                                .ship_id = target_id,
+                                .colony_id = kInvalidId});
+      }
+    }
+
+    // Remove resolved/invalidated salvos.
+    std::sort(erase_salvos.begin(), erase_salvos.end());
+    erase_salvos.erase(std::unique(erase_salvos.begin(), erase_salvos.end()), erase_salvos.end());
+    for (Id mid : erase_salvos) {
+      state_.missile_salvos.erase(mid);
+    }
+  }
+
+
   // --- weapon fire ---
   for (Id aid : ship_ids) {
-    const auto* attacker_ptr = find_ptr(state_.ships, aid);
+    auto* attacker_ptr = find_ptr(state_.ships, aid);
     if (!attacker_ptr) continue;
-    const auto& attacker = *attacker_ptr;
+    auto& attacker = *attacker_ptr;
 
     const auto* ad = find_design(attacker.design_id);
     if (!ad) continue;
-    if (ad->weapon_damage <= 0.0 || ad->weapon_range_mkm <= 0.0) continue;
+
+    const bool beam_capable = (ad->weapon_damage > 0.0 && ad->weapon_range_mkm > 0.0);
+    const bool missile_capable = (ad->missile_damage > 0.0 && ad->missile_range_mkm > 0.0 &&
+                                 ad->missile_speed_mkm_per_day > 0.0);
+    if (!beam_capable && !missile_capable) continue;
 
     // Power gating: if weapons are offline (due to power deficit or the
     // ship's power policy), it cannot fire.
@@ -233,7 +522,8 @@ void Simulation::tick_combat() {
               const double dist = (body->position_mkm - attacker.position_mkm).length();
               if (dist <= ad->weapon_range_mkm + 1e-9) {
                 // Apply damage in the order: ground forces -> installations -> population.
-                double remaining = std::max(0.0, ad->weapon_damage);
+                // Scale by dt_days so sub-day turn ticks don't amplify bombardment.
+                double remaining = std::max(0.0, ad->weapon_damage * dt_days);
                 double killed_ground = 0.0;
                 double pop_loss_m = 0.0;
                 std::vector<std::pair<std::string, int>> destroyed;
@@ -361,7 +651,11 @@ void Simulation::tick_combat() {
 
                 // Tick down duration only when we actually fired.
                 if (bo->duration_days > 0) {
-                  bo->duration_days -= 1;
+                  bo->progress_days = std::max(0.0, bo->progress_days) + dt_days;
+                  while (bo->duration_days > 0 && bo->progress_days >= 1.0 - 1e-12) {
+                    bo->duration_days -= 1;
+                    bo->progress_days -= 1.0;
+                  }
                   if (bo->duration_days == 0) {
                     auto itq = state_.ship_orders.find(aid);
                     if (itq != state_.ship_orders.end() && !itq->second.queue.empty() &&
@@ -384,6 +678,109 @@ void Simulation::tick_combat() {
     double chosen_dist = 1e300;
 
     const auto& detected_hostiles = detected_hostiles_for(attacker.faction_id, attacker.system_id);
+
+    // --- Missile launch ---
+    //
+    // Missiles are time-of-flight salvos that apply damage when they arrive.
+    // This is separate from beam weapon fire (which applies immediately).
+    if (missile_capable && attacker.missile_cooldown_days <= 0.0) {
+      Id mtarget = kInvalidId;
+      double mtarget_dist = 1e300;
+
+      // Prefer explicit AttackShip target if detected + in range.
+      {
+        const Id tid = attack_order_target(aid);
+        if (tid != kInvalidId) {
+          if (std::binary_search(detected_hostiles.begin(), detected_hostiles.end(), tid)) {
+            const auto* tgt = find_ptr(state_.ships, tid);
+            if (tgt && tgt->system_id == attacker.system_id && is_hostile(attacker, *tgt)) {
+              const double dist = (tgt->position_mkm - attacker.position_mkm).length();
+              if (dist <= ad->missile_range_mkm + 1e-9) {
+                if (is_target_boardable(attacker, *tgt)) {
+                  // Mirror beam behavior: if we're planning to board an already-disabled ship,
+                  // hold fire to avoid destroying it.
+                  continue;
+                }
+                mtarget = tid;
+                mtarget_dist = dist;
+              }
+            }
+          }
+        }
+      }
+
+      // Otherwise, pick nearest detected hostile within missile range.
+      if (mtarget == kInvalidId && !detected_hostiles.empty()) {
+        auto& idx = index_for_system(attacker.system_id);
+        const auto nearby = idx.query_radius(attacker.position_mkm, ad->missile_range_mkm, 0.0);
+        for (Id bid : nearby) {
+          if (bid == aid) continue;
+          if (!std::binary_search(detected_hostiles.begin(), detected_hostiles.end(), bid)) continue;
+
+          const auto* tgt = find_ptr(state_.ships, bid);
+          if (!tgt) continue;
+          if (tgt->system_id != attacker.system_id) continue;
+          if (!is_hostile(attacker, *tgt)) continue;
+
+          const double dist = (tgt->position_mkm - attacker.position_mkm).length();
+          if (dist > ad->missile_range_mkm + 1e-9) continue;
+          if (dist < mtarget_dist) {
+            mtarget = bid;
+            mtarget_dist = dist;
+          }
+        }
+      }
+
+      if (mtarget != kInvalidId) {
+        const auto* tgt = find_ptr(state_.ships, mtarget);
+        if (tgt) {
+          const double dmg = std::max(0.0, ad->missile_damage);
+          const double speed = std::max(1e-9, ad->missile_speed_mkm_per_day);
+          const double eta = std::max(1e-6, mtarget_dist / speed);
+
+          MissileSalvo salvo;
+          salvo.id = allocate_id(state_);
+          salvo.system_id = attacker.system_id;
+          salvo.attacker_ship_id = aid;
+          salvo.attacker_faction_id = attacker.faction_id;
+          salvo.target_ship_id = mtarget;
+          salvo.target_faction_id = tgt->faction_id;
+          salvo.damage = dmg;
+          salvo.damage_initial = dmg;
+          salvo.eta_days_total = eta;
+          salvo.eta_days_remaining = eta;
+          salvo.launch_pos_mkm = attacker.position_mkm;
+          salvo.target_pos_mkm = tgt->position_mkm;
+          state_.missile_salvos[salvo.id] = salvo;
+
+          attacker.missile_cooldown_days = std::max(0.0, ad->missile_reload_days);
+
+          auto ship_label = [](const Ship& s) -> std::string {
+            if (!s.name.empty()) return s.name;
+            return "Ship " + std::to_string(static_cast<unsigned long long>(s.id));
+          };
+
+          const std::string msg = ship_label(attacker) + " launched missiles at " + ship_label(*tgt) +
+                                  " (ETA " + format_duration_days(eta) + ", payload " + fmt1(dmg) + ").";
+
+          push_event(EventLevel::Info, EventCategory::Combat, msg,
+                     EventContext{.faction_id = attacker.faction_id,
+                                  .faction_id2 = tgt->faction_id,
+                                  .system_id = attacker.system_id,
+                                  .ship_id = attacker.id,
+                                  .colony_id = kInvalidId});
+
+          push_event(EventLevel::Info, EventCategory::Combat, msg,
+                     EventContext{.faction_id = tgt->faction_id,
+                                  .faction_id2 = attacker.faction_id,
+                                  .system_id = attacker.system_id,
+                                  .ship_id = tgt->id,
+                                  .colony_id = kInvalidId});
+        }
+      }
+    }
+
+    if (!beam_capable) continue;
 
     // If the ship has an explicit AttackShip order, prefer its target.
     // Additionally, if the target is already disabled and we have troops,
@@ -438,7 +835,7 @@ void Simulation::tick_combat() {
     }
 
     if (chosen != kInvalidId) {
-      incoming_damage[chosen] += ad->weapon_damage;
+      incoming_damage[chosen] += ad->weapon_damage * dt_days;
       attackers_for_target[chosen].push_back(aid);
     }
   }
@@ -472,7 +869,7 @@ void Simulation::tick_combat() {
     }
 
     if (chosen != kInvalidId) {
-      incoming_damage[chosen] += bat.weapon_damage;
+      incoming_damage[chosen] += bat.weapon_damage * dt_days;
       colony_attackers_for_target[chosen].push_back(bat.colony_id);
     }
   }
@@ -879,6 +1276,7 @@ void Simulation::tick_combat() {
       const Ship& attacker = *attacker_ptr;
 
       if (attacker.troops + 1e-9 < cfg_.boarding_min_attacker_troops) continue;
+      if (attacker.boarding_cooldown_days > 0.0) continue;
 
       const Id tid = attack_order_target(aid);
       if (tid == kInvalidId) continue;
@@ -927,6 +1325,11 @@ void Simulation::tick_combat() {
 
       const double attacker_strength = std::max(0.0, attacker->troops);
       if (attacker_strength + 1e-9 < cfg_.boarding_min_attacker_troops) continue;
+
+      // Boarding is a discrete action. Gate it so sub-day turn ticks don't
+      // cause multiple boarding attempts in the same day.
+      if (attacker->boarding_cooldown_days > 0.0) continue;
+      attacker->boarding_cooldown_days = std::max(attacker->boarding_cooldown_days, 1.0);
 
       const double max_hp = ship_max_hp(*target);
       const double defender_strength =

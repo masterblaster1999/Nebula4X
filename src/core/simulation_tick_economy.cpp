@@ -35,7 +35,8 @@ using sim_internal::compute_faction_economy_multipliers;
 using sim_internal::compute_power_allocation;
 } // namespace
 
-void Simulation::tick_colonies() {
+void Simulation::tick_colonies(double dt_days, bool emit_daily_events) {
+  if (dt_days <= 0.0) return;
   // Precompute faction-wide economy modifiers once per tick for determinism
   // and to avoid repeated tech scanning in inner loops.
   std::unordered_map<Id, FactionEconomyMultipliers> fac_mult;
@@ -54,7 +55,7 @@ void Simulation::tick_colonies() {
   // Aggregate mining requests so that multiple colonies on the same body share
   // finite deposits fairly (proportional allocation) and deterministically.
   //
-  // Structure: body_id -> mineral -> [(colony_id, requested_tons_per_day), ...]
+  // Structure: body_id -> mineral -> [(colony_id, requested_tons_this_tick), ...]
   std::unordered_map<Id, std::unordered_map<std::string, std::vector<std::pair<Id, double>>>> mine_reqs;
   mine_reqs.reserve(state_.colonies.size());
 
@@ -80,12 +81,12 @@ void Simulation::tick_colonies() {
         // the older "unlimited" behaviour to avoid silently losing resources.
         if (body_id == kInvalidId || state_.bodies.find(body_id) == state_.bodies.end()) {
           for (const auto& [mineral, per_day] : def.produces_per_day) {
-            colony.minerals[mineral] += per_day * static_cast<double>(count) * mining_mult;
+            colony.minerals[mineral] += per_day * static_cast<double>(count) * mining_mult * dt_days;
           }
           continue;
         }
         for (const auto& [mineral, per_day] : def.produces_per_day) {
-          const double req = per_day * static_cast<double>(count) * mining_mult;
+          const double req = per_day * static_cast<double>(count) * mining_mult * dt_days;
           if (req <= 1e-12) continue;
           mine_reqs[body_id][mineral].push_back({cid, req});
         }
@@ -112,7 +113,7 @@ void Simulation::tick_colonies() {
             growth_mult = std::max(0.0, cfg_.habitation_supported_growth_multiplier) * std::clamp(hab, 0.0, 1.0);
           }
         }
-        pop *= (1.0 + base_per_day * growth_mult);
+        pop *= (1.0 + base_per_day * growth_mult * dt_days);
       }
 
       if (cfg_.enable_habitability) {
@@ -123,10 +124,11 @@ void Simulation::tick_colonies() {
           if (required > 1e-9 && have + 1e-9 < required) {
             const double shortfall_frac = std::clamp(1.0 - (have / required), 0.0, 1.0);
             const double decline_per_day = std::max(0.0, cfg_.habitation_shortfall_decline_rate_per_year) / 365.25;
-            pop *= (1.0 - decline_per_day * shortfall_frac);
+            pop *= (1.0 - decline_per_day * shortfall_frac * dt_days);
 
             // Throttled warning events so the player understands why population is dropping.
-            if (shortfall_frac >= std::max(0.0, cfg_.habitation_shortfall_event_min_fraction)) {
+            if (emit_daily_events &&
+                shortfall_frac >= std::max(0.0, cfg_.habitation_shortfall_event_min_fraction)) {
               const int interval = std::max(0, cfg_.habitation_shortfall_event_interval_days);
               if (interval <= 0 || (state_.date.days_since_epoch() % interval) == 0) {
                 const auto* body = find_ptr(state_.bodies, colony.body_id);
@@ -284,7 +286,7 @@ void Simulation::tick_colonies() {
         const double per_day = std::max(0.0, per_day_raw);
         if (per_day <= 1e-12) continue;
 
-        const double req = per_day * static_cast<double>(count);
+        const double req = per_day * static_cast<double>(count) * dt_days;
 
         const double have = [&]() {
           const auto it = colony.minerals.find(mineral);
@@ -302,7 +304,7 @@ void Simulation::tick_colonies() {
       for (const auto& [mineral, per_day_raw] : def.consumes_per_day) {
         const double per_day = std::max(0.0, per_day_raw);
         if (per_day <= 1e-12) continue;
-        const double amt = per_day * static_cast<double>(count) * frac;
+        const double amt = per_day * static_cast<double>(count) * frac * dt_days;
         if (amt <= 1e-12) continue;
 
         double& stock = colony.minerals[mineral]; // creates entry if missing
@@ -313,7 +315,7 @@ void Simulation::tick_colonies() {
       for (const auto& [mineral, per_day_raw] : def.produces_per_day) {
         const double per_day = std::max(0.0, per_day_raw);
         if (per_day <= 1e-12) continue;
-        const double amt = per_day * static_cast<double>(count) * frac * industry_mult;
+        const double amt = per_day * static_cast<double>(count) * frac * industry_mult * dt_days;
         if (amt <= 1e-12) continue;
         colony.minerals[mineral] += amt;
       }
@@ -322,7 +324,8 @@ void Simulation::tick_colonies() {
 }
 
 
-void Simulation::tick_research() {
+void Simulation::tick_research(double dt_days) {
+  if (dt_days <= 0.0) return;
   std::unordered_map<Id, FactionEconomyMultipliers> fac_mult;
   fac_mult.reserve(state_.factions.size());
   for (Id fid : sorted_keys(state_.factions)) {
@@ -349,7 +352,7 @@ void Simulation::tick_research() {
     if (rp_per_day <= 0.0) continue;
     auto fit = state_.factions.find(col.faction_id);
     if (fit == state_.factions.end()) continue;
-    fit->second.research_points += rp_per_day;
+    fit->second.research_points += rp_per_day * dt_days;
   }
 
   auto prereqs_met = [&](const Faction& f, const TechDef& t) {
@@ -475,7 +478,8 @@ void Simulation::tick_research() {
 }
 
 
-void Simulation::tick_shipyards() {
+void Simulation::tick_shipyards(double dt_days) {
+  if (dt_days <= 0.0) return;
   const auto it_def = content_.installations.find("shipyard");
   if (it_def == content_.installations.end()) return;
 
@@ -693,7 +697,7 @@ void Simulation::tick_shipyards() {
     if (yards <= 0) continue;
 
     const double shipyard_mult = std::max(0.0, mult_for(colony.faction_id).shipyard);
-    double capacity_tons = base_rate * static_cast<double>(yards) * shipyard_mult;
+    double capacity_tons = base_rate * static_cast<double>(yards) * shipyard_mult * dt_days;
 
     while (capacity_tons > 1e-9 && !colony.shipyard_queue.empty()) {
       auto& bo = colony.shipyard_queue.front();
@@ -876,14 +880,15 @@ void Simulation::tick_shipyards() {
   }
 }
 
-void Simulation::tick_construction() {
+void Simulation::tick_construction(double dt_days) {
+  if (dt_days <= 0.0) return;
   for (Id cid : sorted_keys(state_.colonies)) {
     auto& colony = state_.colonies.at(cid);
 
     Id colony_system_id = kInvalidId;
     if (auto* b = find_ptr(state_.bodies, colony.body_id)) colony_system_id = b->system_id;
 
-    double cp_available = construction_points_per_day(colony);
+    double cp_available = construction_points_per_day(colony) * dt_days;
     if (cp_available <= 1e-9) continue;
 
     auto can_pay_minerals = [&](const InstallationDef& def) {

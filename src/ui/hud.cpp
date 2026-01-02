@@ -14,6 +14,7 @@
 #include "nebula4x/core/serialization.h"
 #include "nebula4x/util/file_io.h"
 #include "nebula4x/util/log.h"
+#include "nebula4x/util/time.h"
 
 namespace nebula4x::ui {
 namespace {
@@ -335,6 +336,12 @@ void draw_status_bar(Simulation& sim, UIState& ui, HUDState& /*hud*/, Id& select
   }
 
   // --- Quick turn controls ---
+  if (ImGui::SmallButton("+1h")) sim.advance_hours(1);
+  ImGui::SameLine();
+  if (ImGui::SmallButton("+6h")) sim.advance_hours(6);
+  ImGui::SameLine();
+  if (ImGui::SmallButton("+12h")) sim.advance_hours(12);
+  VerticalSeparator();
   if (ImGui::SmallButton("+1d")) sim.advance_days(1);
   ImGui::SameLine();
   if (ImGui::SmallButton("+5d")) sim.advance_days(5);
@@ -381,7 +388,8 @@ void draw_status_bar(Simulation& sim, UIState& ui, HUDState& /*hud*/, Id& select
 
   // --- Context / indicators ---
   auto& s = sim.state();
-  ImGui::Text("Date: %s", s.date.to_string().c_str());
+  const std::string dt = format_datetime(s.date, s.hour_of_day);
+  ImGui::Text("Date: %s", dt.c_str());
 
   const auto* sys = find_ptr(s.systems, s.selected_system);
   if (sys) {

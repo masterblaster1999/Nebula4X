@@ -52,6 +52,7 @@ int test_event_export() {
     nebula4x::SimEvent ev;
     ev.seq = 5;
     ev.day = 10; // 2200-01-11
+    ev.hour = 6;
     ev.level = nebula4x::EventLevel::Warn;
     ev.category = nebula4x::EventCategory::Movement;
     ev.faction_id = 1;
@@ -65,6 +66,7 @@ int test_event_export() {
     nebula4x::SimEvent ev;
     ev.seq = 6;
     ev.day = 11; // 2200-01-12
+    ev.hour = 18;
     ev.level = nebula4x::EventLevel::Info;
     ev.category = nebula4x::EventCategory::Research;
     ev.faction_id = 1;
@@ -79,7 +81,9 @@ int test_event_export() {
   // CSV: header + date conversion + CSV escaping.
   const std::string csv = nebula4x::events_to_csv(s, events);
   N4X_ASSERT(csv.find("day,date,seq,level,category") != std::string::npos);
+  N4X_ASSERT(csv.find("message,hour,time,datetime") != std::string::npos);
   N4X_ASSERT(csv.find("2200-01-11") != std::string::npos);
+  N4X_ASSERT(csv.find("2200-01-11 06:00") != std::string::npos);
   N4X_ASSERT(csv.find("\"Test,comma\"") != std::string::npos);
   N4X_ASSERT(csv.find(R"("He said ""ok""")") != std::string::npos);
 
@@ -95,6 +99,9 @@ int test_event_export() {
   N4X_ASSERT(o0 != nullptr);
   N4X_ASSERT(o0->at("day").int_value() == 10);
   N4X_ASSERT(o0->at("date").string_value() == "2200-01-11");
+  N4X_ASSERT(o0->at("hour").int_value() == 6);
+  N4X_ASSERT(o0->at("time").string_value() == "06:00");
+  N4X_ASSERT(o0->at("datetime").string_value() == "2200-01-11 06:00");
   N4X_ASSERT(o0->at("seq").int_value() == 5);
   N4X_ASSERT(o0->at("level").string_value() == "warn");
   N4X_ASSERT(o0->at("category").string_value() == "movement");
@@ -106,6 +113,8 @@ int test_event_export() {
 
   const auto* o1 = (*arr)[1].as_object();
   N4X_ASSERT(o1 != nullptr);
+  N4X_ASSERT(o1->at("hour").int_value() == 18);
+  N4X_ASSERT(o1->at("datetime").string_value() == "2200-01-12 18:00");
   N4X_ASSERT(o1->at("message").string_value() == "He said \"ok\"");
 
   // JSONL: one object per line, parseable per-line.
@@ -152,6 +161,10 @@ int test_event_export() {
   N4X_ASSERT(range->at("date_min").string_value() == "2200-01-11");
   N4X_ASSERT(range->at("day_max").int_value() == 11);
   N4X_ASSERT(range->at("date_max").string_value() == "2200-01-12");
+  N4X_ASSERT(range->at("hour_min").int_value() == 6);
+  N4X_ASSERT(range->at("hour_max").int_value() == 18);
+  N4X_ASSERT(range->at("datetime_min").string_value() == "2200-01-11 06:00");
+  N4X_ASSERT(range->at("datetime_max").string_value() == "2200-01-12 18:00");
 
   const auto* levels = sum->at("levels").as_object();
   N4X_ASSERT(levels != nullptr);
@@ -166,7 +179,7 @@ int test_event_export() {
 
   // Summary CSV: header + expected counts/range.
   const std::string summary_csv = nebula4x::events_summary_to_csv(events);
-  N4X_ASSERT(summary_csv.find("count,day_min,day_max,date_min,date_max") != std::string::npos);
+  N4X_ASSERT(summary_csv.find("count,day_min,day_max,date_min,date_max,hour_min,hour_max,time_min,time_max,datetime_min,datetime_max") != std::string::npos);
   N4X_ASSERT(summary_csv.find("2200-01-11") != std::string::npos);
   N4X_ASSERT(summary_csv.find("2200-01-12") != std::string::npos);
   // count=2, info=1, warn=1, error=0

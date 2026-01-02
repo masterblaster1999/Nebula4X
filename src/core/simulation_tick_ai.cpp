@@ -277,6 +277,117 @@ void Simulation::tick_ai() {
     return true;
   };
 
+  // --- Auto-colonize ---
+  //
+  // Strategy:
+  // - Only consider bodies in systems discovered by the ship's faction.
+  // - Avoid bodies that already have a colony.
+  // - Avoid assigning multiple colony ships to the same target by tracking
+  //   already-targeted bodies from existing ship orders.
+  // - Score targets by a blend of habitability, mineral deposits, and ETA.
+  std::unordered_set<Id> colonized_bodies;
+  colonized_bodies.reserve(state_.colonies.size() * 2 + 8);
+  for (const auto& [_, c] : state_.colonies) {
+    if (c.body_id != kInvalidId) colonized_bodies.insert(c.body_id);
+  }
+
+  std::unordered_map<Id, std::unordered_set<Id>> reserved_colonize_targets;
+  reserved_colonize_targets.reserve(faction_ids.size() * 2 + 8);
+  for (const auto& [sid, so] : state_.ship_orders) {
+    const Ship* sh = find_ptr(state_.ships, sid);
+    if (!sh) continue;
+    auto& reserved = reserved_colonize_targets[sh->faction_id];
+    for (const auto& ord : so.queue) {
+      if (const auto* c = std::get_if<ColonizeBody>(&ord)) {
+        if (c->body_id != kInvalidId) reserved.insert(c->body_id);
+      }
+    }
+  }
+
+  auto is_body_auto_colonizable = [&](const Body& b) -> bool {
+    // Keep the AI from doing obviously nonsensical colonization.
+    // Colonies can exist anywhere in the prototype, but auto-colonize should
+    // stick to plausible colony targets.
+    if (b.type == BodyType::Star) return false;
+    if (b.type == BodyType::GasGiant) return false;
+    return (b.type == BodyType::Planet || b.type == BodyType::Moon || b.type == BodyType::Asteroid);
+  };
+
+  auto total_mineral_deposits = [&](const Body& b) -> double {
+    double total = 0.0;
+    for (const auto& [_, amt] : b.mineral_deposits) {
+      if (amt > 0.0) total += amt;
+    }
+    return total;
+  };
+
+  auto issue_auto_colonize = [&](Id ship_id) -> bool {
+    Ship* ship = find_ptr(state_.ships, ship_id);
+    if (!ship) return false;
+    if (!ship->auto_colonize) return false;
+    if (!orders_empty(ship_id)) return false;
+    if (ship->system_id == kInvalidId) return false;
+    if (ship->speed_km_s <= 0.0) return false;
+
+    // Avoid fighting the fleet movement logic. Fleets should be controlled by fleet orders.
+    if (fleet_for_ship(ship_id) != kInvalidId) return false;
+
+    const ShipDesign* d = find_design(ship->design_id);
+    if (!d) return false;
+    if (d->colony_capacity_millions <= 0.0) return false;
+
+    auto& reserved = reserved_colonize_targets[ship->faction_id];
+
+    Id best_body_id = kInvalidId;
+    double best_score = -std::numeric_limits<double>::infinity();
+
+    for (Id bid : sorted_keys(state_.bodies)) {
+      const Body* b = find_ptr(state_.bodies, bid);
+      if (!b) continue;
+      if (b->id == kInvalidId) continue;
+      if (b->system_id == kInvalidId) continue;
+      if (!find_ptr(state_.systems, b->system_id)) continue;
+
+      if (!is_body_auto_colonizable(*b)) continue;
+      if (colonized_bodies.contains(bid)) continue;
+      if (reserved.contains(bid)) continue;
+      if (!is_system_discovered_by_faction(ship->faction_id, b->system_id)) continue;
+
+      const double hab = std::clamp(body_habitability(bid), 0.0, 1.0);
+      const double minerals = std::max(0.0, total_mineral_deposits(*b));
+      const double mineral_score = std::log10(minerals + 1.0);
+
+      // Skip targets that are both extremely hostile and resource-poor.
+      if (hab < 0.05 && mineral_score < 2.0) continue;  // <~ 100 total deposit
+
+      const double eta = estimate_eta_days_to_pos(ship->system_id, ship->position_mkm, ship->faction_id,
+                                                  ship->speed_km_s, b->system_id, b->position_mkm);
+      if (!std::isfinite(eta)) continue;
+
+      // Score blend:
+      // - Habitability dominates for population-friendly worlds.
+      // - Minerals matter via log scale (so huge deposits don't dwarf everything).
+      // - ETA discourages sending colony ships on extremely long routes.
+      double score = hab * 1000.0 + mineral_score * 100.0 - eta * 5.0;
+      if (b->type == BodyType::Planet) score += 20.0;
+      if (b->type == BodyType::Moon) score += 10.0;
+
+      if (best_body_id == kInvalidId || score > best_score + 1e-9 ||
+          (std::abs(score - best_score) <= 1e-9 && bid < best_body_id)) {
+        best_body_id = bid;
+        best_score = score;
+      }
+    }
+
+    if (best_body_id == kInvalidId) return false;
+
+    // Reserve immediately so other colony ships don't pick the same target this tick.
+    reserved.insert(best_body_id);
+
+    // Queue the travel + colonize order.
+    return issue_colonize_body(ship_id, best_body_id, /*colony_name=*/"", /*restrict_to_discovered=*/true);
+  };
+
   auto issue_auto_explore = [&](Id ship_id) -> bool {
     Ship* ship = find_ptr(state_.ships, ship_id);
     if (!ship) return false;
@@ -384,12 +495,292 @@ void Simulation::tick_ai() {
     (void)issue_auto_repair(sid);
   }
 
+  // --- Ship-level automation: Auto-tanker (fuel logistics) ---
+  // Reserve fuel transfer targets that are already being serviced (or en-route) so we don't send
+  // multiple automated tankers to the same ship.
+  std::unordered_map<Id, std::unordered_set<Id>> reserved_fuel_targets;
+  reserved_fuel_targets.reserve(faction_ids.size() * 2 + 4);
+  for (const auto& [sid, so] : state_.ship_orders) {
+    const Ship* ship = find_ptr(state_.ships, sid);
+    if (!ship) continue;
+    if (ship->faction_id == kInvalidId) continue;
+    for (const auto& ord : so.queue) {
+      if (const auto* tf = std::get_if<TransferFuelToShip>(&ord)) {
+        if (tf->target_ship_id != kInvalidId) {
+          reserved_fuel_targets[ship->faction_id].insert(tf->target_ship_id);
+        }
+      }
+    }
+  }
+
+  auto issue_auto_tanker = [&](Id tanker_id) -> bool {
+    Ship* tanker = find_ptr(state_.ships, tanker_id);
+    if (!tanker) return false;
+    if (!tanker->auto_tanker) return false;
+
+    // Auto-tanker is mutually exclusive with mission-style automations.
+    if (tanker->auto_explore || tanker->auto_freight || tanker->auto_salvage || tanker->auto_colonize) return false;
+
+    if (!orders_empty(tanker_id)) return false;
+    if (tanker->system_id == kInvalidId) return false;
+    if (tanker->speed_km_s <= 0.0) return false;
+
+    // Avoid fighting the fleet movement logic. Fleets should be controlled by fleet orders.
+    if (fleet_for_ship(tanker_id) != kInvalidId) return false;
+
+    const ShipDesign* td = find_design(tanker->design_id);
+    if (!td) return false;
+    const double tanker_cap = std::max(0.0, td->fuel_capacity_tons);
+    if (tanker_cap <= 1e-9) return false;
+
+    const double reserve_frac = std::clamp(tanker->auto_tanker_reserve_fraction, 0.0, 1.0);
+    const double reserve_tons = reserve_frac * tanker_cap;
+    const double tanker_fuel = std::clamp((tanker->fuel_tons < 0.0) ? tanker_cap : tanker->fuel_tons, 0.0, tanker_cap);
+    const double available = std::max(0.0, tanker_fuel - reserve_tons);
+
+    const double min_transfer = std::max(0.0, cfg_.auto_tanker_min_transfer_tons);
+    if (available <= min_transfer + 1e-9) return false;
+
+    const Id fid = tanker->faction_id;
+    auto& reserved = reserved_fuel_targets[fid];
+
+    const double req_thresh = std::clamp(cfg_.auto_tanker_request_threshold_fraction, 0.0, 1.0);
+    const double fill_target = std::clamp(cfg_.auto_tanker_fill_target_fraction, 0.0, 1.0);
+
+    Id best_target_id = kInvalidId;
+    double best_frac = 2.0;
+    double best_eta = std::numeric_limits<double>::infinity();
+
+    for (Id tid : ship_ids) {
+      if (tid == tanker_id) continue;
+      if (reserved.contains(tid)) continue;
+
+      const Ship* target = find_ptr(state_.ships, tid);
+      if (!target) continue;
+      if (target->faction_id != fid) continue;
+      if (target->system_id == kInvalidId) continue;
+
+      // Avoid fighting the fleet movement logic.
+      if (fleet_for_ship(tid) != kInvalidId) continue;
+
+      // Only service ships that are idle and not already using colony auto-refuel.
+      if (!orders_empty(tid)) continue;
+      if (target->auto_refuel) continue;
+
+      const ShipDesign* sd = find_design(target->design_id);
+      if (!sd) continue;
+      const double cap = std::max(0.0, sd->fuel_capacity_tons);
+      if (cap <= 1e-9) continue;
+
+      const double fuel = std::clamp((target->fuel_tons < 0.0) ? cap : target->fuel_tons, 0.0, cap);
+      const double frac = (cap > 0.0) ? (fuel / cap) : 1.0;
+      if (frac + 1e-9 >= req_thresh) continue;
+
+      // Require the target system to be in our discovered map so route planning is deterministic.
+      if (!is_system_discovered_by_faction(fid, target->system_id)) continue;
+
+      const double eta = estimate_eta_days_to_pos(tanker->system_id, tanker->position_mkm, fid, tanker->speed_km_s,
+                                                  target->system_id, target->position_mkm);
+      if (!std::isfinite(eta)) continue;
+
+      // Primary: lowest fuel fraction.
+      // Secondary: shortest ETA.
+      // Tertiary: lowest id.
+      if (best_target_id == kInvalidId || frac < best_frac - 1e-9 ||
+          (std::abs(frac - best_frac) <= 1e-9 && eta < best_eta - 1e-9) ||
+          (std::abs(frac - best_frac) <= 1e-9 && std::abs(eta - best_eta) <= 1e-9 && tid < best_target_id)) {
+        best_target_id = tid;
+        best_frac = frac;
+        best_eta = eta;
+      }
+    }
+
+    if (best_target_id == kInvalidId) return false;
+
+    const Ship* tgt = find_ptr(state_.ships, best_target_id);
+    if (!tgt) return false;
+    const ShipDesign* td2 = find_design(tgt->design_id);
+    if (!td2) return false;
+    const double tgt_cap = std::max(0.0, td2->fuel_capacity_tons);
+    if (tgt_cap <= 1e-9) return false;
+
+    const double tgt_fuel = std::clamp((tgt->fuel_tons < 0.0) ? tgt_cap : tgt->fuel_tons, 0.0, tgt_cap);
+    const double desired = tgt_cap * fill_target;
+    const double need = std::max(0.0, desired - tgt_fuel);
+
+    const double give = std::min(available, need);
+    if (give <= min_transfer + 1e-9) return false;
+
+    if (!issue_transfer_fuel_to_ship(tanker_id, best_target_id, give, /*restrict_to_discovered=*/true)) return false;
+
+    reserved.insert(best_target_id);
+    return true;
+  };
+
+  for (Id sid : ship_ids) {
+    Ship* sh = find_ptr(state_.ships, sid);
+    if (!sh) continue;
+    if (!sh->auto_tanker) continue;
+    if (!orders_empty(sid)) continue;
+
+    (void)issue_auto_tanker(sid);
+  }
+
+  // --- Ship-level automation: Auto-salvage (wreck recovery) ---
+  // Reserve wreck targets that are already being salvaged (or en-route) so we don't
+  // send multiple automated ships to the same wreck.
+  //
+  // This mirrors common 4X salvage UX expectations: one ship works a wreck at a time,
+  // and additional salvage ships should look for other opportunities.
+  std::unordered_map<Id, std::unordered_set<Id>> reserved_wreck_targets;
+  reserved_wreck_targets.reserve(faction_ids.size() * 2 + 4);
+  for (const auto& [sid, so] : state_.ship_orders) {
+    const Ship* ship = find_ptr(state_.ships, sid);
+    if (!ship) continue;
+    if (ship->faction_id == kInvalidId) continue;
+    for (const auto& ord : so.queue) {
+      if (const auto* sw = std::get_if<SalvageWreck>(&ord)) {
+        if (sw->wreck_id != kInvalidId) reserved_wreck_targets[ship->faction_id].insert(sw->wreck_id);
+      }
+    }
+  }
+
+  const auto wreck_ids = sorted_keys(state_.wrecks);
+
+  auto issue_auto_salvage = [&](Id ship_id) -> bool {
+    Ship* ship = find_ptr(state_.ships, ship_id);
+    if (!ship) return false;
+    if (!ship->auto_salvage) return false;
+    if (!orders_empty(ship_id)) return false;
+    if (ship->system_id == kInvalidId) return false;
+    if (ship->speed_km_s <= 0.0) return false;
+
+    // Avoid fighting the fleet movement logic. Fleets should be controlled by fleet orders.
+    if (fleet_for_ship(ship_id) != kInvalidId) return false;
+
+    const ShipDesign* d = find_design(ship->design_id);
+    const double cap = d ? std::max(0.0, d->cargo_tons) : 0.0;
+    if (cap <= 1e-9) return false;
+
+    auto cargo_used_tons = [&](const Ship& s) {
+      double used = 0.0;
+      for (const auto& [_, tons] : s.cargo) used += std::max(0.0, tons);
+      return used;
+    };
+
+    const double used = cargo_used_tons(*ship);
+
+    // 1) If we're carrying anything, deliver it to the nearest friendly colony.
+    if (used > 1e-6) {
+      Id best_colony_id = kInvalidId;
+      double best_eta = std::numeric_limits<double>::infinity();
+
+      for (Id cid : sorted_keys(state_.colonies)) {
+        const Colony* c = find_ptr(state_.colonies, cid);
+        if (!c) continue;
+        if (c->faction_id != ship->faction_id) continue;
+        const Body* b = find_ptr(state_.bodies, c->body_id);
+        if (!b) continue;
+        if (b->system_id == kInvalidId) continue;
+
+        const double eta = estimate_eta_days_to_pos(ship->system_id, ship->position_mkm, ship->faction_id,
+                                                  ship->speed_km_s, b->system_id, b->position_mkm);
+        if (!std::isfinite(eta)) continue;
+        if (eta < best_eta) {
+          best_eta = eta;
+          best_colony_id = cid;
+        }
+      }
+
+      if (best_colony_id == kInvalidId) return false;
+
+      // Unload all cargo minerals.
+      return issue_unload_mineral(ship_id, best_colony_id, /*mineral=*/"", /*tons=*/0.0,
+                                 /*restrict_to_discovered=*/true);
+    }
+
+    // 2) Otherwise, find the best available wreck in discovered space.
+    const Id fid = ship->faction_id;
+    auto& reserved = reserved_wreck_targets[fid];
+
+    Id best_wreck_id = kInvalidId;
+    double best_score = -std::numeric_limits<double>::infinity();
+    double best_eta = std::numeric_limits<double>::infinity();
+    double best_total = 0.0;
+
+    for (Id wid : wreck_ids) {
+      const Wreck* w = find_ptr(state_.wrecks, wid);
+      if (!w) continue;
+      if (w->system_id == kInvalidId) continue;
+
+      // Honor fog-of-war: auto-salvage only operates inside discovered space.
+      if (!is_system_discovered_by_faction(fid, w->system_id)) continue;
+
+      if (reserved.find(wid) != reserved.end()) continue;
+
+      double total = 0.0;
+      for (const auto& [_, tons] : w->minerals) total += std::max(0.0, tons);
+      if (total <= 1e-9) continue;
+
+      const double eta = estimate_eta_days_to_pos(ship->system_id, ship->position_mkm, fid, ship->speed_km_s,
+                                                w->system_id, w->position_mkm);
+      if (!std::isfinite(eta)) continue;
+
+      // Score: prefer closer wrecks, but strongly bias toward larger returns.
+      const double score = std::log10(total + 1.0) * 100.0 - eta;
+
+      if (score > best_score + 1e-9 || (std::abs(score - best_score) <= 1e-9 && (eta < best_eta - 1e-9)) ||
+          (std::abs(score - best_score) <= 1e-9 && std::abs(eta - best_eta) <= 1e-9 && total > best_total + 1e-9)) {
+        best_score = score;
+        best_wreck_id = wid;
+        best_eta = eta;
+        best_total = total;
+      }
+    }
+
+    if (best_wreck_id == kInvalidId) return false;
+
+    reserved.insert(best_wreck_id);
+    return issue_salvage_wreck(ship_id, best_wreck_id, /*mineral=*/"", /*tons=*/0.0,
+                              /*restrict_to_discovered=*/true);
+  };
+
+  for (Id sid : ship_ids) {
+    Ship* sh = find_ptr(state_.ships, sid);
+    if (!sh) continue;
+    if (!sh->auto_salvage) continue;
+    if (sh->auto_explore) continue;   // mutually exclusive; auto-explore handled below
+    if (sh->auto_freight) continue;   // mutually exclusive; auto-freight handled below
+    if (sh->auto_colonize) continue;  // mutually exclusive; auto-colonize handled below
+    if (sh->auto_tanker) continue;    // mutually exclusive; auto-tanker handled above
+    if (!orders_empty(sid)) continue;
+
+    (void)issue_auto_salvage(sid);
+  }
+
+  // --- Ship-level automation: Auto-colonize ---
+  for (Id sid : ship_ids) {
+    Ship* sh = find_ptr(state_.ships, sid);
+    if (!sh) continue;
+    if (!sh->auto_colonize) continue;
+    if (sh->auto_explore) continue;   // mutually exclusive; auto-explore handled below
+    if (sh->auto_freight) continue;   // mutually exclusive; auto-freight handled below
+    if (sh->auto_salvage) continue;   // mutually exclusive; auto-salvage handled above
+    if (sh->auto_tanker) continue;    // mutually exclusive; auto-tanker handled above
+    if (!orders_empty(sid)) continue;
+
+    (void)issue_auto_colonize(sid);
+  }
+
   // --- Ship-level automation: Auto-explore ---
   for (Id sid : ship_ids) {
     Ship* sh = find_ptr(state_.ships, sid);
     if (!sh) continue;
     if (!sh->auto_explore) continue;
     if (sh->auto_freight) continue;  // mutually exclusive; auto-freight handled below
+    if (sh->auto_colonize) continue; // mutually exclusive; auto-colonize handled above
+    if (sh->auto_salvage) continue;  // mutually exclusive; auto-salvage handled above
+    if (sh->auto_tanker) continue;   // mutually exclusive; auto-tanker handled above
     if (!orders_empty(sid)) continue;
 
     (void)issue_auto_explore(sid);
@@ -412,6 +803,9 @@ void Simulation::tick_ai() {
     if (!sh) continue;
     if (!sh->auto_freight) continue;
     if (sh->auto_explore) continue;  // mutually exclusive; auto-explore handled above
+    if (sh->auto_colonize) continue; // mutually exclusive; auto-colonize handled above
+    if (sh->auto_salvage) continue;  // mutually exclusive; auto-salvage handled above
+    if (sh->auto_tanker) continue;   // mutually exclusive; auto-tanker handled above
     if (!orders_empty(sid)) continue;
     if (sh->system_id == kInvalidId) continue;
     if (sh->speed_km_s <= 0.0) continue;
@@ -987,7 +1381,8 @@ void Simulation::tick_refuel() {
 }
 
 
-void Simulation::tick_repairs() {
+void Simulation::tick_repairs(double dt_days) {
+  if (dt_days <= 0.0) return;
   const double per_yard = std::max(0.0, cfg_.repair_hp_per_day_per_shipyard);
   if (per_yard <= 0.0) return;
 
@@ -1082,7 +1477,7 @@ void Simulation::tick_repairs() {
     const int yards = (it_yard != colony->installations.end()) ? it_yard->second : 0;
     if (yards <= 0) continue;
 
-    double capacity = per_yard * static_cast<double>(yards);
+    double capacity = per_yard * static_cast<double>(yards) * dt_days;
     if (capacity <= 1e-9) continue;
 
     // Apply mineral limits (if configured).

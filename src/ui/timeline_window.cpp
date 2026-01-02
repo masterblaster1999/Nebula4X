@@ -13,6 +13,7 @@
 
 #include "nebula4x/core/date.h"
 #include "nebula4x/util/strings.h"
+#include "nebula4x/util/time.h"
 
 namespace nebula4x::ui {
 namespace {
@@ -81,13 +82,61 @@ bool matches_search(const SimEvent& ev, const char* q) {
   return hay.find(needle) != std::string::npos;
 }
 
-double nice_step(double raw) {
-  // Choose from a set of pleasant tick steps.
-  const double steps[] = {1, 2, 5, 10, 20, 50, 100, 200, 500, 1000};
+double nice_step(double raw_days) {
+  // Choose from a set of pleasant tick steps, including sub-day ticks.
+  //
+  // This timeline runs in "days" units (where 1.0 == 24 hours). When zoomed
+  // in sufficiently, allow major ticks at 12h/6h/1h boundaries to align with
+  // sub-day turn ticks.
+  const double steps[] = {
+      1.0 / 24.0,  // 1 hour
+      6.0 / 24.0,  // 6 hours
+      12.0 / 24.0, // 12 hours
+      1.0,
+      2.0,
+      5.0,
+      10.0,
+      20.0,
+      50.0,
+      100.0,
+      200.0,
+      500.0,
+      1000.0,
+  };
   for (double s : steps) {
-    if (s >= raw) return s;
+    if (s >= raw_days) return s;
   }
   return steps[IM_ARRAYSIZE(steps) - 1];
+}
+
+struct DayHour {
+  std::int64_t day{0};
+  int hour{0};
+};
+
+DayHour split_day_hour(double t_days) {
+  // Convert a continuous day value into (day, hour) rounded to the nearest hour.
+  //
+  // We round because the timeline uses floating-point values for layout, and
+  // the tick steps are exact multiples of 1/24 in intent but not always in
+  // binary.
+  const double day_floor = std::floor(t_days);
+  std::int64_t day = static_cast<std::int64_t>(day_floor);
+  const double frac = t_days - day_floor;
+  int hour = static_cast<int>(std::llround(frac * 24.0));
+  // Handle rounding spillover.
+  if (hour >= 24) {
+    hour -= 24;
+    day += 1;
+  } else if (hour < 0) {
+    hour += 24;
+    day -= 1;
+  }
+  return {day, clamp_hour(hour)};
+}
+
+double event_time_days(const SimEvent& ev) {
+  return static_cast<double>(ev.day) + static_cast<double>(clamp_hour(ev.hour)) / 24.0;
 }
 
 struct TimelineViewState {
@@ -211,15 +260,26 @@ void draw_timeline_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& s
     return;
   }
 
-  // Compute event day bounds.
+  // Compute event time bounds.
+  //
+  // The canvas uses a continuous "days" unit where 1.0 == 24 hours.
+  double min_time = event_time_days(events.front());
+  double max_time = min_time;
+
+  // Keep integer day bounds for coarse minimap/grid ranges.
   std::int64_t min_day = events.front().day;
   std::int64_t max_day = events.front().day;
+
   for (const auto& ev : events) {
     min_day = std::min(min_day, ev.day);
     max_day = std::max(max_day, ev.day);
+    const double t = event_time_days(ev);
+    min_time = std::min(min_time, t);
+    max_time = std::max(max_time, t);
   }
 
   const std::int64_t now_day = s.date.days_since_epoch();
+  const double now_time = static_cast<double>(now_day) + static_cast<double>(clamp_hour(s.hour_of_day)) / 24.0;
 
   // --- Toolbar / filters ---
   ImGui::TextDisabled("Visualize and navigate the persistent event log (SimEvents).");
@@ -339,8 +399,8 @@ void draw_timeline_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& s
     const ImVec2 lanes_pos(cpos.x + label_w, cpos.y + axis_h);
     const ImVec2 lanes_size(std::max(1.0f, csize.x - label_w), std::max(1.0f, csize.y - axis_h));
 
-    // Clamp zoom.
-    tl.px_per_day = std::clamp(tl.px_per_day, 2.0, 120.0);
+    // Clamp zoom (allow sub-day exploration at higher zoom levels).
+    tl.px_per_day = std::clamp(tl.px_per_day, 2.0, 720.0);
 
     view_days = std::max(1.0, (double)lanes_size.x / tl.px_per_day);
 
@@ -349,7 +409,7 @@ void draw_timeline_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& s
       tl.initialized = true;
       tl.px_per_day = 12.0;
       view_days = std::max(1.0, (double)lanes_size.x / tl.px_per_day);
-      tl.start_day = (double)std::max<std::int64_t>(min_day, now_day - (std::int64_t)std::ceil(view_days));
+      tl.start_day = std::max(min_time, now_time - view_days);
     }
 
     // Apply programmatic focus request (from toast/log buttons).
@@ -357,14 +417,14 @@ void draw_timeline_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& s
       if (const SimEvent* ev = find_event_by_seq(events, ui.request_focus_event_seq)) {
         tl.selected_seq = ev->seq;
         ui.timeline_follow_now = false;
-        tl.start_day = (double)ev->day - view_days * 0.5;
+        tl.start_day = event_time_days(*ev) - view_days * 0.5;
       }
       ui.request_focus_event_seq = 0;
     }
 
     // Follow now: keep the right edge close to the current sim date.
     if (ui.timeline_follow_now) {
-      tl.start_day = (double)now_day - view_days;
+      tl.start_day = now_time - view_days;
     }
 
     // Input: zoom/pan (only over the marker region, not the label column).
@@ -378,7 +438,7 @@ void draw_timeline_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& s
 
         const double factor = std::pow(1.10, (double)io.MouseWheel);
         double new_ppd = tl.px_per_day * factor;
-        new_ppd = std::clamp(new_ppd, 2.0, 120.0);
+        new_ppd = std::clamp(new_ppd, 2.0, 720.0);
 
         tl.px_per_day = new_ppd;
         view_days = std::max(1.0, (double)lanes_size.x / tl.px_per_day);
@@ -397,8 +457,10 @@ void draw_timeline_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& s
     // Clamp view to a reasonable range (allow a bit of overscroll for aesthetics).
     {
       const double overscroll = view_days * 0.15;
-      const double min_start = (double)min_day - overscroll;
-      const double max_start = (double)max_day - view_days + overscroll;
+      const double data_min = std::min(min_time, now_time);
+      const double data_max = std::max(max_time, now_time);
+      const double min_start = data_min - overscroll;
+      const double max_start = data_max - view_days + overscroll;
       if (min_start < max_start) {
         tl.start_day = std::clamp(tl.start_day, min_start, max_start);
       } else {
@@ -442,10 +504,10 @@ void draw_timeline_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& s
     if (ui.timeline_show_grid) {
       const double desired_major_px = 140.0;
       const double major_step = nice_step(desired_major_px / tl.px_per_day);
-      const double minor_step = std::max(1.0, major_step / 5.0);
+      const double minor_step = std::max(1.0 / 24.0, major_step / 6.0);
 
       // Minor lines (optional when zoomed-in enough).
-      if (tl.px_per_day * minor_step >= 14.0) {
+      if (tl.px_per_day * minor_step >= 12.0) {
         const double first_minor = std::floor(tl.start_day / minor_step) * minor_step;
         for (double d = first_minor; d <= end_day + minor_step; d += minor_step) {
           const float x = lanes_pos.x + (float)((d - tl.start_day) * tl.px_per_day);
@@ -464,15 +526,22 @@ void draw_timeline_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& s
 
         // Axis labels (only when there's room).
         if (tl.px_per_day * major_step >= 64.0) {
-          const nebula4x::Date date((std::int64_t)std::llround(d));
-          dl->AddText(ImVec2(x + 3.0f, cpos.y + 4.0f), IM_COL32(220, 220, 220, 200), date.to_string().c_str());
+          std::string label;
+          if (major_step >= 1.0) {
+            const nebula4x::Date date((std::int64_t)std::llround(d));
+            label = date.to_string();
+          } else {
+            const DayHour dh = split_day_hour(d);
+            label = format_datetime(nebula4x::Date(dh.day), dh.hour);
+          }
+          dl->AddText(ImVec2(x + 3.0f, cpos.y + 4.0f), IM_COL32(220, 220, 220, 200), label.c_str());
         }
       }
     }
 
     // "Now" indicator.
     {
-      const float x_now = lanes_pos.x + (float)(((double)now_day - tl.start_day) * tl.px_per_day);
+      const float x_now = lanes_pos.x + (float)((now_time - tl.start_day) * tl.px_per_day);
       if (x_now >= lanes_pos.x && x_now <= lanes_pos.x + lanes_size.x) {
         dl->AddLine(ImVec2(x_now, lanes_pos.y), ImVec2(x_now, lanes_bottom), IM_COL32(80, 220, 170, 165), 2.0f);
         dl->AddText(ImVec2(x_now + 4.0f, lanes_pos.y - 18.0f), IM_COL32(80, 220, 170, 220), "NOW");
@@ -497,15 +566,17 @@ void draw_timeline_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& s
 
       if (!matches_search(ev, tl.search)) continue;
 
-      if ((double)ev.day < tl.start_day - 1.0 || (double)ev.day > end_day + 1.0) continue;
+      const double t = event_time_days(ev);
+      if (t < tl.start_day - 1.0 || t > end_day + 1.0) continue;
 
-      const float x = lanes_pos.x + (float)(((double)ev.day - tl.start_day) * tl.px_per_day);
+      const float x = lanes_pos.x + (float)((t - tl.start_day) * tl.px_per_day);
       if (x < lanes_pos.x - 8.0f || x > lanes_pos.x + lanes_size.x + 8.0f) continue;
 
       const float y_center = lanes_pos.y + (float)lane * lane_h + lane_h * 0.5f;
 
-      // Stack multiple events on the same lane+day around the center line.
-      int n = stacks[lane][ev.day]++;
+      // Stack multiple events that share the same lane + hour-bucket.
+      const std::int64_t bucket = ev.day * 24 + static_cast<std::int64_t>(clamp_hour(ev.hour));
+      int n = stacks[lane][bucket]++;
       float dy = 0.0f;
       if (n > 0) {
         const int band = (n + 1) / 2;
@@ -536,8 +607,8 @@ void draw_timeline_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& s
     // Hover tooltip + interaction.
     if (hovered_ev && mouse_over_lanes) {
       ImGui::BeginTooltip();
-      const nebula4x::Date d(hovered_ev->day);
-      ImGui::Text("%s", d.to_string().c_str());
+      const std::string dt = format_datetime(nebula4x::Date(hovered_ev->day), hovered_ev->hour);
+      ImGui::Text("%s", dt.c_str());
       ImGui::TextDisabled("#%llu  %s  %s", (unsigned long long)hovered_ev->seq, level_label(hovered_ev->level),
                           kLanes[(std::size_t)lane_index(hovered_ev->category)].label);
       ImGui::Separator();
@@ -551,7 +622,7 @@ void draw_timeline_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& s
       }
       if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
         ui.timeline_follow_now = false;
-        tl.start_day = (double)hovered_ev->day - view_days * 0.5;
+        tl.start_day = event_time_days(*hovered_ev) - view_days * 0.5;
       }
       if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
         tl.context_seq = hovered_ev->seq;
@@ -566,8 +637,8 @@ void draw_timeline_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& s
         ImGui::TextDisabled("(event missing)");
         ImGui::EndPopup();
       } else {
-        const nebula4x::Date d(ev->day);
-        ImGui::Text("%s", d.to_string().c_str());
+        const std::string dt = format_datetime(nebula4x::Date(ev->day), ev->hour);
+        ImGui::Text("%s", dt.c_str());
         ImGui::TextDisabled("#%llu  %s  %s", (unsigned long long)ev->seq, level_label(ev->level),
                             kLanes[(std::size_t)lane_index(ev->category)].label);
         ImGui::Separator();
@@ -576,7 +647,7 @@ void draw_timeline_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& s
 
         if (ImGui::MenuItem("Center on timeline")) {
           ui.timeline_follow_now = false;
-          tl.start_day = (double)ev->day - view_days * 0.5;
+          tl.start_day = event_time_days(*ev) - view_days * 0.5;
         }
         if (ImGui::MenuItem("Open Event Log")) {
           ui.show_details_window = true;
@@ -591,9 +662,10 @@ void draw_timeline_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& s
 
     // Footer: show visible range.
     {
-      const nebula4x::Date d0((std::int64_t)std::floor(tl.start_day));
-      const nebula4x::Date d1((std::int64_t)std::ceil(end_day));
-      const std::string rng = d0.to_string() + "  →  " + d1.to_string();
+      const DayHour t0 = split_day_hour(tl.start_day);
+      const DayHour t1 = split_day_hour(end_day);
+      const std::string rng = format_datetime(nebula4x::Date(t0.day), t0.hour) + "  →  " +
+                              format_datetime(nebula4x::Date(t1.day), t1.hour);
       dl->AddText(ImVec2(cpos.x + 8.0f, cpos.y + csize.y - 18.0f), IM_COL32(200, 200, 200, 160), rng.c_str());
     }
   }
@@ -674,9 +746,8 @@ void draw_timeline_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& s
       ImGui::TextDisabled("No event selected.");
       ImGui::TextDisabled("Hover markers for a tooltip, left-click to select.");
     } else {
-      const nebula4x::Date d(sel->day);
-
-      ImGui::Text("%s", d.to_string().c_str());
+      const std::string dt = format_datetime(nebula4x::Date(sel->day), sel->hour);
+      ImGui::Text("%s", dt.c_str());
       ImGui::SameLine();
       ImGui::TextDisabled("#%llu", (unsigned long long)sel->seq);
 
@@ -692,7 +763,7 @@ void draw_timeline_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& s
       ImGui::SameLine();
       if (ImGui::SmallButton("Center")) {
         ui.timeline_follow_now = false;
-        tl.start_day = (double)sel->day - view_days * 0.5;
+        tl.start_day = event_time_days(*sel) - view_days * 0.5;
       }
 
       ImGui::SameLine();

@@ -16,7 +16,7 @@ using json::Array;
 using json::Object;
 using json::Value;
 
-constexpr int kCurrentSaveVersion = 36;
+constexpr int kCurrentSaveVersion = 41;
 
 Object ship_power_policy_to_json(const ShipPowerPolicy& p) {
   Object o;
@@ -250,6 +250,7 @@ Value order_to_json(const Order& order) {
           obj["type"] = std::string("orbit_body");
           obj["body_id"] = static_cast<double>(o.body_id);
           obj["duration_days"] = static_cast<double>(o.duration_days);
+          if (o.progress_days > 1e-12) obj["progress_days"] = o.progress_days;
         } else if constexpr (std::is_same_v<T, TravelViaJump>) {
           obj["type"] = std::string("travel_via_jump");
           obj["jump_point_id"] = static_cast<double>(o.jump_point_id);
@@ -268,6 +269,7 @@ Value order_to_json(const Order& order) {
         } else if constexpr (std::is_same_v<T, WaitDays>) {
           obj["type"] = std::string("wait_days");
           obj["days_remaining"] = static_cast<double>(o.days_remaining);
+          if (o.progress_days > 1e-12) obj["progress_days"] = o.progress_days;
         } else if constexpr (std::is_same_v<T, LoadMineral>) {
           obj["type"] = std::string("load_mineral");
           obj["colony_id"] = static_cast<double>(o.colony_id);
@@ -301,6 +303,7 @@ Value order_to_json(const Order& order) {
           obj["type"] = std::string("bombard_colony");
           obj["colony_id"] = static_cast<double>(o.colony_id);
           obj["duration_days"] = static_cast<double>(o.duration_days);
+          if (o.progress_days > 1e-12) obj["progress_days"] = o.progress_days;
         } else if constexpr (std::is_same_v<T, SalvageWreck>) {
           obj["type"] = std::string("salvage_wreck");
           obj["wreck_id"] = static_cast<double>(o.wreck_id);
@@ -349,8 +352,14 @@ Order order_from_json(const Value& v) {
   }
   if (type == "orbit_body") {
     OrbitBody m;
-    m.body_id = static_cast<Id>(o.at("body_id").int_value());
-    m.duration_days = static_cast<int>(o.at("duration_days").int_value(-1));
+    m.body_id = static_cast<Id>(o.at("body_id").int_value(kInvalidId));
+    // Optional: older/forward-compatible saves may omit these.
+    if (auto it = o.find("duration_days"); it != o.end()) {
+      m.duration_days = static_cast<int>(it->second.int_value(-1));
+    }
+    if (auto it = o.find("progress_days"); it != o.end()) {
+      m.progress_days = it->second.number_value(0.0);
+    }
     return m;
   }
   if (type == "travel_via_jump") {
@@ -392,6 +401,9 @@ Order order_from_json(const Value& v) {
       w.days_remaining = static_cast<int>(dr_it->second.int_value(0));
     } else if (auto d_it = o.find("days"); d_it != o.end()) {
       w.days_remaining = static_cast<int>(d_it->second.int_value(0));
+    }
+    if (auto it = o.find("progress_days"); it != o.end()) {
+      w.progress_days = it->second.number_value(0.0);
     }
     return w;
   }
@@ -444,6 +456,9 @@ Order order_from_json(const Value& v) {
     // Optional: older/forward-compatible saves may omit this.
     if (auto it = o.find("duration_days"); it != o.end()) {
       b.duration_days = static_cast<int>(it->second.int_value(-1));
+    }
+    if (auto it = o.find("progress_days"); it != o.end()) {
+      b.progress_days = it->second.number_value(0.0);
     }
     return b;
   }
@@ -524,6 +539,7 @@ std::string serialize_game_to_json(const GameState& s) {
   Object root;
   root["save_version"] = static_cast<double>(s.save_version);
   root["date"] = s.date.to_string();
+  root["hour_of_day"] = static_cast<double>(s.hour_of_day);
   root["next_id"] = static_cast<double>(s.next_id);
   root["next_event_seq"] = static_cast<double>(s.next_event_seq);
   root["selected_system"] = static_cast<double>(s.selected_system);
@@ -627,8 +643,14 @@ std::string serialize_game_to_json(const GameState& s) {
     o["design_id"] = sh.design_id;
     o["auto_explore"] = sh.auto_explore;
     o["auto_freight"] = sh.auto_freight;
+    o["auto_salvage"] = sh.auto_salvage;
+    o["auto_colonize"] = sh.auto_colonize;
     o["auto_refuel"] = sh.auto_refuel;
     o["auto_refuel_threshold_fraction"] = sh.auto_refuel_threshold_fraction;
+    o["auto_tanker"] = sh.auto_tanker;
+    if (sh.auto_tanker_reserve_fraction != 0.25) {
+      o["auto_tanker_reserve_fraction"] = sh.auto_tanker_reserve_fraction;
+    }
     o["auto_repair"] = sh.auto_repair;
     o["auto_repair_threshold_fraction"] = sh.auto_repair_threshold_fraction;
     if (sh.repair_priority != RepairPriority::Normal) {
@@ -638,6 +660,8 @@ std::string serialize_game_to_json(const GameState& s) {
     if (sh.sensor_mode != SensorMode::Normal) o["sensor_mode"] = sensor_mode_to_string(sh.sensor_mode);
     o["speed_km_s"] = sh.speed_km_s;
     o["hp"] = sh.hp;
+    o["missile_cooldown_days"] = sh.missile_cooldown_days;
+    if (sh.boarding_cooldown_days > 0.0) o["boarding_cooldown_days"] = sh.boarding_cooldown_days;
     o["fuel_tons"] = sh.fuel_tons;
     o["shields"] = sh.shields;
     o["cargo"] = map_string_double_to_json(sh.cargo);
@@ -665,6 +689,29 @@ std::string serialize_game_to_json(const GameState& s) {
     wrecks.push_back(o);
   }
   root["wrecks"] = wrecks;
+
+  // Missile salvos.
+  Array missile_salvos;
+  missile_salvos.reserve(s.missile_salvos.size());
+  for (Id id : sorted_keys(s.missile_salvos)) {
+    const auto& ms = s.missile_salvos.at(id);
+    Object o;
+    o["id"] = static_cast<double>(ms.id);
+    o["system_id"] = static_cast<double>(ms.system_id);
+    o["attacker_ship_id"] = static_cast<double>(ms.attacker_ship_id);
+    o["attacker_faction_id"] = static_cast<double>(ms.attacker_faction_id);
+    o["target_ship_id"] = static_cast<double>(ms.target_ship_id);
+    o["target_faction_id"] = static_cast<double>(ms.target_faction_id);
+    o["damage"] = ms.damage;
+    if (ms.damage_initial > 0.0) o["damage_initial"] = ms.damage_initial;
+    if (ms.eta_days_total > 0.0) o["eta_days_total"] = static_cast<double>(ms.eta_days_total);
+    o["eta_days_remaining"] = static_cast<double>(ms.eta_days_remaining);
+    // Optional visualization metadata.
+    if (ms.launch_pos_mkm.length() > 0.0) o["launch_pos_mkm"] = vec2_to_json(ms.launch_pos_mkm);
+    if (ms.target_pos_mkm.length() > 0.0) o["target_pos_mkm"] = vec2_to_json(ms.target_pos_mkm);
+    missile_salvos.push_back(o);
+  }
+  root["missile_salvos"] = missile_salvos;
 
   // Colonies
   Array colonies;
@@ -760,6 +807,12 @@ std::string serialize_game_to_json(const GameState& s) {
     for (Id sid : disc) discovered_systems.push_back(static_cast<double>(sid));
     o["discovered_systems"] = discovered_systems;
 
+    Array surveyed_jump_points;
+    const auto sjp = sorted_unique_copy(f.surveyed_jump_points);
+    surveyed_jump_points.reserve(sjp.size());
+    for (Id jid : sjp) surveyed_jump_points.push_back(static_cast<double>(jid));
+    o["surveyed_jump_points"] = surveyed_jump_points;
+
     Array contacts;
     contacts.reserve(f.ship_contacts.size());
     for (Id sid : sorted_keys(f.ship_contacts)) {
@@ -834,6 +887,13 @@ std::string serialize_game_to_json(const GameState& s) {
     o["shield_regen_per_day"] = d.shield_regen_per_day;
     o["weapon_damage"] = d.weapon_damage;
     o["weapon_range_mkm"] = d.weapon_range_mkm;
+    o["missile_damage"] = d.missile_damage;
+    o["missile_range_mkm"] = d.missile_range_mkm;
+    o["missile_speed_mkm_per_day"] = d.missile_speed_mkm_per_day;
+    o["missile_reload_days"] = d.missile_reload_days;
+    o["point_defense_damage"] = d.point_defense_damage;
+    o["point_defense_range_mkm"] = d.point_defense_range_mkm;
+    o["signature_multiplier"] = d.signature_multiplier;
     designs.push_back(o);
   }
   root["custom_designs"] = designs;
@@ -884,6 +944,7 @@ std::string serialize_game_to_json(const GameState& s) {
     Object o;
     o["seq"] = static_cast<double>(ev.seq);
     o["day"] = static_cast<double>(ev.day);
+    o["hour"] = static_cast<double>(ev.hour);
     o["level"] = std::string(event_level_to_string(ev.level));
     o["category"] = std::string(event_category_to_string(ev.category));
     o["faction_id"] = static_cast<double>(ev.faction_id);
@@ -931,6 +992,12 @@ GameState deserialize_game_from_json(const std::string& json_text) {
   }
 
   s.date = Date::parse_iso_ymd(root.at("date").string_value());
+
+  s.hour_of_day = 0;
+  if (auto ith = root.find("hour_of_day"); ith != root.end()) {
+    s.hour_of_day = static_cast<int>(ith->second.int_value(0));
+  }
+  s.hour_of_day = std::clamp(s.hour_of_day, 0, 23);
 
   s.next_id = 1;
   if (auto itnid = root.find("next_id"); itnid != root.end()) {
@@ -1041,9 +1108,15 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     sh.design_id = o.at("design_id").string_value();
     if (auto it = o.find("auto_explore"); it != o.end()) sh.auto_explore = it->second.bool_value(false);
     if (auto it = o.find("auto_freight"); it != o.end()) sh.auto_freight = it->second.bool_value(false);
+    if (auto it = o.find("auto_salvage"); it != o.end()) sh.auto_salvage = it->second.bool_value(false);
+    if (auto it = o.find("auto_colonize"); it != o.end()) sh.auto_colonize = it->second.bool_value(false);
     if (auto it = o.find("auto_refuel"); it != o.end()) sh.auto_refuel = it->second.bool_value(false);
     if (auto it = o.find("auto_refuel_threshold_fraction"); it != o.end()) {
       sh.auto_refuel_threshold_fraction = it->second.number_value(sh.auto_refuel_threshold_fraction);
+    }
+    if (auto it = o.find("auto_tanker"); it != o.end()) sh.auto_tanker = it->second.bool_value(false);
+    if (auto it = o.find("auto_tanker_reserve_fraction"); it != o.end()) {
+      sh.auto_tanker_reserve_fraction = it->second.number_value(sh.auto_tanker_reserve_fraction);
     }
     if (auto it = o.find("auto_repair"); it != o.end()) sh.auto_repair = it->second.bool_value(false);
     if (auto it = o.find("auto_repair_threshold_fraction"); it != o.end()) {
@@ -1058,6 +1131,12 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     }
     sh.speed_km_s = o.at("speed_km_s").number_value(0.0);
     sh.hp = o.at("hp").number_value(0.0);
+    if (auto it = o.find("missile_cooldown_days"); it != o.end()) {
+      sh.missile_cooldown_days = it->second.number_value(0.0);
+    }
+    if (auto it = o.find("boarding_cooldown_days"); it != o.end()) {
+      sh.boarding_cooldown_days = it->second.number_value(0.0);
+    }
     if (auto it = o.find("fuel_tons"); it != o.end()) sh.fuel_tons = it->second.number_value(-1.0);
     if (auto it = o.find("shields"); it != o.end()) sh.shields = it->second.number_value(-1.0);
     if (auto it = o.find("cargo"); it != o.end()) sh.cargo = map_string_double_from_json(it->second);
@@ -1085,6 +1164,50 @@ GameState deserialize_game_from_json(const std::string& json_text) {
       if (auto id = o.find("source_design_id"); id != o.end()) w.source_design_id = id->second.string_value();
       if (auto ic = o.find("created_day"); ic != o.end()) w.created_day = static_cast<int>(ic->second.int_value(0));
       s.wrecks[w.id] = w;
+    }
+  }
+
+  // Missile salvos (optional).
+  if (auto it = root.find("missile_salvos"); it != root.end()) {
+    for (const auto& sv : it->second.array()) {
+      const auto& o = sv.object();
+      MissileSalvo ms;
+      ms.id = static_cast<Id>(o.at("id").int_value(kInvalidId));
+      if (auto is = o.find("system_id"); is != o.end()) ms.system_id = static_cast<Id>(is->second.int_value(kInvalidId));
+      if (auto ia = o.find("attacker_ship_id"); ia != o.end()) {
+        ms.attacker_ship_id = static_cast<Id>(ia->second.int_value(kInvalidId));
+      }
+      if (auto ifa = o.find("attacker_faction_id"); ifa != o.end()) {
+        ms.attacker_faction_id = static_cast<Id>(ifa->second.int_value(kInvalidId));
+      }
+      if (auto itar = o.find("target_ship_id"); itar != o.end()) {
+        ms.target_ship_id = static_cast<Id>(itar->second.int_value(kInvalidId));
+      }
+      if (auto itf = o.find("target_faction_id"); itf != o.end()) {
+        ms.target_faction_id = static_cast<Id>(itf->second.int_value(kInvalidId));
+      }
+      if (auto idmg = o.find("damage"); idmg != o.end()) ms.damage = idmg->second.number_value(0.0);
+      if (auto idmgi = o.find("damage_initial"); idmgi != o.end()) ms.damage_initial = idmgi->second.number_value(0.0);
+      if (auto ieta = o.find("eta_days_total"); ieta != o.end()) ms.eta_days_total = ieta->second.number_value(0.0);
+      if (auto ieta = o.find("eta_days_remaining"); ieta != o.end()) {
+        ms.eta_days_remaining = ieta->second.number_value(0.0);
+      }
+      if (auto ip = o.find("launch_pos_mkm"); ip != o.end()) ms.launch_pos_mkm = vec2_from_json(ip->second);
+      if (auto ip = o.find("target_pos_mkm"); ip != o.end()) ms.target_pos_mkm = vec2_from_json(ip->second);
+
+      // Backfill for legacy saves (pre-save_version 41).
+      if (ms.damage_initial <= 1e-12) ms.damage_initial = ms.damage;
+      if (ms.eta_days_total <= 1e-12) ms.eta_days_total = ms.eta_days_remaining;
+
+      // Best-effort: if positions weren't stored, infer them from the current
+      // attacker/target ship positions at load time.
+      if (ms.launch_pos_mkm.length() <= 1e-12) {
+        if (const auto* sh = find_ptr(s.ships, ms.attacker_ship_id)) ms.launch_pos_mkm = sh->position_mkm;
+      }
+      if (ms.target_pos_mkm.length() <= 1e-12) {
+        if (const auto* sh = find_ptr(s.ships, ms.target_ship_id)) ms.target_pos_mkm = sh->position_mkm;
+      }
+      s.missile_salvos[ms.id] = ms;
     }
   }
 
@@ -1206,6 +1329,12 @@ GameState deserialize_game_from_json(const std::string& json_text) {
       }
     }
 
+    if (auto it = o.find("surveyed_jump_points"); it != o.end()) {
+      for (const auto& jv : it->second.array()) {
+        f.surveyed_jump_points.push_back(static_cast<Id>(jv.int_value(kInvalidId)));
+      }
+    }
+
     if (auto it = o.find("ship_contacts"); it != o.end()) {
       for (const auto& cv : it->second.array()) {
         const auto& co = cv.object();
@@ -1295,6 +1424,21 @@ GameState deserialize_game_from_json(const std::string& json_text) {
       }
       d.weapon_damage = o.at("weapon_damage").number_value(0.0);
       d.weapon_range_mkm = o.at("weapon_range_mkm").number_value(0.0);
+      if (auto itmd = o.find("missile_damage"); itmd != o.end()) d.missile_damage = itmd->second.number_value(0.0);
+      if (auto itmr = o.find("missile_range_mkm"); itmr != o.end()) d.missile_range_mkm = itmr->second.number_value(0.0);
+      if (auto itms = o.find("missile_speed_mkm_per_day"); itms != o.end()) {
+        d.missile_speed_mkm_per_day = itms->second.number_value(0.0);
+      }
+      if (auto itrl = o.find("missile_reload_days"); itrl != o.end()) d.missile_reload_days = itrl->second.number_value(0.0);
+      if (auto itpd = o.find("point_defense_damage"); itpd != o.end()) {
+        d.point_defense_damage = itpd->second.number_value(0.0);
+      }
+      if (auto itpr = o.find("point_defense_range_mkm"); itpr != o.end()) {
+        d.point_defense_range_mkm = itpr->second.number_value(0.0);
+      }
+      if (auto itsig = o.find("signature_multiplier"); itsig != o.end()) {
+        d.signature_multiplier = itsig->second.number_value(1.0);
+      }
       s.custom_designs[d.id] = d;
     }
   }
@@ -1454,6 +1598,8 @@ GameState deserialize_game_from_json(const std::string& json_text) {
       seq_cursor = ev.seq;
 
       ev.day = static_cast<std::int64_t>(o.at("day").int_value(0));
+      if (auto ith = o.find("hour"); ith != o.end()) ev.hour = static_cast<int>(ith->second.int_value(0));
+      ev.hour = std::clamp(ev.hour, 0, 23);
       if (auto itl = o.find("level"); itl != o.end()) ev.level = event_level_from_string(itl->second.string_value("info"));
       if (auto itc = o.find("category"); itc != o.end()) {
         ev.category = event_category_from_string(itc->second.string_value("general"));

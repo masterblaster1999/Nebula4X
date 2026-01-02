@@ -297,6 +297,13 @@ std::vector<std::string> validate_game_state(const GameState& s, const ContentDB
              join("Ship ", id_u64(sid), " ('", sh.name, "') has invalid auto_repair_threshold_fraction ",
                   sh.auto_repair_threshold_fraction));
       }
+
+      if (!std::isfinite(sh.auto_tanker_reserve_fraction) || sh.auto_tanker_reserve_fraction < 0.0 ||
+          sh.auto_tanker_reserve_fraction > 1.0) {
+        push(errors,
+             join("Ship ", id_u64(sid), " ('", sh.name, "') has invalid auto_tanker_reserve_fraction ",
+                  sh.auto_tanker_reserve_fraction));
+      }
     }
 
     // RepairPriority validation.
@@ -874,6 +881,29 @@ std::vector<std::string> validate_game_state(const GameState& s, const ContentDB
       }
     }
 
+    // surveyed jump points: exist + no duplicates.
+    {
+      std::unordered_set<Id> seen;
+      seen.reserve(f.surveyed_jump_points.size() * 2);
+      for (const auto jid : f.surveyed_jump_points) {
+        if (jid == kInvalidId) {
+          push(errors, join("Faction ", id_u64(fid), " ('", f.name, "') has kInvalidId in surveyed_jump_points"));
+          continue;
+        }
+        if (!has_jump(jid)) {
+          push(errors,
+               join("Faction ", id_u64(fid), " ('", f.name, "') surveyed_jump_points references missing jump_point ",
+                    id_u64(jid)));
+          continue;
+        }
+        if (!seen.insert(jid).second) {
+          push(errors,
+               join("Faction ", id_u64(fid), " ('", f.name, "') surveyed_jump_points contains duplicate jump_point ",
+                    id_u64(jid)));
+        }
+      }
+    }
+
     // contact map is keyed by ship id; ensure internal field matches.
     for (const auto& [sid, c] : f.ship_contacts) {
       if (c.ship_id != kInvalidId && c.ship_id != sid) {
@@ -1266,6 +1296,16 @@ FixReport fix_game_state(GameState& s, const ContentDB* content) {
       sh.auto_repair_threshold_fraction = std::clamp(sh.auto_repair_threshold_fraction, 0.0, 1.0);
       if (sh.auto_repair_threshold_fraction != before_repair) {
         note(join("Fix: Ship ", id_u64(sid), " had out-of-range auto_repair_threshold_fraction; clamped"));
+      }
+
+      if (!std::isfinite(sh.auto_tanker_reserve_fraction)) {
+        note(join("Fix: Ship ", id_u64(sid), " had NaN/inf auto_tanker_reserve_fraction; set to 0.25"));
+        sh.auto_tanker_reserve_fraction = 0.25;
+      }
+      const double before_reserve = sh.auto_tanker_reserve_fraction;
+      sh.auto_tanker_reserve_fraction = std::clamp(sh.auto_tanker_reserve_fraction, 0.0, 1.0);
+      if (sh.auto_tanker_reserve_fraction != before_reserve) {
+        note(join("Fix: Ship ", id_u64(sid), " had out-of-range auto_tanker_reserve_fraction; clamped"));
       }
     }
   }
@@ -1866,6 +1906,21 @@ FixReport fix_game_state(GameState& s, const ContentDB* content) {
       }
       sort_unique(cleaned);
       f.discovered_systems = std::move(cleaned);
+    }
+
+    // surveyed jump points: remove missing + duplicates.
+    {
+      std::vector<Id> cleaned;
+      cleaned.reserve(f.surveyed_jump_points.size());
+      for (Id jid : f.surveyed_jump_points) {
+        if (jid == kInvalidId || !has_jump(jid)) {
+          note(join("Fix: Faction ", id_u64(fid), " removed invalid surveyed_jump_point ", id_u64(jid)));
+          continue;
+        }
+        cleaned.push_back(jid);
+      }
+      sort_unique(cleaned);
+      f.surveyed_jump_points = std::move(cleaned);
     }
 
     // contacts: drop entries for missing ships; fix ids + system_id.

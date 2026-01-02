@@ -109,6 +109,18 @@ bool Simulation::upsert_custom_design(ShipDesign design, std::string* error) {
 
   double weapon_damage = 0.0;
   double weapon_range = 0.0;
+
+  // Missile weapons (discrete salvos).
+  double missile_damage = 0.0;
+  double missile_range = 0.0;
+  double missile_speed = 0.0;
+  double missile_reload = 0.0;
+  bool missile_reload_set = false;
+
+  // Point defense (anti-missile).
+  double point_defense_damage = 0.0;
+  double point_defense_range = 0.0;
+
   double hp_bonus = 0.0;
   double max_shields = 0.0;
   double shield_regen = 0.0;
@@ -142,6 +154,23 @@ bool Simulation::upsert_custom_design(ShipDesign design, std::string* error) {
     if (c.type == ComponentType::Weapon) {
       weapon_damage += c.weapon_damage;
       weapon_range = std::max(weapon_range, c.weapon_range_mkm);
+
+      // Missile launcher stats (optional).
+      if (c.missile_damage > 0.0) {
+        missile_damage += c.missile_damage;
+        missile_range = std::max(missile_range, c.missile_range_mkm);
+        missile_speed = std::max(missile_speed, c.missile_speed_mkm_per_day);
+        if (c.missile_reload_days > 0.0) {
+          missile_reload = missile_reload_set ? std::min(missile_reload, c.missile_reload_days) : c.missile_reload_days;
+          missile_reload_set = true;
+        }
+      }
+
+      // Point defense stats (optional).
+      if (c.point_defense_damage > 0.0) {
+        point_defense_damage += c.point_defense_damage;
+        point_defense_range = std::max(point_defense_range, c.point_defense_range_mkm);
+      }
     }
 
     if (c.type == ComponentType::Reactor) {
@@ -181,6 +210,14 @@ bool Simulation::upsert_custom_design(ShipDesign design, std::string* error) {
   design.power_use_shields = power_use_shields;
   design.weapon_damage = weapon_damage;
   design.weapon_range_mkm = weapon_range;
+
+  design.missile_damage = missile_damage;
+  design.missile_range_mkm = missile_range;
+  design.missile_speed_mkm_per_day = missile_speed;
+  design.missile_reload_days = missile_reload_set ? missile_reload : 0.0;
+
+  design.point_defense_damage = point_defense_damage;
+  design.point_defense_range_mkm = point_defense_range;
   design.max_shields = max_shields;
   design.shield_regen_per_day = shield_regen;
   design.max_hp = std::max(1.0, mass * 2.0 + hp_bonus);
@@ -221,6 +258,21 @@ void Simulation::initialize_unlocks_for_faction(Faction& f) {
     for (const auto& eff : tit->second.effects) {
       if (eff.type == "unlock_component") push_unique(f.unlocked_components, eff.value);
       if (eff.type == "unlock_installation") push_unique(f.unlocked_installations, eff.value);
+    }
+  }
+
+  // Backfill jump-point surveys for legacy saves (pre-save_version 40).
+  // If the field is empty, assume all jump points in currently discovered systems
+  // are known/surveyed to preserve existing behaviour.
+  if (f.surveyed_jump_points.empty()) {
+    for (Id sys_id : f.discovered_systems) {
+      const auto* sys = find_ptr(state_.systems, sys_id);
+      if (!sys) continue;
+      for (Id jid : sys->jump_points) {
+        if (jid == kInvalidId) continue;
+        if (state_.jump_points.find(jid) == state_.jump_points.end()) continue;
+        push_unique(f.surveyed_jump_points, jid);
+      }
     }
   }
 }
@@ -347,6 +399,65 @@ void Simulation::discover_system_for_faction(Id faction_id, Id system_id) {
   }
 }
 
+void Simulation::survey_jump_point_for_faction(Id faction_id, Id jump_point_id) {
+  if (jump_point_id == kInvalidId) return;
+  auto* fac = find_ptr(state_.factions, faction_id);
+  if (!fac) return;
+
+  const auto* jp = find_ptr(state_.jump_points, jump_point_id);
+  if (!jp) return;
+
+  auto add_survey = [&](Faction& f, Id jid) -> bool {
+    if (jid == kInvalidId) return false;
+    if (std::find(f.surveyed_jump_points.begin(), f.surveyed_jump_points.end(), jid) !=
+        f.surveyed_jump_points.end()) {
+      return false;
+    }
+    f.surveyed_jump_points.push_back(jid);
+    return true;
+  };
+
+  if (!add_survey(*fac, jump_point_id)) return;
+
+  invalidate_jump_route_cache();
+
+  const std::string jp_name = !jp->name.empty() ? jp->name : std::string("Jump Point");
+  std::string dest_name = "(unknown)";
+  if (jp->linked_jump_id != kInvalidId) {
+    if (const auto* lnk = find_ptr(state_.jump_points, jp->linked_jump_id)) {
+      if (const auto* dst_sys = find_ptr(state_.systems, lnk->system_id)) {
+        if (!dst_sys->name.empty()) dest_name = dst_sys->name;
+      }
+    }
+  }
+
+  EventContext ctx;
+  ctx.faction_id = faction_id;
+  ctx.system_id = jp->system_id;
+
+  const std::string msg = fac->name + " surveyed jump point " + jp_name + " -> " + dest_name;
+  push_event(EventLevel::Info, EventCategory::Exploration, msg, ctx);
+
+  // Share the survey with mutual-friendly factions.
+  const auto faction_ids = sorted_keys(state_.factions);
+  for (Id other_id : faction_ids) {
+    if (other_id == faction_id) continue;
+    if (!are_factions_mutual_friendly(faction_id, other_id)) continue;
+    auto* other = find_ptr(state_.factions, other_id);
+    if (!other) continue;
+
+    if (!add_survey(*other, jump_point_id)) continue;
+
+    EventContext ctx2;
+    ctx2.faction_id = other_id;
+    ctx2.faction_id2 = faction_id;
+    ctx2.system_id = jp->system_id;
+
+    const std::string msg2 = "Intel: " + fac->name + " shared jump survey of " + jp_name + " -> " + dest_name;
+    push_event(EventLevel::Info, EventCategory::Intel, msg2, ctx2);
+  }
+}
+
 void Simulation::new_game() {
   state_ = make_sol_scenario();
   for (auto& [_, ship] : state_.ships) {
@@ -354,7 +465,7 @@ void Simulation::new_game() {
   }
   for (auto& [_, f] : state_.factions) initialize_unlocks_for_faction(f);
   recompute_body_positions();
-  tick_contacts();
+  tick_contacts(false);
   invalidate_jump_route_cache();
 }
 
@@ -395,13 +506,26 @@ void Simulation::load_game(GameState loaded) {
   prune_fleets();
 
   recompute_body_positions();
-  tick_contacts();
+  tick_contacts(false);
   invalidate_jump_route_cache();
 }
 
 void Simulation::advance_days(int days) {
   if (days <= 0) return;
-  for (int i = 0; i < days; ++i) tick_one_day();
+  advance_hours(days * 24);
+}
+
+void Simulation::advance_hours(int hours) {
+  if (hours <= 0) return;
+
+  int remaining = hours;
+  while (remaining > 0) {
+    const int hod = std::clamp(state_.hour_of_day, 0, 23);
+    const int until_midnight = 24 - hod;
+    const int step = std::clamp(std::min(remaining, until_midnight), 1, 24);
+    tick_one_tick_hours(step);
+    remaining -= step;
+  }
 }
 
 namespace {
@@ -446,29 +570,55 @@ bool event_matches_stop(const SimEvent& ev, const EventStopCondition& stop) {
 } // namespace
 
 AdvanceUntilEventResult Simulation::advance_until_event(int max_days, const EventStopCondition& stop) {
+  // Preserve the existing day-oriented API, but implement it on top of the
+  // hour-stepped variant.
+  const int max_hours = (max_days <= 0) ? 0 : max_days * 24;
+  return advance_until_event_hours(max_hours, stop, /*step_hours=*/24);
+}
+
+AdvanceUntilEventResult Simulation::advance_until_event_hours(int max_hours, const EventStopCondition& stop, int step_hours) {
   AdvanceUntilEventResult out;
-  if (max_days <= 0) return out;
+  if (max_hours <= 0) return out;
+
+  step_hours = std::clamp(step_hours, 1, 24);
 
   std::uint64_t last_seq = 0;
   if (state_.next_event_seq > 0) last_seq = state_.next_event_seq - 1;
 
-  for (int i = 0; i < max_days; ++i) {
-    tick_one_day();
-    out.days_advanced += 1;
+  int remaining = max_hours;
+  while (remaining > 0) {
+    // Don't allow a single step to cross midnight so that we can stop on
+    // events precisely at a boundary and keep hour-of-day stamps intuitive.
+    const int hod = std::clamp(state_.hour_of_day, 0, 23);
+    const int until_midnight = 24 - hod;
+    const int step = std::min({remaining, step_hours, until_midnight});
 
-    const std::uint64_t newest_seq = (state_.next_event_seq > 0) ? (state_.next_event_seq - 1) : 0;
-    if (newest_seq <= last_seq) continue; 
+    const std::int64_t day_before = state_.date.days_since_epoch();
+    tick_one_tick_hours(step);
+    const std::int64_t day_after = state_.date.days_since_epoch();
 
-    for (int j = static_cast<int>(state_.events.size()) - 1; j >= 0; --j) {
-      const auto& ev = state_.events[static_cast<std::size_t>(j)];
-      if (ev.seq <= last_seq) break;
-      if (!event_matches_stop(ev, stop)) continue;
-      out.hit = true;
-      out.event = ev; // copy
-      return out;
+    out.hours_advanced += step;
+    if (day_after != day_before) {
+      // In practice, this should be at most 1 due to the no-midnight-crossing
+      // constraint above, but keep it robust.
+      out.days_advanced += static_cast<int>(day_after - day_before);
     }
 
-    last_seq = newest_seq;
+    const std::uint64_t newest_seq = (state_.next_event_seq > 0) ? (state_.next_event_seq - 1) : 0;
+    if (newest_seq > last_seq) {
+      for (int j = static_cast<int>(state_.events.size()) - 1; j >= 0; --j) {
+        const auto& ev = state_.events[static_cast<std::size_t>(j)];
+        if (ev.seq <= last_seq) break;
+        if (!event_matches_stop(ev, stop)) continue;
+        out.hit = true;
+        out.event = ev; // copy
+        return out;
+      }
+
+      last_seq = newest_seq;
+    }
+
+    remaining -= step;
   }
 
   return out;

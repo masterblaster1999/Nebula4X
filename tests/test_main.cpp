@@ -28,6 +28,9 @@ int test_population_growth();
 int test_combat_events();
 int test_shields();
 int test_population_transport();
+int test_auto_colonize();
+int test_auto_salvage();
+int test_auto_tanker();
 int test_ship_repairs();
 int test_fleets();
 int test_ai_economy();
@@ -36,6 +39,7 @@ int test_mineral_deposits();
 int test_power_system();
 int test_digests();
 int test_faction_economy_modifiers();
+int test_turn_ticks();
 
 int main() {
   int fails = 0;
@@ -71,8 +75,12 @@ int main() {
   fails += test_fleets();
   fails += test_population_growth();
   fails += test_population_transport();
+  fails += test_auto_colonize();
+  fails += test_auto_salvage();
+  fails += test_auto_tanker();
   fails += test_combat_events();
   fails += test_shields();
+  fails += test_turn_ticks();
   fails += test_ship_repairs();
   fails += test_faction_economy_modifiers();
 

@@ -43,16 +43,27 @@ int test_serialization() {
 
   nebula4x::Simulation sim(std::move(content), nebula4x::SimConfig{});
 
+  // Pick a real jump point id to validate new save schema v40 fields.
+  nebula4x::Id sample_jump_id = nebula4x::kInvalidId;
+  if (!sim.state().jump_points.empty()) {
+    sample_jump_id = sim.state().jump_points.begin()->first;
+  }
+
   // Toggle some non-default fields to validate schema round-trip.
   nebula4x::Id probe_ship = nebula4x::kInvalidId;
   if (!sim.state().ships.empty()) {
     probe_ship = sim.state().ships.begin()->first;
     sim.state().ships[probe_ship].auto_explore = true;
     sim.state().ships[probe_ship].auto_freight = true;
+    sim.state().ships[probe_ship].auto_salvage = true;
   }
   for (auto& [_, f] : sim.state().factions) {
     if (f.name == "Pirate Raiders") {
       f.control = nebula4x::FactionControl::AI_Pirate;
+      if (sample_jump_id != nebula4x::kInvalidId) {
+        f.surveyed_jump_points.clear();
+        f.surveyed_jump_points.push_back(sample_jump_id);
+      }
     }
   }
 
@@ -93,6 +104,7 @@ int test_serialization() {
     N4X_ASSERT(it != loaded.ships.end());
     N4X_ASSERT(it->second.auto_explore == true);
     N4X_ASSERT(it->second.auto_freight == true);
+    N4X_ASSERT(it->second.auto_salvage == true);
   }
 
   bool found_pirates = false;
@@ -100,6 +112,10 @@ int test_serialization() {
     if (f.name == "Pirate Raiders") {
       found_pirates = true;
       N4X_ASSERT(f.control == nebula4x::FactionControl::AI_Pirate);
+      if (sample_jump_id != nebula4x::kInvalidId) {
+        N4X_ASSERT(std::find(f.surveyed_jump_points.begin(), f.surveyed_jump_points.end(),
+                             sample_jump_id) != f.surveyed_jump_points.end());
+      }
     }
   }
   N4X_ASSERT(found_pirates);

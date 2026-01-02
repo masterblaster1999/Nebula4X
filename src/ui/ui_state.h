@@ -190,6 +190,7 @@ struct UIState {
   bool system_map_grid{false};
   bool system_map_order_paths{true};
   bool system_map_fleet_formation_preview{true};
+  bool system_map_missile_salvos{false};
   bool system_map_follow_selected{false};
 
   bool galaxy_map_starfield{true};

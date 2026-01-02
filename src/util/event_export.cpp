@@ -8,6 +8,7 @@
 #include "nebula4x/core/date.h"
 #include "nebula4x/util/json.h"
 #include "nebula4x/util/strings.h"
+#include "nebula4x/util/time.h"
 
 namespace nebula4x {
 namespace {
@@ -90,6 +91,9 @@ json::Object event_to_object(const GameState& state, const SimEvent& ev) {
   json::Object obj;
   obj["day"] = static_cast<double>(ev.day);
   obj["date"] = d.to_string();
+  obj["hour"] = static_cast<double>(clamp_hour(ev.hour));
+  obj["time"] = format_time_hh(ev.hour);
+  obj["datetime"] = format_datetime(d, ev.hour);
   obj["seq"] = static_cast<double>(ev.seq);
   obj["level"] = std::string(event_level_json_label(ev.level));
   obj["category"] = std::string(event_category_json_label(ev.category));
@@ -117,7 +121,7 @@ std::string events_to_csv(const GameState& state, const std::vector<const SimEve
          "system_id,system,"
          "ship_id,ship,"
          "colony_id,colony,"
-         "message\n";
+         "message,hour,time,datetime\n";
 
   // Reserve a small amount to avoid lots of reallocations for modest logs.
   csv.reserve(csv.size() + events.size() * 96);
@@ -157,6 +161,14 @@ std::string events_to_csv(const GameState& state, const std::vector<const SimEve
     csv += csv_escape(colony_name(state, ev->colony_id));
     csv += ",";
     csv += csv_escape(ev->message);
+
+    // Time metadata (kept at the end for backward-ish compatibility).
+    csv += ",";
+    csv += std::to_string(clamp_hour(ev->hour));
+    csv += ",";
+    csv += csv_escape(format_time_hh(ev->hour));
+    csv += ",";
+    csv += csv_escape(format_datetime(d, ev->hour));
     csv += "\n";
   }
 
@@ -199,6 +211,9 @@ std::string events_summary_to_json(const std::vector<const SimEvent*>& events) {
   std::int64_t min_day = 0;
   std::int64_t max_day = 0;
 
+  const SimEvent* first = nullptr;
+  const SimEvent* last = nullptr;
+
   std::size_t info_count = 0;
   std::size_t warn_count = 0;
   std::size_t error_count = 0;
@@ -212,9 +227,22 @@ std::string events_summary_to_json(const std::vector<const SimEvent*>& events) {
     if (count == 1) {
       min_day = ev->day;
       max_day = ev->day;
+      first = ev;
+      last = ev;
     } else {
       min_day = std::min(min_day, ev->day);
       max_day = std::max(max_day, ev->day);
+
+      // Track first/last event by (day, hour, seq).
+      const auto before = [](const SimEvent* a, const SimEvent* b) {
+        if (a->day != b->day) return a->day < b->day;
+        const int ah = clamp_hour(a->hour);
+        const int bh = clamp_hour(b->hour);
+        if (ah != bh) return ah < bh;
+        return a->seq < b->seq;
+      };
+      if (first && before(ev, first)) first = ev;
+      if (last && before(last, ev)) last = ev;
     }
 
     if (ev->level == EventLevel::Info) ++info_count;
@@ -237,11 +265,26 @@ std::string events_summary_to_json(const std::vector<const SimEvent*>& events) {
     range["day_max"] = nullptr;
     range["date_min"] = nullptr;
     range["date_max"] = nullptr;
+    range["hour_min"] = nullptr;
+    range["hour_max"] = nullptr;
+    range["time_min"] = nullptr;
+    range["time_max"] = nullptr;
+    range["datetime_min"] = nullptr;
+    range["datetime_max"] = nullptr;
   } else {
     range["day_min"] = static_cast<double>(min_day);
     range["day_max"] = static_cast<double>(max_day);
     range["date_min"] = Date(min_day).to_string();
     range["date_max"] = Date(max_day).to_string();
+
+    const int hmin = first ? clamp_hour(first->hour) : 0;
+    const int hmax = last ? clamp_hour(last->hour) : 0;
+    range["hour_min"] = static_cast<double>(hmin);
+    range["hour_max"] = static_cast<double>(hmax);
+    range["time_min"] = format_time_hh(hmin);
+    range["time_max"] = format_time_hh(hmax);
+    range["datetime_min"] = first ? format_datetime(Date(first->day), hmin) : std::string();
+    range["datetime_max"] = last ? format_datetime(Date(last->day), hmax) : std::string();
   }
   out["range"] = std::move(range);
 
@@ -275,6 +318,17 @@ std::string events_summary_to_csv(const std::vector<const SimEvent*>& events) {
   std::int64_t min_day = 0;
   std::int64_t max_day = 0;
 
+  const SimEvent* first = nullptr;
+  const SimEvent* last = nullptr;
+
+  const auto before = [](const SimEvent* a, const SimEvent* b) {
+    if (a->day != b->day) return a->day < b->day;
+    const int ah = clamp_hour(a->hour);
+    const int bh = clamp_hour(b->hour);
+    if (ah != bh) return ah < bh;
+    return a->seq < b->seq;
+  };
+
   std::size_t info_count = 0;
   std::size_t warn_count = 0;
   std::size_t error_count = 0;
@@ -288,9 +342,14 @@ std::string events_summary_to_csv(const std::vector<const SimEvent*>& events) {
     if (count == 1) {
       min_day = ev->day;
       max_day = ev->day;
+      first = ev;
+      last = ev;
     } else {
       min_day = std::min(min_day, ev->day);
       max_day = std::max(max_day, ev->day);
+
+      if (first && before(ev, first)) first = ev;
+      if (last && before(last, ev)) last = ev;
     }
 
     if (ev->level == EventLevel::Info) ++info_count;
@@ -304,7 +363,7 @@ std::string events_summary_to_csv(const std::vector<const SimEvent*>& events) {
   }
 
   std::string csv;
-  csv += "count,day_min,day_max,date_min,date_max,"
+  csv += "count,day_min,day_max,date_min,date_max,hour_min,hour_max,time_min,time_max,datetime_min,datetime_max,"
          "info,warn,error,"
          "general,research,shipyard,construction,movement,combat,intel,exploration,diplomacy\n";
 
@@ -313,7 +372,7 @@ std::string events_summary_to_csv(const std::vector<const SimEvent*>& events) {
 
   if (count == 0) {
     // Range fields are blank when the set is empty.
-    csv += ",,,,";
+    for (int i = 0; i < 10; ++i) csv += ",";
   } else {
     csv += std::to_string(static_cast<long long>(min_day));
     csv += ",";
@@ -322,6 +381,21 @@ std::string events_summary_to_csv(const std::vector<const SimEvent*>& events) {
     csv += csv_escape(Date(min_day).to_string());
     csv += ",";
     csv += csv_escape(Date(max_day).to_string());
+    csv += ",";
+
+    const int hmin = first ? clamp_hour(first->hour) : 0;
+    const int hmax = last ? clamp_hour(last->hour) : 0;
+    csv += std::to_string(hmin);
+    csv += ",";
+    csv += std::to_string(hmax);
+    csv += ",";
+    csv += csv_escape(format_time_hh(hmin));
+    csv += ",";
+    csv += csv_escape(format_time_hh(hmax));
+    csv += ",";
+    csv += csv_escape(first ? format_datetime(Date(first->day), hmin) : std::string());
+    csv += ",";
+    csv += csv_escape(last ? format_datetime(Date(last->day), hmax) : std::string());
     csv += ",";
   }
 

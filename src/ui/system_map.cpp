@@ -5,6 +5,7 @@
 #include "nebula4x/core/fleet_formation.h"
 #include "nebula4x/core/enum_strings.h"
 #include "nebula4x/core/power.h"
+#include "nebula4x/util/time.h"
 
 #include <imgui.h>
 
@@ -408,8 +409,11 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
 
     const ImVec2 p = to_screen(jp->position_mkm, center, scale, zoom, pan);
     const float r = 6.0f;
-    draw->AddCircle(p, r, color_jump(), 0, 2.0f);
-    draw->AddText(ImVec2(p.x + 6, p.y - 6), IM_COL32(200, 200, 200, 255), jp->name.c_str());
+    const bool surveyed = (!ui.fog_of_war) || sim.is_jump_point_surveyed_by_faction(viewer_faction_id, jid);
+    const ImU32 col = (surveyed ? color_jump() : IM_COL32(90, 90, 100, 255));
+    const ImU32 text_col = (surveyed ? IM_COL32(200, 200, 200, 255) : IM_COL32(140, 140, 150, 255));
+    draw->AddCircle(p, r, col, 0, 2.0f);
+    draw->AddText(ImVec2(p.x + 6, p.y - 6), text_col, jp->name.c_str());
   }
 
   // Selected ship order path (linked elements).
@@ -592,10 +596,50 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
     }
   }
 
+  // Missile salvos (in flight). These are visual only (damage is resolved in the simulation tick).
+  if (ui.system_map_missile_salvos) {
+    for (const auto& [mid, ms] : s.missile_salvos) {
+      if (ms.system_id != sys->id) continue;
+
+      // Fog-of-war: show salvos if the viewer is involved (attacker/target), or if the viewer
+      // has detected either the attacker or the target ship.
+      if (ui.fog_of_war && viewer_faction_id != kInvalidId) {
+        if (ms.attacker_faction_id != viewer_faction_id && ms.target_faction_id != viewer_faction_id) {
+          const bool sees_attacker = sim.is_ship_detected_by_faction(viewer_faction_id, ms.attacker_ship_id);
+          const bool sees_target = sim.is_ship_detected_by_faction(viewer_faction_id, ms.target_ship_id);
+          if (!sees_attacker && !sees_target) continue;
+        }
+      }
+
+      const double total = std::max(1e-6, ms.eta_days_total);
+      const double rem = std::max(0.0, ms.eta_days_remaining);
+      const double frac = std::clamp(1.0 - rem / total, 0.0, 1.0);
+      const Vec2 pos_mkm = ms.launch_pos_mkm + (ms.target_pos_mkm - ms.launch_pos_mkm) * frac;
+
+      Vec2 target_pos_mkm = ms.target_pos_mkm;
+      if (const auto* tgt = find_ptr(s.ships, ms.target_ship_id); tgt && tgt->system_id == sys->id) {
+        target_pos_mkm = tgt->position_mkm;
+      }
+
+      const ImVec2 p = to_screen(pos_mkm, center, scale, zoom, pan);
+      const ImVec2 t = to_screen(target_pos_mkm, center, scale, zoom, pan);
+
+      const ImU32 base = modulate_alpha(color_faction(ms.attacker_faction_id), 0.85f);
+      const ImU32 trail = modulate_alpha(base, 0.22f);
+
+      // Trail to show direction.
+      draw->AddLine(p, t, trail, 1.0f);
+
+      // Marker.
+      draw->AddCircleFilled(ImVec2(p.x + 1.0f, p.y + 1.0f), 2.7f, IM_COL32(0, 0, 0, 140));
+      draw->AddCircleFilled(p, 2.7f, base);
+    }
+  }
+
   // Wreck markers (salvageable debris)
   for (const auto& [wid, w] : s.wrecks) {
     if (w.system_id != sys->id) continue;
-    const ImVec2 p = world_to_screen(w.position_mkm);
+    const ImVec2 p = to_screen(w.position_mkm, center, scale, zoom, pan);
     const float r = 5.0f;
     const ImU32 c = IM_COL32(160, 160, 160, 200);
     draw->AddLine(ImVec2(p.x - r, p.y - r), ImVec2(p.x + r, p.y + r), c, 2.0f);
@@ -1006,7 +1050,7 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
     constexpr float kHoverRadiusPx = 18.0f;
     const float hover_d2 = kHoverRadiusPx * kHoverRadiusPx;
 
-    enum class HoverKind { None, Ship, Wreck, Body, Jump };
+    enum class HoverKind { None, Ship, Missile, Wreck, Body, Jump };
     HoverKind kind = HoverKind::None;
     Id hovered_id = kInvalidId;
     float best_d2 = hover_d2;
@@ -1032,6 +1076,36 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
         best_d2 = d2;
         kind = HoverKind::Ship;
         hovered_id = sid;
+      }
+    }
+
+    // Missile salvos (optional overlay).
+    if (kind == HoverKind::None && ui.system_map_missile_salvos) {
+      for (const auto& [mid, ms] : s.missile_salvos) {
+        if (ms.system_id != sys->id) continue;
+
+        if (ui.fog_of_war && viewer_faction_id != kInvalidId) {
+          if (ms.attacker_faction_id != viewer_faction_id && ms.target_faction_id != viewer_faction_id) {
+            const bool sees_attacker = sim.is_ship_detected_by_faction(viewer_faction_id, ms.attacker_ship_id);
+            const bool sees_target = sim.is_ship_detected_by_faction(viewer_faction_id, ms.target_ship_id);
+            if (!sees_attacker && !sees_target) continue;
+          }
+        }
+
+        const double total = std::max(1e-6, ms.eta_days_total);
+        const double rem = std::max(0.0, ms.eta_days_remaining);
+        const double frac = std::clamp(1.0 - rem / total, 0.0, 1.0);
+        const Vec2 pos_mkm = ms.launch_pos_mkm + (ms.target_pos_mkm - ms.launch_pos_mkm) * frac;
+
+        const ImVec2 p = to_screen(pos_mkm, center, scale, zoom, pan);
+        const float dx = mp.x - p.x;
+        const float dy = mp.y - p.y;
+        const float d2 = dx * dx + dy * dy;
+        if (d2 <= best_d2) {
+          best_d2 = d2;
+          kind = HoverKind::Missile;
+          hovered_id = mid;
+        }
       }
     }
 
@@ -1117,6 +1191,51 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
             ui.system_map_follow_selected = false;
           }
         }
+      } else if (kind == HoverKind::Missile) {
+        const auto* ms = find_ptr(s.missile_salvos, hovered_id);
+        if (ms) {
+          ImGui::TextUnformatted("Missile salvo");
+          ImGui::Separator();
+
+          const Ship* attacker = find_ptr(s.ships, ms->attacker_ship_id);
+          const Ship* target = find_ptr(s.ships, ms->target_ship_id);
+
+          if (attacker) {
+            ImGui::TextDisabled("Attacker: %s", attacker->name.c_str());
+          } else {
+            ImGui::TextDisabled("Attacker: Ship %llu", static_cast<unsigned long long>(ms->attacker_ship_id));
+          }
+          if (target) {
+            ImGui::TextDisabled("Target: %s", target->name.c_str());
+          } else {
+            ImGui::TextDisabled("Target: Ship %llu", static_cast<unsigned long long>(ms->target_ship_id));
+          }
+
+          ImGui::TextDisabled("ETA: %s", format_duration_days(std::max(0.0, ms->eta_days_remaining)).c_str());
+          const double payload = (ms->damage_initial > 1e-12) ? ms->damage_initial : ms->damage;
+          ImGui::TextDisabled("Payload: %.1f (remaining %.1f)", payload, std::max(0.0, ms->damage));
+
+          if (target && ImGui::SmallButton("Select target")) {
+            selected_ship = target->id;
+            ui.selected_fleet_id = sim.fleet_for_ship(target->id);
+            ui.request_details_tab = DetailsTab::Ship;
+          }
+          if (attacker) {
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Select attacker")) {
+              selected_ship = attacker->id;
+              ui.selected_fleet_id = sim.fleet_for_ship(attacker->id);
+              ui.request_details_tab = DetailsTab::Ship;
+            }
+          }
+          if (target) {
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Center")) {
+              pan = Vec2{-target->position_mkm.x, -target->position_mkm.y};
+              ui.system_map_follow_selected = false;
+            }
+          }
+        }
       } else if (kind == HoverKind::Wreck) {
         const auto* w = find_ptr(s.wrecks, hovered_id);
         if (w) {
@@ -1186,11 +1305,22 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
         const auto* jp = find_ptr(s.jump_points, hovered_id);
         if (jp) {
           ImGui::Text("%s", jp->name.c_str());
-          if (const auto* other = find_ptr(s.jump_points, jp->linked_jump_id)) {
+
+          const bool surveyed = (!ui.fog_of_war) ||
+                                sim.is_jump_point_surveyed_by_faction(viewer_faction_id, jp->id);
+          ImGui::TextDisabled("Surveyed: %s", surveyed ? "Yes" : "No");
+
+          if (!surveyed) {
+            ImGui::TextDisabled("To: (unknown)");
+          } else if (const auto* other = find_ptr(s.jump_points, jp->linked_jump_id)) {
             if (const auto* dest = find_ptr(s.systems, other->system_id)) {
-              ImGui::TextDisabled("To: %s", dest->name.c_str());
+              if (!ui.fog_of_war || sim.is_system_discovered_by_faction(viewer_faction_id, dest->id)) {
+                ImGui::TextDisabled("To: %s", dest->name.c_str());
+              } else {
+                ImGui::TextDisabled("To: (undiscovered system)");
+              }
             } else {
-              ImGui::TextDisabled("To: system %d", static_cast<int>(other->system_id));
+              ImGui::TextDisabled("To: (unknown system)");
             }
           }
 
@@ -1231,6 +1361,8 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
   ImGui::SameLine();
   ImGui::Checkbox("Grid", &ui.system_map_grid);
   ImGui::Checkbox("Order paths", &ui.system_map_order_paths);
+  ImGui::SameLine();
+  ImGui::Checkbox("Missiles", &ui.system_map_missile_salvos);
   ImGui::SameLine();
   ImGui::Checkbox("Formation preview", &ui.system_map_fleet_formation_preview);
   ImGui::Checkbox("Follow (F)", &ui.system_map_follow_selected);

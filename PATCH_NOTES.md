@@ -1,10 +1,113 @@
-# Patch notes (generated 2026-01-01 r40)
+# Patch notes (generated 2026-01-02 r47)
 
 This patch pack contains only the files that changed.
 
 Apply by copying the files over the repo (drag/drop into GitHub's "Upload files"), preserving folder paths.
 
 ## Summary of changes
+
+### r47: Jump point surveys (fog-of-war route knowledge)
+
+- Core / simulation:
+  - Adds per-faction **jump point survey state**: `Faction::surveyed_jump_points`.
+  - Ships automatically **survey nearby jump points**:
+    - All ships survey within docking range.
+    - **Surveyor-role ships** can survey from their effective sensor range (respects sensor mode / power policy).
+    - Jump transit surveys **both ends** (origin + destination) immediately.
+  - Under fog-of-war route restrictions, auto-routing / route planning will only traverse **surveyed** jump links.
+  - Mutual-friendly factions share jump-point survey intel when intel-sharing becomes active.
+
+- UI:
+  - System map:
+    - Unsurveyed jump points are rendered dimmer.
+    - Jump point tooltips show **Surveyed: Yes/No** and hide the destination until surveyed.
+  - Galaxy map:
+    - Jump connections are only drawn for **surveyed** links under fog-of-war.
+    - “Unknown exits” hints now include **unsurveyed** exits (as well as surveyed exits leading to undiscovered systems).
+    - Route preview cache key now includes event sequence to refresh immediately when survey intel changes.
+
+- Serialization / validation / determinism:
+  - Save schema bumped to **v40**.
+  - Persists `surveyed_jump_points` and includes it in state digest + validation/repair.
+
+- Tests:
+  - Extends serialization coverage for `surveyed_jump_points`.
+
+
+### r46: Sub-day turns (hour-level tick support)
+
+- Core:
+  - Adds hour-level time handling and supports sub-day turn sizes.
+  - Updates simulation ticks (ships / combat / economy / installations) to scale correctly with smaller `dt_days`.
+- UI:
+  - Improves turn/tick handling and displays for sub-day time steps.
+
+### r44: Auto-salvage automation + Wreck directory
+
+- Core AI automation:
+  - Adds ship automation: **auto-salvage when idle** (`Ship::auto_salvage`).
+  - Auto-salvage behavior:
+    - If the ship is carrying minerals, it routes to the **nearest friendly colony** and unloads.
+    - Otherwise, it selects a best-known wreck in discovered space, queues a salvage pass,
+      and repeats.
+    - Prevents multiple automated ships from targeting the same wreck by reserving wreck
+      targets already referenced by existing salvage orders.
+- UI:
+  - Adds **Directory → Wrecks** tab:
+    - search + system filter
+    - sortable table (total tons, age)
+    - quick “Go” button to center the system map on the wreck
+  - Adds a ship automation toggle: **Auto-salvage wrecks when idle**.
+  - Fixes an unbuildable UI reference to `ui.player_faction_id` in the ship salvage UI.
+- Serialization / export / determinism:
+  - Persist + export `auto_salvage`.
+  - Digest now includes `auto_colonize` and `auto_salvage` (previously omitted).
+- Tests:
+  - Adds `test_auto_salvage` and extends serialization coverage.
+
+
+### r43: Turn tick presets (1h / 6h / 12h)
+
+- Adds new turn tick presets and strengthens date/time handling for sub-day turns.
+
+
+### r42: Missile salvos + point defense + save v37
+
+- Core combat:
+  - Adds **missile salvos**: weapons can launch projectiles with time-of-flight (ETA in days).
+  - Adds **point defense**: ships with PD stats can intercept incoming missile damage for nearby friendly ships.
+  - Ships track a per-ship **missile cooldown** (`missile_cooldown_days`) based on the launching design's reload time.
+- Content/Tech pipeline:
+  - `ComponentDef` can now define (optional) missile & PD stats:
+    - `missile_damage`, `missile_range_mkm`, `missile_speed_mkm_per_day`, `missile_reload_days`
+    - `point_defense_damage`, `point_defense_range_mkm`
+  - `ShipDesign` now carries derived missile/PD stats aggregated from installed components.
+- UI:
+  - Ship / design panels now display **Beam weapons**, **Missiles**, and **Point defense** separately.
+  - Missile cooldown is shown on ships that have missile weapons.
+- Serialization / compatibility:
+  - Save schema bumped to **v37** to persist missile salvos + missile cooldown, and to include missile/PD-derived stats in custom designs.
+  - Also persists `signature_multiplier` for custom designs (previously lost on save/load).
+
+
+### r41: Auto-colonize automation + explorer AI expansion
+
+- Core:
+  - Adds ship automation: **auto-colonize when idle** (`Ship::auto_colonize`).
+  - Auto-colonize selects a best colonization target among discovered systems, avoiding:
+    - bodies that already have a colony
+    - bodies already targeted by an in-flight ColonizeBody order (per-faction)
+  - State export now includes ship automation flags (auto-explore/freight/colonize/refuel/repair).
+- AI:
+  - Explorer AI research plan now includes **colonization_1**.
+  - Explorer AI no longer auto-freights colony-capable freighters; it enables **auto-colonize** instead.
+  - Explorer AI will keep at least one colonizer in the shipyard queue when colonization targets exist
+    (without starving surveyor production).
+- UI:
+  - Ship panel: adds **Auto-colonize when idle** toggle for ships with colony modules.
+  - Auto-colonize is mutually exclusive with auto-explore and auto-freight.
+- Tests:
+  - Adds `test_auto_colonize` covering order generation and end-to-end colony creation.
 
 ### r40: Population transport (colonists)
 
@@ -496,3 +599,45 @@ Notes:
 
 - **Save schema is unchanged** (still v12).
 - CI and `.gitignore` changes do not affect runtime behavior.
+
+### r43: sub-day turn ticks (1h / 6h / 12h)
+
+- Adds `Simulation::advance_hours()` and introduces an `hour_of_day` field in `GameState`.
+- UI: adds quick turn buttons `+1h`, `+6h`, `+12h` (status bar + sidebar) and displays `YYYY-MM-DD HH:00`.
+- Simulation: splits each turn at midnight and runs daily economy only once per day, while running
+  continuous systems (ship movement, contacts, shields, combat) on sub-day ticks.
+- Combat scaling: beam damage, shields regen, and missile ETA/cooldowns now scale by elapsed time.
+- Order timing: `WaitDays`, `OrbitBody`, and `BombardColony` use a `progress_days` accumulator so they
+  behave consistently under sub-day ticks.
+- Boarding now has a per-ship daily cooldown to avoid multiple boarding attempts in one day.
+
+Compatibility:
+- Save schema bumped to v38; older saves load with `hour_of_day = 0`.
+
+### r45: Event timestamps with hour-of-day + hour-resolution time warp + timeline zoom
+
+- **SimEvent now records `hour`** (0..23) in addition to `day`, enabling accurate mid-day logging when using sub-day ticks.
+- **UI: Event log and timeline** now display `YYYY-MM-DD HH:00` and the timeline plots events at sub-day positions.
+- **Timeline zoom**: increased max zoom so you can inspect hour-level activity, with sub-day grid ticks/labels when zoomed in.
+- **Event exports** (`--export-events-*`): added `hour`, `time`, and `datetime` fields to JSON/JSONL and appended `hour,time,datetime` columns to CSV (kept at end for backward-ish compatibility).
+- **Time warp until event**: added `Simulation::advance_until_event_hours(max_hours, stop, step_hours)` and UI auto-run now lets you choose an event-check step of **1h / 6h / 12h / 1d**.
+
+Compatibility:
+- Save schema bumped to v39 (adds optional `hour` field to serialized events; older saves load with `hour = 0`).
+
+### r46: Auto-tanker logistics (ship-to-ship refueling) + test cleanup
+
+- **New ship automation: Auto-tanker**
+  - When enabled, an **idle** ship with fuel capacity will act as a fuel tanker.
+  - It automatically routes to **friendly idle ships** that are **low on fuel** (and have **auto-refuel disabled**) and performs **ship-to-ship fuel transfer**.
+  - Tankers keep a configurable **reserve fraction** of their own fuel capacity and will not transfer below it.
+- **Simulation config:** adds a few knobs in `SimConfig`:
+  - `auto_tanker_request_threshold_fraction`
+  - `auto_tanker_fill_target_fraction`
+  - `auto_tanker_min_transfer_tons`
+- **UI:** ship Automation panel adds an Auto-tanker toggle + reserve slider.
+- **State plumbing:** serialization, validation, digest, and exports updated for the new ship fields.
+- **Tests:** fixes a broken `test_auto_salvage` and adds `test_auto_tanker`.
+
+Compatibility:
+- **Save schema is unchanged** (still v39). New fields default to disabled on older saves.

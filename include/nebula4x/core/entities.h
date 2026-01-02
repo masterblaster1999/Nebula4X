@@ -186,8 +186,24 @@ struct ComponentDef {
   // design's total power use exceeds its generation.
   double power_output{0.0};        // reactor
   double power_use{0.0};           // consumer
-  double weapon_damage{0.0};       // weapon (damage per day)
+    double weapon_damage{0.0};       // weapon (damage per day)
   double weapon_range_mkm{0.0};    // weapon
+
+  // Missile weapons (prototype: discrete salvos with time-of-flight).
+  //
+  // - missile_damage is applied when the salvo reaches its target.
+  // - missile_speed_mkm_per_day controls time-to-impact.
+  // - missile_reload_days is the cooldown between launches (per-ship; see Ship::missile_cooldown_days).
+  double missile_damage{0.0};
+  double missile_range_mkm{0.0};
+  double missile_speed_mkm_per_day{0.0};
+  double missile_reload_days{0.0};
+
+  // Point defense (anti-missile interception).
+  //
+  // Interpreted as damage that can be applied to incoming missile damage at impact.
+  double point_defense_damage{0.0};
+  double point_defense_range_mkm{0.0};
   double hp_bonus{0.0};            // armor
   double shield_hp{0.0};           // shield (max shield points)
   double shield_regen_per_day{0.0}; // shield (regen per day)
@@ -225,8 +241,18 @@ struct ShipDesign {
   double max_hp{0.0};
   double max_shields{0.0};
   double shield_regen_per_day{0.0};
-  double weapon_damage{0.0};
+    double weapon_damage{0.0};
   double weapon_range_mkm{0.0};
+
+  // Missile weapons (discrete salvos with time-of-flight).
+  double missile_damage{0.0};
+  double missile_range_mkm{0.0};
+  double missile_speed_mkm_per_day{0.0};
+  double missile_reload_days{0.0};
+
+  // Point defense (anti-missile interception).
+  double point_defense_damage{0.0};
+  double point_defense_range_mkm{0.0};
 
   // Derived troop capacity (from troop bays).
   double troop_capacity{0.0};
@@ -349,6 +375,21 @@ struct Ship {
   // for this ship whenever it is idle (no queued orders).
   bool auto_freight{false};
 
+  // Automation: when enabled, the simulation will generate salvage orders for
+  // this ship whenever it is idle (no queued orders).
+  //
+  // Auto-salvage is intended for freighters and dedicated recovery craft. When
+  // a ship returns with minerals in its cargo hold, it will attempt to deliver
+  // them to a friendly colony before seeking more wrecks.
+  bool auto_salvage{false};
+
+  // Automation: when enabled, the simulation will generate colonization orders
+  // for this ship whenever it is idle (no queued orders).
+  //
+  // Only ships whose design includes a colony module (design.colony_capacity_millions > 0)
+  // can meaningfully use this flag.
+  bool auto_colonize{false};
+
   // Automation: when enabled, the simulation will route this ship to refuel when
   // it is low on fuel and idle.
   //
@@ -364,6 +405,20 @@ struct Ship {
   //
   // Example: 0.25 means "refuel when below 25%".
   double auto_refuel_threshold_fraction{0.25};
+
+  // Automation: when enabled, this ship will act as a fuel tanker and will
+  // automatically travel to friendly idle ships that are low on fuel,
+  // transferring fuel ship-to-ship.
+  //
+  // Auto-tanker only triggers when the tanker itself is idle (no queued orders).
+  // The tanker will never transfer fuel below its configured reserve fraction.
+  bool auto_tanker{false};
+
+  // Fraction of this ship's fuel capacity that is reserved and will not be
+  // transferred away by auto-tanker.
+  //
+  // Example: 0.25 means keep at least 25% of capacity as a safety reserve.
+  double auto_tanker_reserve_fraction{0.25};
 
   // Automation: when enabled, the simulation will route this ship to a friendly
   // shipyard for repairs when it is damaged and idle.
@@ -400,6 +455,17 @@ struct Ship {
 
   // Combat state.
   double hp{0.0};
+
+  // Missile weapon cooldown (days until the ship can launch another salvo).
+  // 0 = ready.
+  double missile_cooldown_days{0.0};
+
+  // Boarding attempt cooldown (days).
+  //
+  // Boarding is a discrete action intended to happen roughly once per day in
+  // the prototype. With sub-day turn ticks, we track a per-ship cooldown so
+  // boarding doesn't occur multiple times per day.
+  double boarding_cooldown_days{0.0};
 
   // Fuel state (if the design defines fuel).
   //
@@ -439,6 +505,46 @@ struct Wreck {
   // Creation day (Date::days_since_epoch) for optional decay / analytics.
   int created_day{0};
 };
+
+
+// Missile salvos (prototype).
+//
+// A salvo is created when a ship launches missiles at a target ship. It travels for
+// a number of days (eta_days_remaining) and applies its damage on arrival.
+// Point defense can reduce/negate the damage at impact time.
+struct MissileSalvo {
+  Id id{kInvalidId};
+  Id system_id{kInvalidId};
+
+  Id attacker_ship_id{kInvalidId};
+  Id attacker_faction_id{kInvalidId};
+
+  Id target_ship_id{kInvalidId};
+  Id target_faction_id{kInvalidId};
+
+  // Remaining damage payload that will be applied on impact.
+  // (Point defense can reduce this while the salvo is in flight.)
+  double damage{0.0};
+
+  // Initial damage payload at launch time.
+  // This enables clearer combat messaging ("payload" vs "leaked") and
+  // UI visualization without having to infer history.
+  double damage_initial{0.0};
+
+  // Total flight time at launch (days).
+  // Stored as a double so sub-day turn ticks can decrement by fractional days
+  // (e.g. 1h = 1/24d).
+  double eta_days_total{0.0};
+
+  // Days until impact remaining.
+  double eta_days_remaining{0.0};
+
+  // For UI visualization (map overlay): the launch and target positions used
+  // to build a straight-line "missile track".
+  Vec2 launch_pos_mkm{0.0, 0.0};
+  Vec2 target_pos_mkm{0.0, 0.0};
+};
+
 
 struct BuildOrder {
   // Shipyard queue entry.
@@ -603,6 +709,11 @@ struct Faction {
   // updated when ships transit jump points into new systems.
   std::vector<Id> discovered_systems;
 
+  // Jump point surveys (fog-of-war route knowledge).
+  // When fog-of-war is enabled, the UI + route planner will only consider
+  // jump links that have been surveyed by the viewing faction.
+  std::vector<Id> surveyed_jump_points;
+
   // Simple per-faction ship contact memory.
   // Key: ship id.
   std::unordered_map<Id, Contact> ship_contacts;
@@ -699,6 +810,13 @@ struct SimEvent {
 
   // Date::days_since_epoch() at the time the event occurred.
   std::int64_t day{0};
+
+  // Hour-of-day at the time the event occurred (0..23).
+  //
+  // When sub-day ticks are enabled, many events can occur mid-day.
+  // This is primarily used for UI/exports; simulation logic generally uses
+  // day-level scheduling.
+  int hour{0};
 
   EventLevel level{EventLevel::Info};
 

@@ -14,6 +14,14 @@ namespace nebula4x {
 struct SimConfig {
   double seconds_per_day{86400.0};
 
+  // When enabled, economic systems (mining/industry, research, shipyards, construction,
+  // terraforming, and repairs) tick proportionally on sub-day time steps (advance_hours),
+  // instead of only at the midnight day boundary.
+  //
+  // This makes +1h/+6h/+12h time warp meaningful for non-combat progress while preserving
+  // the classic "daily tick" feel when disabled.
+  bool enable_subday_economy{false};
+
   // Colony population growth rate (fraction per year).
   //
   // Example: 0.01 = +1% per year. A negative value models population decline.
@@ -301,6 +309,27 @@ struct SimConfig {
   // Example: an installation consumes 2 Duranium/day and the buffer is 30 days =>
   // desired stockpile is 60 Duranium.
   double auto_freight_industry_input_buffer_days{30.0};
+
+  // --- Auto-tanker (fuel logistics) ---
+  //
+  // Ships with Ship::auto_tanker enabled will, when idle, automatically seek out
+  // friendly idle ships that are low on fuel and transfer fuel ship-to-ship.
+  //
+  // To avoid fighting other automation and player intent, auto-tanker only
+  // targets ships that have auto_refuel disabled (i.e. ships that are not
+  // already configured to route themselves to a colony for refueling).
+
+  // Target ships below this fuel fraction are considered requesting fuel.
+  // Example: 0.25 means below 25%.
+  double auto_tanker_request_threshold_fraction{0.25};
+
+  // Auto-tanker attempts to fill a target ship up to this fuel fraction.
+  // Example: 0.9 means try to reach 90% full (subject to tanker reserves).
+  double auto_tanker_fill_target_fraction{0.90};
+
+  // Minimum fuel transfer size (tons) for an auto-tanker dispatch.
+  // Prevents tiny 0.001t transfers due to floating point noise.
+  double auto_tanker_min_transfer_tons{1.0};
 };
 
 // Optional context passed when recording a persistent simulation event.
@@ -347,6 +376,7 @@ struct EventStopCondition {
 
 struct AdvanceUntilEventResult {
   int days_advanced{0};
+  int hours_advanced{0};
   bool hit{false};
   SimEvent event;
 };
@@ -438,6 +468,9 @@ class Simulation {
 
   const SimConfig& cfg() const { return cfg_; }
 
+  bool subday_economy_enabled() const { return cfg_.enable_subday_economy; }
+  void set_subday_economy_enabled(bool enabled) { cfg_.enable_subday_economy = enabled; }
+
   GameState& state() { return state_; }
   const GameState& state() const { return state_; }
 
@@ -447,12 +480,30 @@ class Simulation {
   // Advance simulation by N days.
   void advance_days(int days);
 
+  // Advance simulation by N hours.
+  //
+  // This enables sub-day turn ticks (e.g. 1h / 6h / 12h).
+  //
+  // By default, most economy systems still tick at the midnight day boundary.
+  // If SimConfig::enable_subday_economy is true, economy systems are integrated
+  // proportionally each step (dt in days), so advancing in hours will also
+  // progress mining/industry, research, shipyards, construction, terraforming,
+  // and docked repairs.
+  void advance_hours(int hours);
+
   // Advance simulation day-by-day up to max_days, stopping early if a newly
   // recorded persistent SimEvent matches the provided stop condition.
   //
   // This is primarily a UI/CLI convenience to "time warp" until something
   // interesting happens.
   AdvanceUntilEventResult advance_until_event(int max_days, const EventStopCondition& stop);
+
+  // Advance simulation in sub-day steps up to max_hours, stopping early if a newly
+  // recorded persistent SimEvent matches the provided stop condition.
+  //
+  // step_hours controls the time-warp granularity (e.g. 1/6/12/24). The
+  // implementation will not cross midnight within a single step.
+  AdvanceUntilEventResult advance_until_event_hours(int max_hours, const EventStopCondition& stop, int step_hours = 1);
 
   // --- Order helpers ---
   // Clear all queued orders for a ship.
@@ -845,6 +896,7 @@ bool move_construction_order(Id colony_id, int from_index, int to_index);
 
   // Exploration / map knowledge helpers.
   bool is_system_discovered_by_faction(Id viewer_faction_id, Id system_id) const;
+  bool is_jump_point_surveyed_by_faction(Id viewer_faction_id, Id jump_point_id) const;
 
   // --- Jump route planning (query-only) ---
   // Plan a path through the jump network without mutating ship orders.
@@ -882,21 +934,23 @@ bool move_construction_order(Id colony_id, int from_index, int to_index);
  private:
   void recompute_body_positions();
   void tick_one_day();
-  void tick_colonies();
-  void tick_research();
-  void tick_shipyards();
-  void tick_construction();
+  void tick_one_tick_hours(int hours);
+  void tick_colonies(double dt_days, bool emit_daily_events);
+  void tick_research(double dt_days);
+  void tick_shipyards(double dt_days);
+  void tick_construction(double dt_days);
   void tick_ai();
   void tick_refuel();
-  void tick_ships();
-  void tick_contacts();
-  void tick_shields();
-  void tick_combat();
+  void tick_ships(double dt_days);
+  void tick_contacts(bool emit_contact_lost_events);
+  void tick_shields(double dt_days);
+  void tick_combat(double dt_days);
   void tick_ground_combat();
-  void tick_terraforming();
-  void tick_repairs();
+  void tick_terraforming(double dt_days);
+  void tick_repairs(double dt_days);
 
   void discover_system_for_faction(Id faction_id, Id system_id);
+  void survey_jump_point_for_faction(Id faction_id, Id jump_point_id);
 
   void apply_design_stats_to_ship(Ship& ship);
   void initialize_unlocks_for_faction(Faction& f);

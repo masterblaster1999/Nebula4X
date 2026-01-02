@@ -41,7 +41,8 @@ using sim_sensors::gather_sensor_sources;
 } // namespace
 
 void Simulation::recompute_body_positions() {
-  const double t = static_cast<double>(state_.date.days_since_epoch());
+  const double t = static_cast<double>(state_.date.days_since_epoch()) +
+                   static_cast<double>(std::clamp(state_.hour_of_day, 0, 23)) / 24.0;
 
   // Bodies may orbit other bodies (e.g., moons). Compute absolute positions in a
   // parent-first manner, but remain robust to unordered_map iteration order.
@@ -128,33 +129,112 @@ void Simulation::recompute_body_positions() {
 }
 
 void Simulation::tick_one_day() {
-  state_.date = state_.date.add_days(1);
-  recompute_body_positions();
-  tick_colonies();
-  tick_research();
-  tick_shipyards();
-  tick_construction();
-  tick_ai();
-  tick_refuel();
-  tick_ships();
-  tick_contacts();
-  tick_shields();
-  if (cfg_.enable_combat) tick_combat();
-  tick_ground_combat();
-  tick_terraforming();
-  tick_repairs();
+  // A "day" is 24 hours, even if the simulation is currently mid-day.
+  advance_hours(24);
+}
 
-  // Wreck cleanup (optional).
-  if (cfg_.wreck_decay_days > 0 && !state_.wrecks.empty()) {
-    const int now = state_.date.days_since_epoch();
-    const int max_age = cfg_.wreck_decay_days;
-    for (auto it = state_.wrecks.begin(); it != state_.wrecks.end(); ) {
-      const int created = it->second.created_day;
-      const int age = (created > 0) ? (now - created) : 0;
-      if (age >= max_age) {
-        it = state_.wrecks.erase(it);
-      } else {
-        ++it;
+void Simulation::tick_one_tick_hours(int hours) {
+  if (hours <= 0) return;
+  hours = std::clamp(hours, 1, 24);
+
+  // Defensive: if a caller asks for a tick that crosses more than one day
+  // boundary, split it.
+  const int start_hod = std::clamp(state_.hour_of_day, 0, 23);
+  if (start_hod + hours > 24) {
+    const int first = 24 - start_hod;
+    tick_one_tick_hours(first);
+    tick_one_tick_hours(hours - first);
+    return;
+  }
+
+  const int prev_day = static_cast<int>(state_.date.days_since_epoch());
+  const int end_hod_raw = start_hod + hours;
+
+  // Advance time.
+  if (end_hod_raw == 24) {
+    state_.hour_of_day = 0;
+    state_.date = state_.date.add_days(1);
+  } else {
+    state_.hour_of_day = end_hod_raw;
+  }
+
+  const bool day_advanced = static_cast<int>(state_.date.days_since_epoch()) != prev_day;
+
+  // Update moving bodies at the new simulation time.
+  recompute_body_positions();
+
+  const double dt_days = static_cast<double>(hours) / 24.0;
+
+  if (cfg_.enable_subday_economy) {
+    // Economy ticks every step (scaled by dt_days).
+    //
+    // Some warnings (e.g. habitation shortfall) are intentionally throttled to
+    // daily cadence via emit_daily_events to avoid spamming the event log when
+    // running at 1h/6h/12h resolution.
+    tick_colonies(dt_days, day_advanced);
+    tick_research(dt_days);
+    tick_shipyards(dt_days);
+    tick_construction(dt_days);
+
+    // Keep AI as a daily tick for now (avoid thrashing decisions every hour).
+    if (day_advanced) tick_ai();
+  } else if (day_advanced) {
+    // Daily economy / planning ticks (midnight boundary).
+    tick_colonies(1.0, /*emit_daily_events=*/true);
+    tick_research(1.0);
+    tick_shipyards(1.0);
+    tick_construction(1.0);
+    tick_ai();
+    tick_refuel();
+  }
+
+  // Continuous (sub-day) ticks.
+  tick_ships(dt_days);
+  tick_contacts(day_advanced);
+  tick_shields(dt_days);
+  if (cfg_.enable_combat) tick_combat(dt_days);
+
+  // Post-movement maintenance / slow processes.
+  if (cfg_.enable_subday_economy) {
+    tick_refuel();
+    tick_terraforming(dt_days);
+    tick_repairs(dt_days);
+    if (day_advanced) tick_ground_combat();
+  } else if (day_advanced) {
+    tick_ground_combat();
+    tick_terraforming(1.0);
+    tick_repairs(1.0);
+
+    // Wreck cleanup (optional).
+    if (cfg_.wreck_decay_days > 0 && !state_.wrecks.empty()) {
+      const int now = state_.date.days_since_epoch();
+      const int max_age = cfg_.wreck_decay_days;
+      for (auto it = state_.wrecks.begin(); it != state_.wrecks.end();) {
+        const int created = it->second.created_day;
+        const int age = (created > 0) ? (now - created) : 0;
+        if (age >= max_age) {
+          it = state_.wrecks.erase(it);
+        } else {
+          ++it;
+        }
+      }
+    }
+  }
+
+  // In sub-day economy mode we still only prune wrecks on day boundaries (keeps
+  // behavior stable and avoids doing extra work every hour).
+  if (cfg_.enable_subday_economy && day_advanced) {
+    if (cfg_.wreck_decay_days > 0 && !state_.wrecks.empty()) {
+      const int now = state_.date.days_since_epoch();
+      const int max_age = cfg_.wreck_decay_days;
+      for (auto it = state_.wrecks.begin(); it != state_.wrecks.end();) {
+        const int created = it->second.created_day;
+        const int age = (created > 0) ? (now - created) : 0;
+        if (age >= max_age) {
+          it = state_.wrecks.erase(it);
+        } else {
+          ++it;
+        }
       }
     }
   }
@@ -171,6 +251,7 @@ void Simulation::push_event(EventLevel level, EventCategory category, std::strin
   if (state_.next_event_seq == 0) state_.next_event_seq = 1; 
 
   ev.day = state_.date.days_since_epoch();
+  ev.hour = std::clamp(state_.hour_of_day, 0, 23);
   ev.level = level;
   ev.category = category;
   ev.faction_id = ctx.faction_id;
@@ -189,7 +270,7 @@ void Simulation::push_event(EventLevel level, EventCategory category, std::strin
   }
 }
 
-void Simulation::tick_contacts() {
+void Simulation::tick_contacts(bool emit_contact_lost_events) {
   const int now = static_cast<int>(state_.date.days_since_epoch());
   constexpr int kMaxContactAgeDays = 180;
 
@@ -361,6 +442,8 @@ void Simulation::tick_contacts() {
     }
   }
 
+  if (!emit_contact_lost_events) return;
+
   for (Id fid : faction_ids) {
     auto* fac = find_ptr(state_.factions, fid);
     if (!fac) continue;
@@ -402,7 +485,8 @@ void Simulation::tick_contacts() {
   }
 }
 
-void Simulation::tick_shields() {
+void Simulation::tick_shields(double dt_days) {
+  dt_days = std::clamp(dt_days, 0.0, 10.0);
   const auto ship_ids = sorted_keys(state_.ships);
   for (Id sid : ship_ids) {
     auto* sh = find_ptr(state_.ships, sid);
@@ -435,7 +519,7 @@ void Simulation::tick_shields() {
     if (sh->shields < 0.0) sh->shields = max_sh;
 
     const double regen = std::max(0.0, d->shield_regen_per_day);
-    sh->shields = std::clamp(sh->shields + regen, 0.0, max_sh);
+    sh->shields = std::clamp(sh->shields + regen * dt_days, 0.0, max_sh);
   }
 }
 

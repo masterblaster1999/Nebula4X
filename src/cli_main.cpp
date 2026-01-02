@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cctype>
+#include <iomanip>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -22,6 +23,7 @@
 #include "nebula4x/util/json.h"
 #include "nebula4x/util/log.h"
 #include "nebula4x/util/strings.h"
+#include "nebula4x/util/time.h"
 
 namespace {
 
@@ -997,7 +999,8 @@ int main(int argc, char** argv) {
       // When producing machine-readable output on stdout (PATH='-'), keep human
       // status output on stderr so scripts can safely parse stdout.
       std::ostream& info = script_stdout ? std::cerr : std::cout;
-      info << "Date: " << s.date.to_string() << "\n";
+      info << "Date: " << s.date.to_string();
+      info << " " << std::setw(2) << std::setfill('0') << std::clamp(s.hour_of_day, 0, 23) << ":00\n";
       info << "Systems: " << s.systems.size() << ", Bodies: " << s.bodies.size() << ", Jump Points: "
                 << s.jump_points.size() << ", Ships: " << s.ships.size() << ", Colonies: " << s.colonies.size()
                 << "\n";
@@ -1015,13 +1018,15 @@ int main(int argc, char** argv) {
       if (!quiet) status << "\n";
       if (until_res.hit) {
         const nebula4x::Date d(until_res.event.day);
-        status << "Until-event: hit after " << until_res.days_advanced << " days -> [" << d.to_string() << "] #"
+        status << "Until-event: hit after " << until_res.days_advanced << " days (" << until_res.hours_advanced
+               << " hours) -> [" << format_datetime(d, until_res.event.hour) << "] #"
                << static_cast<unsigned long long>(until_res.event.seq) << " ["
                << event_category_label(until_res.event.category) << "] "
                << event_level_label(until_res.event.level) << ": " << until_res.event.message << "\n";
       } else {
         status << "Until-event: no matching event within " << until_event_days << " days (advanced "
-               << until_res.days_advanced << ", date now " << s.date.to_string() << ")\n";
+               << until_res.days_advanced << " days / " << until_res.hours_advanced << " hours, date now "
+               << format_datetime(s.date, s.hour_of_day) << ")\n";
       }
     }
 

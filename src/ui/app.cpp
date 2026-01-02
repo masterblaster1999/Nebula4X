@@ -522,6 +522,9 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       if (auto it = obj->find("system_map_fleet_formation_preview"); it != obj->end()) {
         ui_.system_map_fleet_formation_preview = it->second.bool_value(ui_.system_map_fleet_formation_preview);
       }
+      if (auto it = obj->find("system_map_missile_salvos"); it != obj->end()) {
+        ui_.system_map_missile_salvos = it->second.bool_value(ui_.system_map_missile_salvos);
+      }
       if (auto it = obj->find("system_map_follow_selected"); it != obj->end()) {
         ui_.system_map_follow_selected = it->second.bool_value(ui_.system_map_follow_selected);
       }
@@ -652,7 +655,7 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     }
 
     nebula4x::json::Object o;
-    o["version"] = 9.0;
+    o["version"] = 10.0;
 
     // Theme.
     o["clear_color"] = color_to_json(ui_.clear_color);
@@ -715,6 +718,7 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     o["system_map_grid"] = ui_.system_map_grid;
     o["system_map_order_paths"] = ui_.system_map_order_paths;
     o["system_map_fleet_formation_preview"] = ui_.system_map_fleet_formation_preview;
+    o["system_map_missile_salvos"] = ui_.system_map_missile_salvos;
     o["system_map_follow_selected"] = ui_.system_map_follow_selected;
     o["galaxy_map_starfield"] = ui_.galaxy_map_starfield;
     o["galaxy_map_grid"] = ui_.galaxy_map_grid;
@@ -790,7 +794,10 @@ void App::reset_ui_theme_defaults() {
   ui_.system_map_starfield = true;
   ui_.system_map_grid = false;
   ui_.system_map_order_paths = true;
+  ui_.system_map_fleet_formation_preview = true;
+  ui_.system_map_missile_salvos = false;
   ui_.system_map_follow_selected = false;
+  ui_.system_map_missile_salvos = false;
   ui_.galaxy_map_starfield = true;
   ui_.galaxy_map_grid = false;
   ui_.galaxy_map_selected_route = true;

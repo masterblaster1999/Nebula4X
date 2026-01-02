@@ -208,8 +208,12 @@ if(NEBULA4X_BUILD_TESTS)
     tests/test_fleets.cpp
     tests/test_combat_events.cpp
     tests/test_shields.cpp
+    tests/test_turn_ticks.cpp
     tests/test_population_growth.cpp
-  tests/test_population_transport.cpp
+    tests/test_population_transport.cpp
+    tests/test_auto_colonize.cpp
+    tests/test_auto_salvage.cpp
+    tests/test_auto_tanker.cpp
     tests/test_ship_repairs.cpp
   )
   target_link_libraries(nebula4x_tests PRIVATE nebula4x::core)

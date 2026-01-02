@@ -219,6 +219,13 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
       for (Id jid : v.sys->jump_points) {
         const auto* jp = find_ptr(s.jump_points, jid);
         if (!jp) continue;
+
+        // If the exit hasn't been surveyed, it counts as an unknown exit.
+        if (!sim.is_jump_point_surveyed_by_faction(viewer_faction_id, jid)) {
+          u++;
+          continue;
+        }
+
         const auto* dest_jp = find_ptr(s.jump_points, jp->linked_jump_id);
         if (!dest_jp) continue;
         if (!sim.is_system_discovered_by_faction(viewer_faction_id, dest_jp->system_id)) {
@@ -242,6 +249,7 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
         if (!dest_sys) continue;
 
         if (ui.fog_of_war && viewer_faction_id != kInvalidId) {
+          if (!sim.is_jump_point_surveyed_by_faction(viewer_faction_id, jid)) continue;
           if (!sim.is_system_discovered_by_faction(viewer_faction_id, dest_sys->id)) continue;
         }
 
@@ -278,6 +286,13 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
       for (const auto& ord : q) {
         if (!std::holds_alternative<nebula4x::TravelViaJump>(ord)) continue;
         const auto& o = std::get<nebula4x::TravelViaJump>(ord);
+
+        // Don't leak an unsurveyed link under FoW.
+        if (ui.fog_of_war && viewer_faction_id != kInvalidId &&
+            !sim.is_jump_point_surveyed_by_faction(viewer_faction_id, o.jump_point_id)) {
+          break;
+        }
+
         const auto* jp = find_ptr(s.jump_points, o.jump_point_id);
         if (!jp) continue;
         const auto* other = find_ptr(s.jump_points, jp->linked_jump_id);
@@ -370,12 +385,13 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
     bool restrict_to_discovered{false};
     bool from_queue{false};
     std::int64_t sim_day{0};
+    std::uint64_t event_seq{0};
 
     bool operator==(const RoutePreviewCacheKey& o) const {
       return hovered_system == o.hovered_system && selected_ship == o.selected_ship &&
              selected_fleet == o.selected_fleet && fleet_mode == o.fleet_mode &&
              restrict_to_discovered == o.restrict_to_discovered && from_queue == o.from_queue &&
-             sim_day == o.sim_day;
+             sim_day == o.sim_day && event_seq == o.event_seq;
     }
   };
 
@@ -405,6 +421,7 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
     key.restrict_to_discovered = restrict;
     key.from_queue = from_queue;
     key.sim_day = sim_day;
+    key.event_seq = s.next_event_seq;
 
     if (!route_cache.valid || !(route_cache.key == key)) {
       route_cache.valid = true;
@@ -602,7 +619,7 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
         if (ui.fog_of_war) {
           ImGui::Text("Detected hostiles: %d", detected_hostiles);
           ImGui::Text("Recent contacts: %d", contact_count);
-          ImGui::Text("Unknown jump exits: %d", unknown);
+          ImGui::Text("Unknown exits (unsurveyed / undiscovered): %d", unknown);
         }
       }
 
@@ -653,7 +670,7 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   ImGui::Checkbox("Fog of war", &ui.fog_of_war);
   ImGui::Checkbox("Labels", &ui.show_galaxy_labels);
   ImGui::Checkbox("Jump links", &ui.show_galaxy_jump_lines);
-  ImGui::Checkbox("Unknown exits hint", &ui.show_galaxy_unknown_exits);
+  ImGui::Checkbox("Unknown exits hint (unsurveyed / undiscovered)", &ui.show_galaxy_unknown_exits);
   ImGui::Checkbox("Intel alerts", &ui.show_galaxy_intel_alerts);
 
   if (ImGui::Button("Reset view (R)")) {

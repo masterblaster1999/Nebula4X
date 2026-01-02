@@ -143,5 +143,201 @@ int test_combat_events() {
     N4X_ASSERT(found_damage_event);
   }
 
-  return 0;
+  
+  
+  
+  // Missile salvos: basic launch + impact.
+  {
+    nebula4x::ContentDB content;
+
+    {
+      nebula4x::ShipDesign d;
+      d.id = "escort_gamma";
+      d.name = "Escort Gamma";
+      d.max_hp = 50.0;
+      d.speed_km_s = 0.0;
+      d.sensor_range_mkm = 1000.0;
+      d.weapon_damage = 0.0;
+      d.weapon_range_mkm = 0.0;
+      d.max_shields = 0.0;
+      d.shield_regen_per_day = 0.0;
+      d.point_defense_damage = 0.0;
+      d.point_defense_range_mkm = 0.0;
+      d.power_generation = 1000.0;
+      d.power_use_weapons = 1.0;
+      content.designs[d.id] = d;
+    }
+    {
+      nebula4x::ShipDesign d;
+      d.id = "pirate_raider";
+      d.name = "Pirate Raider";
+      d.max_hp = 50.0;
+      d.speed_km_s = 0.0;
+      d.sensor_range_mkm = 1000.0;
+      d.weapon_damage = 0.0;
+      d.weapon_range_mkm = 0.0;
+      d.missile_damage = 10.0;
+      d.missile_range_mkm = 5.0;
+      // Keep the flight time ~1 day for a 0.2 mkm separation so the test
+      // remains deterministic under sub-day combat ticks.
+      d.missile_speed_mkm_per_day = 0.2;
+      d.missile_reload_days = 1.0;
+      d.power_generation = 1000.0;
+      d.power_use_weapons = 1.0;
+      content.designs[d.id] = d;
+    }
+
+    // Minimal techs referenced by the scenario (avoid churn in research logic).
+    for (const char* id : {"chemistry_1", "nuclear_1", "propulsion_1"}) {
+      nebula4x::TechDef t;
+      t.id = id;
+      t.name = id;
+      t.cost = 1e9;  // very high so nothing completes during the test
+      content.techs[id] = t;
+    }
+
+    nebula4x::SimConfig cfg;
+    cfg.combat_damage_event_min_abs = 0.0;
+    cfg.combat_damage_event_min_fraction = 0.0;
+    cfg.combat_damage_event_warn_remaining_fraction = 0.0;
+
+    nebula4x::Simulation sim(std::move(content), cfg);
+
+    auto& st = sim.state();
+    const auto sol = find_system_id(st, "Sol");
+    N4X_ASSERT(sol != nebula4x::kInvalidId);
+
+    const auto escort_id = find_ship_id(st, "Escort Gamma");
+    N4X_ASSERT(escort_id != nebula4x::kInvalidId);
+
+    const auto raider_id = find_ship_id(st, "Raider I");
+    N4X_ASSERT(raider_id != nebula4x::kInvalidId);
+
+    auto* escort = nebula4x::find_ptr(st.ships, escort_id);
+    auto* raider = nebula4x::find_ptr(st.ships, raider_id);
+    N4X_ASSERT(escort);
+    N4X_ASSERT(raider);
+
+    // Move the pirate raider into Sol near the escort to force missile combat.
+    remove_ship_from_all_system_lists(st, raider_id);
+    raider->system_id = sol;
+    raider->position_mkm = escort->position_mkm + nebula4x::Vec2{0.2, 0.0};
+    st.systems[sol].ships.push_back(raider_id);
+
+    const double hp0 = escort->hp;
+
+    // Day 1: missiles launched, no impact yet.
+    sim.advance_days(1);
+
+    N4X_ASSERT(!st.missile_salvos.empty());
+    N4X_ASSERT(std::abs(escort->hp - hp0) < 1e-9);
+
+    bool saw_launch = false;
+    for (const auto& ev : sim.state().events) {
+      if (ev.category != nebula4x::EventCategory::Combat) continue;
+      if (ev.message.find("launched missiles") == std::string::npos) continue;
+      saw_launch = true;
+      break;
+    }
+    N4X_ASSERT(saw_launch);
+
+    // Day 2: impact applies damage.
+    sim.advance_days(1);
+
+    bool saw_impact = false;
+    for (const auto& ev : sim.state().events) {
+      if (ev.category != nebula4x::EventCategory::Combat) continue;
+      if (ev.message.find("Missile impacts on") == std::string::npos) continue;
+      saw_impact = true;
+      break;
+    }
+    N4X_ASSERT(saw_impact);
+    N4X_ASSERT(escort->hp < hp0);
+  }
+
+  // Missile salvos: point defense interception (no HP damage).
+  {
+    nebula4x::ContentDB content;
+
+    {
+      nebula4x::ShipDesign d;
+      d.id = "escort_gamma";
+      d.name = "Escort Gamma";
+      d.max_hp = 50.0;
+      d.speed_km_s = 0.0;
+      d.sensor_range_mkm = 1000.0;
+      d.weapon_damage = 0.0;
+      d.weapon_range_mkm = 0.0;
+      d.max_shields = 0.0;
+      d.shield_regen_per_day = 0.0;
+      d.point_defense_damage = 100.0;
+      d.point_defense_range_mkm = 1000.0;
+      d.power_generation = 1000.0;
+      d.power_use_weapons = 1.0;
+      content.designs[d.id] = d;
+    }
+    {
+      nebula4x::ShipDesign d;
+      d.id = "pirate_raider";
+      d.name = "Pirate Raider";
+      d.max_hp = 50.0;
+      d.speed_km_s = 0.0;
+      d.sensor_range_mkm = 1000.0;
+      d.weapon_damage = 0.0;
+      d.weapon_range_mkm = 0.0;
+      d.missile_damage = 10.0;
+      d.missile_range_mkm = 5.0;
+      // Keep the flight time ~1 day for a 0.2 mkm separation so the test
+      // remains deterministic under sub-day combat ticks.
+      d.missile_speed_mkm_per_day = 0.2;
+      d.missile_reload_days = 1.0;
+      d.power_generation = 1000.0;
+      d.power_use_weapons = 1.0;
+      content.designs[d.id] = d;
+    }
+
+    for (const char* id : {"chemistry_1", "nuclear_1", "propulsion_1"}) {
+      nebula4x::TechDef t;
+      t.id = id;
+      t.name = id;
+      t.cost = 1e9;
+      content.techs[id] = t;
+    }
+
+    nebula4x::SimConfig cfg;
+    cfg.combat_damage_event_min_abs = 0.0;
+    cfg.combat_damage_event_min_fraction = 0.0;
+    cfg.combat_damage_event_warn_remaining_fraction = 0.0;
+
+    nebula4x::Simulation sim(std::move(content), cfg);
+
+    auto& st = sim.state();
+    const auto sol = find_system_id(st, "Sol");
+    N4X_ASSERT(sol != nebula4x::kInvalidId);
+
+    const auto escort_id = find_ship_id(st, "Escort Gamma");
+    N4X_ASSERT(escort_id != nebula4x::kInvalidId);
+
+    const auto raider_id = find_ship_id(st, "Raider I");
+    N4X_ASSERT(raider_id != nebula4x::kInvalidId);
+
+    auto* escort = nebula4x::find_ptr(st.ships, escort_id);
+    auto* raider = nebula4x::find_ptr(st.ships, raider_id);
+    N4X_ASSERT(escort);
+    N4X_ASSERT(raider);
+
+    remove_ship_from_all_system_lists(st, raider_id);
+    raider->system_id = sol;
+    raider->position_mkm = escort->position_mkm + nebula4x::Vec2{0.2, 0.0};
+    st.systems[sol].ships.push_back(raider_id);
+
+    const double hp0 = escort->hp;
+
+    // Two days: launch then impact (fully intercepted).
+    sim.advance_days(2);
+
+    N4X_ASSERT(std::abs(escort->hp - hp0) < 1e-9);
+  }
+
+return 0;
 }

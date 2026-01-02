@@ -20,6 +20,7 @@
 #include "nebula4x/util/file_io.h"
 #include "nebula4x/util/log.h"
 #include "nebula4x/util/strings.h"
+#include "nebula4x/util/time.h"
 
 namespace nebula4x::ui {
 namespace {
@@ -458,7 +459,12 @@ void draw_main_menu(Simulation& sim, UIState& ui, char* save_path, char* load_pa
       ImGui::EndMenu();
     }
 
-    ImGui::Text("  Date: %s", sim.state().date.to_string().c_str());
+    {
+      const auto& st = sim.state();
+      char buf[64];
+      std::snprintf(buf, sizeof(buf), "%s %02d:00", st.date.to_string().c_str(), std::clamp(st.hour_of_day, 0, 23));
+      ImGui::Text("  Date: %s", buf);
+    }
 
     ImGui::EndMainMenuBar();
   }
@@ -466,6 +472,26 @@ void draw_main_menu(Simulation& sim, UIState& ui, char* save_path, char* load_pa
 
 void draw_left_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& selected_colony) {
   ImGui::Text("Turns");
+  if (ImGui::Button("+1 hour")) sim.advance_hours(1);
+  ImGui::SameLine();
+  if (ImGui::Button("+6h")) sim.advance_hours(6);
+  ImGui::SameLine();
+  if (ImGui::Button("+12h")) sim.advance_hours(12);
+
+  {
+    bool subday = sim.subday_economy_enabled();
+    if (ImGui::Checkbox("Sub-day economy", &subday)) {
+      sim.set_subday_economy_enabled(subday);
+    }
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip(
+          "When enabled, mining/industry, research, shipyards, construction, terraforming, and docked repairs\n"
+          "advance proportionally on sub-day turns (+1h/+6h/+12h).\n"
+          "When disabled, most economy systems tick only at the midnight day boundary.");
+    }
+  }
+
+  ImGui::Separator();
   if (ImGui::Button("+1 day")) sim.advance_days(1);
   ImGui::SameLine();
   if (ImGui::Button("+5")) sim.advance_days(5);
@@ -490,6 +516,13 @@ void draw_left_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sele
     if (ImGui::CollapsingHeader("Auto-run (pause on event)", ImGuiTreeNodeFlags_DefaultOpen)) {
       ImGui::InputInt("Max days##autorun", &max_days);
       max_days = std::clamp(max_days, 1, 36500);
+
+      // Granularity for auto-run checks. Smaller steps stop closer to the
+      // triggering event when using sub-day turn ticks.
+      static int step_idx = 3;  // 0=1h,1=6h,2=12h,3=1d
+      const int step_hours_opts[] = {1, 6, 12, 24};
+      ImGui::SetNextItemWidth(110.0f);
+      ImGui::Combo("Step##autorun", &step_idx, "1h\0" "6h\0" "12h\0" "1d\0");
 
       ImGui::Checkbox("Info##autorun", &stop_info);
       ImGui::SameLine();
@@ -611,7 +644,16 @@ void draw_left_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sele
           }
         }
 
-        auto res = sim.advance_until_event(max_days, stop);
+        const int step_hours = step_hours_opts[std::clamp(step_idx, 0, 3)];
+        const int max_hours = max_days * 24;
+        auto res = sim.advance_until_event_hours(max_hours, stop, step_hours);
+
+        const auto fmt_dur = [](int hours) {
+          const int days = hours / 24;
+          const int rem = hours % 24;
+          if (days <= 0) return std::to_string(hours) + "h";
+          return std::to_string(days) + "d " + std::to_string(rem) + "h";
+        };
 
         if (res.hit) {
           // Jump UI context to the event payload when possible.
@@ -622,9 +664,10 @@ void draw_left_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sele
             if (find_ptr(s.ships, res.event.ship_id)) selected_ship = res.event.ship_id;
           }
 
-          last_status = "Paused on event after " + std::to_string(res.days_advanced) + " day(s): " + res.event.message;
+          const std::string ts = format_datetime(nebula4x::Date(res.event.day), res.event.hour);
+          last_status = "Paused on event after " + fmt_dur(res.hours_advanced) + ": [" + ts + "] " + res.event.message;
         } else {
-          last_status = "No matching events in " + std::to_string(res.days_advanced) + " day(s).";
+          last_status = "No matching events within " + fmt_dur(max_hours) + " (advanced " + fmt_dur(res.hours_advanced) + ").";
         }
       }
 
@@ -1040,9 +1083,25 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
             ImGui::TextDisabled("Colony capacity: (none)");
           }
           if (d->weapon_damage > 0.0) {
-            ImGui::Text("Weapons: %.1f dmg/day  (Range %.1f mkm)", d->weapon_damage, d->weapon_range_mkm);
+            ImGui::Text("Beam weapons: %.1f dmg/day  (Range %.1f mkm)", d->weapon_damage, d->weapon_range_mkm);
           } else {
-            ImGui::TextDisabled("Weapons: (none)");
+            ImGui::TextDisabled("Beam weapons: (none)");
+          }
+
+          if (d->missile_damage > 0.0 && d->missile_range_mkm > 0.0) {
+            ImGui::Text("Missiles: %.1f dmg/salvo  (Range %.1f mkm, Speed %.1f mkm/day, Reload %.1f d)",
+                        d->missile_damage, d->missile_range_mkm, d->missile_speed_mkm_per_day,
+                        d->missile_reload_days);
+            ImGui::TextDisabled("Missile cooldown: %.1f d", std::max(0.0, sh->missile_cooldown_days));
+          } else {
+            ImGui::TextDisabled("Missiles: (none)");
+          }
+
+          if (d->point_defense_damage > 0.0 && d->point_defense_range_mkm > 0.0) {
+            ImGui::Text("Point defense: %.1f intercept  (Range %.1f mkm)", d->point_defense_damage,
+                        d->point_defense_range_mkm);
+          } else {
+            ImGui::TextDisabled("Point defense: (none)");
           }
         } else {
           ImGui::TextDisabled("Design definition missing: %s", sh->design_id.c_str());
@@ -1128,7 +1187,12 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
         const bool in_fleet = (ship_fleet != nullptr);
         if (in_fleet) ImGui::BeginDisabled();
         if (ImGui::Checkbox("Auto-explore when idle", &sh->auto_explore)) {
-          if (sh->auto_explore) sh->auto_freight = false;
+          if (sh->auto_explore) {
+            sh->auto_freight = false;
+            sh->auto_salvage = false;
+            sh->auto_colonize = false;
+            sh->auto_tanker = false;
+          }
         }
         if (ImGui::IsItemHovered()) {
           ImGui::SetTooltip(
@@ -1139,7 +1203,12 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
         const bool can_auto_freight = (d && d->cargo_tons > 0.0);
         if (!can_auto_freight) ImGui::BeginDisabled();
         if (ImGui::Checkbox("Auto-freight minerals when idle", &sh->auto_freight)) {
-          if (sh->auto_freight) sh->auto_explore = false;
+          if (sh->auto_freight) {
+            sh->auto_explore = false;
+            sh->auto_salvage = false;
+            sh->auto_colonize = false;
+            sh->auto_tanker = false;
+          }
         }
         if (ImGui::IsItemHovered()) {
           ImGui::SetTooltip(
@@ -1150,6 +1219,49 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
           ImGui::EndDisabled();
           ImGui::SameLine();
           ImGui::TextDisabled("(requires a cargo hold)");
+        }
+
+        const bool can_auto_salvage = (d && d->cargo_tons > 0.0);
+        if (!can_auto_salvage) ImGui::BeginDisabled();
+        if (ImGui::Checkbox("Auto-salvage wrecks when idle", &sh->auto_salvage)) {
+          if (sh->auto_salvage) {
+            sh->auto_explore = false;
+            sh->auto_freight = false;
+            sh->auto_colonize = false;
+            sh->auto_tanker = false;
+          }
+        }
+        if (ImGui::IsItemHovered()) {
+          ImGui::SetTooltip(
+              "When enabled, this ship will automatically seek out known wrecks, salvage minerals into its cargo\n"
+              "hold, and return the minerals to the nearest friendly colony when idle.");
+        }
+        if (!can_auto_salvage) {
+          ImGui::EndDisabled();
+          ImGui::SameLine();
+          ImGui::TextDisabled("(requires a cargo hold)");
+        }
+
+        const bool can_auto_colonize = (d && d->colony_capacity_millions > 0.0);
+        if (!can_auto_colonize) ImGui::BeginDisabled();
+        if (ImGui::Checkbox("Auto-colonize when idle", &sh->auto_colonize)) {
+          if (sh->auto_colonize) {
+            sh->auto_explore = false;
+            sh->auto_freight = false;
+            sh->auto_salvage = false;
+            sh->auto_tanker = false;
+          }
+        }
+        if (ImGui::IsItemHovered()) {
+          ImGui::SetTooltip(
+              "When enabled, this ship will automatically attempt to colonize the best available body\n"
+              "in your discovered map whenever it has no queued orders.\n\n"
+              "Note: Colonization consumes the colonizer ship.");
+        }
+        if (!can_auto_colonize) {
+          ImGui::EndDisabled();
+          ImGui::SameLine();
+          ImGui::TextDisabled("(requires a colony module)");
         }
 
         const bool can_auto_refuel = (d && d->fuel_capacity_tons > 0.0);
@@ -1180,6 +1292,51 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
         }
 
         if (!can_auto_refuel) {
+          ImGui::EndDisabled();
+          ImGui::SameLine();
+          ImGui::TextDisabled("(requires fuel tanks)");
+        }
+
+        const bool can_auto_tanker = (d && d->fuel_capacity_tons > 0.0);
+        if (!can_auto_tanker) ImGui::BeginDisabled();
+        if (ImGui::Checkbox("Auto-tanker: refuel other ships when idle", &sh->auto_tanker)) {
+          if (sh->auto_tanker) {
+            // Mutually exclusive with mission-style automation (explore/freight/salvage/colonize).
+            sh->auto_explore = false;
+            sh->auto_freight = false;
+            sh->auto_salvage = false;
+            sh->auto_colonize = false;
+            sh->auto_tanker_reserve_fraction =
+                std::clamp(sh->auto_tanker_reserve_fraction, 0.0, 1.0);
+          }
+        }
+        if (ImGui::IsItemHovered()) {
+          const auto& cfg = sim.cfg();
+          ImGui::SetTooltip(
+              "When enabled, this ship will act as a fuel tanker. If it is idle, it will automatically\n"
+              "seek out a friendly idle ship with auto-refuel disabled that is below the request threshold\n"
+              "and transfer fuel ship-to-ship.\n\n"
+              "Request threshold: %.0f%%\n"
+              "Fill target: %.0f%%\n\n"
+              "Tip: Detach ships from fleets to use auto-tasks.",
+              cfg.auto_tanker_request_threshold_fraction * 100.0,
+              cfg.auto_tanker_fill_target_fraction * 100.0);
+        }
+
+        if (can_auto_tanker && sh->auto_tanker) {
+          float reserve_pct = static_cast<float>(sh->auto_tanker_reserve_fraction * 100.0);
+          if (ImGui::SliderFloat("Tanker reserve", &reserve_pct, 0.0f, 100.0f, "%.0f%%")) {
+            sh->auto_tanker_reserve_fraction =
+                std::clamp(static_cast<double>(reserve_pct) / 100.0, 0.0, 1.0);
+          }
+          if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "Auto-tanker will never transfer fuel below this fraction of its own capacity.\n"
+                "Example: 25%% reserve means keep at least 25%% of tanks.");
+          }
+        }
+
+        if (!can_auto_tanker) {
           ImGui::EndDisabled();
           ImGui::SameLine();
           ImGui::TextDisabled("(requires fuel tanks)");
@@ -1699,9 +1856,9 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
               ImGui::Spacing();
               ImGui::Text("Orbital bombardment");
               if (d2) {
-                ImGui::TextDisabled("Weapons: %.1f dmg/day, range %.1f mkm", w_dmg, w_range);
+                ImGui::TextDisabled("Beam weapons: %.1f dmg/day, range %.1f mkm", w_dmg, w_range);
               } else {
-                ImGui::TextDisabled("Weapons: (unknown design)");
+                ImGui::TextDisabled("Beam weapons: (unknown design)");
               }
 
               static int bombard_days = 7;
@@ -1887,7 +2044,7 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
           wreck_ids.reserve(s.wrecks.size());
           wreck_labels.reserve(s.wrecks.size());
 
-          const Id viewer_faction_id = ui.player_faction_id;
+          const Id viewer_faction_id = sh ? sh->faction_id : ui.viewer_faction_id;
           for (const auto& [wid, w] : s.wrecks) {
             if (ui.fog_of_war && !sim.is_system_discovered_by_faction(viewer_faction_id, w.system_id)) {
               continue;
@@ -4587,7 +4744,24 @@ if (colony->shipyard_queue.empty()) {
             if (d->colony_capacity_millions > 0.0) {
               ImGui::Text("Colony capacity: %.0f M", d->colony_capacity_millions);
             }
-            if (d->weapon_damage > 0.0) ImGui::Text("Weapons: %.1f (range %.1f)", d->weapon_damage, d->weapon_range_mkm);
+            if (d->weapon_damage > 0.0) {
+              ImGui::Text("Beam weapons: %.1f (range %.1f)", d->weapon_damage, d->weapon_range_mkm);
+            } else {
+              ImGui::TextDisabled("Beam weapons: (none)");
+            }
+
+            if (d->missile_damage > 0.0 && d->missile_range_mkm > 0.0) {
+              ImGui::Text("Missiles: %.1f dmg/salvo (range %.1f, speed %.1f, reload %.1f d)", d->missile_damage,
+                          d->missile_range_mkm, d->missile_speed_mkm_per_day, d->missile_reload_days);
+            } else {
+              ImGui::TextDisabled("Missiles: (none)");
+            }
+
+            if (d->point_defense_damage > 0.0 && d->point_defense_range_mkm > 0.0) {
+              ImGui::Text("Point defense: %.1f (range %.1f)", d->point_defense_damage, d->point_defense_range_mkm);
+            } else {
+              ImGui::TextDisabled("Point defense: (none)");
+            }
           }
         }
 
@@ -4825,7 +4999,13 @@ if (colony->shipyard_queue.empty()) {
               if (c.sensor_range_mkm > 0.0) ImGui::TextDisabled("Sensor: %.0f mkm", c.sensor_range_mkm);
               if (c.colony_capacity_millions > 0.0)
                 ImGui::TextDisabled("Colony capacity: %.0f M", c.colony_capacity_millions);
-              if (c.weapon_damage > 0.0) ImGui::TextDisabled("Weapon: %.1f (range %.1f)", c.weapon_damage, c.weapon_range_mkm);
+              if (c.weapon_damage > 0.0) ImGui::TextDisabled("Beam weapon: %.1f (range %.1f)", c.weapon_damage, c.weapon_range_mkm);
+              if (c.missile_damage > 0.0)
+                ImGui::TextDisabled("Missile: %.1f (range %.1f, speed %.1f, reload %.1f d)", c.missile_damage,
+                                    c.missile_range_mkm, c.missile_speed_mkm_per_day, c.missile_reload_days);
+              if (c.point_defense_damage > 0.0)
+                ImGui::TextDisabled("Point defense: %.1f (range %.1f)", c.point_defense_damage,
+                                    c.point_defense_range_mkm);
               if (c.hp_bonus > 0.0) ImGui::TextDisabled("HP bonus: %.0f", c.hp_bonus);
               if (c.shield_hp > 0.0) {
                 ImGui::TextDisabled("Shield: %.0f (+%.1f/day)", c.shield_hp, c.shield_regen_per_day);
@@ -4902,7 +5082,24 @@ if (colony->shipyard_queue.empty()) {
         ImGui::Text("Signature: %.0f%%", preview.signature_multiplier * 100.0);
         if (preview.colony_capacity_millions > 0.0)
           ImGui::Text("Colony capacity: %.0f M", preview.colony_capacity_millions);
-        if (preview.weapon_damage > 0.0) ImGui::Text("Weapons: %.1f (range %.1f)", preview.weapon_damage, preview.weapon_range_mkm);
+        if (preview.weapon_damage > 0.0) {
+          ImGui::Text("Beam weapons: %.1f (range %.1f)", preview.weapon_damage, preview.weapon_range_mkm);
+        } else {
+          ImGui::TextDisabled("Beam weapons: (none)");
+        }
+
+        if (preview.missile_damage > 0.0 && preview.missile_range_mkm > 0.0) {
+          ImGui::Text("Missiles: %.1f dmg/salvo (range %.1f, speed %.1f, reload %.1f d)", preview.missile_damage,
+                      preview.missile_range_mkm, preview.missile_speed_mkm_per_day, preview.missile_reload_days);
+        } else {
+          ImGui::TextDisabled("Missiles: (none)");
+        }
+
+        if (preview.point_defense_damage > 0.0 && preview.point_defense_range_mkm > 0.0) {
+          ImGui::Text("Point defense: %.1f (range %.1f)", preview.point_defense_damage, preview.point_defense_range_mkm);
+        } else {
+          ImGui::TextDisabled("Point defense: (none)");
+        }
 
         if (ImGui::Button("Save custom design")) {
           std::string err;
@@ -5223,7 +5420,8 @@ if (colony->shipyard_queue.empty()) {
           for (int idx : rows) {
             const auto& ev = s.events[static_cast<std::size_t>(idx)];
             const nebula4x::Date d(ev.day);
-            out += std::string("[") + d.to_string() + "] #" + std::to_string(static_cast<unsigned long long>(ev.seq)) +
+            out += std::string("[") + format_datetime(d, ev.hour) + "] #" +
+                   std::to_string(static_cast<unsigned long long>(ev.seq)) +
                    " [" + event_category_label(ev.category) + "] " + event_level_label(ev.level) + ": " + ev.message;
             out.push_back('\n');
           }
@@ -5313,14 +5511,15 @@ if (colony->shipyard_queue.empty()) {
         for (int i : rows) {
           const auto& ev = s.events[static_cast<std::size_t>(i)];
           const nebula4x::Date d(ev.day);
-          ImGui::BulletText("[%s] #%llu [%s] %s: %s", d.to_string().c_str(),
+          const std::string dt = format_datetime(d, ev.hour);
+          ImGui::BulletText("[%s] #%llu [%s] %s: %s", dt.c_str(),
                             static_cast<unsigned long long>(ev.seq), event_category_label(ev.category),
                             event_level_label(ev.level), ev.message.c_str());
 
           ImGui::PushID(i);
           ImGui::SameLine();
           if (ImGui::SmallButton("Copy")) {
-            std::string line = std::string("[") + d.to_string() + "] #" +
+            std::string line = std::string("[") + dt + "] #" +
                               std::to_string(static_cast<unsigned long long>(ev.seq)) + " [" +
                               event_category_label(ev.category) + "] " + event_level_label(ev.level) + ": " +
                               ev.message;
@@ -5423,7 +5622,7 @@ void draw_settings_window(UIState& ui, char* ui_prefs_path, UIPrefActions& actio
   ImGui::SameLine();
   ImGui::Checkbox("Jump lines", &ui.show_galaxy_jump_lines);
   ImGui::SameLine();
-  ImGui::Checkbox("Unknown exits", &ui.show_galaxy_unknown_exits);
+  ImGui::Checkbox("Unknown exits (unsurveyed / undiscovered)", &ui.show_galaxy_unknown_exits);
   ImGui::SameLine();
   ImGui::Checkbox("Intel alerts", &ui.show_galaxy_intel_alerts);
 
@@ -5906,6 +6105,180 @@ void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_colony, Id
             ImGui::Text("%.2f", r.colony_pop);
           } else {
             ImGui::TextDisabled("-");
+          }
+        }
+      }
+
+      ImGui::EndTable();
+    }
+
+    ImGui::EndTabItem();
+  }
+
+  // --- Wrecks tab ---
+  if (ImGui::BeginTabItem("Wrecks")) {
+    static char search[128] = "";
+    static int system_filter_idx = 0; // 0 = All
+
+    const auto systems = sorted_systems(s);
+
+    ImGui::InputTextWithHint("Search##wreck", "name / system / source", search, IM_ARRAYSIZE(search));
+    {
+      std::vector<const char*> labels;
+      labels.reserve(systems.size() + 1);
+      labels.push_back("All systems");
+      for (const auto& p : systems) labels.push_back(p.second.c_str());
+      if (labels.size() > 1) {
+        system_filter_idx = std::clamp(system_filter_idx, 0, static_cast<int>(labels.size()) - 1);
+      } else {
+        system_filter_idx = 0;
+      }
+      ImGui::Combo("System##wreck", &system_filter_idx, labels.data(), static_cast<int>(labels.size()));
+    }
+
+    const Id system_filter = (system_filter_idx <= 0 || systems.empty()) ? kInvalidId : systems[system_filter_idx - 1].first;
+
+    if (ui.fog_of_war && ui.viewer_faction_id != kInvalidId) {
+      ImGui::TextDisabled("Fog-of-war is enabled: only discovered systems are listed.");
+    }
+
+    struct WreckRow {
+      Id id{kInvalidId};
+      Id system_id{kInvalidId};
+      Vec2 pos{0.0, 0.0};
+      std::string name;
+      std::string system;
+      std::string source;
+      double total{0.0};
+      int age_days{0};
+    };
+
+    std::vector<WreckRow> rows;
+    rows.reserve(s.wrecks.size());
+
+    const int cur_day = s.date.days_since_epoch;
+
+    for (const auto& [wid, w] : s.wrecks) {
+      if (system_filter != kInvalidId && w.system_id != system_filter) continue;
+      if (ui.fog_of_war && ui.viewer_faction_id != kInvalidId) {
+        if (!sim.is_system_discovered_by_faction(ui.viewer_faction_id, w.system_id)) continue;
+      }
+
+      const StarSystem* sys = find_ptr(s.systems, w.system_id);
+
+      // Search matches wreck name, system, or source design.
+      if (!case_insensitive_contains(w.name, search) &&
+          !(sys && case_insensitive_contains(sys->name, search)) &&
+          !case_insensitive_contains(w.source_design_id, search)) {
+        continue;
+      }
+
+      double total = 0.0;
+      for (const auto& [_, v] : w.minerals) total += std::max(0.0, v);
+
+      WreckRow r;
+      r.id = wid;
+      r.system_id = w.system_id;
+      r.pos = w.position_mkm;
+      r.name = w.name.empty() ? (std::string("Wreck ") + std::to_string((int)wid)) : w.name;
+      r.system = sys ? sys->name : "?";
+      r.total = total;
+      r.age_days = (w.created_day == 0) ? 0 : std::max(0, cur_day - w.created_day);
+
+      // Compact source label.
+      if (!w.source_design_id.empty()) {
+        r.source = w.source_design_id;
+      } else if (w.source_ship_id != kInvalidId) {
+        r.source = std::string("Ship ") + std::to_string((int)w.source_ship_id);
+      } else {
+        r.source = "-";
+      }
+      rows.push_back(std::move(r));
+    }
+
+    ImGui::Separator();
+    ImGui::TextDisabled("Showing %d / %d wrecks", (int)rows.size(), (int)s.wrecks.size());
+
+    const ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable |
+                                 ImGuiTableFlags_Reorderable | ImGuiTableFlags_Hideable | ImGuiTableFlags_Sortable |
+                                 ImGuiTableFlags_ScrollY;
+
+    const ImVec2 avail = ImGui::GetContentRegionAvail();
+    if (ImGui::BeginTable("wreck_directory", 6, flags, ImVec2(avail.x, avail.y))) {
+      ImGui::TableSetupScrollFreeze(0, 1);
+      ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_DefaultSort, 0.0f, 0);
+      ImGui::TableSetupColumn("System", 0, 0.0f, 1);
+      ImGui::TableSetupColumn("Total (t)", ImGuiTableColumnFlags_PreferSortDescending, 0.0f, 2);
+      ImGui::TableSetupColumn("Age (d)", ImGuiTableColumnFlags_PreferSortDescending, 0.0f, 3);
+      ImGui::TableSetupColumn("Source", 0, 0.0f, 4);
+      ImGui::TableSetupColumn("Center", ImGuiTableColumnFlags_NoSort, 0.0f, 5);
+      ImGui::TableHeadersRow();
+
+      if (ImGuiTableSortSpecs* sort = ImGui::TableGetSortSpecs()) {
+        if (sort->SpecsDirty && sort->SpecsCount > 0) {
+          const ImGuiTableColumnSortSpecs* spec = &sort->Specs[0];
+          const bool asc = (spec->SortDirection == ImGuiSortDirection_Ascending);
+          auto cmp = [&](const WreckRow& a, const WreckRow& b) {
+            auto lt = [&](auto x, auto y) { return asc ? (x < y) : (x > y); };
+            switch (spec->ColumnUserID) {
+              case 0: return lt(a.name, b.name);
+              case 1: return lt(a.system, b.system);
+              case 2: return lt(a.total, b.total);
+              case 3: return lt(a.age_days, b.age_days);
+              case 4: return lt(a.source, b.source);
+              default: return lt(a.name, b.name);
+            }
+          };
+          std::stable_sort(rows.begin(), rows.end(), cmp);
+          sort->SpecsDirty = false;
+        }
+      }
+
+      static Id selected_wreck = kInvalidId;
+
+      ImGuiListClipper clip;
+      clip.Begin(static_cast<int>(rows.size()));
+      while (clip.Step()) {
+        for (int i = clip.DisplayStart; i < clip.DisplayEnd; ++i) {
+          const WreckRow& r = rows[i];
+          ImGui::TableNextRow();
+
+          ImGui::TableSetColumnIndex(0);
+          const bool is_sel = (selected_wreck == r.id);
+          std::string label = r.name + "##wreck_" + std::to_string((int)r.id);
+          if (ImGui::Selectable(label.c_str(), is_sel, ImGuiSelectableFlags_SpanAllColumns)) {
+            selected_wreck = r.id;
+            if (r.system_id != kInvalidId) {
+              s.selected_system = r.system_id;
+              ui.request_map_tab = MapTab::System;
+              ui.request_system_map_center = true;
+              ui.request_system_map_center_system_id = r.system_id;
+              ui.request_system_map_center_x_mkm = r.pos.x;
+              ui.request_system_map_center_y_mkm = r.pos.y;
+              ui.request_system_map_center_zoom = 0.0;
+            }
+          }
+
+          ImGui::TableSetColumnIndex(1);
+          ImGui::TextUnformatted(r.system.c_str());
+          ImGui::TableSetColumnIndex(2);
+          ImGui::Text("%.1f", r.total);
+          ImGui::TableSetColumnIndex(3);
+          ImGui::Text("%d", r.age_days);
+          ImGui::TableSetColumnIndex(4);
+          ImGui::TextUnformatted(r.source.c_str());
+          ImGui::TableSetColumnIndex(5);
+          std::string b = "Go##wreck_go_" + std::to_string((int)r.id);
+          if (ImGui::SmallButton(b.c_str())) {
+            if (r.system_id != kInvalidId) {
+              s.selected_system = r.system_id;
+              ui.request_map_tab = MapTab::System;
+              ui.request_system_map_center = true;
+              ui.request_system_map_center_system_id = r.system_id;
+              ui.request_system_map_center_x_mkm = r.pos.x;
+              ui.request_system_map_center_y_mkm = r.pos.y;
+              ui.request_system_map_center_zoom = 0.0;
+            }
           }
         }
       }
