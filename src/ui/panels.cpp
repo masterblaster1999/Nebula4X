@@ -8,6 +8,8 @@
 #include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <iomanip>
+#include <sstream>
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -72,6 +74,13 @@ void maybe_fix_export_extension(char* path, std::size_t cap, const char* desired
   std::strncpy(path, p.c_str(), cap);
   path[cap - 1] = '\0';
 #endif
+}
+
+std::string format_fixed(double v, int decimals) {
+  std::ostringstream oss;
+  oss.setf(std::ios::fixed);
+  oss << std::setprecision(decimals) << v;
+  return oss.str();
 }
 
 const char* ship_role_label(ShipRole r) {
@@ -1988,7 +1997,8 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
           // --- Colonists ---
           ImGui::Separator();
           ImGui::Text("Colonists");
-          const double cap_col = d2 ? d2->colony_capacity_millions : 0.0;
+          const auto* d2_col = sim.find_design(sh->design_id);
+          const double cap_col = d2_col ? d2_col->colony_capacity_millions : 0.0;
           ImGui::Text("Embarked: %.1f / %.1f M", sh->colonists_millions, cap_col);
           ImGui::Text("Colony population: %.1f M", sel_col->population_millions);
 
@@ -2054,7 +2064,7 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
             double total = 0.0;
             for (const auto& [_, v] : w.minerals) total += v;
             std::string label = sys_name + ": " + (w.name.empty() ? ("Wreck " + std::to_string(wid)) : w.name);
-            label += " (" + fmt::format("{:.1f}", total) + " t)";
+            label += " (" + format_fixed(total, 1) + " t)";
             wreck_ids.push_back(wid);
             wreck_labels.push_back(std::move(label));
           }
@@ -2895,7 +2905,7 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
         // --- Habitability / Life support ---
         ImGui::Separator();
         ImGui::Text("Habitability / Life Support");
-        if (!sim.config().enable_habitability) {
+        if (!sim.cfg().enable_habitability) {
           ImGui::TextDisabled("Disabled in SimConfig.");
         } else if (!b) {
           ImGui::TextDisabled("Body missing.");
@@ -3158,6 +3168,8 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
           } else {
             ImGui::BulletText("%s: %d", nm.c_str(), v);
           }
+        }
+
         if (ImGui::TreeNode("Installation targets (auto-build)")) {
           ImGui::TextDisabled("The simulation will auto-queue construction orders to reach these counts.");
           ImGui::TextDisabled("Auto-queued orders are marked [AUTO] in the construction queue.");
@@ -3165,6 +3177,11 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
           if (ImGui::SmallButton("Clear all targets")) {
             colony->installation_targets.clear();
           }
+
+          static char inst_filter[64] = "";
+          ImGui::SetNextItemWidth(220.0f);
+          ImGui::InputTextWithHint("##inst_filter", "Filter installations (name/id)...", inst_filter,
+                                  sizeof(inst_filter));
 
           // Pending quantities from the construction queue (split manual vs auto).
           std::unordered_map<std::string, int> pending_manual;
@@ -3218,16 +3235,20 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
               const auto itdef = sim.content().installations.find(id);
               const std::string nm2 = (itdef == sim.content().installations.end()) ? id : itdef->second.name;
 
+              if (!case_insensitive_contains(nm2, inst_filter) && !case_insensitive_contains(id, inst_filter)) {
+                continue;
+              }
+
               const int have = [&]() -> int {
-                auto it = colony->installations.find(id);
-                return (it == colony->installations.end()) ? 0 : it->second;
+                auto inst_it = colony->installations.find(id);
+                return (inst_it == colony->installations.end()) ? 0 : inst_it->second;
               }();
 
               const int man = pending_manual[id];
               const int aut = pending_auto[id];
 
               int tgt = 0;
-              if (auto it = colony->installation_targets.find(id); it != colony->installation_targets.end()) tgt = it->second;
+              if (auto tgt_it = colony->installation_targets.find(id); tgt_it != colony->installation_targets.end()) tgt = tgt_it->second;
               tgt = std::max(0, tgt);
 
               const int need = std::max(0, tgt - (have + man + aut));
