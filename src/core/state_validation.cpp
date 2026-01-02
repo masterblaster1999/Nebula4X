@@ -1312,7 +1312,7 @@ FixReport fix_game_state(GameState& s, const ContentDB* content) {
 
   // --- Wrecks ---
   {
-    const int now = s.date.days_since_epoch();
+    const std::int64_t now = s.date.days_since_epoch();
     for (Id wid : sorted_keys(s.wrecks)) {
       auto it = s.wrecks.find(wid);
       if (it == s.wrecks.end()) continue;

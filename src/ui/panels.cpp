@@ -6150,13 +6150,13 @@ void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_colony, Id
       std::string system;
       std::string source;
       double total{0.0};
-      int age_days{0};
+      std::int64_t age_days{0};
     };
 
     std::vector<WreckRow> rows;
     rows.reserve(s.wrecks.size());
 
-    const int cur_day = s.date.days_since_epoch;
+    const std::int64_t cur_day = s.date.days_since_epoch();
 
     for (const auto& [wid, w] : s.wrecks) {
       if (system_filter != kInvalidId && w.system_id != system_filter) continue;
@@ -6183,7 +6183,7 @@ void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_colony, Id
       r.name = w.name.empty() ? (std::string("Wreck ") + std::to_string((int)wid)) : w.name;
       r.system = sys ? sys->name : "?";
       r.total = total;
-      r.age_days = (w.created_day == 0) ? 0 : std::max(0, cur_day - w.created_day);
+      r.age_days = (w.created_day == 0) ? 0 : std::max<std::int64_t>(0, cur_day - w.created_day);
 
       // Compact source label.
       if (!w.source_design_id.empty()) {
@@ -6264,7 +6264,7 @@ void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_colony, Id
           ImGui::TableSetColumnIndex(2);
           ImGui::Text("%.1f", r.total);
           ImGui::TableSetColumnIndex(3);
-          ImGui::Text("%d", r.age_days);
+          ImGui::Text("%lld", static_cast<long long>(r.age_days));
           ImGui::TableSetColumnIndex(4);
           ImGui::TextUnformatted(r.source.c_str());
           ImGui::TableSetColumnIndex(5);

@@ -28,6 +28,7 @@ int test_population_growth();
 int test_combat_events();
 int test_shields();
 int test_population_transport();
+int test_colonization();
 int test_auto_colonize();
 int test_auto_salvage();
 int test_auto_tanker();
@@ -75,6 +76,7 @@ int main() {
   fails += test_fleets();
   fails += test_population_growth();
   fails += test_population_transport();
+  fails += test_colonization();
   fails += test_auto_colonize();
   fails += test_auto_salvage();
   fails += test_auto_tanker();

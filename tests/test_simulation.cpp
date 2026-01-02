@@ -2377,7 +2377,7 @@ int test_simulation() {
     salvager.name = "Salvager";
     salvager.mass_tons = 100.0;
     salvager.speed_km_s = 0.0;
-    salvager.max_fuel_tons = 0.0;
+    salvager.fuel_capacity_tons = 0.0;
     salvager.max_hp = 10.0;
     salvager.cargo_tons = 1000.0;
     content.designs[salvager.id] = salvager;
@@ -2399,7 +2399,7 @@ int test_simulation() {
     Faction fac;
     fac.id = fac_id;
     fac.name = "Player";
-    fac.discovered_systems.insert(sys_id);
+    fac.discovered_systems.push_back(sys_id);
     st.factions[fac_id] = fac;
 
     const auto ship_id = allocate_id(st);
@@ -2429,7 +2429,7 @@ int test_simulation() {
 
     // Salvage all (tons=0) should take everything and remove the wreck.
     N4X_ASSERT(sim.issue_salvage_wreck(ship_id, wreck_id, "", 0.0, false));
-    sim.tick_ships();
+    sim.advance_days(1);
     N4X_ASSERT(sim.state().ships.at(ship_id).cargo.at("Duranium") == 50.0);
     N4X_ASSERT(sim.state().wrecks.empty());
   }
@@ -2623,7 +2623,7 @@ int test_simulation() {
     body.id = 1;
     body.system_id = sys.id;
     body.name = "TestBody";
-    body.type = "planet";
+    body.type = nebula4x::BodyType::Planet;
     body.position_mkm = nebula4x::Vec2{0.0, 0.0};
     s.bodies[body.id] = body;
 
@@ -2637,7 +2637,6 @@ int test_simulation() {
     c.id = 1;
     c.name = "TestColony";
     c.faction_id = f.id;
-    c.system_id = sys.id;
     c.body_id = body.id;
     c.installations["shipyard"] = 1;
     s.colonies[c.id] = c;
@@ -2645,7 +2644,7 @@ int test_simulation() {
     sim.load_game(std::move(s));
 
     // First tick should auto-queue the build order (and progress it).
-    sim.tick_shipyards();
+    sim.advance_days(1);
     auto& st = sim.state();
     auto& c2 = st.colonies.at(1);
     N4X_ASSERT(!c2.shipyard_queue.empty());
@@ -2653,12 +2652,12 @@ int test_simulation() {
     N4X_ASSERT(c2.shipyard_queue.front().auto_queued);
 
     // Run until the ship completes.
-    for (int i = 0; i < 10; ++i) sim.tick_shipyards();
+    for (int i = 0; i < 10; ++i) sim.advance_days(1);
     N4X_ASSERT(st.ships.size() == 1);
     N4X_ASSERT(st.ships.begin()->second.design_id == "test_ship");
 
     // Ensure no extra auto orders once the target is met.
-    sim.tick_shipyards();
+    sim.advance_days(1);
     N4X_ASSERT(st.colonies.at(1).shipyard_queue.empty());
   }
   return 0;

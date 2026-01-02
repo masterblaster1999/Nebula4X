@@ -204,9 +204,9 @@ int test_auto_freight() {
     N4X_ASSERT(std::abs(src_dur - 900.0) < 1e-6, "source exported bundled Duranium");
     N4X_ASSERT(std::abs(src_cor - 900.0) < 1e-6, "source exported bundled Corbomite");
 
-    const Ship& tsh = sim3.state().ships.at(sh.id);
-    const double cargo_dur = tsh.cargo.count("Duranium") ? tsh.cargo.at("Duranium") : 0.0;
-    const double cargo_cor = tsh.cargo.count("Corbomite") ? tsh.cargo.at("Corbomite") : 0.0;
+    const Ship& tsh3 = sim3.state().ships.at(sh.id);
+    const double cargo_dur = tsh3.cargo.count("Duranium") ? tsh3.cargo.at("Duranium") : 0.0;
+    const double cargo_cor = tsh3.cargo.count("Corbomite") ? tsh3.cargo.at("Corbomite") : 0.0;
     N4X_ASSERT(cargo_dur < 1e-6 && cargo_cor < 1e-6, "ship cargo is empty after bundled same-day delivery");
   }
 

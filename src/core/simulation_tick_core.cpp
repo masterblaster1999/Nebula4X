@@ -207,11 +207,11 @@ void Simulation::tick_one_tick_hours(int hours) {
 
     // Wreck cleanup (optional).
     if (cfg_.wreck_decay_days > 0 && !state_.wrecks.empty()) {
-      const int now = state_.date.days_since_epoch();
-      const int max_age = cfg_.wreck_decay_days;
+      const std::int64_t now = state_.date.days_since_epoch();
+      const std::int64_t max_age = cfg_.wreck_decay_days;
       for (auto it = state_.wrecks.begin(); it != state_.wrecks.end();) {
-        const int created = it->second.created_day;
-        const int age = (created > 0) ? (now - created) : 0;
+        const std::int64_t created = it->second.created_day;
+        const std::int64_t age = (created > 0) ? (now - created) : 0;
         if (age >= max_age) {
           it = state_.wrecks.erase(it);
         } else {
@@ -225,11 +225,11 @@ void Simulation::tick_one_tick_hours(int hours) {
   // behavior stable and avoids doing extra work every hour).
   if (cfg_.enable_subday_economy && day_advanced) {
     if (cfg_.wreck_decay_days > 0 && !state_.wrecks.empty()) {
-      const int now = state_.date.days_since_epoch();
-      const int max_age = cfg_.wreck_decay_days;
+      const std::int64_t now = state_.date.days_since_epoch();
+      const std::int64_t max_age = cfg_.wreck_decay_days;
       for (auto it = state_.wrecks.begin(); it != state_.wrecks.end();) {
-        const int created = it->second.created_day;
-        const int age = (created > 0) ? (now - created) : 0;
+        const std::int64_t created = it->second.created_day;
+        const std::int64_t age = (created > 0) ? (now - created) : 0;
         if (age >= max_age) {
           it = state_.wrecks.erase(it);
         } else {

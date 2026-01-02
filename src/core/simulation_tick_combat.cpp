@@ -1208,12 +1208,12 @@ void Simulation::tick_combat(double dt_days) {
         }
 
         // Prune non-positive / non-finite entries.
-        for (auto it = salvage.begin(); it != salvage.end();) {
-          const double v = it->second;
+        for (auto it_salv = salvage.begin(); it_salv != salvage.end();) {
+          const double v = it_salv->second;
           if (!(v > 1e-9) || std::isnan(v) || std::isinf(v)) {
-            it = salvage.erase(it);
+            it_salv = salvage.erase(it_salv);
           } else {
-            ++it;
+            ++it_salv;
           }
         }
 

@@ -503,7 +503,8 @@ struct Wreck {
   std::string source_design_id;
 
   // Creation day (Date::days_since_epoch) for optional decay / analytics.
-  int created_day{0};
+  // Use a 64-bit day counter to match Date (and avoid narrowing warnings on some compilers).
+  std::int64_t created_day{0};
 };
 
 

@@ -1590,9 +1590,9 @@ void Simulation::tick_ships(double dt_days) {
           const double hab = body_habitability(body->id);
           if (hab < 0.999) {
             constexpr const char* kHabitationInstallationId = "infrastructure";
-            auto it = content_.installations.find(kHabitationInstallationId);
-            if (it != content_.installations.end()) {
-              const double per_unit = it->second.habitation_capacity_millions;
+            auto it_install = content_.installations.find(kHabitationInstallationId);
+            if (it_install != content_.installations.end()) {
+              const double per_unit = it_install->second.habitation_capacity_millions;
               if (per_unit > 1e-9) {
                 const double required = cap * std::clamp(1.0 - hab, 0.0, 1.0);
                 const int units = static_cast<int>(std::ceil(required / per_unit));

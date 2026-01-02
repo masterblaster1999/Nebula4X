@@ -1,18 +1,26 @@
+#include <cmath>
+#include <iostream>
+#include <string>
+
 #include "nebula4x/core/simulation.h"
 
-#include <catch2/catch_test_macros.hpp>
-
-using namespace nebula4x;
+#define N4X_ASSERT(expr)                                                                            \
+  do {                                                                                              \
+    if (!(expr)) {                                                                                  \
+      std::cerr << "ASSERT failed: " #expr " (" << __FILE__ << ":" << __LINE__ << ")\n"; \
+      return 1;                                                                                     \
+    }                                                                                               \
+  } while (0)
 
 namespace {
 
-ContentDB minimal_content_for_colonization() {
-  ContentDB c;
+nebula4x::ContentDB minimal_content_for_colonization() {
+  nebula4x::ContentDB c;
 
-  ShipDesign d;
+  nebula4x::ShipDesign d;
   d.id = "colony_ship";
   d.name = "Colony Ship";
-  d.role = ShipRole::Freighter;
+  d.role = nebula4x::ShipRole::Freighter;
   d.mass_tons = 100.0;
   d.speed_km_s = 10.0;
   d.cargo_tons = 0.0;
@@ -24,11 +32,13 @@ ContentDB minimal_content_for_colonization() {
   return c;
 }
 
-GameState minimal_state_for_colonization() {
+nebula4x::GameState minimal_state_for_colonization() {
+  using namespace nebula4x;
+
   GameState s;
   s.next_id = 1000;
 
-  System sys;
+  StarSystem sys;
   sys.id = 1;
   sys.name = "Test System";
   sys.bodies = {10};
@@ -68,45 +78,52 @@ GameState minimal_state_for_colonization() {
 
 }  // namespace
 
-TEST_CASE("ColonizeBody creates a new colony and consumes the colonizer ship") {
-  ContentDB content = minimal_content_for_colonization();
-  Simulation sim(content, SimConfig{});
-  sim.load_game(minimal_state_for_colonization());
+int test_colonization() {
+  using namespace nebula4x;
 
-  REQUIRE(sim.issue_colonize_body(100, 10, "New Terra Colony"));
-  sim.advance_days(1);
+  // 1) ColonizeBody creates a new colony and consumes the colonizer ship.
+  {
+    ContentDB content = minimal_content_for_colonization();
+    Simulation sim(content, SimConfig{});
+    sim.load_game(minimal_state_for_colonization());
 
-  const auto& st = sim.state();
-  REQUIRE(st.ships.find(100) == st.ships.end());
-  REQUIRE(st.colonies.size() == 1);
+    N4X_ASSERT(sim.issue_colonize_body(100, 10, "New Terra Colony"));
+    sim.advance_days(1);
 
-  const Colony& col = st.colonies.begin()->second;
-  CHECK(col.body_id == 10);
-  CHECK(col.faction_id == 2);
-  CHECK(col.name == "New Terra Colony");
-  CHECK(col.population_millions == Approx(50.0));
-  CHECK(col.minerals.at("Duranium") == Approx(123.0));
-}
+    const auto& st = sim.state();
+    N4X_ASSERT(st.ships.find(100) == st.ships.end());
+    N4X_ASSERT(st.colonies.size() == 1);
 
-TEST_CASE("ColonizeBody does nothing if body already has a colony") {
-  ContentDB content = minimal_content_for_colonization();
-  Simulation sim(content, SimConfig{});
-  GameState s = minimal_state_for_colonization();
+    const Colony& col = st.colonies.begin()->second;
+    N4X_ASSERT(col.body_id == 10);
+    N4X_ASSERT(col.faction_id == 2);
+    N4X_ASSERT(col.name == "New Terra Colony");
+    N4X_ASSERT(std::abs(col.population_millions - 50.0) < 1e-9);
+    N4X_ASSERT(col.minerals.count("Duranium") && std::abs(col.minerals.at("Duranium") - 123.0) < 1e-9);
+  }
 
-  Colony existing;
-  existing.id = 200;
-  existing.faction_id = 2;
-  existing.body_id = 10;
-  existing.name = "Existing Colony";
-  existing.population_millions = 10.0;
-  s.colonies[existing.id] = existing;
+  // 2) ColonizeBody aborts if the body already has a colony (ship remains).
+  {
+    ContentDB content = minimal_content_for_colonization();
+    Simulation sim(content, SimConfig{});
+    GameState s = minimal_state_for_colonization();
 
-  sim.load_game(std::move(s));
-  REQUIRE(sim.issue_colonize_body(100, 10));
-  sim.advance_days(1);
+    Colony existing;
+    existing.id = 200;
+    existing.faction_id = 2;
+    existing.body_id = 10;
+    existing.name = "Existing Colony";
+    existing.population_millions = 10.0;
+    s.colonies[existing.id] = existing;
 
-  const auto& st = sim.state();
-  // Ship should remain because colonization was rejected.
-  CHECK(st.ships.find(100) != st.ships.end());
-  CHECK(st.colonies.size() == 1);
+    sim.load_game(std::move(s));
+    N4X_ASSERT(sim.issue_colonize_body(100, 10));
+    sim.advance_days(1);
+
+    const auto& st = sim.state();
+    N4X_ASSERT(st.ships.find(100) != st.ships.end());
+    N4X_ASSERT(st.colonies.size() == 1);
+  }
+
+  return 0;
 }

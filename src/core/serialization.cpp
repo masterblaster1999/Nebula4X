@@ -1162,7 +1162,7 @@ GameState deserialize_game_from_json(const std::string& json_text) {
         w.source_faction_id = static_cast<Id>(ifa->second.int_value(kInvalidId));
       }
       if (auto id = o.find("source_design_id"); id != o.end()) w.source_design_id = id->second.string_value();
-      if (auto ic = o.find("created_day"); ic != o.end()) w.created_day = static_cast<int>(ic->second.int_value(0));
+      if (auto ic = o.find("created_day"); ic != o.end()) w.created_day = ic->second.int_value(0);
       s.wrecks[w.id] = w;
     }
   }
