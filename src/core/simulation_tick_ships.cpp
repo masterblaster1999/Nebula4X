@@ -698,8 +698,8 @@ void Simulation::tick_ships(double dt_days) {
         // aim at an intercept point (to desired_range) rather than tail-chasing
         // the instantaneous position.
         if (const auto* fac = find_ptr(state_.factions, ship.faction_id)) {
-          if (auto it = fac->ship_contacts.find(target_id); it != fac->ship_contacts.end()) {
-            const auto& c = it->second;
+          if (auto contact_it = fac->ship_contacts.find(target_id); contact_it != fac->ship_contacts.end()) {
+            const auto& c = contact_it->second;
             if (c.system_id == ship.system_id && c.prev_seen_day > 0 && c.prev_seen_day < c.last_seen_day) {
               const int dt = c.last_seen_day - c.prev_seen_day;
               if (dt > 0) {
@@ -732,9 +732,9 @@ void Simulation::tick_ships(double dt_days) {
         bool has_track_v = false;
         int track_age_days = 0;
         if (const auto* fac = find_ptr(state_.factions, ship.faction_id)) {
-          if (auto it = fac->ship_contacts.find(target_id); it != fac->ship_contacts.end()) {
+          if (auto contact_it = fac->ship_contacts.find(target_id); contact_it != fac->ship_contacts.end()) {
             const int now = static_cast<int>(state_.date.days_since_epoch());
-            const auto pred = predict_contact_position(it->second, now, cfg_.contact_prediction_max_days);
+            const auto pred = predict_contact_position(contact_it->second, now, cfg_.contact_prediction_max_days);
             ord.last_known_position_mkm = pred.predicted_position_mkm;
             track_v_mkm_per_day = pred.velocity_mkm_per_day;
             has_track_v = pred.has_velocity && (std::abs(track_v_mkm_per_day.x) > 1e-9 || std::abs(track_v_mkm_per_day.y) > 1e-9);

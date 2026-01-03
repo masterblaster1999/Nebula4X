@@ -406,11 +406,12 @@ if (tw.active) {
       tw.active = false;
       tw.hit = true;
       tw.hit_event = res.event;
-      tw.status = "Hit " + std::string(level_label(res.event.level)) + "/" + std::string(category_label(res.event.category)) + " event.";
+      tw.status = std::string("Hit ") + event_level_label(res.event.level) + "/" +
+                  event_category_label(res.event.category) + " event.";
 
       if (tw.open_timeline_on_hit) {
         ui.show_timeline_window = true;
-        ui.timeline_selected_day = res.event.day;
+        ui.request_focus_event_seq = res.event.seq;
       }
 
       if (tw.focus_context_on_hit) {

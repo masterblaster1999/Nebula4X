@@ -146,7 +146,17 @@ void draw_freight_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& se
 
   // Default faction selection.
   if (fw.faction_id == kInvalidId) {
-    fw.faction_id = (ui.viewer_faction_id != kInvalidId) ? ui.viewer_faction_id : st.viewer_faction_id;
+    // Prefer UI's viewer faction (if set), then the selected ship's faction, then any faction.
+    Id fallback = (ui.viewer_faction_id != kInvalidId) ? ui.viewer_faction_id : kInvalidId;
+    if (fallback == kInvalidId && selected_ship != kInvalidId) {
+      if (const auto* sh = find_ptr(st.ships, selected_ship)) {
+        fallback = sh->faction_id;
+      }
+    }
+    if (fallback == kInvalidId && !st.factions.empty()) {
+      fallback = st.factions.begin()->first;
+    }
+    fw.faction_id = fallback;
   }
 
   if (!ImGui::Begin("Freight Planner", &ui.show_freight_window)) {

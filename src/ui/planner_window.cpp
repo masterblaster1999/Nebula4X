@@ -179,7 +179,7 @@ void jump_to_planner_event(const PlannerEvent& ev,
                            Id& selected_body) {
   // Map focus.
   if (ev.system_id != kInvalidId) {
-    sim.state_mut().selected_system = ev.system_id;
+    sim.state().selected_system = ev.system_id;
     ui.request_map_tab = MapTab::System;
 
     // Best-effort map centering on the referenced entity.
@@ -187,16 +187,16 @@ void jump_to_planner_event(const PlannerEvent& ev,
       if (const auto* ship = find_ptr(sim.state().ships, ev.ship_id)) {
         ui.request_system_map_center = true;
         ui.request_system_map_center_system_id = ship->system_id;
-        ui.request_system_map_center_x_mkm = ship->x_mkm;
-        ui.request_system_map_center_y_mkm = ship->y_mkm;
+        ui.request_system_map_center_x_mkm = ship->position_mkm.x;
+        ui.request_system_map_center_y_mkm = ship->position_mkm.y;
       }
     } else if (ev.colony_id != kInvalidId) {
       if (const auto* colony = find_ptr(sim.state().colonies, ev.colony_id)) {
         if (const auto* body = find_ptr(sim.state().bodies, colony->body_id)) {
           ui.request_system_map_center = true;
           ui.request_system_map_center_system_id = body->system_id;
-          ui.request_system_map_center_x_mkm = body->x_mkm;
-          ui.request_system_map_center_y_mkm = body->y_mkm;
+          ui.request_system_map_center_x_mkm = body->position_mkm.x;
+          ui.request_system_map_center_y_mkm = body->position_mkm.y;
         }
       }
     }
@@ -208,9 +208,7 @@ void jump_to_planner_event(const PlannerEvent& ev,
     selected_colony = kInvalidId;
     selected_body = kInvalidId;
 
-    if (const auto* ship = find_ptr(sim.state().ships, ev.ship_id)) {
-      ui.selected_fleet_id = ship->fleet_id;
-    }
+    ui.selected_fleet_id = sim.fleet_for_ship(ev.ship_id);
 
     ui.show_details_window = true;
     ui.request_details_tab = DetailsTab::Ship;

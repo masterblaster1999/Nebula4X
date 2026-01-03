@@ -3400,9 +3400,6 @@ const bool can_up = (i > 0);
           ImGui::TreePop();
         }
 
-
-        }
-
         ImGui::Separator();
         ImGui::Text("Construction");
         const double cp_per_day = sim.construction_points_per_day(*colony);
@@ -3421,7 +3418,7 @@ const bool can_up = (i > 0);
           static bool forecast_include_auto_targets = true;
 
           static Id cached_colony_id = kInvalidId;
-          static int cached_day = -1;
+          static std::int64_t cached_day = -1;
           static int cached_days = 0;
           static int cached_max_events = 0;
           static bool cached_shipyard = true;
@@ -3449,7 +3446,7 @@ const bool can_up = (i > 0);
           forecast_days = std::clamp(forecast_days, 0, 36500);
           forecast_max_events = std::clamp(forecast_max_events, 0, 4096);
 
-          const int now_day = sim.state().date.days_since_epoch();
+          const std::int64_t now_day = sim.state().date.days_since_epoch();
           if (!has_cached || recompute || cached_colony_id != colony->id || cached_day != now_day ||
               cached_days != forecast_days || cached_max_events != forecast_max_events ||
               cached_shipyard != forecast_include_shipyard ||
