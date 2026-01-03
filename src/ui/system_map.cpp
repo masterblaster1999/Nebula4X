@@ -2,6 +2,8 @@
 
 #include "ui/map_render.h"
 
+#include "core/simulation_sensors.h"
+
 #include "nebula4x/core/fleet_formation.h"
 #include "nebula4x/core/enum_strings.h"
 #include "nebula4x/core/power.h"
@@ -18,6 +20,7 @@
 #include <type_traits>
 #include <unordered_set>
 #include <variant>
+#include <vector>
 
 namespace nebula4x::ui {
 namespace {
@@ -507,6 +510,57 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
 
           prev = next;
         }
+      }
+    }
+  }
+
+  // Optional: sensor coverage overlay for the viewer faction.
+  std::vector<sim_sensors::SensorSource> sensor_sources;
+  int sensor_sources_drawn = 0;
+  double sensor_coverage_sig = 1.0;
+  double sensor_coverage_sig_max = 1.0;
+  if (ui.show_faction_sensor_coverage && viewer_faction_id != kInvalidId) {
+    sensor_sources = sim_sensors::gather_sensor_sources(sim, viewer_faction_id, sys->id);
+
+    // Sort by range so large rings are drawn first (nicer alpha blending).
+    std::sort(sensor_sources.begin(), sensor_sources.end(),
+              [](const sim_sensors::SensorSource& a, const sim_sensors::SensorSource& b) {
+                return a.range_mkm > b.range_mkm;
+              });
+
+    sensor_coverage_sig_max = std::max(0.05, sim_sensors::max_signature_multiplier_for_detection(sim));
+    sensor_coverage_sig = std::clamp<double>(static_cast<double>(ui.faction_sensor_coverage_signature), 0.05,
+                                             sensor_coverage_sig_max);
+
+    // Keep UI state clamped so it persists cleanly.
+    ui.faction_sensor_coverage_signature = static_cast<float>(sensor_coverage_sig);
+
+    const int max_draw = std::clamp(ui.faction_sensor_coverage_max_sources, 1, 4096);
+    ui.faction_sensor_coverage_max_sources = max_draw;
+
+    const float alpha = std::clamp(ui.map_route_opacity, 0.0f, 1.0f);
+    const ImU32 col_outline = modulate_alpha(IM_COL32(0, 170, 255, 255), 0.16f * alpha);
+    const ImU32 col_fill = modulate_alpha(IM_COL32(0, 170, 255, 255), 0.03f * alpha);
+
+    for (const auto& src : sensor_sources) {
+      if (src.range_mkm <= 1e-6) {
+        continue;
+      }
+      const double r_mkm = src.range_mkm * sensor_coverage_sig;
+      if (r_mkm <= 1e-6) {
+        continue;
+      }
+      const float r_px = static_cast<float>(r_mkm * scale * zoom);
+      const ImVec2 p = to_screen(src.pos_mkm, center, scale, zoom, pan);
+
+      if (ui.faction_sensor_coverage_fill) {
+        draw->AddCircleFilled(p, r_px, col_fill, 0);
+      }
+      draw->AddCircle(p, r_px, col_outline, 0, 1.0f);
+
+      sensor_sources_drawn += 1;
+      if (sensor_sources_drawn >= max_draw) {
+        break;
       }
     }
   }
@@ -1381,6 +1435,35 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
   ImGui::Separator();
   ImGui::Checkbox("Fog of war", &ui.fog_of_war);
   ImGui::Checkbox("Show sensor range", &ui.show_selected_sensor_range);
+  ImGui::Checkbox("Sensor coverage (faction)", &ui.show_faction_sensor_coverage);
+  if (ui.show_faction_sensor_coverage) {
+    ImGui::SameLine();
+    ImGui::Checkbox("Fill##sensor_cov", &ui.faction_sensor_coverage_fill);
+
+    const float max_sig = static_cast<float>(
+        std::max(0.05, sim_sensors::max_signature_multiplier_for_detection(sim)));
+    ImGui::SliderFloat("Target signature##sensor_cov", &ui.faction_sensor_coverage_signature, 0.05f, max_sig,
+                      "%.2f");
+    ImGui::InputInt("Max sources##sensor_cov", &ui.faction_sensor_coverage_max_sources);
+    ui.faction_sensor_coverage_max_sources =
+        std::clamp(ui.faction_sensor_coverage_max_sources, 1, 4096);
+
+    ImGui::TextDisabled("Sources: %d (drawn %d)", static_cast<int>(sensor_sources.size()),
+                        sensor_sources_drawn);
+
+    const Vec2 w = to_world(mouse, center, scale, zoom, pan);
+    const double sig = std::clamp<double>(
+        static_cast<double>(ui.faction_sensor_coverage_signature), 0.05,
+        std::max(0.05, sim_sensors::max_signature_multiplier_for_detection(sim)));
+    if (viewer_faction_id != kInvalidId && !sensor_sources.empty()) {
+      const bool det = sim_sensors::any_source_detects(sensor_sources, w, sig);
+      ImGui::TextColored(det ? ImVec4(0.3f, 0.95f, 0.45f, 1.0f)
+                          : ImVec4(1.0f, 0.35f, 0.35f, 1.0f),
+                         "Detect @cursor (sig %.2f): %s", sig, det ? "YES" : "NO");
+    } else if (viewer_faction_id == kInvalidId) {
+      ImGui::TextDisabled("Select a ship to define view faction");
+    }
+  }
   ImGui::Checkbox("Weapon range (selected)", &ui.show_selected_weapon_range);
   ImGui::SameLine();
   ImGui::Checkbox("Fleet", &ui.show_fleet_weapon_ranges);

@@ -48,6 +48,13 @@ struct UIState {
 
   bool fog_of_war{false};
   bool show_selected_sensor_range{true};
+  // Show combined sensor coverage rings for the viewer faction (includes mutual-friendly sensor sharing).
+  bool show_faction_sensor_coverage{false};
+  bool faction_sensor_coverage_fill{true};
+  // Assumed target signature multiplier for coverage visualization (1.0 = baseline).
+  float faction_sensor_coverage_signature{1.0f};
+  // Safety/perf cap for how many sensor sources to draw as rings.
+  int faction_sensor_coverage_max_sources{128};
   bool show_selected_weapon_range{false};
   bool show_fleet_weapon_ranges{false};
   bool show_hostile_weapon_ranges{false};
@@ -79,6 +86,9 @@ struct UIState {
   bool show_directory_window{true};
   bool show_production_window{false};
   bool show_economy_window{false};
+  bool show_planner_window{false};
+  bool show_freight_window{false};
+  bool show_time_warp_window{false};
   bool show_timeline_window{false};
   bool show_design_studio_window{false};
   bool show_intel_window{false};

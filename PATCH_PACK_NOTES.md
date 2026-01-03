@@ -1,8 +1,92 @@
-# Patch pack notes (generated 2026-01-01 r39)
+# Patch pack notes (generated 2026-01-03 r59)
 
 This patch pack is designed for **GitHub web uploads** (Add file → Upload files).
 
 It is **cumulative**: it contains the union of files changed/added in all rounds so far, so you can apply it in one upload.
+
+## New in this patch pack: Planner-driven Time Warp (r58)
+
+- Planner window:
+  - Per-row **Warp** / **Until** buttons (advance to forecast time, or until a matching INFO event occurs).
+  - **Warp to next** to jump to the soonest currently-visible planner item.
+- Time Warp window:
+  - Quick-start API so other UI surfaces (like Planner) can start a time warp job programmatically.
+  - Optional target label/time display while running, and an option to treat reaching the time budget as success.
+
+## New in this patch pack: System map sensor coverage overlay (r57)
+
+- UI: system map legend gains **Sensor coverage (faction)**:
+  - draws combined detection rings for all sensor sources (ships + colonies), including mutual-friendly sensor sharing
+  - respects Sensor Mode (Passive/Normal/Active) and sensor power policy (offline sensors contribute no range)
+- UI: **Target signature** slider + cursor probe ("would a target here be detected?")
+- UI prefs: new overlay settings persisted (ui_prefs version bumped to v12)
+- Tests: adds `test_sensor_coverage`
+
+## Previously added: Ground battle forecast + invasion advisor (r56)
+
+- Core: deterministic `ground_battle_forecast` mirrors `tick_ground_combat`
+- UI: colony + ship panels show battle outcome/ETA; planner integration
+
+## Previously added: Predictive Contact Tracking (r55)
+
+- Core: 2-point contact track + constant-velocity prediction; pursuit uses prediction
+- UI: Intel window displays predicted contact position + estimated velocity
+
+## New in this patch pack: Freight Planner window (r54)
+
+- Core: adds a deterministic **dry-run** freight planner (`compute_freight_plan`) that mirrors auto-freight constraints
+  (min transfer tons, take fraction, multi-mineral bundling, colony reserves + needs-based reserves).
+- UI: adds a **Freight Planner** window (View → Freight Planner / Tools → Open Freight Planner / Status bar → Freight):
+  - preview shipments per ship (from/to, cargo list, ETA)
+  - one-click Apply per row, or Apply all
+  - filters (auto-freight ships, idle ships), discovery restriction toggle, bundling override, etc.
+
+## Previously added: UI Time Warp window (r53)
+
+- UI: adds a **Time Warp** window to advance the sim until a matching event occurs.
+  - Presets (WARN/ERROR, Research, Shipyard, Construction, Movement, Combat)
+  - Filters: level, category, message substring, faction, selected system/ship/colony
+  - Runs in small per-frame chunks so the UI remains responsive
+  - Can auto-open Timeline and focus the hit event / context
+
+## Previously added: Global Planner window (r52)
+
+- Core: adds `planner_events`, a best-effort aggregator that merges forecast items (research + colony production, and optionally ship order ETAs)
+  into a single, chronological list with safety caps.
+- UI: adds a new **Planner** window (View → Planner / Tools → Open Planner) with:
+  - Faction selector
+  - Auto-refresh + manual refresh
+  - Search + category/level filters
+  - Click-to-jump navigation to the relevant ship/colony/system.
+
+## New in this patch pack: Fog-of-war friendly auto-explore overhaul (r51)
+
+- Core AI: Auto-explore is now survey-first and will not transit unsurveyed jump points.
+
+## New in this patch pack: Colony production forecast (r50)
+
+- Core: adds a best-effort `colony_schedule` helper to estimate when a colony's:
+  - **Construction queue** completes (CP/day + mineral costs)
+  - **Shipyard queue** completes (tons/day + minerals/ton)
+  - While simulating simplified **mining + industry** mineral flows.
+  - Optionally simulates **installation_targets** auto-queued construction.
+- UI: Colony tab gains a new **Production forecast (best-effort)** section:
+  - Shows a chronological completion timeline (D+days + absolute date).
+  - Toggles: shipyard / construction / auto-targets.
+  - Safety knobs: max days + max events.
+
+## New in this patch pack: Research schedule forecast (r49)
+
+- Core: adds a best-effort `research_schedule` helper to estimate completion dates for a faction's current active research and queue.
+  - Mirrors the sim's day-level research tick (RP/day, queue scanning, multiple completions in one day).
+  - Tech-based research multipliers apply starting the *next* day (matching the simulation).
+  - Detects and reports when a queue is blocked by missing prerequisites.
+- UI: Research tab shows a compact forecast table (D+days + absolute completion date) and an RP/day breakdown (base × multiplier).
+
+## New in this patch pack: Ship order mission planner (r48)
+
+- Core: adds `order_planner` to preview ship order ETAs and fuel use.
+- UI: ship orders table now shows ETA and Fuel columns.
 
 ## New in this patch pack: Colony habitability + habitation infrastructure
 
@@ -359,3 +443,15 @@ GitHub does **not** auto-extract a zip you upload.
 2. In GitHub: **Add file → Upload files**.
 3. Drag & drop the extracted folders/files (keep folder structure).
 4. Commit.
+
+## New in r58
+- Planner-driven time warp:
+  - Per-row **Warp** / **Until** buttons.
+  - **Warp to next** (soonest visible item).
+- Time warp window quick-start API so other UI surfaces can start a warp job, plus optional target label/time display.
+
+
+## r59 (2026-01-03)
+- Core: Lead pursuit for AttackShip (intercept-based aim point when target velocity can be estimated from contacts; bounded lead pursuit on predicted tracks when contact is lost).
+- Core: new `include/nebula4x/core/intercept.h` helper with unit tests.
+- UI: Intel window copy updated to mention lead pursuit.

@@ -1,5 +1,8 @@
 #include "nebula4x/core/simulation.h"
 
+#include "nebula4x/core/contact_prediction.h"
+#include "nebula4x/core/intercept.h"
+
 #include "nebula4x/core/fleet_formation.h"
 
 #include "simulation_internal.h"
@@ -690,13 +693,71 @@ void Simulation::tick_ships(double dt_days) {
             desired_range = std::min(desired_range, std::max(0.0, cfg_.boarding_range_mkm));
           }
         }
+
+        // Lead pursuit: if we have a simple velocity estimate for this contact,
+        // aim at an intercept point (to desired_range) rather than tail-chasing
+        // the instantaneous position.
+        if (const auto* fac = find_ptr(state_.factions, ship.faction_id)) {
+          if (auto it = fac->ship_contacts.find(target_id); it != fac->ship_contacts.end()) {
+            const auto& c = it->second;
+            if (c.system_id == ship.system_id && c.prev_seen_day > 0 && c.prev_seen_day < c.last_seen_day) {
+              const int dt = c.last_seen_day - c.prev_seen_day;
+              if (dt > 0) {
+                const Vec2 v_mkm_per_day =
+                    (c.last_seen_position_mkm - c.prev_seen_position_mkm) * (1.0 / static_cast<double>(dt));
+                if (std::isfinite(v_mkm_per_day.x) && std::isfinite(v_mkm_per_day.y) &&
+                    (std::abs(v_mkm_per_day.x) > 1e-9 || std::abs(v_mkm_per_day.y) > 1e-9)) {
+                  const double sp_mkm_per_day = mkm_per_day_from_speed(ship.speed_km_s, cfg_.seconds_per_day);
+                  if (sp_mkm_per_day > 1e-12) {
+                    const int lead_cap_i = std::max(0, std::min(cfg_.contact_prediction_max_days, 14));
+                    const auto aim = compute_intercept_aim(ship.position_mkm, sp_mkm_per_day, target, v_mkm_per_day,
+                                                          desired_range, static_cast<double>(lead_cap_i));
+                    target = aim.aim_position_mkm;
+                  }
+                }
+              }
+            }
+          }
+        }
       } else {
         if (!ord.has_last_known) {
           q.erase(q.begin());
           continue;
         }
+
+        // Keep extrapolating last_known_position while the contact is lost,
+        // so attackers continue to chase the track instead of beelining to a
+        // stale point forever.
+        Vec2 track_v_mkm_per_day{0.0, 0.0};
+        bool has_track_v = false;
+        int track_age_days = 0;
+        if (const auto* fac = find_ptr(state_.factions, ship.faction_id)) {
+          if (auto it = fac->ship_contacts.find(target_id); it != fac->ship_contacts.end()) {
+            const int now = static_cast<int>(state_.date.days_since_epoch());
+            const auto pred = predict_contact_position(it->second, now, cfg_.contact_prediction_max_days);
+            ord.last_known_position_mkm = pred.predicted_position_mkm;
+            track_v_mkm_per_day = pred.velocity_mkm_per_day;
+            has_track_v = pred.has_velocity && (std::abs(track_v_mkm_per_day.x) > 1e-9 || std::abs(track_v_mkm_per_day.y) > 1e-9);
+            track_age_days = pred.age_days;
+          }
+        }
+
         target = ord.last_known_position_mkm;
         desired_range = 0.0;
+
+        // Lead pursuit on stale tracks too (bounded by remaining prediction budget).
+        if (has_track_v && std::isfinite(track_v_mkm_per_day.x) && std::isfinite(track_v_mkm_per_day.y)) {
+          const double sp_mkm_per_day = mkm_per_day_from_speed(ship.speed_km_s, cfg_.seconds_per_day);
+          if (sp_mkm_per_day > 1e-12) {
+            const int remaining = std::max(0, cfg_.contact_prediction_max_days - track_age_days);
+            const int lead_cap_i = std::max(0, std::min(remaining, 7));
+            if (lead_cap_i > 0) {
+              const auto aim = compute_intercept_aim(ship.position_mkm, sp_mkm_per_day, target, track_v_mkm_per_day,
+                                                    /*desired_range_mkm=*/0.0, static_cast<double>(lead_cap_i));
+              target = aim.aim_position_mkm;
+            }
+          }
+        }
       }
     } else if (std::holds_alternative<EscortShip>(q.front())) {
       auto& ord = std::get<EscortShip>(q.front());

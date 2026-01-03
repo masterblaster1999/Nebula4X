@@ -1,10 +1,207 @@
-# Patch notes (generated 2026-01-02 r47)
+# Patch notes (generated 2026-01-03 r59)
+
+## r59 (2026-01-03)
+
+### Lead Pursuit + Intercept Solver
+- Added a small `intercept.h` math helper that computes a lead/intercept aim point for constant-velocity targets while respecting a desired standoff range.
+- **AttackShip** order execution now uses lead pursuit when the attacker has a velocity estimate for the target contact (based on prev/last sensor detections).
+- When a contact is **lost**, AttackShip still extrapolates the last-known track *and* uses bounded lead pursuit on that predicted track (limited by remaining prediction budget), reducing tail-chasing.
+- UI: Intel window attack hint updated to reflect lead pursuit behavior.
+- Tests: added `test_intercept` (math) and `test_attack_lead_pursuit` (integration) to lock the behavior in.
+
+## r58 (2026-01-03)
+
+### Planner-driven Time Warp
+- **Planner rows now have action buttons:**
+  - **Warp**: advance to the forecasted day/hour (interrupts on any WARN/ERROR event).
+  - **Until**: advance until a matching **INFO** event occurs (category/context-scoped).  
+    *Note:* scopes WARN/ERROR too (so unrelated problems elsewhere may be ignored).
+- Added **Warp to next** (top of Planner): jumps to the soonest currently-visible item (honors filters/search).
+
+### Time Warp quick-start API
+- Added a small UI API (**TimeWarpQuickStart** + **time_warp_quick_start**) so other windows can programmatically start a time warp job.
+- Time Warp window can now optionally display a **target label/time** while running, and can treat **reaching the time budget as success** (used by Planner’s Warp-to-time).
 
 This patch pack contains only the files that changed.
 
 Apply by copying the files over the repo (drag/drop into GitHub's "Upload files"), preserving folder paths.
 
 ## Summary of changes
+
+### r57: System map sensor coverage overlay + signature probe
+
+- UI: new **Sensor coverage (faction)** overlay on the system map.
+  - Draws combined detection rings from all sensor sources in the current system (ships + colonies), including mutual-friendly sensor sharing.
+  - Respects ship **Sensor Mode** (Passive/Normal/Active) and sensor power policy (offline sensors contribute no range).
+
+- UI: new coverage controls:
+  - **Target signature** slider (lets you see how stealth/EMCON affects detectability; 1.0 = baseline).
+  - **Fill** toggle for a subtle heat/coverage feel.
+  - **Max sources** cap to keep the overlay fast in late-game swarms.
+  - Cursor probe: shows whether a hypothetical target at the cursor would be detected for the chosen signature.
+
+- UI prefs: persist the new overlay settings (ui_prefs schema bumped to v12).
+
+- Tests: add `test_sensor_coverage` validating that detection:
+  - scales with sensor mode range multipliers,
+  - scales with target signature multiplier,
+  - works via colony sensor installations even when ship sensors are disabled.
+
+### r56: Ground battle forecast + invasion advisor + planner integration
+
+- Core: add `ground_battle_forecast`:
+  - `forecast_ground_battle(cfg, attacker, defender, forts)` mirrors the daily loss model in `tick_ground_combat`.
+  - `square_law_required_attacker_strength(cfg, defender, forts, margin)` gives a quick baseline for “how many troops do I need?”.
+  - Utility `ground_battle_winner_label()` for lightweight UI string output.
+
+- Planner: optional inclusion of **ground battle resolution forecasts** (category: Combat).
+  - Works for both your invasions and battles defending your colonies.
+  - Adds a new planner option toggle: “Include ground battles”.
+
+- UI:
+  - Colony panel shows a small **battle forecast** when a ground battle is in progress.
+  - Ship→Enemy-colony panel shows an **Invasion advisor**: fortifications, troop shortfall, and “if invade now” winner + ETA.
+
+- Tests: add `test_ground_battle_forecast` verifying forecast matches the simulation tick model (including the defender-favored tie case).
+
+### r55: Predictive Contact Tracking (fog-of-war pursuit)
+
+- Core: Contacts now preserve a small **2-point track** (`prev_seen_day`, `prev_seen_position_mkm`) when they are re-detected in the same system.
+  - This enables a simple constant-velocity estimate without adding a heavy track-history system.
+  - Repeated detections within the same day keep the previous-day track intact.
+  - System changes reset the previous snapshot to avoid cross-system extrapolation.
+
+- Core: add `contact_prediction.h` helper (header-only):
+  - `predict_contact_position(Contact, now_day, max_extrap_days)` → predicted position + estimated velocity + clamped extrapolation days.
+  - New `SimConfig::contact_prediction_max_days` to clamp stale extrapolation (default: 30 days).
+
+- Orders/Combat: smarter **lost-contact pursuit**:
+  - `issue_attack_ship()` seeds `AttackShip.last_known_position_mkm` using the predicted position (instead of the raw last-seen position) when the target is not currently detected.
+  - `tick_ships()` keeps updating `AttackShip.last_known_position_mkm` each tick while the contact remains lost, so ships continue chasing the *track* instead of a stale point forever.
+
+- UI: Intel window now shows the predicted position + estimated velocity and uses the predicted position for:
+  - Centering the system map / radar
+  - Intercept (move)
+  (Attack automatically benefits from the improved core logic.)
+
+- Save: bump save schema to **v42** and serialize optional prev-track contact fields.
+
+- Tests: add `test_contact_prediction` covering attack-order seeding + day-to-day last-known updates during lost-contact pursuit.
+
+### r54: Freight Planner (auto-freight preview + one-click apply)
+
+- Core: add `freight_planner`:
+  - Deterministic **dry-run** auto-freight style planning via `compute_freight_plan()`.
+  - Optional helpers to apply a single assignment or the whole plan (`apply_freight_assignment`, `apply_freight_plan`).
+  - Respects existing logistics rules:
+    - manual **mineral reserves**
+    - per-need dynamic reserves (via `logistics_needs_for_faction`)
+    - `auto_freight_min_transfer_tons`, `auto_freight_max_take_fraction_of_surplus`, and multi-mineral bundling.
+  - Planning is **read-only** (does not mutate colony minerals/ship cargo).
+
+- UI: add a new **Freight Planner** window (View → Freight Planner / Tools → Open Freight Planner / Status bar → Freight):
+  - Preview planned shipments per ship (From → To, cargo list, ETA + arrival D+date).
+  - Tooltips show per-item reasons when available (shipyard/construction/targets/etc).
+  - One-click **Apply** per row, or **Apply all**.
+  - Options: filter to auto-freight ships / idle ships, restrict routing to discovered systems, override bundling, max ships, clear orders before applying.
+
+- Tests: add `test_freight_planner` covering:
+  - basic plan generation
+  - reserves capping
+  - multi-mineral bundling
+  - `require_auto_freight_flag` filtering
+
+- Build: wire the new core module + UI window + test into CMake and persist `show_freight_window` in UI prefs.
+
+### r53: UI Time Warp (advance until matching event)
+
+- UI: add a new **Time Warp** window (View → Time Warp / Tools → Open Time Warp / Status bar → Warp).
+  - Runs deterministic "warp" using `Simulation::advance_until_event_hours()`.
+  - Stop conditions:
+    - event level (Info/Warn/Error)
+    - optional category filter
+    - optional message substring filter
+    - optional scope filters (faction / selected system / selected ship / selected colony)
+  - Runs incrementally in chunks per frame to keep the UI responsive (configurable `chunk_hours/frame`).
+  - On hit: optionally auto-opens **Timeline** and focuses the event; optionally focuses context (ship/colony/system) in Details/Map.
+
+- Tests: add `test_time_warp` covering `advance_until_event_hours()` stopping behavior for Info vs Warn under a Research-category filter.
+- Build: wire the new UI file + test into CMake and persist `show_time_warp_window` in UI prefs.
+
+### r52: Global Planner window (unified forecast dashboard)
+
+- Core: add `planner_events` which aggregates best-effort forecast items into a single, chronological list:
+  - Research completions (via `research_schedule`)
+  - Colony shipyard + construction completions (via `colony_schedule`)
+  - Optional ship-order ETAs (via `order_planner`, disabled by default to keep it light)
+  - Per-source and global safety caps (`max_days`, `max_items`, ship limits) with clear truncation reasons.
+
+- UI: add a new **Planner** window (View → Planner / Tools → Open Planner):
+  - Faction selector
+  - Auto-refresh (on time advance), with explicit “Refresh now” button
+  - Search + category/level filters
+  - Click an item to jump to the relevant ship/colony/system and open the right Details tab.
+
+- Tests: add `test_planner_events` to ensure deterministic ordering when multiple forecast categories complete at the same time.
+- Build: wire the new core module + test into CMake. Persist `show_planner_window` in UI prefs.
+
+### r51: Fog-of-war friendly auto-explore overhaul (survey-first + frontier scoring)
+
+- Core AI: reworks **Auto-explore** so it no longer "peeks" through unsurveyed jump points:
+  - Treats unsurveyed jump points as **unknown exits** and first issues a **MoveToPoint** to survey.
+  - Prefers transiting **surveyed** exits that are known to lead to **undiscovered systems**.
+  - If the current system has no exploration work, routes to a **frontier system** (unknown exits or known exits to undiscovered systems),
+    scoring by **frontier work** vs **ETA**.
+  - Adds per-faction **reservations** so multiple idle explorers spread across exits/frontiers in the same AI tick.
+
+- Tests: add `test_auto_explore` to lock in the new behaviour (survey-first + jump only when surveyed).
+- Build: wire the new test into CMake.
+
+### r50: Colony production forecast (construction + shipyard ETA timeline)
+
+- Core: add `colony_schedule` which simulates a simplified day-by-day economy loop for a single colony and
+  estimates completion dates for:
+  - **Shipyard queue** (tons/day, minerals per ton)
+  - **Construction queue** (CP/day, mineral costs)
+  - **Mining + industry** mineral flows (shared finite deposits on a body)
+  - New installations come online **next day** (mirrors tick ordering).
+  - Optionally simulates **installation_targets auto-queueing** (construction automation).
+
+- UI: Colony tab now includes a **Production forecast (best-effort)** section:
+  - Shows a chronological list of predicted completions as **D+days** and absolute dates.
+  - Includes toggles for shipyard/construction/auto-targets plus safety limits (max days/events).
+  - Caches results per colony + date to avoid recomputing every frame.
+
+- Tests: add `test_colony_schedule` and fix `test_order_planner` to use `content.designs`.
+- Build: wire the new core module + test into CMake.
+
+### r49: Research schedule forecast (ETA dates for active + queue)
+
+- Core: add `research_schedule` to estimate completion days for the current active research project and queue.
+  - Mirrors `Simulation::tick_research` day-level behaviour:
+    - RP is generated once per day from current colony labs.
+    - Tech-based research multipliers affect RP income starting the *next* day.
+    - Multiple techs can complete in the same day if sufficient RP is banked.
+    - Detects and reports when the queue is blocked by missing prerequisites.
+- UI: Research tab now includes a compact **Forecast** table:
+  - Shows effective **RP/day** as `base × multiplier`.
+  - Lists planned completions as **D+days** and absolute completion dates.
+  - Marks the project that was active at forecast start with `[A]`.
+- Tests: add `test_research_schedule` covering:
+  - prerequisite ordering effects
+  - multi-completion with a large RP bank
+  - multiplier techs applying from the next day
+  - queue-blocked detection
+  - active progress carryover
+- Build: wires the new core module + test into CMake.
+
+### r48: Ship order mission planner (ETA + fuel preview)
+
+- Core: add `order_planner` to simulate queued ship orders and estimate per-order **ETA** and **fuel** usage (movement, jump transits, waits, orbit durations; truncates on indefinite/combat orders).
+- UI: ship orders table now shows **ETA** and **Fuel** columns plus a compact plan summary line.
+- Tests: add `test_order_planner` covering move-to-body ETA/fuel math and jump transit system/position updates.
+- Build: wire the new core module into CMake.
+
 
 ### r47: Jump point surveys (fog-of-war route knowledge)
 

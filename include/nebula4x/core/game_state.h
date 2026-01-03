@@ -23,7 +23,7 @@ struct ContentDB {
 
 // A single save-game state.
 struct GameState {
-  int save_version{41};
+  int save_version{42};
   Date date;
 
   // Hour-of-day within the current Date (0..23).

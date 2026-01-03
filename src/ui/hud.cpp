@@ -348,6 +348,18 @@ void draw_status_bar(Simulation& sim, UIState& ui, HUDState& /*hud*/, Id& select
   ImGui::SameLine();
   if (ImGui::SmallButton("+30d")) sim.advance_days(30);
 
+  ImGui::SameLine();
+  if (ImGui::SmallButton("Freight")) ui.show_freight_window = true;
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip("Open the Freight Planner (auto-freight preview)");
+  }
+
+  ImGui::SameLine();
+  if (ImGui::SmallButton("Warp")) ui.show_time_warp_window = true;
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip("Time warp until an event matches your filter");
+  }
+
   VerticalSeparator();
 
   if (ImGui::SmallButton("Save")) {

@@ -4,6 +4,8 @@
 
 #include "core/simulation_sensors.h"
 
+#include "nebula4x/core/contact_prediction.h"
+
 #include <imgui.h>
 
 #include <algorithm>
@@ -721,6 +723,8 @@ void draw_intel_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& sele
         const auto* fac2 = find_ptr(s.factions, c.last_seen_faction_id);
         const std::int64_t now = s.date.days_since_epoch();
         const int age = (int)std::max<std::int64_t>(0, now - c.last_seen_day);
+        const auto pred = predict_contact_position(c, static_cast<int>(now), sim.cfg().contact_prediction_max_days);
+        const Vec2 pred_pos = pred.predicted_position_mkm;
 
         ImGui::SeparatorText("Selected");
         ImGui::Text("%s", c.last_seen_name.c_str());
@@ -729,6 +733,10 @@ void draw_intel_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& sele
         ImGui::TextDisabled("Age: %d days", age);
         ImGui::TextDisabled("Design: %s", c.last_seen_design_id.c_str());
         ImGui::TextDisabled("Last pos: (%.1f, %.1f) mkm", c.last_seen_position_mkm.x, c.last_seen_position_mkm.y);
+        ImGui::TextDisabled("Pred pos: (%.1f, %.1f) mkm (%dd extrap)", pred_pos.x, pred_pos.y, pred.extrapolated_days);
+        if (pred.has_velocity) {
+          ImGui::TextDisabled("Est vel: (%.2f, %.2f) mkm/day", pred.velocity_mkm_per_day.x, pred.velocity_mkm_per_day.y);
+        }
 
         if (ImGui::Button("View system map")) {
           s.selected_system = c.system_id;
@@ -742,13 +750,13 @@ void draw_intel_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& sele
           ui.request_map_tab = MapTab::System;
           ui.request_system_map_center = true;
           ui.request_system_map_center_system_id = c.system_id;
-          ui.request_system_map_center_x_mkm = c.last_seen_position_mkm.x;
-          ui.request_system_map_center_y_mkm = c.last_seen_position_mkm.y;
+          ui.request_system_map_center_x_mkm = pred_pos.x;
+          ui.request_system_map_center_y_mkm = pred_pos.y;
           ui.request_system_map_center_zoom = 0.0; // leave as-is
         }
         ImGui::SameLine();
         if (ImGui::Button("Center radar")) {
-          radar.pan_mkm = Vec2{-c.last_seen_position_mkm.x, -c.last_seen_position_mkm.y};
+          radar.pan_mkm = Vec2{-pred_pos.x, -pred_pos.y};
         }
 
         // Tactical actions (require a selected friendly ship).
@@ -760,7 +768,7 @@ void draw_intel_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& sele
               ImGui::TextDisabled("Select a ship in the same system to issue intercept/attack.");
             } else {
               if (ImGui::Button("Intercept (move)")) {
-                sim.issue_move_to_point(selected_ship, c.last_seen_position_mkm);
+                sim.issue_move_to_point(selected_ship, pred_pos);
                 ui.show_map_window = true;
                 ui.request_map_tab = MapTab::System;
               }
@@ -771,7 +779,7 @@ void draw_intel_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& sele
                 ui.request_map_tab = MapTab::System;
               }
               ImGui::SameLine();
-              ImGui::TextDisabled("(uses last known if not detected)");
+              ImGui::TextDisabled("(lead pursuit + predicted track when possible)");
             }
           }
         }

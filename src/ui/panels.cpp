@@ -18,6 +18,10 @@
 
 #include "nebula4x/core/serialization.h"
 #include "nebula4x/core/research_planner.h"
+#include "nebula4x/core/research_schedule.h"
+#include "nebula4x/core/order_planner.h"
+#include "nebula4x/core/colony_schedule.h"
+#include "nebula4x/core/ground_battle_forecast.h"
 #include "nebula4x/util/event_export.h"
 #include "nebula4x/util/file_io.h"
 #include "nebula4x/util/log.h"
@@ -381,6 +385,9 @@ void draw_main_menu(Simulation& sim, UIState& ui, char* save_path, char* load_pa
       ImGui::MenuItem("Directory (Colonies/Bodies)", nullptr, &ui.show_directory_window);
       ImGui::MenuItem("Production (Shipyard/Construction Planner)", nullptr, &ui.show_production_window);
       ImGui::MenuItem("Economy (Industry/Mining/Tech Tree)", nullptr, &ui.show_economy_window);
+      ImGui::MenuItem("Planner (Forecast Dashboard)", nullptr, &ui.show_planner_window);
+      ImGui::MenuItem("Freight Planner (Auto-freight Preview)", nullptr, &ui.show_freight_window);
+      ImGui::MenuItem("Time Warp (Until Event)", nullptr, &ui.show_time_warp_window);
       ImGui::MenuItem("Timeline (Event Timeline)", nullptr, &ui.show_timeline_window);
       ImGui::MenuItem("Design Studio (Blueprints)", nullptr, &ui.show_design_studio_window);
       ImGui::MenuItem("Intel (Contacts/Sensors)", nullptr, &ui.show_intel_window);
@@ -407,6 +414,15 @@ void draw_main_menu(Simulation& sim, UIState& ui, char* save_path, char* load_pa
       }
       if (ImGui::MenuItem("Open Production Planner")) {
         ui.show_production_window = true;
+      }
+      if (ImGui::MenuItem("Open Planner")) {
+        ui.show_planner_window = true;
+      }
+      if (ImGui::MenuItem("Open Freight Planner")) {
+        ui.show_freight_window = true;
+      }
+      if (ImGui::MenuItem("Open Time Warp")) {
+        ui.show_time_warp_window = true;
       }
       if (ImGui::MenuItem("Open Design Studio")) {
         ui.show_design_studio_window = true;
@@ -1418,15 +1434,38 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
           int move_from = -1;
           int move_to = -1;
 
-          auto& q = ship_orders->queue;
+          
+auto& q = ship_orders->queue;
+
+const auto plan = nebula4x::compute_order_plan(sim, selected_ship);
+const auto* plan_ship = find_ptr(s.ships, selected_ship);
+const auto* plan_design = plan_ship ? sim.find_design(plan_ship->design_id) : nullptr;
+const double plan_fuel_cap = plan_design ? std::max(0.0, plan_design->fuel_capacity_tons) : 0.0;
+
+if (plan.ok) {
+  if (plan.steps.empty()) {
+    ImGui::TextDisabled("Plan: (no queued orders)");
+  } else if (plan_fuel_cap > 1e-9) {
+    ImGui::TextDisabled("Plan: +%.2f d | Fuel: %.0f -> %.0f / %.0f",
+                        plan.total_eta_days, plan.start_fuel_tons, plan.end_fuel_tons, plan_fuel_cap);
+  } else {
+    ImGui::TextDisabled("Plan: +%.2f d", plan.total_eta_days);
+  }
+  if (plan.truncated) {
+    ImGui::SameLine();
+    ImGui::TextDisabled("(truncated: %s)", plan.truncated_reason.c_str());
+  }
+}
 
           ImGui::TextDisabled("Drag+drop to reorder. Tip: if repeat is ON, edits do not update the repeat template unless you sync it.");
 
           const ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
                                         ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_Resizable;
-          if (ImGui::BeginTable("ship_orders_table", 4, flags)) {
+          if (ImGui::BeginTable("ship_orders_table", 6, flags)) {
             ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, 24.0f);
             ImGui::TableSetupColumn("Order", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("ETA (d)", ImGuiTableColumnFlags_WidthFixed, 72.0f);
+            ImGui::TableSetupColumn("Fuel (t)", ImGuiTableColumnFlags_WidthFixed, 86.0f);
             ImGui::TableSetupColumn("Move", ImGuiTableColumnFlags_WidthFixed, 70.0f);
             ImGui::TableSetupColumn("Edit", ImGuiTableColumnFlags_WidthFixed, 90.0f);
             ImGui::TableHeadersRow();
@@ -1459,8 +1498,39 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
                 ImGui::EndDragDropTarget();
               }
 
-              ImGui::TableSetColumnIndex(2);
-              const bool can_up = (i > 0);
+              
+ImGui::TableSetColumnIndex(2);
+if (i < static_cast<int>(plan.steps.size())) {
+  const auto& stp = plan.steps[static_cast<std::size_t>(i)];
+  ImGui::Text("%.2f", stp.eta_days);
+  if (ImGui::IsItemHovered()) {
+    ImGui::BeginTooltip();
+    ImGui::Text("Δ %.2f d", stp.delta_days);
+    ImGui::Text("Fuel: %.0f -> %.0f t", stp.fuel_before_tons, stp.fuel_after_tons);
+    if (!stp.note.empty()) {
+      ImGui::Separator();
+      ImGui::TextUnformatted(stp.note.c_str());
+    }
+    ImGui::EndTooltip();
+  }
+} else {
+  ImGui::TextDisabled("--");
+}
+
+ImGui::TableSetColumnIndex(3);
+if (i < static_cast<int>(plan.steps.size())) {
+  const auto& stp = plan.steps[static_cast<std::size_t>(i)];
+  if (plan_fuel_cap > 1e-9) {
+    ImGui::Text("%.0f/%.0f", stp.fuel_after_tons, plan_fuel_cap);
+  } else {
+    ImGui::Text("%.0f", stp.fuel_after_tons);
+  }
+} else {
+  ImGui::TextDisabled("--");
+}
+
+ImGui::TableSetColumnIndex(4);
+const bool can_up = (i > 0);
               const bool can_down = (i + 1 < static_cast<int>(q.size()));
               if (!can_up) ImGui::BeginDisabled();
               if (ImGui::SmallButton(("Up##ship_order_up_" + std::to_string(static_cast<unsigned long long>(i))).c_str())) {
@@ -1477,7 +1547,7 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
               }
               if (!can_down) ImGui::EndDisabled();
 
-              ImGui::TableSetColumnIndex(3);
+              ImGui::TableSetColumnIndex(5);
               if (ImGui::SmallButton(("Dup##ship_order_dup_" + std::to_string(static_cast<unsigned long long>(i))).c_str())) {
                 dup_idx = i;
               }
@@ -1855,6 +1925,31 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
             ImGui::Spacing();
             ImGui::TextDisabled("This colony is not friendly.");
             ImGui::Text("Defenders: %.1f", sel_col->ground_forces);
+
+            // --- Invasion advisor (deterministic forecast) ---
+            {
+              const double forts_here = sim.fortification_points(*sel_col);
+              if (forts_here > 1e-9) ImGui::Text("Fortifications: %.1f", forts_here);
+
+              // Square-law baseline; add a small margin so players don't sit right on the knife-edge.
+              const double req = nebula4x::square_law_required_attacker_strength(
+                  sim.cfg(), sel_col->ground_forces, forts_here, 1.05);
+
+              ImGui::Text("Advisor: ~%.1f troops to win", req);
+              if (sh->troops > 1e-9) {
+                const double shortfall = std::max(0.0, req - sh->troops);
+                if (shortfall > 1e-9) {
+                  ImGui::TextDisabled("Shortfall: %.1f", shortfall);
+                }
+
+                const auto fc_now = nebula4x::forecast_ground_battle(sim.cfg(), sh->troops, sel_col->ground_forces,
+                                                                      forts_here);
+                if (fc_now.ok && !fc_now.truncated) {
+                  const char* winner = (fc_now.winner == nebula4x::GroundBattleWinner::Attacker) ? "attacker" : "defender";
+                  ImGui::TextDisabled("If invade now: %s wins in ~%d d", winner, fc_now.days_to_resolve);
+                }
+              }
+            }
 
             // --- Orbital bombardment ---
             {
@@ -2843,6 +2938,20 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
           ImGui::Text("Attacker: %.1f", b.attacker_strength);
           ImGui::Text("Defender: %.1f", b.defender_strength);
           ImGui::Text("Days: %d", b.days_fought);
+
+          const auto fc = nebula4x::forecast_ground_battle(sim.cfg(), b.attacker_strength, b.defender_strength, forts);
+          if (fc.ok) {
+            if (fc.truncated) {
+              ImGui::TextDisabled("Forecast: %s", fc.truncated_reason.c_str());
+            } else {
+              const char* winner = (fc.winner == nebula4x::GroundBattleWinner::Attacker) ? "attacker" : "defender";
+              ImGui::Text("Forecast: %s wins in ~%d d", winner, fc.days_to_resolve);
+              ImGui::Text("End: att %.1f / def %.1f", fc.attacker_end, fc.defender_end);
+              ImGui::Text("Defense bonus: %.2f", fc.defense_bonus);
+            }
+          } else {
+            ImGui::TextDisabled("Forecast: unavailable");
+          }
         }
 
         const double train_pts = sim.troop_training_points_per_day(*colony);
@@ -3298,6 +3407,131 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
         ImGui::Text("Construction");
         const double cp_per_day = sim.construction_points_per_day(*colony);
         ImGui::Text("Construction Points/day: %.1f", cp_per_day);
+
+        // --- Production forecast (best-effort) ---
+        if (ImGui::TreeNodeEx("Production forecast (best-effort)", ImGuiTreeNodeFlags_DefaultOpen)) {
+          ImGui::TextDisabled(
+              "Simulates local mining/industry + shipyard + construction day-by-day. "
+              "Does not model freight/imports or global auto-shipyard balancing.");
+
+          static int forecast_days = 3650;
+          static int forecast_max_events = 256;
+          static bool forecast_include_shipyard = true;
+          static bool forecast_include_construction = true;
+          static bool forecast_include_auto_targets = true;
+
+          static Id cached_colony_id = kInvalidId;
+          static int cached_day = -1;
+          static int cached_days = 0;
+          static int cached_max_events = 0;
+          static bool cached_shipyard = true;
+          static bool cached_construction = true;
+          static bool cached_auto_targets = true;
+          static ColonySchedule cached_sched;
+          static bool has_cached = false;
+
+          bool recompute = false;
+          if (ImGui::SmallButton("Recompute##colony_forecast")) {
+            recompute = true;
+          }
+          ImGui::SameLine();
+          ImGui::SetNextItemWidth(90.0f);
+          ImGui::InputInt("Max days##colony_forecast_days", &forecast_days);
+          ImGui::SameLine();
+          ImGui::SetNextItemWidth(90.0f);
+          ImGui::InputInt("Max events##colony_forecast_events", &forecast_max_events);
+          ImGui::Checkbox("Include shipyard##colony_forecast_shipyard", &forecast_include_shipyard);
+          ImGui::SameLine();
+          ImGui::Checkbox("Include construction##colony_forecast_construction", &forecast_include_construction);
+          ImGui::SameLine();
+          ImGui::Checkbox("Auto-build targets##colony_forecast_autotgt", &forecast_include_auto_targets);
+
+          forecast_days = std::clamp(forecast_days, 0, 36500);
+          forecast_max_events = std::clamp(forecast_max_events, 0, 4096);
+
+          const int now_day = sim.state().date.days_since_epoch();
+          if (!has_cached || recompute || cached_colony_id != colony->id || cached_day != now_day ||
+              cached_days != forecast_days || cached_max_events != forecast_max_events ||
+              cached_shipyard != forecast_include_shipyard ||
+              cached_construction != forecast_include_construction ||
+              cached_auto_targets != forecast_include_auto_targets) {
+            ColonyScheduleOptions opt;
+            opt.max_days = forecast_days;
+            opt.max_events = forecast_max_events;
+            opt.include_shipyard = forecast_include_shipyard;
+            opt.include_construction = forecast_include_construction;
+            opt.include_auto_construction_targets = forecast_include_auto_targets;
+            cached_sched = estimate_colony_schedule(sim, colony->id, opt);
+            cached_colony_id = colony->id;
+            cached_day = now_day;
+            cached_days = forecast_days;
+            cached_max_events = forecast_max_events;
+            cached_shipyard = forecast_include_shipyard;
+            cached_construction = forecast_include_construction;
+            cached_auto_targets = forecast_include_auto_targets;
+            has_cached = true;
+          }
+
+          if (!cached_sched.ok) {
+            ImGui::TextDisabled("Forecast unavailable.");
+            ImGui::TreePop();
+          } else {
+            if (cached_sched.stalled) {
+              ImGui::TextDisabled("Stalled: %s", cached_sched.stall_reason.c_str());
+            }
+            if (cached_sched.truncated) {
+              ImGui::TextDisabled("Truncated: %s", cached_sched.truncated_reason.c_str());
+            }
+
+            ImGui::TextDisabled("Rates: CP/day %.1f, Shipyard tons/day %.1f", cached_sched.construction_cp_per_day_start,
+                                cached_sched.shipyard_tons_per_day_start);
+            ImGui::TextDisabled("Multipliers: mining %.2f, industry %.2f, construction %.2f, shipyard %.2f",
+                                cached_sched.mining_multiplier, cached_sched.industry_multiplier,
+                                cached_sched.construction_multiplier, cached_sched.shipyard_multiplier);
+
+            const ImGuiTableFlags fflags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
+                                           ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_Resizable;
+            if (ImGui::BeginTable("colony_forecast_table", 5, fflags)) {
+              ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, 24.0f);
+              ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthFixed, 90.0f);
+              ImGui::TableSetupColumn("Item", ImGuiTableColumnFlags_WidthStretch);
+              ImGui::TableSetupColumn("ETA", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+              ImGui::TableSetupColumn("Date", ImGuiTableColumnFlags_WidthFixed, 110.0f);
+              ImGui::TableHeadersRow();
+
+              int idx = 0;
+              for (const auto& ev : cached_sched.events) {
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                ImGui::Text("%d", idx++);
+
+                ImGui::TableSetColumnIndex(1);
+                const char* kind = "Note";
+                if (ev.kind == ColonyScheduleEventKind::ShipyardComplete) kind = "Shipyard";
+                if (ev.kind == ColonyScheduleEventKind::ConstructionComplete) kind = "Construction";
+                ImGui::TextUnformatted(kind);
+
+                ImGui::TableSetColumnIndex(2);
+                if (ev.auto_queued) {
+                  ImGui::Text("[AUTO] %s", ev.detail.c_str());
+                } else {
+                  ImGui::TextUnformatted(ev.detail.c_str());
+                }
+
+                ImGui::TableSetColumnIndex(3);
+                ImGui::Text("D+%d", ev.day);
+
+                ImGui::TableSetColumnIndex(4);
+                const std::string date = sim.state().date.add_days(ev.day).to_string();
+                ImGui::TextUnformatted(date.c_str());
+              }
+
+              ImGui::EndTable();
+            }
+
+            ImGui::TreePop();
+          }
+        }
 
 if (colony->construction_queue.empty()) {
   ImGui::TextDisabled("Queue empty");
@@ -4313,21 +4547,61 @@ if (colony->shipyard_queue.empty()) {
           }
         }
 
-        ImGui::Separator();
-
-        // Also show a computed RP/day so players can reason about timelines.
+        // --- Research forecast (best-effort) ---
         {
-          double rp_per_day = 0.0;
-          for (const auto& [cid, col] : sim.state().colonies) {
-            if (col.faction_id != selected_faction->id) continue;
-            for (const auto& [inst_id, count] : col.installations) {
-              if (count <= 0) continue;
-              const auto it = sim.content().installations.find(inst_id);
-              if (it == sim.content().installations.end()) continue;
-              rp_per_day += it->second.research_points_per_day * static_cast<double>(count);
+          ImGui::Separator();
+          ImGui::Text("Forecast");
+
+          const auto sched = nebula4x::estimate_research_schedule(sim, selected_faction->id);
+          if (!sched.ok) {
+            ImGui::TextDisabled("(cannot compute forecast)");
+          } else {
+            ImGui::Text("RP/day: %.1f  (base %.1f × mult %.2f)",
+                        sched.effective_rp_per_day,
+                        sched.base_rp_per_day,
+                        sched.research_multiplier);
+
+            if (sched.stalled) {
+              ImGui::TextDisabled("Forecast stalled: %s", sched.stall_reason.c_str());
+            }
+            if (sched.truncated) {
+              ImGui::TextDisabled("Forecast truncated: %s", sched.truncated_reason.c_str());
+            }
+
+            if (!sched.items.empty()) {
+              const ImGuiTableFlags tf = ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingStretchProp;
+              if (ImGui::BeginTable("##research_forecast", 3, tf)) {
+                ImGui::TableSetupColumn("Tech", ImGuiTableColumnFlags_WidthStretch, 0.60f);
+                ImGui::TableSetupColumn("ETA (days)", ImGuiTableColumnFlags_WidthFixed, 0.18f);
+                ImGui::TableSetupColumn("Complete on", ImGuiTableColumnFlags_WidthStretch, 0.22f);
+                ImGui::TableHeadersRow();
+
+                for (const auto& it : sched.items) {
+                  const auto ti = sim.content().techs.find(it.tech_id);
+                  const std::string nm = (ti == sim.content().techs.end()) ? it.tech_id : ti->second.name;
+
+                  std::string label = nm;
+                  if (it.was_active_at_start) label = "[A] " + label;
+
+                  ImGui::TableNextRow();
+
+                  ImGui::TableSetColumnIndex(0);
+                  ImGui::TextUnformatted(label.c_str());
+
+                  ImGui::TableSetColumnIndex(1);
+                  ImGui::Text("D+%d", std::max(0, it.end_day));
+
+                  ImGui::TableSetColumnIndex(2);
+                  const std::string date = sim.state().date.add_days(static_cast<std::int64_t>(it.end_day)).to_string();
+                  ImGui::TextUnformatted(date.c_str());
+                }
+
+                ImGui::EndTable();
+              }
+            } else if (!sched.stalled) {
+              ImGui::TextDisabled("(no active research / queue)");
             }
           }
-          ImGui::Text("Research Points/day: %.1f", rp_per_day);
         }
 
         ImGui::Separator();

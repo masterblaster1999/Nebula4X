@@ -28,6 +28,12 @@ target_sources(nebula4x_core
     src/core/fleet_formation.cpp
     src/core/game_state.cpp
     src/core/orders.cpp
+    src/core/order_planner.cpp
+    src/core/freight_planner.cpp
+    src/core/research_schedule.cpp
+    src/core/colony_schedule.cpp
+    src/core/planner_events.cpp
+    src/core/ground_battle_forecast.cpp
     src/core/research_planner.cpp
     src/core/scenario.cpp
     src/core/simulation.cpp
@@ -138,6 +144,9 @@ if(NEBULA4X_BUILD_UI)
     src/ui/map_render.cpp
     src/ui/panels.cpp
     src/ui/economy_window.cpp
+    src/ui/planner_window.cpp
+    src/ui/freight_window.cpp
+    src/ui/time_warp_window.cpp
     src/ui/production_window.cpp
     src/ui/galaxy_map.cpp
     src/ui/system_map.cpp
@@ -177,6 +186,7 @@ if(NEBULA4X_BUILD_TESTS)
     tests/test_date.cpp
     tests/test_simulation.cpp
     tests/test_ground_ops.cpp
+    tests/test_ground_battle_forecast.cpp
     tests/test_boarding.cpp
     tests/test_colonization.cpp
     tests/test_serialization.cpp
@@ -184,6 +194,15 @@ if(NEBULA4X_BUILD_TESTS)
     tests/test_industry.cpp
     tests/test_ai_economy.cpp
     tests/test_research_planner.cpp
+    tests/test_research_schedule.cpp
+    tests/test_colony_schedule.cpp
+    tests/test_planner_events.cpp
+    tests/test_time_warp.cpp
+    tests/test_contact_prediction.cpp
+    tests/test_intercept.cpp
+    tests/test_attack_lead_pursuit.cpp
+    tests/test_sensor_coverage.cpp
+    tests/test_freight_planner.cpp
     tests/test_mineral_deposits.cpp
     tests/test_power_system.cpp
     tests/test_digests.cpp
@@ -191,7 +210,9 @@ if(NEBULA4X_BUILD_TESTS)
     tests/test_refit.cpp
     tests/test_diplomacy.cpp
     tests/test_auto_routing.cpp
+    tests/test_auto_explore.cpp
     tests/test_order_repeat.cpp
+    tests/test_order_planner.cpp
     tests/test_determinism.cpp
     tests/test_event_export.cpp
     tests/test_content_validation.cpp

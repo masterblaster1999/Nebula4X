@@ -129,7 +129,17 @@ struct SimConfig {
   double sensor_mode_passive_signature_multiplier{0.8};
   double sensor_mode_active_signature_multiplier{1.5};
 
-// Master toggle for space combat.
+  // --- Intel / contact prediction ---
+  //
+  // When a contact is lost (fog-of-war), the simulation may extrapolate
+  // a last-known position using a simple constant-velocity estimate derived
+  // from the contact's two most recent detections in the same system.
+  //
+  // To avoid chasing stale tracks forever, extrapolation is clamped to
+  // at most this many days after the last detection.
+  int contact_prediction_max_days{30};
+
+  // Master toggle for space combat.
   //
   // When disabled, tick_combat() is skipped. Ships will still move and can still
   // carry out non-combat orders; ground combat/invasions are unaffected.
@@ -922,6 +932,16 @@ bool move_construction_order(Id colony_id, int from_index, int to_index);
   std::optional<JumpRoutePlan> plan_jump_route_for_fleet_to_pos(Id fleet_id, Id target_system_id, Vec2 goal_pos_mkm,
                                                                bool restrict_to_discovered = false,
                                                                bool include_queued_jumps = false) const;
+
+  // Low-level route planning for tools/planners that already have a start position.
+  // This is a query-only helper and does not mutate game state.
+  std::optional<JumpRoutePlan> plan_jump_route_from_pos(Id start_system_id, Vec2 start_pos_mkm, Id faction_id,
+                                                       double speed_km_s, Id target_system_id,
+                                                       bool restrict_to_discovered = false,
+                                                       std::optional<Vec2> goal_pos_mkm = std::nullopt) const {
+    return plan_jump_route_cached(start_system_id, start_pos_mkm, faction_id, speed_km_s, target_system_id,
+                                 restrict_to_discovered, goal_pos_mkm);
+  }
 
 
 

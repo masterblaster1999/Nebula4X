@@ -663,6 +663,12 @@ struct Contact {
 
   // Snapshot at last detection.
   Vec2 last_seen_position_mkm{0.0, 0.0};
+
+  // Previous snapshot (for simple velocity estimation).
+  //
+  // Only populated when we have at least two detections in the same system.
+  int prev_seen_day{0};
+  Vec2 prev_seen_position_mkm{0.0, 0.0};
   std::string last_seen_name;
   std::string last_seen_design_id;
   Id last_seen_faction_id{kInvalidId};

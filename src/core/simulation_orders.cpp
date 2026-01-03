@@ -1,5 +1,7 @@
 #include "nebula4x/core/simulation.h"
 
+#include "nebula4x/core/contact_prediction.h"
+
 #include "simulation_internal.h"
 
 #include "simulation_nav_helpers.h"
@@ -1127,7 +1129,13 @@ bool Simulation::issue_attack_ship(Id attacker_ship_id, Id target_ship_id, bool 
     const auto it = fac->ship_contacts.find(target_ship_id);
     if (it == fac->ship_contacts.end()) return false;
     ord.has_last_known = true;
-    ord.last_known_position_mkm = it->second.last_seen_position_mkm;
+
+    // If we have a 2-point contact track, extrapolate a better last-known
+    // position to pursue under fog-of-war.
+    const int now = static_cast<int>(state_.date.days_since_epoch());
+    const auto pred = predict_contact_position(it->second, now, cfg_.contact_prediction_max_days);
+    ord.last_known_position_mkm = pred.predicted_position_mkm;
+
     target_system_id = it->second.system_id;
   }
 

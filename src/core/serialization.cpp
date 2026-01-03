@@ -16,7 +16,7 @@ using json::Array;
 using json::Object;
 using json::Value;
 
-constexpr int kCurrentSaveVersion = 41;
+constexpr int kCurrentSaveVersion = 42;
 
 Object ship_power_policy_to_json(const ShipPowerPolicy& p) {
   Object o;
@@ -822,6 +822,10 @@ std::string serialize_game_to_json(const GameState& s) {
       co["system_id"] = static_cast<double>(c.system_id);
       co["last_seen_day"] = static_cast<double>(c.last_seen_day);
       co["last_seen_position_mkm"] = vec2_to_json(c.last_seen_position_mkm);
+      if (c.prev_seen_day > 0) {
+        co["prev_seen_day"] = static_cast<double>(c.prev_seen_day);
+        co["prev_seen_position_mkm"] = vec2_to_json(c.prev_seen_position_mkm);
+      }
       co["last_seen_name"] = c.last_seen_name;
       co["last_seen_design_id"] = c.last_seen_design_id;
       co["last_seen_faction_id"] = static_cast<double>(c.last_seen_faction_id);
@@ -1343,6 +1347,8 @@ GameState deserialize_game_from_json(const std::string& json_text) {
         c.system_id = static_cast<Id>(co.at("system_id").int_value(kInvalidId));
         c.last_seen_day = static_cast<int>(co.at("last_seen_day").int_value(0));
         if (auto itp = co.find("last_seen_position_mkm"); itp != co.end()) c.last_seen_position_mkm = vec2_from_json(itp->second);
+        if (auto itp = co.find("prev_seen_day"); itp != co.end()) c.prev_seen_day = static_cast<int>(itp->second.int_value(0));
+        if (auto itp = co.find("prev_seen_position_mkm"); itp != co.end()) c.prev_seen_position_mkm = vec2_from_json(itp->second);
         if (auto itn = co.find("last_seen_name"); itn != co.end()) c.last_seen_name = itn->second.string_value();
         if (auto itd = co.find("last_seen_design_id"); itd != co.end()) c.last_seen_design_id = itd->second.string_value();
         if (auto itf = co.find("last_seen_faction_id"); itf != co.end()) c.last_seen_faction_id = static_cast<Id>(itf->second.int_value(kInvalidId));

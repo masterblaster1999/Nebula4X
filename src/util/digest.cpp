@@ -582,6 +582,8 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
       d.add_u64(c.system_id);
       d.add_i64(c.last_seen_day);
       hash_vec2(d, c.last_seen_position_mkm);
+      d.add_i64(c.prev_seen_day);
+      hash_vec2(d, c.prev_seen_position_mkm);
       d.add_string(c.last_seen_name);
       d.add_string(c.last_seen_design_id);
       d.add_u64(c.last_seen_faction_id);

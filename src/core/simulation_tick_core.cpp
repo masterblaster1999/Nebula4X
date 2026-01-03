@@ -406,7 +406,27 @@ void Simulation::tick_contacts(bool emit_contact_lost_events) {
       was_stale = (it->second.last_seen_day < now - 1);
     }
 
+    // Update contact memory.
+    //
+    // We keep a 2-point track (prev/last) to support simple constant-velocity
+    // extrapolation for fog-of-war pursuit.
     Contact c;
+    if (auto it = fac->ship_contacts.find(det.ship_id); it != fac->ship_contacts.end()) {
+      c = it->second;
+
+      // If the contact changed systems since the last detection, reset the
+      // previous snapshot (coordinate frame changed).
+      if (c.system_id != sh->system_id) {
+        c.prev_seen_day = 0;
+        c.prev_seen_position_mkm = Vec2{0.0, 0.0};
+      } else if (c.last_seen_day > 0 && c.last_seen_day < now) {
+        // Shift last -> prev only once per day, so repeated detections within
+        // the same day don't destroy a useful day-over-day velocity estimate.
+        c.prev_seen_day = c.last_seen_day;
+        c.prev_seen_position_mkm = c.last_seen_position_mkm;
+      }
+    }
+
     c.ship_id = det.ship_id;
     c.system_id = sh->system_id;
     c.last_seen_day = now;

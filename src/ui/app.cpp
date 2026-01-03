@@ -14,6 +14,9 @@
 #include "nebula4x/util/file_io.h"
 #include "ui/panels.h"
 #include "ui/economy_window.h"
+#include "ui/planner_window.h"
+#include "ui/freight_window.h"
+#include "ui/time_warp_window.h"
 #include "ui/production_window.h"
 #include "ui/galaxy_map.h"
 #include "ui/system_map.h"
@@ -191,6 +194,9 @@ void App::frame() {
   if (ui_.show_directory_window) draw_directory_window(sim_, ui_, selected_colony_, selected_body_);
   if (ui_.show_production_window) draw_production_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   if (ui_.show_economy_window) draw_economy_window(sim_, ui_, selected_colony_, selected_body_);
+  if (ui_.show_planner_window) draw_planner_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  if (ui_.show_freight_window) draw_freight_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  if (ui_.show_time_warp_window) draw_time_warp_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   if (ui_.show_timeline_window) draw_timeline_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   if (ui_.show_design_studio_window) {
     draw_design_studio_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
@@ -569,6 +575,22 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       if (auto it = obj->find("show_selected_sensor_range"); it != obj->end()) {
         ui_.show_selected_sensor_range = it->second.bool_value(ui_.show_selected_sensor_range);
       }
+      if (auto it = obj->find("show_faction_sensor_coverage"); it != obj->end()) {
+        ui_.show_faction_sensor_coverage = it->second.bool_value(ui_.show_faction_sensor_coverage);
+      }
+      if (auto it = obj->find("faction_sensor_coverage_fill"); it != obj->end()) {
+        ui_.faction_sensor_coverage_fill = it->second.bool_value(ui_.faction_sensor_coverage_fill);
+      }
+      if (auto it = obj->find("faction_sensor_coverage_signature"); it != obj->end()) {
+        ui_.faction_sensor_coverage_signature =
+            static_cast<float>(it->second.number_value(ui_.faction_sensor_coverage_signature));
+      }
+      if (auto it = obj->find("faction_sensor_coverage_max_sources"); it != obj->end()) {
+        ui_.faction_sensor_coverage_max_sources =
+            static_cast<int>(it->second.number_value(ui_.faction_sensor_coverage_max_sources));
+      }
+      ui_.faction_sensor_coverage_signature = std::clamp(ui_.faction_sensor_coverage_signature, 0.05f, 100.0f);
+      ui_.faction_sensor_coverage_max_sources = std::clamp(ui_.faction_sensor_coverage_max_sources, 1, 4096);
       if (auto it = obj->find("show_contact_markers"); it != obj->end()) {
         ui_.show_contact_markers = it->second.bool_value(ui_.show_contact_markers);
       }
@@ -619,6 +641,15 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       if (auto it = obj->find("show_economy_window"); it != obj->end()) {
         ui_.show_economy_window = it->second.bool_value(ui_.show_economy_window);
       }
+      if (auto it = obj->find("show_planner_window"); it != obj->end()) {
+        ui_.show_planner_window = it->second.bool_value(ui_.show_planner_window);
+      }
+      if (auto it = obj->find("show_freight_window"); it != obj->end()) {
+        ui_.show_freight_window = it->second.bool_value(ui_.show_freight_window);
+      }
+      if (auto it = obj->find("show_time_warp_window"); it != obj->end()) {
+        ui_.show_time_warp_window = it->second.bool_value(ui_.show_time_warp_window);
+      }
       if (auto it = obj->find("show_timeline_window"); it != obj->end()) {
         ui_.show_timeline_window = it->second.bool_value(ui_.show_timeline_window);
       }
@@ -655,7 +686,7 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     }
 
     nebula4x::json::Object o;
-    o["version"] = 10.0;
+    o["version"] = 12.0;
 
     // Theme.
     o["clear_color"] = color_to_json(ui_.clear_color);
@@ -735,6 +766,10 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
 
     // Map intel/exploration toggles.
     o["show_selected_sensor_range"] = ui_.show_selected_sensor_range;
+    o["show_faction_sensor_coverage"] = ui_.show_faction_sensor_coverage;
+    o["faction_sensor_coverage_fill"] = ui_.faction_sensor_coverage_fill;
+    o["faction_sensor_coverage_signature"] = static_cast<double>(ui_.faction_sensor_coverage_signature);
+    o["faction_sensor_coverage_max_sources"] = static_cast<double>(ui_.faction_sensor_coverage_max_sources);
     o["show_contact_markers"] = ui_.show_contact_markers;
     o["show_contact_labels"] = ui_.show_contact_labels;
     o["show_minor_bodies"] = ui_.show_minor_bodies;
@@ -752,6 +787,9 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     o["show_directory_window"] = ui_.show_directory_window;
     o["show_production_window"] = ui_.show_production_window;
     o["show_economy_window"] = ui_.show_economy_window;
+    o["show_planner_window"] = ui_.show_planner_window;
+    o["show_freight_window"] = ui_.show_freight_window;
+    o["show_time_warp_window"] = ui_.show_time_warp_window;
     o["show_timeline_window"] = ui_.show_timeline_window;
     o["show_design_studio_window"] = ui_.show_design_studio_window;
     o["show_intel_window"] = ui_.show_intel_window;
@@ -816,6 +854,9 @@ void App::reset_window_layout_defaults() {
   ui_.show_directory_window = true;
   ui_.show_production_window = false;
   ui_.show_economy_window = false;
+  ui_.show_planner_window = false;
+  ui_.show_freight_window = false;
+  ui_.show_time_warp_window = false;
   ui_.show_timeline_window = false;
   ui_.show_design_studio_window = false;
   ui_.show_intel_window = false;

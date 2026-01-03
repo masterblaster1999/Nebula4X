@@ -388,6 +388,108 @@ void Simulation::tick_ai() {
     return issue_colonize_body(ship_id, best_body_id, /*colony_name=*/"", /*restrict_to_discovered=*/true);
   };
 
+  // --- Auto-explore ---
+  //
+  // Strategy:
+  // - Never "peek" through unsurveyed jump points. Treat them as unknown exits and
+  //   move to them first to survey (fog-of-war friendly).
+  // - Prefer transiting through *surveyed* jump points that lead to undiscovered systems.
+  // - If the current system has no exploration work, route to a frontier system:
+  //   a discovered system that still has unknown exits or known exits to undiscovered systems.
+  //
+  // Coordination:
+  // - Maintain per-faction reservations so multiple idle auto-explore ships will
+  //   spread across different exits/frontiers in the same AI tick.
+  struct ExploreFrontierInfo {
+    Id system_id = kInvalidId;
+    int unknown_exits = 0;
+    int known_exits_to_undiscovered = 0;
+
+    int weight() const { return unknown_exits + known_exits_to_undiscovered * 2; }
+    bool is_frontier() const { return (unknown_exits + known_exits_to_undiscovered) > 0; }
+  };
+
+  struct ExploreFactionCache {
+    std::unordered_set<Id> discovered;
+    std::unordered_set<Id> surveyed;
+    std::vector<ExploreFrontierInfo> frontiers;  // deterministic order (system_id ascending)
+  };
+
+  std::unordered_map<Id, ExploreFactionCache> explore_cache;
+  explore_cache.reserve(faction_ids.size() * 2 + 8);
+
+  for (Id fid : faction_ids) {
+    const auto* fac = find_ptr(state_.factions, fid);
+    if (!fac) continue;
+
+    ExploreFactionCache c;
+    c.discovered.reserve(fac->discovered_systems.size() * 2 + 8);
+    for (Id sid : fac->discovered_systems) {
+      if (sid != kInvalidId) c.discovered.insert(sid);
+    }
+
+    c.surveyed.reserve(fac->surveyed_jump_points.size() * 2 + 8);
+    for (Id jid : fac->surveyed_jump_points) {
+      if (jid != kInvalidId) c.surveyed.insert(jid);
+    }
+
+    // Build deterministic frontier list.
+    std::vector<Id> sys_ids;
+    sys_ids.reserve(c.discovered.size());
+    for (Id sid : c.discovered) sys_ids.push_back(sid);
+    std::sort(sys_ids.begin(), sys_ids.end());
+
+    for (Id sys_id : sys_ids) {
+      const auto* sys = find_ptr(state_.systems, sys_id);
+      if (!sys) continue;
+
+      ExploreFrontierInfo info;
+      info.system_id = sys_id;
+
+      // Deterministic scan (stable even if sys->jump_points is unsorted).
+      std::vector<Id> jps = sys->jump_points;
+      std::sort(jps.begin(), jps.end());
+
+      for (Id jp_id : jps) {
+        if (jp_id == kInvalidId) continue;
+        const auto* jp = find_ptr(state_.jump_points, jp_id);
+        if (!jp || jp->linked_jump_id == kInvalidId) continue;
+
+        if (!c.surveyed.contains(jp_id)) {
+          info.unknown_exits += 1;
+          continue;
+        }
+
+        const auto* other = find_ptr(state_.jump_points, jp->linked_jump_id);
+        if (!other) continue;
+        const Id dest_sys = other->system_id;
+        if (dest_sys == kInvalidId) continue;
+
+        if (!c.discovered.contains(dest_sys)) info.known_exits_to_undiscovered += 1;
+      }
+
+      if (info.is_frontier()) c.frontiers.push_back(info);
+    }
+
+    explore_cache.emplace(fid, std::move(c));
+  }
+
+  std::unordered_map<Id, std::unordered_set<Id>> reserved_explore_jump_targets;
+  reserved_explore_jump_targets.reserve(faction_ids.size() * 2 + 8);
+
+  std::unordered_map<Id, std::unordered_set<Id>> reserved_explore_frontier_targets;
+  reserved_explore_frontier_targets.reserve(faction_ids.size() * 2 + 8);
+
+  // A system-level ETA helper (no specific goal position; just "get into the system").
+  auto estimate_eta_days_to_system = [&](Id start_system_id, Vec2 start_pos_mkm, Id fid, double speed_km_s,
+                                        Id goal_system_id) -> double {
+    if (speed_km_s <= 0.0) return std::numeric_limits<double>::infinity();
+    const auto plan = plan_jump_route_cached(start_system_id, start_pos_mkm, fid, speed_km_s, goal_system_id,
+                                            /*restrict_to_discovered=*/true, std::nullopt);
+    if (!plan) return std::numeric_limits<double>::infinity();
+    return plan->total_eta_days;
+  };
+
   auto issue_auto_explore = [&](Id ship_id) -> bool {
     Ship* ship = find_ptr(state_.ships, ship_id);
     if (!ship) return false;
@@ -402,79 +504,111 @@ void Simulation::tick_ai() {
     const auto* sys = find_ptr(state_.systems, ship->system_id);
     if (!sys) return false;
 
+    const auto it_cache = explore_cache.find(fid);
+    const ExploreFactionCache* cache = (it_cache != explore_cache.end()) ? &it_cache->second : nullptr;
+
+    auto& reserved_jumps = reserved_explore_jump_targets[fid];
+    auto& reserved_frontiers = reserved_explore_frontier_targets[fid];
+
     std::vector<Id> jps = sys->jump_points;
     std::sort(jps.begin(), jps.end());
 
-    // If we have an undiscovered neighbor, jump now.
+    // (A) Prefer surveyed exits that are known to lead to undiscovered systems.
+    Id best_jump = kInvalidId;
+    double best_dist = std::numeric_limits<double>::infinity();
     for (Id jp_id : jps) {
+      if (jp_id == kInvalidId) continue;
+      if (reserved_jumps.contains(jp_id)) continue;
+
+      if (cache && !cache->surveyed.contains(jp_id)) continue;
+
       const JumpPoint* jp = find_ptr(state_.jump_points, jp_id);
       if (!jp) continue;
       const JumpPoint* other = find_ptr(state_.jump_points, jp->linked_jump_id);
       if (!other) continue;
+
       const Id dest_sys = other->system_id;
       if (dest_sys == kInvalidId) continue;
-      if (!is_system_discovered_by_faction(fid, dest_sys)) {
-        issue_travel_via_jump(ship_id, jp_id);
-        return true;
+
+      const bool dest_known = cache ? cache->discovered.contains(dest_sys)
+                                    : is_system_discovered_by_faction(fid, dest_sys);
+      if (dest_known) continue;
+
+      const double dist = (ship->position_mkm - jp->position_mkm).length();
+      if (best_jump == kInvalidId || dist + 1e-9 < best_dist ||
+          (std::abs(dist - best_dist) <= 1e-9 && jp_id < best_jump)) {
+        best_jump = jp_id;
+        best_dist = dist;
       }
     }
 
-    // Otherwise, route to the nearest *discovered* frontier system (one jump away from an undiscovered neighbor).
-    std::unordered_set<Id> visited;
-    std::queue<Id> q;
-    visited.insert(ship->system_id);
-    q.push(ship->system_id);
+    if (best_jump != kInvalidId) {
+      reserved_jumps.insert(best_jump);
+      issue_travel_via_jump(ship_id, best_jump);
+      return true;
+    }
 
-    Id frontier = kInvalidId;
+    // (B) Survey unknown exits (move to the jump point, but do NOT automatically transit).
+    Id best_survey = kInvalidId;
+    double best_survey_dist = std::numeric_limits<double>::infinity();
+    Vec2 best_survey_pos = Vec2{};
+    for (Id jp_id : jps) {
+      if (jp_id == kInvalidId) continue;
+      if (reserved_jumps.contains(jp_id)) continue;
 
-    while (!q.empty()) {
-      const Id cur = q.front();
-      q.pop();
+      const bool surveyed = cache ? cache->surveyed.contains(jp_id) : is_jump_point_surveyed_by_faction(fid, jp_id);
+      if (surveyed) continue;
 
-      const auto* cs = find_ptr(state_.systems, cur);
-      if (!cs) continue;
+      const JumpPoint* jp = find_ptr(state_.jump_points, jp_id);
+      if (!jp) continue;
 
-      std::vector<Id> cs_jps = cs->jump_points;
-      std::sort(cs_jps.begin(), cs_jps.end());
-
-      bool is_frontier = false;
-      for (Id jp_id : cs_jps) {
-        const JumpPoint* jp = find_ptr(state_.jump_points, jp_id);
-        if (!jp) continue;
-        const JumpPoint* other = find_ptr(state_.jump_points, jp->linked_jump_id);
-        if (!other) continue;
-        const Id dest_sys = other->system_id;
-        if (dest_sys == kInvalidId) continue;
-        if (!is_system_discovered_by_faction(fid, dest_sys)) {
-          is_frontier = true;
-          break;
-        }
-      }
-
-      if (is_frontier) {
-        frontier = cur;
-        break;
-      }
-
-      for (Id jp_id : cs_jps) {
-        const JumpPoint* jp = find_ptr(state_.jump_points, jp_id);
-        if (!jp) continue;
-        const JumpPoint* other = find_ptr(state_.jump_points, jp->linked_jump_id);
-        if (!other) continue;
-        const Id dest_sys = other->system_id;
-        if (dest_sys == kInvalidId) continue;
-        if (!is_system_discovered_by_faction(fid, dest_sys)) continue;
-        if (visited.insert(dest_sys).second) q.push(dest_sys);
+      const double dist = (ship->position_mkm - jp->position_mkm).length();
+      if (best_survey == kInvalidId || dist + 1e-9 < best_survey_dist ||
+          (std::abs(dist - best_survey_dist) <= 1e-9 && jp_id < best_survey)) {
+        best_survey = jp_id;
+        best_survey_dist = dist;
+        best_survey_pos = jp->position_mkm;
       }
     }
 
-    if (frontier != kInvalidId && frontier != ship->system_id) {
-      return issue_travel_to_system(ship_id, frontier, true);
+    if (best_survey != kInvalidId) {
+      reserved_jumps.insert(best_survey);
+      issue_move_to_point(ship_id, best_survey_pos);
+      return true;
+    }
+
+    // (C) No work here. Route to the best frontier system.
+    if (!cache) return false;
+
+    Id best_frontier = kInvalidId;
+    double best_score = -std::numeric_limits<double>::infinity();
+
+    for (const auto& fr : cache->frontiers) {
+      const Id sys_id = fr.system_id;
+      if (sys_id == kInvalidId) continue;
+      if (sys_id == ship->system_id) continue;
+      if (reserved_frontiers.contains(sys_id)) continue;
+
+      const double eta = estimate_eta_days_to_system(ship->system_id, ship->position_mkm, fid, ship->speed_km_s, sys_id);
+      if (!std::isfinite(eta)) continue;
+
+      // Score: more frontier work is better; ETA is worse.
+      const double score = static_cast<double>(fr.weight()) * 1000.0 - eta * 10.0;
+
+      if (best_frontier == kInvalidId || score > best_score + 1e-9 ||
+          (std::abs(score - best_score) <= 1e-9 && sys_id < best_frontier)) {
+        best_frontier = sys_id;
+        best_score = score;
+      }
+    }
+
+    if (best_frontier != kInvalidId) {
+      reserved_frontiers.insert(best_frontier);
+      return issue_travel_to_system(ship_id, best_frontier, /*restrict_to_discovered=*/true);
     }
 
     return false;
   };
-
   // --- Ship-level automation: Auto-refuel (fuel safety) ---
   for (Id sid : ship_ids) {
     Ship* sh = find_ptr(state_.ships, sid);
