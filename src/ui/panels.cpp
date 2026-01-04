@@ -25,11 +25,14 @@
 #include "nebula4x/util/event_export.h"
 #include "nebula4x/util/file_io.h"
 #include "nebula4x/util/log.h"
+#include "nebula4x/util/sorted_keys.h"
 #include "nebula4x/util/strings.h"
 #include "nebula4x/util/time.h"
 
 namespace nebula4x::ui {
 namespace {
+
+using nebula4x::util::sorted_keys;
 
 bool case_insensitive_contains(const std::string& haystack, const char* needle_cstr) {
   if (!needle_cstr) return true;

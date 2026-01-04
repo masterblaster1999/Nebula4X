@@ -265,6 +265,7 @@ struct CompDraw {
   double mass_tons{0.0};
   double power_out{0.0};
   double power_use{0.0};
+  double mining_tpd{0.0};
   double hp_bonus{0.0};
   double shield_hp{0.0};
   double weapon_dmg{0.0};
@@ -615,6 +616,7 @@ void draw_design_studio_window(Simulation& sim, UIState& ui, Id& selected_ship, 
               cd.mass_tons = c.mass_tons;
               cd.power_out = c.power_output;
               cd.power_use = c.power_use;
+              cd.mining_tpd = c.mining_tons_per_day;
               cd.hp_bonus = c.hp_bonus;
               cd.shield_hp = c.shield_hp;
               cd.weapon_dmg = c.weapon_damage;

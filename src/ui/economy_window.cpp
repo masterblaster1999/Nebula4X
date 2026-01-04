@@ -14,22 +14,13 @@
 #include <vector>
 
 #include "nebula4x/core/research_planner.h"
+#include "nebula4x/util/sorted_keys.h"
 #include "nebula4x/util/strings.h"
 
 namespace nebula4x::ui {
 namespace {
 
-// Many core containers are stored as std::unordered_map for convenience.
-// Iteration order of unordered_map is not specified, so relying on it can
-// introduce cross-platform nondeterminism in UI ordering.
-template <typename Map>
-std::vector<typename Map::key_type> sorted_keys(const Map& m) {
-  std::vector<typename Map::key_type> keys;
-  keys.reserve(m.size());
-  for (const auto& [k, _] : m) keys.push_back(k);
-  std::sort(keys.begin(), keys.end());
-  return keys;
-}
+using nebula4x::util::sorted_keys;
 
 // ImGui expects UTF-8 in `const char*`, but C++20 `u8"..."` literals are `const char8_t*`.
 // This helper bridges the type gap without changing the underlying byte sequence.

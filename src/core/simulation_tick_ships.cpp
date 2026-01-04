@@ -1313,6 +1313,7 @@ void Simulation::tick_ships(double dt_days) {
     };
 
     auto mining_order_complete = [&](double mined_this_tick) {
+      (void)mined_this_tick;
       if (!mine_ord) return true;
 
       const auto* d = find_design(ship.design_id);
