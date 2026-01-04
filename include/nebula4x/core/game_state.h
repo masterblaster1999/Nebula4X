@@ -15,6 +15,13 @@ namespace nebula4x {
 
 // Static content loaded from JSON files.
 struct ContentDB {
+  // Optional resource catalog (minerals/materials).
+  //
+  // When empty, the simulation will still function with ad-hoc string keys
+  // in stockpiles/cargo/deposits; the catalog is mainly used for UI grouping
+  // and for validating content files.
+  std::unordered_map<std::string, ResourceDef> resources;
+
   std::unordered_map<std::string, ComponentDef> components;
   std::unordered_map<std::string, ShipDesign> designs;
   std::unordered_map<std::string, InstallationDef> installations;

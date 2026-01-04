@@ -355,6 +355,12 @@ void draw_status_bar(Simulation& sim, UIState& ui, HUDState& /*hud*/, Id& select
   }
 
   ImGui::SameLine();
+  if (ImGui::SmallButton("Fuel")) ui.show_fuel_window = true;
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip("Open the Fuel Planner (auto-tanker preview)");
+  }
+
+  ImGui::SameLine();
   if (ImGui::SmallButton("Warp")) ui.show_time_warp_window = true;
   if (ImGui::IsItemHovered()) {
     ImGui::SetTooltip("Time warp until an event matches your filter");

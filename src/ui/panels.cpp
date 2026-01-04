@@ -387,6 +387,7 @@ void draw_main_menu(Simulation& sim, UIState& ui, char* save_path, char* load_pa
       ImGui::MenuItem("Economy (Industry/Mining/Tech Tree)", nullptr, &ui.show_economy_window);
       ImGui::MenuItem("Planner (Forecast Dashboard)", nullptr, &ui.show_planner_window);
       ImGui::MenuItem("Freight Planner (Auto-freight Preview)", nullptr, &ui.show_freight_window);
+      ImGui::MenuItem("Fuel Planner (Auto-tanker Preview)", nullptr, &ui.show_fuel_window);
       ImGui::MenuItem("Time Warp (Until Event)", nullptr, &ui.show_time_warp_window);
       ImGui::MenuItem("Timeline (Event Timeline)", nullptr, &ui.show_timeline_window);
       ImGui::MenuItem("Design Studio (Blueprints)", nullptr, &ui.show_design_studio_window);
@@ -420,6 +421,9 @@ void draw_main_menu(Simulation& sim, UIState& ui, char* save_path, char* load_pa
       }
       if (ImGui::MenuItem("Open Freight Planner")) {
         ui.show_freight_window = true;
+      }
+      if (ImGui::MenuItem("Open Fuel Planner")) {
+        ui.show_fuel_window = true;
       }
       if (ImGui::MenuItem("Open Time Warp")) {
         ui.show_time_warp_window = true;
@@ -1215,6 +1219,7 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
           if (sh->auto_explore) {
             sh->auto_freight = false;
             sh->auto_salvage = false;
+            sh->auto_mine = false;
             sh->auto_colonize = false;
             sh->auto_tanker = false;
           }
@@ -1231,6 +1236,7 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
           if (sh->auto_freight) {
             sh->auto_explore = false;
             sh->auto_salvage = false;
+            sh->auto_mine = false;
             sh->auto_colonize = false;
             sh->auto_tanker = false;
           }
@@ -1252,6 +1258,7 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
           if (sh->auto_salvage) {
             sh->auto_explore = false;
             sh->auto_freight = false;
+            sh->auto_mine = false;
             sh->auto_colonize = false;
             sh->auto_tanker = false;
           }
@@ -1267,6 +1274,107 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
           ImGui::TextDisabled("(requires a cargo hold)");
         }
 
+        const bool can_auto_mine = (d && d->cargo_tons > 0.0 && d->mining_tons_per_day > 0.0);
+        if (!can_auto_mine) ImGui::BeginDisabled();
+        if (ImGui::Checkbox("Auto-mine deposits when idle", &sh->auto_mine)) {
+          if (sh->auto_mine) {
+            sh->auto_explore = false;
+            sh->auto_freight = false;
+            sh->auto_salvage = false;
+            sh->auto_colonize = false;
+            sh->auto_tanker = false;
+          }
+        }
+        if (ImGui::IsItemHovered()) {
+          ImGui::SetTooltip(
+              "When enabled, this ship will automatically mine the best known deposit in your discovered map\n"
+              "whenever it is idle, then deliver its cargo to a friendly colony when full.");
+        }
+
+        if (can_auto_mine && sh->auto_mine) {
+          // Home colony selector.
+          std::string home_label = "Nearest";
+          if (sh->auto_mine_home_colony_id != kInvalidId) {
+            if (const Colony* hc = find_ptr(s.colonies, sh->auto_mine_home_colony_id)) {
+              home_label = hc->name;
+            }
+          }
+          if (ImGui::BeginCombo("Mining home colony", home_label.c_str())) {
+            const bool nearest_selected = (sh->auto_mine_home_colony_id == kInvalidId);
+            if (ImGui::Selectable("Nearest", nearest_selected)) {
+              sh->auto_mine_home_colony_id = kInvalidId;
+            }
+            if (nearest_selected) ImGui::SetItemDefaultFocus();
+
+            for (Id cid : sorted_keys(s.colonies)) {
+              const Colony* c = find_ptr(s.colonies, cid);
+              if (!c) continue;
+              if (c->faction_id != sh->faction_id) continue;
+              const bool selected = (sh->auto_mine_home_colony_id == cid);
+              std::string label = c->name + "##minehome_" + std::to_string(static_cast<std::uint64_t>(cid));
+              if (ImGui::Selectable(label.c_str(), selected)) {
+                sh->auto_mine_home_colony_id = cid;
+              }
+              if (selected) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+          }
+
+          // Mineral filter selector.
+          const auto& res = sim.content().resources;
+          std::vector<std::string> mineable;
+          if (!res.empty()) {
+            mineable.reserve(res.size());
+            for (const auto& [id, def] : res) {
+              if (!def.mineable) continue;
+              if (id == "Fuel") continue;
+              mineable.push_back(id);
+            }
+            std::sort(mineable.begin(), mineable.end());
+          } else {
+            mineable = {"Boronide", "Corbomite", "Corundium", "Duranium", "Gallicite", "Mercassium",
+                        "Neutronium", "Sorium", "Tritanium", "Uridium", "Vendarite"};
+          }
+
+          auto mineral_label = [&]() -> std::string {
+            if (sh->auto_mine_mineral.empty()) return "(All minerals)";
+            if (!res.empty()) {
+              if (auto it = res.find(sh->auto_mine_mineral); it != res.end() && !it->second.name.empty()) {
+                return it->second.name;
+              }
+            }
+            return sh->auto_mine_mineral;
+          }();
+
+          if (ImGui::BeginCombo("Mining target mineral", mineral_label.c_str())) {
+            const bool all_selected = sh->auto_mine_mineral.empty();
+            if (ImGui::Selectable("(All minerals)", all_selected)) {
+              sh->auto_mine_mineral.clear();
+            }
+            if (all_selected) ImGui::SetItemDefaultFocus();
+
+            for (const auto& id : mineable) {
+              const bool selected = (sh->auto_mine_mineral == id);
+              std::string label = id;
+              if (!res.empty()) {
+                if (auto it = res.find(id); it != res.end() && !it->second.name.empty()) label = it->second.name;
+              }
+              label += "##mine_mineral_" + id;
+              if (ImGui::Selectable(label.c_str(), selected)) {
+                sh->auto_mine_mineral = id;
+              }
+              if (selected) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+          }
+        }
+
+        if (!can_auto_mine) {
+          ImGui::EndDisabled();
+          ImGui::SameLine();
+          ImGui::TextDisabled("(requires mining gear + cargo hold)");
+        }
+
         const bool can_auto_colonize = (d && d->colony_capacity_millions > 0.0);
         if (!can_auto_colonize) ImGui::BeginDisabled();
         if (ImGui::Checkbox("Auto-colonize when idle", &sh->auto_colonize)) {
@@ -1274,6 +1382,7 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
             sh->auto_explore = false;
             sh->auto_freight = false;
             sh->auto_salvage = false;
+            sh->auto_mine = false;
             sh->auto_tanker = false;
           }
         }
@@ -1330,6 +1439,7 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
             sh->auto_explore = false;
             sh->auto_freight = false;
             sh->auto_salvage = false;
+            sh->auto_mine = false;
             sh->auto_colonize = false;
             sh->auto_tanker_reserve_fraction =
                 std::clamp(sh->auto_tanker_reserve_fraction, 0.0, 1.0);

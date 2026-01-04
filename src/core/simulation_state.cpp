@@ -99,6 +99,7 @@ bool Simulation::upsert_custom_design(ShipDesign design, std::string* error) {
   double fuel_cap = 0.0;
   double fuel_use = 0.0;
   double cargo = 0.0;
+  double mining_rate = 0.0;
   double sensor = 0.0;
   double colony_cap = 0.0;
   double troop_cap = 0.0;
@@ -143,6 +144,7 @@ bool Simulation::upsert_custom_design(ShipDesign design, std::string* error) {
     fuel_cap += c.fuel_capacity_tons;
     fuel_use += c.fuel_use_per_mkm;
     cargo += c.cargo_tons;
+    mining_rate += c.mining_tons_per_day;
     sensor = std::max(sensor, c.sensor_range_mkm);
     colony_cap += c.colony_capacity_millions;
     troop_cap += c.troop_capacity;
@@ -195,6 +197,7 @@ bool Simulation::upsert_custom_design(ShipDesign design, std::string* error) {
   design.fuel_capacity_tons = fuel_cap;
   design.fuel_use_per_mkm = fuel_use;
   design.cargo_tons = cargo;
+  design.mining_tons_per_day = mining_rate;
   design.sensor_range_mkm = sensor;
   design.colony_capacity_millions = colony_cap;
   design.troop_capacity = troop_cap;

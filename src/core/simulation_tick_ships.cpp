@@ -579,6 +579,13 @@ void Simulation::tick_ships(double dt_days) {
     std::string salvage_mineral;
     double salvage_tons = 0.0;
 
+    // Mobile mining ops (body -> ship cargo)
+    bool is_mining_op = false;
+    MineBody* mine_ord = nullptr;
+    Id mine_body_id = kInvalidId;
+    std::string mine_mineral;
+    bool mine_stop_when_full = true;
+
     // Fuel transfer ops (ship-to-ship refueling)
     bool is_fuel_transfer_op = false;
     TransferFuelToShip* fuel_transfer_ord = nullptr;
@@ -827,6 +834,21 @@ void Simulation::tick_ships(double dt_days) {
       if (!colony || !are_factions_mutual_friendly(ship.faction_id, colony->faction_id)) { q.erase(q.begin()); continue; }
       const auto* body = find_ptr(state_.bodies, colony->body_id);
       if (!body || body->system_id != ship.system_id) { q.erase(q.begin()); continue; }
+      target = body->position_mkm;
+    } else if (std::holds_alternative<MineBody>(q.front())) {
+      auto& ord = std::get<MineBody>(q.front());
+      is_mining_op = true;
+      mine_ord = &ord;
+      mine_body_id = ord.body_id;
+      mine_mineral = ord.mineral;
+      mine_stop_when_full = ord.stop_when_cargo_full;
+
+      const auto* body = find_ptr(state_.bodies, mine_body_id);
+      if (!body || body->system_id != ship.system_id) { q.erase(q.begin()); continue; }
+
+      const auto* d = find_design(ship.design_id);
+      if (!d || d->mining_tons_per_day <= 0.0 || d->cargo_tons <= 0.0) { q.erase(q.begin()); continue; }
+
       target = body->position_mkm;
     } else if (std::holds_alternative<LoadTroops>(q.front())) {
       auto& ord = std::get<LoadTroops>(q.front());
@@ -1206,6 +1228,131 @@ void Simulation::tick_ships(double dt_days) {
       return false;
     };
 
+    // Mobile mining moves minerals from a body's deposits into this ship's cargo holds.
+    auto do_body_mining = [&]() -> double {
+      if (mine_body_id == kInvalidId) return 0.0;
+      auto* body = find_ptr(state_.bodies, mine_body_id);
+      if (!body) return 0.0;
+      if (body->system_id != ship.system_id) return 0.0;
+
+      const auto* d = find_design(ship.design_id);
+      if (!d) return 0.0;
+
+      // Base mining rate (tons/day) from design; apply faction mining multiplier if present.
+      double rate_per_day = std::max(0.0, d->mining_tons_per_day);
+      if (const auto* fac = find_ptr(state_.factions, ship.faction_id)) {
+        const auto mult = sim_internal::compute_faction_economy_multipliers(content_, *fac);
+        rate_per_day *= std::max(0.0, mult.mining);
+      }
+
+      if (rate_per_day <= 1e-12) return 0.0;
+
+      const double cap = std::max(0.0, d->cargo_tons);
+      const double free = std::max(0.0, cap - cargo_used_tons(ship));
+      if (free <= 1e-9) return 0.0;
+
+      double remaining = std::min(free, rate_per_day * dt_days);
+      if (remaining <= 1e-9) return 0.0;
+
+      auto mine_one = [&](const std::string& mineral, double want) -> double {
+        if (want <= 1e-9) return 0.0;
+
+        auto it = body->mineral_deposits.find(mineral);
+        if (it == body->mineral_deposits.end()) {
+          // Deposit semantics:
+          // - If the deposit map is empty, treat missing keys as unlimited (legacy).
+          // - Otherwise, missing keys mean the mineral isn't present on this body.
+          if (body->mineral_deposits.empty()) {
+            ship.cargo[mineral] += want;
+            return want;
+          }
+          return 0.0;
+        }
+
+        const double have = std::max(0.0, it->second);
+        if (have <= 1e-9) return 0.0;
+
+        const double take = std::min(have, want);
+        if (take <= 1e-9) return 0.0;
+
+        ship.cargo[mineral] += take;
+
+        const double before = it->second;
+        it->second = std::max(0.0, it->second - take);
+
+        // Depletion event (only on transition to depleted).
+        if (before > 1e-9 && it->second <= 1e-9) {
+          EventContext ctx;
+          ctx.system_id = body->system_id;
+          ctx.ship_id = ship_id;
+          ctx.faction_id = ship.faction_id;
+          const std::string msg = "Mineral deposit depleted on " + body->name + ": " + mineral + " (mobile mining)";
+          push_event(EventLevel::Warn, EventCategory::Construction, msg, ctx);
+        }
+
+        return take;
+      };
+
+      double mined_total = 0.0;
+
+      if (!mine_mineral.empty()) {
+        const double mined = mine_one(mine_mineral, remaining);
+        mined_total += mined;
+        return mined_total;
+      }
+
+      // Mine all modeled minerals on the body (deterministic order).
+      if (body->mineral_deposits.empty()) return 0.0;
+      for (const auto& k : sorted_keys(body->mineral_deposits)) {
+        if (remaining <= 1e-9) break;
+        const double mined = mine_one(k, remaining);
+        remaining -= mined;
+        mined_total += mined;
+      }
+      return mined_total;
+    };
+
+    auto mining_order_complete = [&](double mined_this_tick) {
+      if (!mine_ord) return true;
+
+      const auto* d = find_design(ship.design_id);
+      const double cap = d ? std::max(0.0, d->cargo_tons) : 0.0;
+      const double free = std::max(0.0, cap - cargo_used_tons(ship));
+
+      if (mine_stop_when_full && free <= 1e-9) return true;
+
+      auto* body = find_ptr(state_.bodies, mine_body_id);
+      if (!body) return true;
+
+      // If the player asked to "mine all", but this body has no modeled deposits,
+      // the order can't make progress (we don't have a mineral list).
+      if (mine_mineral.empty() && body->mineral_deposits.empty()) return true;
+
+      if (!mine_mineral.empty()) {
+        auto it = body->mineral_deposits.find(mine_mineral);
+        if (it != body->mineral_deposits.end()) {
+          // Modeled deposit: stop once depleted.
+          return it->second <= 1e-9;
+        }
+        if (body->mineral_deposits.empty()) {
+          // Legacy bodies without modeled deposits: missing key => unlimited.
+          return false;
+        }
+        // Mineral not present on this body: nothing to mine.
+        return true;
+      }
+
+      // Mine all modeled minerals: stop when all deposits are depleted.
+      bool any_left = false;
+      for (const auto& [_, v] : body->mineral_deposits) {
+        if (v > 1e-9) { any_left = true; break; }
+      }
+      if (!any_left) return true;
+
+      // Otherwise keep mining (even if we mined 0 this tick, e.g., due to 0 free cargo).
+      return false;
+    };
+
     // Fuel transfer is handled similarly to cargo transfer, but operates on
     // ships' fuel tanks rather than cargo holds.
     auto do_fuel_transfer = [&]() -> double {
@@ -1327,6 +1474,13 @@ void Simulation::tick_ships(double dt_days) {
       ship.position_mkm = target;
       const double moved = do_wreck_salvage();
       if (salvage_order_complete(moved)) q.erase(q.begin());
+      continue;
+    }
+
+    if (is_mining_op && dist <= dock_range) {
+      ship.position_mkm = target;
+      const double mined = do_body_mining();
+      if (mining_order_complete(mined)) q.erase(q.begin());
       continue;
     }
     if (is_troop_op && dist <= dock_range) {
@@ -1733,7 +1887,7 @@ void Simulation::tick_ships(double dt_days) {
     }
 
     if (!is_attack && !is_escort && !is_bombard && !is_jump && !is_cargo_op && !is_salvage_op && !is_fuel_transfer_op &&
-        !is_troop_transfer_op && !is_troop_op && !is_colonist_op && !is_body && !is_orbit && !is_scrap && dist <= arrive_eps) {
+        !is_troop_transfer_op && !is_troop_op && !is_colonist_op && !is_mining_op && !is_body && !is_orbit && !is_scrap && dist <= arrive_eps) {
       q.erase(q.begin());
       continue;
     }
@@ -1895,6 +2049,9 @@ void Simulation::tick_ships(double dt_days) {
       } else if (is_salvage_op) {
         const double moved = do_wreck_salvage();
         if (salvage_order_complete(moved)) q.erase(q.begin());
+      } else if (is_mining_op) {
+        const double mined = do_body_mining();
+        if (mining_order_complete(mined)) q.erase(q.begin());
       } else if (is_fuel_transfer_op) {
         const double moved = do_fuel_transfer();
         if (fuel_order_complete(moved)) q.erase(q.begin());

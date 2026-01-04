@@ -21,6 +21,7 @@ enum class ComponentType {
   Engine,
   FuelTank,
   Cargo,
+  Mining,
   Sensor,
   Reactor,
   Weapon,
@@ -106,8 +107,9 @@ struct Body {
   // this body.
   //
   // Back-compat / mods:
-  // - If a mineral key is missing, extraction for that mineral is treated as
-  //   "unlimited" (i.e., mines will produce as they did in older versions).
+  // - If mineral_deposits is empty, all deposits are treated as "unlimited" and
+  //   mining behaves as it did in older versions (no depletion).
+  // - If mineral_deposits is non-empty, missing keys mean "no deposit".
   // - If a mineral is present with value <= 0, that deposit is depleted.
   std::unordered_map<std::string, double> mineral_deposits;
 
@@ -176,6 +178,7 @@ struct ComponentDef {
   double fuel_use_per_mkm{0.0};    // engine (tons per million km)
   double fuel_capacity_tons{0.0};  // fuel tank
   double cargo_tons{0.0};          // cargo
+  double mining_tons_per_day{0.0}; // mining (tons/day)
   double sensor_range_mkm{0.0};    // sensor
   double colony_capacity_millions{0.0}; // colony module
   // Power model (prototype):
@@ -225,6 +228,7 @@ struct ShipDesign {
   double fuel_capacity_tons{0.0};
   double fuel_use_per_mkm{0.0};
   double cargo_tons{0.0};
+  double mining_tons_per_day{0.0};
   double sensor_range_mkm{0.0};
   // Visibility / sensor signature multiplier for this design.
   // 1.0 = normal; lower values are harder to detect.
@@ -258,19 +262,54 @@ struct ShipDesign {
   double troop_capacity{0.0};
 };
 
+// Resource definitions are content-driven metadata for mineral / material types.
+//
+// The core simulation generally treats resources as string-keyed quantities
+// (in stockpiles, cargo holds, deposits, etc.). ResourceDef is an optional
+// catalog used for UI grouping and for content validation (catching typos).
+struct ResourceDef {
+  std::string id;
+  std::string name;
+
+  // Free-form category tag used by UI (e.g. "metal", "volatile", "fuel").
+  // If empty, defaults to "mineral".
+  std::string category{"mineral"};
+
+  // If true, this resource can appear in Body::mineral_deposits and be mined.
+  bool mineable{true};
+};
+
 struct InstallationDef {
   std::string id;
   std::string name;
 
-  // If true, `produces_per_day` is interpreted as extraction from the colony's
-  // underlying body mineral deposits (Body::mineral_deposits). Extraction is
-  // capped by remaining deposits.
+  // If true, this installation extracts minerals from the underlying body's
+  // mineral deposits (Body::mineral_deposits) when present.
   //
-  // If false, `produces_per_day` creates minerals out of thin air (prototype /
-  // back-compat behavior).
+  // Mining model:
+  //  - If mining_tons_per_day > 0 and the body has a non-empty mineral_deposits map,
+  //    the installation provides a generic extraction capacity (tons/day) that is
+  //    distributed across all non-depleted deposits on that body (weighted by
+  //    remaining tons).
+  //  - Otherwise, produces_per_day is interpreted as per-mineral extraction rates
+  //    (legacy behavior) and is capped by remaining deposits when those deposits
+  //    exist.
+  //
+  // Back-compat / mods:
+  //  - If a body has an empty mineral_deposits map, mining behaves as "unlimited"
+  //    (mines produce without depletion as in early versions).
   bool mining{false};
 
-  // Simple mineral production.
+  // Generic mining capacity in tons per day (see mining model above).
+  double mining_tons_per_day{0.0};
+
+  // Mineral production per day.
+  //
+  // For non-mining installations, this creates minerals out of thin air (prototype
+  // industry output) and may be input-limited by consumes_per_day.
+  //
+  // For mining installations with mining_tons_per_day == 0, this is interpreted as
+  // fixed extraction rates per mineral (legacy mining model).
   std::unordered_map<std::string, double> produces_per_day;
 
 
@@ -382,6 +421,26 @@ struct Ship {
   // a ship returns with minerals in its cargo hold, it will attempt to deliver
   // them to a friendly colony before seeking more wrecks.
   bool auto_salvage{false};
+
+  // Automation: when enabled, the simulation will generate mobile mining orders
+  // for this ship whenever it is idle (no queued orders).
+  //
+  // Auto-mine is intended for dedicated mining ships that extract minerals
+  // directly from asteroid/comet deposits into their cargo holds.
+  bool auto_mine{false};
+
+  // Optional: home colony for auto-mine deliveries.
+  //
+  // If set to a valid colony id owned by this ship's faction, the auto-mine
+  // routine will prefer delivering mined cargo to this colony.
+  // If unset/invalid, the ship will deliver to the nearest friendly colony.
+  Id auto_mine_home_colony_id{kInvalidId};
+
+  // Optional mineral filter for auto-mine.
+  //
+  // If empty, auto-mine will mine any available minerals on the chosen body.
+  // Otherwise, the ship will target this specific mineral.
+  std::string auto_mine_mineral;
 
   // Automation: when enabled, the simulation will generate colonization orders
   // for this ship whenever it is idle (no queued orders).

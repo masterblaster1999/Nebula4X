@@ -750,7 +750,21 @@ class Simulation {
   bool issue_salvage_wreck(Id ship_id, Id wreck_id, const std::string& mineral, double tons = 0.0,
                            bool restrict_to_discovered = false);
 
-  // Troops / invasion (prototype).
+    // Mobile mining.
+  // Mine minerals directly from a body's deposits into the ship's cargo hold.
+  //
+  // - mineral == "" means "mine all minerals present on the body".
+  // - If the body is in another system, the simulation will automatically
+  //   enqueue TravelViaJump steps before the mining order.
+  // - When stop_when_cargo_full is true, the order completes once the ship has
+  //   no free cargo capacity.
+  //
+  // When restrict_to_discovered is true, jump routing will only traverse
+  // systems discovered by the ship's faction.
+  bool issue_mine_body(Id ship_id, Id body_id, const std::string& mineral = "",
+                       bool stop_when_cargo_full = true, bool restrict_to_discovered = false);
+
+// Troops / invasion (prototype).
   // Load/unload colony ground forces into a ship's troop bays.
   // - strength <= 0 means "as much as possible".
   //

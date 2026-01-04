@@ -7,9 +7,10 @@ namespace nebula4x {
 
 std::string order_to_string(const Order& order) {
   return std::visit(
-      [](const auto& o) {
+      [](const auto& o) -> std::string {
         using T = std::decay_t<decltype(o)>;
         std::ostringstream ss;
+
         if constexpr (std::is_same_v<T, MoveToPoint>) {
           ss << "MoveToPoint(" << o.target_mkm.x << ", " << o.target_mkm.y << ")";
         } else if constexpr (std::is_same_v<T, MoveToBody>) {
@@ -19,9 +20,7 @@ std::string order_to_string(const Order& order) {
           if (!o.colony_name.empty()) ss << ", name=\"" << o.colony_name << "\"";
           ss << ")";
         } else if constexpr (std::is_same_v<T, OrbitBody>) {
-          ss << "OrbitBody(id=" << o.body_id;
-          ss << ", days=" << o.duration_days;
-          ss << ")";
+          ss << "OrbitBody(id=" << o.body_id << ", days=" << o.duration_days << ")";
         } else if constexpr (std::is_same_v<T, TravelViaJump>) {
           ss << "TravelViaJump(jump_id=" << o.jump_point_id << ")";
         } else if constexpr (std::is_same_v<T, AttackShip>) {
@@ -31,8 +30,7 @@ std::string order_to_string(const Order& order) {
           }
           ss << ")";
         } else if constexpr (std::is_same_v<T, EscortShip>) {
-          ss << "EscortShip(target_id=" << o.target_ship_id;
-          ss << ", follow_mkm=" << o.follow_distance_mkm;
+          ss << "EscortShip(target_id=" << o.target_ship_id << ", follow_mkm=" << o.follow_distance_mkm;
           if (o.restrict_to_discovered) ss << ", restrict_to_discovered=true";
           ss << ")";
         } else if constexpr (std::is_same_v<T, WaitDays>) {
@@ -46,6 +44,11 @@ std::string order_to_string(const Order& order) {
           ss << "UnloadMineral(colony_id=" << o.colony_id;
           if (!o.mineral.empty()) ss << ", mineral=" << o.mineral;
           if (o.tons > 0.0) ss << ", tons=" << o.tons;
+          ss << ")";
+        } else if constexpr (std::is_same_v<T, MineBody>) {
+          ss << "MineBody(body_id=" << o.body_id;
+          if (!o.mineral.empty()) ss << ", mineral=" << o.mineral;
+          if (o.stop_when_cargo_full) ss << ", stop_when_full=true";
           ss << ")";
         } else if constexpr (std::is_same_v<T, LoadTroops>) {
           ss << "LoadTroops(colony_id=" << o.colony_id;
@@ -66,9 +69,7 @@ std::string order_to_string(const Order& order) {
         } else if constexpr (std::is_same_v<T, InvadeColony>) {
           ss << "InvadeColony(colony_id=" << o.colony_id << ")";
         } else if constexpr (std::is_same_v<T, BombardColony>) {
-          ss << "BombardColony(colony_id=" << o.colony_id;
-          ss << ", days=" << o.duration_days;
-          ss << ")";
+          ss << "BombardColony(colony_id=" << o.colony_id << ", days=" << o.duration_days << ")";
         } else if constexpr (std::is_same_v<T, SalvageWreck>) {
           ss << "SalvageWreck(wreck_id=" << o.wreck_id;
           if (!o.mineral.empty()) ss << ", mineral=" << o.mineral;
@@ -90,6 +91,7 @@ std::string order_to_string(const Order& order) {
         } else if constexpr (std::is_same_v<T, ScrapShip>) {
           ss << "ScrapShip(colony_id=" << o.colony_id << ")";
         }
+
         return ss.str();
       },
       order);

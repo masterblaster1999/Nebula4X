@@ -196,22 +196,39 @@ GameState make_sol_scenario() {
   //
   // Newer versions of the prototype support finite mineral deposits attached to
   // bodies. Mines extract from these deposits each day.
-  auto seed_deposits = [&](Id body_id, double duranium_tons, double neutronium_tons) {
+  auto seed_standard_deposits = [&](Id body_id, double duranium_tons, double sorium_multiplier = 1.0) {
     auto& b = s.bodies.at(body_id);
-    b.mineral_deposits["Duranium"] = std::max(0.0, duranium_tons);
-    b.mineral_deposits["Neutronium"] = std::max(0.0, neutronium_tons);
+    auto& d = b.mineral_deposits;
+
+    d["Duranium"] = std::max(0.0, duranium_tons);
+    d["Neutronium"] = std::max(0.0, duranium_tons * 0.10);
+
+    // Terra Novan-style mineral roster (prototype). These ratios are tuned for
+    // gameplay rather than strict canon realism.
+    d["Tritanium"] = std::max(0.0, duranium_tons * 0.08);
+    d["Boronide"] = std::max(0.0, duranium_tons * 0.07);
+    d["Corbomite"] = std::max(0.0, duranium_tons * 0.05);
+    d["Mercassium"] = std::max(0.0, duranium_tons * 0.06);
+    d["Vendarite"] = std::max(0.0, duranium_tons * 0.05);
+    d["Uridium"] = std::max(0.0, duranium_tons * 0.05);
+    d["Corundium"] = std::max(0.0, duranium_tons * 0.05);
+    d["Gallicite"] = std::max(0.0, duranium_tons * 0.06);
+
+    // Volatiles: comets / outer bodies trend Sorium-rich.
+    d["Sorium"] = std::max(0.0, duranium_tons * 0.12 * sorium_multiplier);
   };
 
   // Give home bodies deep deposits so early growth isn't immediately blocked.
-  seed_deposits(earth, 2.0e6, 2.0e5);
-  seed_deposits(mars, 4.0e5, 4.0e4);
+  seed_standard_deposits(earth, 2.0e6, 1.0);
+  seed_standard_deposits(mars, 4.0e5, 0.7);
   // Minor bodies have smaller, but sometimes useful deposits.
   for (Id aid : sol_belt) {
-    seed_deposits(aid, 7.5e4, 6.0e3);
+    seed_standard_deposits(aid, 7.5e4, 0.3);
   }
-  seed_deposits(encke, 2.5e4, 1.5e3);
-  seed_deposits(centauri_prime, 1.2e6, 1.2e5);
-  seed_deposits(barnard_b, 3.0e5, 3.0e4);
+  // Comets are volatile-rich.
+  seed_standard_deposits(encke, 2.5e4, 6.0);
+  seed_standard_deposits(centauri_prime, 1.2e6, 0.9);
+  seed_standard_deposits(barnard_b, 3.0e5, 0.8);
 
   // --- Jump points (Sol <-> Alpha Centauri) ---
   const Id jp_sol = allocate_id(s);
@@ -677,12 +694,6 @@ GameState make_random_scenario(std::uint32_t seed, int num_systems) {
     return id;
   };
 
-  auto seed_deposits = [&](Id body_id, double duranium_tons, double neutronium_tons) {
-    auto& b = s.bodies.at(body_id);
-    b.mineral_deposits["Duranium"] = std::max(0.0, duranium_tons);
-    b.mineral_deposits["Neutronium"] = std::max(0.0, neutronium_tons);
-  };
-
   auto seed_basic_deposits = [&](Id body_id, BodyType type, double orbit_au, double metallicity, double richness) {
     // Baselines tuned for "prototype fun" rather than strict realism.
     double base_dur = 6.0e5;
@@ -726,7 +737,33 @@ GameState make_random_scenario(std::uint32_t seed, int num_systems) {
       neu *= boost;
     }
 
-    seed_deposits(body_id, dur, neu);
+    auto& d = s.bodies.at(body_id).mineral_deposits;
+
+    // Volatiles multiplier trends upward with distance; comets and gas giants are extra Sorium-rich.
+    double sorium_mult = 0.6 + 0.6 * clamp01(orbit_au / 6.0);
+    if (type == BodyType::GasGiant) sorium_mult *= 2.2;
+    if (type == BodyType::Comet) sorium_mult *= 7.0;
+
+    // Duranium / Neutronium are seeded explicitly, the rest are proportional to Duranium with
+    // an independent random factor.
+    d["Duranium"] = std::max(0.0, dur);
+    d["Neutronium"] = std::max(0.0, neu);
+
+    const double base = std::max(0.0, dur);
+    auto prop = [&](double fraction, double lo, double hi) {
+      return std::max(0.0, base * fraction * rand_log_uniform(rng, lo, hi));
+    };
+
+    d["Tritanium"] = prop(0.08, 0.55, 1.85);
+    d["Boronide"] = prop(0.07, 0.55, 1.85);
+    d["Corbomite"] = prop(0.05, 0.55, 1.85);
+    d["Mercassium"] = prop(0.06, 0.55, 1.85);
+    d["Vendarite"] = prop(0.05, 0.55, 1.85);
+    d["Uridium"] = prop(0.05, 0.55, 1.85);
+    d["Corundium"] = prop(0.05, 0.55, 1.85);
+    d["Gallicite"] = prop(0.06, 0.55, 1.85);
+
+    d["Sorium"] = std::max(0.0, base * 0.12 * sorium_mult * rand_log_uniform(rng, 0.55, 1.85));
   };
 
   struct SysInfo {

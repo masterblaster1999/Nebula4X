@@ -86,22 +86,64 @@ int colony_mining_units(const Simulation& sim, const Colony& c) {
   return mines;
 }
 
-std::unordered_map<std::string, double> colony_mining_request_per_day(const Simulation& sim, const Colony& c) {
+std::unordered_map<std::string, double> colony_mining_request_per_day(const Simulation& sim,
+                                                                     const Colony& c) {
   std::unordered_map<std::string, double> out;
-  for (const auto& [inst_id, count_raw] : c.installations) {
-    const int count = std::max(0, count_raw);
-    if (count <= 0) continue;
-    const auto it = sim.content().installations.find(inst_id);
-    if (it == sim.content().installations.end()) continue;
-    const InstallationDef& def = it->second;
-    if (def.produces_per_day.empty()) continue;
-    const bool mining = def.mining ||
-                        (!def.mining && nebula4x::to_lower(def.id).find("mine") != std::string::npos);
-    if (!mining) continue;
-    for (const auto& [mineral, per_day] : def.produces_per_day) {
-      out[mineral] += std::max(0.0, per_day) * static_cast<double>(count);
+
+  // Mirror the simulation's mining heuristic: explicit flag OR a mining-ish id.
+  const auto is_mining_installation = [&](const std::string& id, const InstallationDef& def) {
+    if (def.mining) return true;
+    return (id.find("mine") != std::string::npos) || (id.find("quarry") != std::string::npos) ||
+           (id.find("excavator") != std::string::npos);
+  };
+
+  const Body* body = nullptr;
+  if (auto it = sim.state().bodies.find(c.body_id); it != sim.state().bodies.end()) {
+    body = &it->second;
+  }
+
+  // If the body has a non-empty mineral deposit map, use it as the distribution basis
+  // for generic mining capacity.
+  const bool modeled_deposits = body && !body->mineral_deposits.empty();
+
+  std::vector<std::pair<std::string, double>> deposits;
+  double sum_remaining = 0.0;
+  if (modeled_deposits) {
+    for (const auto& mineral : sorted_keys(body->mineral_deposits)) {
+      const double remaining = body->mineral_deposits.at(mineral);
+      if (remaining > 1e-9) {
+        deposits.push_back({mineral, remaining});
+        sum_remaining += remaining;
+      }
     }
   }
+
+  for (const auto& [inst_id, count] : c.installations) {
+    if (count <= 0) continue;
+    auto it = sim.content().installations.find(inst_id);
+    if (it == sim.content().installations.end()) continue;
+
+    const InstallationDef& def = it->second;
+    if (!is_mining_installation(inst_id, def)) continue;
+
+    // New mining model: generic capacity distributed across modeled deposits.
+    if (def.mining_tons_per_day > 0.0 && modeled_deposits) {
+      if (sum_remaining <= 1e-9) continue;
+      const double cap = def.mining_tons_per_day * static_cast<double>(count);
+      if (cap <= 1e-12) continue;
+
+      for (const auto& [mineral, remaining] : deposits) {
+        out[mineral] += cap * (remaining / sum_remaining);
+      }
+      continue;
+    }
+
+    // Legacy mining model: per-mineral extraction rates.
+    for (const auto& [mineral, per_day] : def.produces_per_day) {
+      out[mineral] += per_day * static_cast<double>(count);
+    }
+  }
+
   return out;
 }
 
@@ -997,8 +1039,8 @@ void draw_economy_window(Simulation& sim, UIState& ui, Id& selected_colony, Id& 
         ImGui::TableSetupColumn("CP/d", ImGuiTableColumnFlags_WidthFixed, 60.0f);
         ImGui::TableSetupColumn("RP/d", ImGuiTableColumnFlags_WidthFixed, 60.0f);
         ImGui::TableSetupColumn("Mines", ImGuiTableColumnFlags_WidthFixed, 45.0f);
-        ImGui::TableSetupColumn("Dur/d", ImGuiTableColumnFlags_WidthFixed, 60.0f);
-        ImGui::TableSetupColumn("Neu/d", ImGuiTableColumnFlags_WidthFixed, 60.0f);
+        ImGui::TableSetupColumn("Mine/d", ImGuiTableColumnFlags_WidthFixed, 60.0f);
+        ImGui::TableSetupColumn("Top Mine", ImGuiTableColumnFlags_WidthFixed, 100.0f);
         ImGui::TableSetupColumn("Fuel/d", ImGuiTableColumnFlags_WidthFixed, 60.0f);
         ImGui::TableSetupColumn("Yards", ImGuiTableColumnFlags_WidthFixed, 45.0f);
         ImGui::TableSetupColumn("CQ", ImGuiTableColumnFlags_WidthFixed, 35.0f);
@@ -1018,8 +1060,18 @@ void draw_economy_window(Simulation& sim, UIState& ui, Id& selected_colony, Id& 
 
           const int mines = colony_mining_units(sim, *c);
           const auto mine_req = colony_mining_request_per_day(sim, *c);
-          const double dur_d = mine_req.count("Duranium") ? mine_req.at("Duranium") : 0.0;
-          const double neu_d = mine_req.count("Neutronium") ? mine_req.at("Neutronium") : 0.0;
+          double mine_total = 0.0;
+          std::vector<std::pair<std::string, double>> mine_rows;
+          mine_rows.reserve(mine_req.size());
+          for (const auto& [mineral, rate] : mine_req) {
+            if (rate <= 1e-12) continue;
+            mine_total += rate;
+            mine_rows.push_back({mineral, rate});
+          }
+          std::sort(mine_rows.begin(), mine_rows.end(),
+                    [](const auto& a, const auto& b) { return a.second > b.second; });
+          const std::string top_mineral = mine_rows.empty() ? std::string{} : mine_rows.front().first;
+          const double top_rate = mine_rows.empty() ? 0.0 : mine_rows.front().second;
 
           const auto industry_out = colony_industry_output_per_day(sim, *c);
           const auto industry_in = colony_industry_input_per_day(sim, *c);
@@ -1057,10 +1109,34 @@ void draw_economy_window(Simulation& sim, UIState& ui, Id& selected_colony, Id& 
           ImGui::Text("%d", mines);
 
           ImGui::TableSetColumnIndex(6);
-          ImGui::Text("%.1f", dur_d);
+          if (mine_total > 1e-9) {
+            ImGui::Text("%.1f", mine_total);
+          } else {
+            ImGui::TextUnformatted("-");
+          }
+          if (!mine_rows.empty() && ImGui::IsItemHovered()) {
+            ImGui::BeginTooltip();
+            ImGui::TextUnformatted("Mining output per day (estimated):");
+            for (const auto& [mineral, rate] : mine_rows) {
+              ImGui::Text("%s: %.2f", mineral.c_str(), rate);
+            }
+            ImGui::EndTooltip();
+          }
 
           ImGui::TableSetColumnIndex(7);
-          ImGui::Text("%.1f", neu_d);
+          if (!top_mineral.empty()) {
+            ImGui::Text("%s (%.1f)", top_mineral.c_str(), top_rate);
+          } else {
+            ImGui::TextUnformatted("-");
+          }
+          if (!mine_rows.empty() && ImGui::IsItemHovered()) {
+            ImGui::BeginTooltip();
+            ImGui::TextUnformatted("Mining output per day (estimated):");
+            for (const auto& [mineral, rate] : mine_rows) {
+              ImGui::Text("%s: %.2f", mineral.c_str(), rate);
+            }
+            ImGui::EndTooltip();
+          }
 
           ImGui::TableSetColumnIndex(8);
           ImGui::Text("%.1f", fuel_d);
@@ -1095,6 +1171,248 @@ void draw_economy_window(Simulation& sim, UIState& ui, Id& selected_colony, Id& 
 
       ImGui::Separator();
       ImGui::TextDisabled("Tip: set per-colony mineral reserves in the Colony tab to keep local stockpiles safe from auto-freight.");
+
+      ImGui::EndTabItem();
+    }
+
+    // --- Resources ---
+    // A faction-level ledger aggregating stockpiles and approximate net flow
+    // (mining request + industry output - industry input) for each resource.
+    if (ImGui::BeginTabItem("Resources")) {
+      static char res_filter[96] = "";
+      static int category_idx = 0;
+      static bool hide_zeros = true;
+      static bool mineable_only = false;
+
+      const auto& res_defs = sim.content().resources;
+
+      // Viewer faction colonies.
+      std::vector<Id> colony_ids;
+      colony_ids.reserve(s.colonies.size());
+      for (Id cid : sorted_keys(s.colonies)) {
+        const Colony* c = find_ptr(s.colonies, cid);
+        if (!c) continue;
+        if (c->faction_id != view_faction_id) continue;
+        colony_ids.push_back(cid);
+      }
+
+      struct ColCache {
+        Id colony_id{kInvalidId};
+        std::unordered_map<std::string, double> mine;
+        std::unordered_map<std::string, double> out;
+        std::unordered_map<std::string, double> in;
+      };
+
+      std::vector<ColCache> caches;
+      caches.reserve(colony_ids.size());
+
+      std::unordered_map<std::string, double> stock_total;
+      std::unordered_map<std::string, double> prod_total;
+      std::unordered_map<std::string, double> cons_total;
+
+      for (Id cid : colony_ids) {
+        const Colony* c = find_ptr(s.colonies, cid);
+        if (!c) continue;
+
+        ColCache cc;
+        cc.colony_id = cid;
+        cc.mine = colony_mining_request_per_day(sim, *c);
+        cc.out = colony_industry_output_per_day(sim, *c);
+        cc.in = colony_industry_input_per_day(sim, *c);
+        caches.push_back(cc);
+
+        for (const auto& [rid, tons] : c->minerals) {
+          if (std::abs(tons) <= 1e-12) continue;
+          stock_total[rid] += tons;
+        }
+        for (const auto& [rid, per_day] : caches.back().mine) {
+          if (std::abs(per_day) <= 1e-12) continue;
+          prod_total[rid] += per_day;
+        }
+        for (const auto& [rid, per_day] : caches.back().out) {
+          if (std::abs(per_day) <= 1e-12) continue;
+          prod_total[rid] += per_day;
+        }
+        for (const auto& [rid, per_day] : caches.back().in) {
+          if (std::abs(per_day) <= 1e-12) continue;
+          cons_total[rid] += per_day;
+        }
+      }
+
+      auto category_for = [&](const std::string& rid) -> std::string {
+        auto it = res_defs.find(rid);
+        if (it == res_defs.end()) return "unknown";
+        if (it->second.category.empty()) return "unknown";
+        return it->second.category;
+      };
+
+      auto name_for = [&](const std::string& rid) -> std::string {
+        auto it = res_defs.find(rid);
+        if (it == res_defs.end()) return rid;
+        if (it->second.name.empty()) return rid;
+        return it->second.name;
+      };
+
+      auto mineable_for = [&](const std::string& rid) -> bool {
+        auto it = res_defs.find(rid);
+        if (it == res_defs.end()) return false;
+        return it->second.mineable;
+      };
+
+      // Build roster (catalog + anything referenced by stock/flows).
+      std::unordered_set<std::string> roster;
+      roster.reserve(res_defs.size() + stock_total.size() + prod_total.size() + cons_total.size());
+      for (const auto& [rid, _] : res_defs) roster.insert(rid);
+      for (const auto& [rid, _] : stock_total) roster.insert(rid);
+      for (const auto& [rid, _] : prod_total) roster.insert(rid);
+      for (const auto& [rid, _] : cons_total) roster.insert(rid);
+
+      std::vector<std::string> resource_ids;
+      resource_ids.reserve(roster.size());
+      for (const auto& rid : roster) resource_ids.push_back(rid);
+
+      std::sort(resource_ids.begin(), resource_ids.end(), [&](const std::string& a, const std::string& b) {
+        const std::string ca = category_for(a);
+        const std::string cb = category_for(b);
+        if (ca != cb) return ca < cb;
+        const std::string na = name_for(a);
+        const std::string nb = name_for(b);
+        if (na != nb) return na < nb;
+        return a < b;
+      });
+
+      // Category list for filtering.
+      std::vector<std::string> categories;
+      categories.push_back("All");
+      {
+        std::unordered_set<std::string> cats;
+        cats.reserve(resource_ids.size());
+        for (const auto& rid : resource_ids) cats.insert(category_for(rid));
+        std::vector<std::string> tmp(cats.begin(), cats.end());
+        std::sort(tmp.begin(), tmp.end());
+        for (const auto& c : tmp) categories.push_back(c);
+      }
+      if (category_idx < 0) category_idx = 0;
+      if (category_idx >= static_cast<int>(categories.size())) category_idx = 0;
+      const std::string selected_cat = categories[static_cast<std::size_t>(category_idx)];
+
+      ImGui::Text("Resources (faction totals)");
+      ImGui::InputText("Filter##res_filter", res_filter, IM_ARRAYSIZE(res_filter));
+      ImGui::SameLine();
+      ImGui::SetNextItemWidth(180.0f);
+      if (ImGui::BeginCombo("Category##res_cat", selected_cat.c_str())) {
+        for (int i = 0; i < static_cast<int>(categories.size()); ++i) {
+          const bool sel = (i == category_idx);
+          if (ImGui::Selectable(categories[static_cast<std::size_t>(i)].c_str(), sel)) {
+            category_idx = i;
+          }
+          if (sel) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+      }
+      ImGui::SameLine();
+      ImGui::Checkbox("Hide zeros##res_hide_zeros", &hide_zeros);
+      ImGui::SameLine();
+      ImGui::Checkbox("Mineable only##res_mineable_only", &mineable_only);
+
+      ImGui::Separator();
+
+      const ImGuiTableFlags tflags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
+                                     ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_Resizable;
+      if (ImGui::BeginTable("resources_ledger_table", 6, tflags)) {
+        ImGui::TableSetupColumn("Resource", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("Category", ImGuiTableColumnFlags_WidthFixed, 90.0f);
+        ImGui::TableSetupColumn("Stockpile", ImGuiTableColumnFlags_WidthFixed, 95.0f);
+        ImGui::TableSetupColumn("Net/d", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+        ImGui::TableSetupColumn("Prod/d", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+        ImGui::TableSetupColumn("Cons/d", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+        ImGui::TableHeadersRow();
+
+        for (const auto& rid : resource_ids) {
+          const std::string name = name_for(rid);
+          const std::string cat = category_for(rid);
+          const bool mineable = mineable_for(rid);
+
+          if (mineable_only && !mineable) continue;
+          if (selected_cat != "All" && cat != selected_cat) continue;
+          if (!case_insensitive_contains(name, res_filter) && !case_insensitive_contains(rid, res_filter)) continue;
+
+          const double stock = stock_total.count(rid) ? stock_total.at(rid) : 0.0;
+          const double prod = prod_total.count(rid) ? prod_total.at(rid) : 0.0;
+          const double cons = cons_total.count(rid) ? cons_total.at(rid) : 0.0;
+          const double net = prod - cons;
+
+          if (hide_zeros) {
+            if (std::abs(stock) < 1e-9 && std::abs(prod) < 1e-9 && std::abs(cons) < 1e-9) continue;
+          }
+
+          ImGui::TableNextRow();
+
+          ImGui::TableSetColumnIndex(0);
+          ImGui::TextUnformatted(name.c_str());
+          if (ImGui::IsItemHovered()) {
+            ImGui::BeginTooltip();
+            ImGui::Text("%s", name.c_str());
+            if (rid != name) ImGui::TextDisabled("id: %s", rid.c_str());
+            ImGui::TextDisabled("category: %s", cat.c_str());
+            if (mineable) ImGui::TextDisabled("mineable");
+            ImGui::Separator();
+
+            // Per-colony breakdown (top few rows by stock).
+            struct Row { std::string label; double stock; double net; };
+            std::vector<Row> rows;
+            rows.reserve(colony_ids.size());
+            for (const auto& cc : caches) {
+              const Colony* c = find_ptr(s.colonies, cc.colony_id);
+              if (!c) continue;
+              const double c_stock = get_mineral_tons(*c, rid);
+              const double c_prod = (cc.mine.count(rid) ? cc.mine.at(rid) : 0.0) +
+                                    (cc.out.count(rid) ? cc.out.at(rid) : 0.0);
+              const double c_cons = (cc.in.count(rid) ? cc.in.at(rid) : 0.0);
+              const double c_net = c_prod - c_cons;
+              if (std::abs(c_stock) < 1e-9 && std::abs(c_net) < 1e-9) continue;
+
+              const Body* b = find_ptr(s.bodies, c->body_id);
+              const StarSystem* sys = b ? find_ptr(s.systems, b->system_id) : nullptr;
+              const std::string label = (sys ? sys->name : std::string("(unknown)")) + " / " + c->name;
+              rows.push_back(Row{label, c_stock, c_net});
+            }
+            std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) {
+              return std::abs(a.stock) > std::abs(b.stock);
+            });
+
+            const int max_rows = 8;
+            int shown = 0;
+            for (const auto& r : rows) {
+              if (shown >= max_rows) break;
+              ImGui::BulletText("%s: %.0f  (net %.2f/d)", r.label.c_str(), r.stock, r.net);
+              ++shown;
+            }
+            if (static_cast<int>(rows.size()) > max_rows) {
+              ImGui::TextDisabled("(+%d more)", static_cast<int>(rows.size()) - max_rows);
+            }
+
+            ImGui::EndTooltip();
+          }
+
+          ImGui::TableSetColumnIndex(1);
+          ImGui::TextUnformatted(cat.c_str());
+
+          ImGui::TableSetColumnIndex(2);
+          ImGui::Text("%.0f", stock);
+
+          ImGui::TableSetColumnIndex(3);
+          ImGui::Text("%.2f", net);
+
+          ImGui::TableSetColumnIndex(4);
+          ImGui::Text("%.2f", prod);
+
+          ImGui::TableSetColumnIndex(5);
+          ImGui::Text("%.2f", cons);
+        }
+
+        ImGui::EndTable();
+      }
 
       ImGui::EndTabItem();
     }
@@ -1172,6 +1490,18 @@ void draw_economy_window(Simulation& sim, UIState& ui, Id& selected_colony, Id& 
         ImGui::Text("%s", body->name.c_str());
         ImGui::TextDisabled("System: %s", sys ? sys->name.c_str() : "(unknown)");
 
+        // Deposit semantics match the simulation:
+        // - If the body has a non-empty deposit map, missing minerals are absent (0).
+        // - If the deposit map is empty (legacy/unmodeled), missing minerals are treated as unlimited (∞).
+        const bool modeled_deposits = !body->mineral_deposits.empty();
+        auto deposit_left = [&](const std::string& mineral) -> double {
+          if (!modeled_deposits) return std::numeric_limits<double>::infinity();
+          auto it = body->mineral_deposits.find(mineral);
+          if (it == body->mineral_deposits.end()) return 0.0;
+          return std::max(0.0, it->second);
+        };
+
+
         // Gather colonies on this body (all factions).
         struct ColMining {
           Id colony_id{kInvalidId};
@@ -1215,8 +1545,7 @@ void draw_economy_window(Simulation& sim, UIState& ui, Id& selected_colony, Id& 
           }
           total_req_by_mineral[mineral] = total_req;
 
-          const double left = body->mineral_deposits.count(mineral) ? body->mineral_deposits.at(mineral)
-                                                                    : std::numeric_limits<double>::infinity();
+          const double left = deposit_left(mineral);
           const double actual_total = (std::isfinite(left) ? std::min(left, total_req) : total_req);
           const double ratio = (total_req > 1e-12) ? (actual_total / total_req) : 0.0;
 
@@ -1244,8 +1573,7 @@ void draw_economy_window(Simulation& sim, UIState& ui, Id& selected_colony, Id& 
             ImGui::TableHeadersRow();
 
             for (const auto& mineral : minerals) {
-              const double left = body->mineral_deposits.count(mineral) ? body->mineral_deposits.at(mineral)
-                                                                        : std::numeric_limits<double>::infinity();
+              const double left = deposit_left(mineral);
               const double req = total_req_by_mineral.count(mineral) ? total_req_by_mineral.at(mineral) : 0.0;
               const double act = (std::isfinite(left) ? std::min(left, req) : req);
 
@@ -1267,7 +1595,8 @@ void draw_economy_window(Simulation& sim, UIState& ui, Id& selected_colony, Id& 
               ImGui::TableSetColumnIndex(4);
               if (std::isfinite(left) && req > 1e-9) {
                 const double eta_d = left / req;
-                ImGui::Text("%.0f", eta_d);
+                if (eta_d < 1.0) ImGui::TextUnformatted("<1");
+                else ImGui::Text("%.0f", eta_d);
               } else if (std::isfinite(left)) {
                 ImGui::TextDisabled("-");
               } else {
@@ -1277,7 +1606,8 @@ void draw_economy_window(Simulation& sim, UIState& ui, Id& selected_colony, Id& 
               ImGui::TableSetColumnIndex(5);
               if (std::isfinite(left) && req > 1e-9) {
                 const double eta_y = (left / req) / 365.25;
-                ImGui::Text("%.1f", eta_y);
+                if (eta_y < 0.1) ImGui::TextUnformatted("<0.1");
+                else ImGui::Text("%.1f", eta_y);
               } else if (std::isfinite(left)) {
                 ImGui::TextDisabled("-");
               } else {

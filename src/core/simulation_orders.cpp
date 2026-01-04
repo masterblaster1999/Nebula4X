@@ -1230,6 +1230,35 @@ bool Simulation::issue_salvage_wreck(Id ship_id, Id wreck_id, const std::string&
   return true;
 }
 
+
+bool Simulation::issue_mine_body(Id ship_id, Id body_id, const std::string& mineral,
+                                bool stop_when_cargo_full, bool restrict_to_discovered) {
+  auto* ship = find_ptr(state_.ships, ship_id);
+  if (!ship) return false;
+
+  const auto* body = find_ptr(state_.bodies, body_id);
+  if (!body) return false;
+
+  // Require some mining capacity.
+  const auto* d = find_design(ship->design_id);
+  const double mine_rate = d ? std::max(0.0, d->mining_tons_per_day) : 0.0;
+  if (mine_rate <= 1e-9) return false;
+
+  // Travel to the target system if needed.
+  if (body->system_id != ship->system_id) {
+    // Use goal-aware routing to prefer entry jump points closer to the body.
+    if (!issue_travel_to_system(ship_id, body->system_id, restrict_to_discovered, body->position_mkm)) return false;
+  }
+
+  ShipOrders& so = state_.ship_orders[ship_id];
+  MineBody mb;
+  mb.body_id = body_id;
+  mb.mineral = mineral;
+  mb.stop_when_cargo_full = stop_when_cargo_full;
+  so.queue.push_back(mb);
+  return true;
+}
+
 bool Simulation::issue_load_troops(Id ship_id, Id colony_id, double strength, bool restrict_to_discovered) {
   auto* ship = find_ptr(state_.ships, ship_id);
   if (!ship) return false;

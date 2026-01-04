@@ -88,6 +88,7 @@ struct UIState {
   bool show_economy_window{false};
   bool show_planner_window{false};
   bool show_freight_window{false};
+  bool show_fuel_window{false};
   bool show_time_warp_window{false};
   bool show_timeline_window{false};
   bool show_design_studio_window{false};

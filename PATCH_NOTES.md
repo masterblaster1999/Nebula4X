@@ -1,4 +1,49 @@
-# Patch notes (generated 2026-01-03 r59)
+# Patch notes (generated 2026-01-04 r63)
+
+## r63 (2026-01-04)
+
+### Metals & Minerals as first-class resources + faction ledger
+
+- Content: added two new non-mineable **processed** resources: **Metals** and **Minerals**.
+- Content: added two new installations:
+  - **Metal Smelter** → consumes metal ores (Duranium/Tritanium/Boronide) to produce **Metals**.
+  - **Mineral Processor** → consumes industrial minerals (Corundium/Gallicite/Uridium/Mercassium) to produce **Minerals**.
+- Tech: added **Materials Processing** tech (prereq: Industrial Chemistry) that unlocks both installations.
+- UI: Economy window gained a **Resources** tab: faction-level ledger of stockpiles and approximate net flow (Prod/d, Cons/d, Net/d) with category/filter controls and per-colony hover breakdown.
+- Tests: added `test_materials_processing` covering input-limited processed-resource production.
+
+## r62 (2026-01-04)
+
+### Small QoL + correctness fixes
+
+- UI: Economy → Mining tab now matches deposit semantics: for bodies with modeled deposits, missing minerals are treated as **absent (0)** rather than **unlimited**.
+- UI: Mining depletion ETA now shows **<1 day** / **<0.1 years** when a deposit is projected to run out within the current day/year (instead of rounding to 0).
+- Core: cleaned up formatting in `order_to_string()` (no logic change).
+
+## r61 (2026-01-04)
+
+### Resource Catalog + Weighted Mining + Multi-Mineral Economy
+
+- Added a first-class **resource catalog** (`data/blueprints/resources.json`) and `ContentDB.resources`.
+- Expanded mineral deposits to include **11 classic minerals** (plus Fuel) and seeded them in both the **Sol** and **random** scenarios.
+- Mining installations now support a **generic `mining_tons_per_day`** model: extraction is distributed across a body's non-depleted deposits (weighted by remaining tons).
+  - Legacy per-mineral `produces` mining is still supported for mods/tests.
+- Deposit semantics tightened:
+  - When deposits are **modeled** (non-empty map), missing mineral keys mean the mineral is **absent**.
+  - If a body has an **empty** deposit map (legacy saves/mods), missing keys remain **unlimited** (back-compat).
+- **Fuel Refineries** now consume **Sorium** to produce Fuel (input-limited).
+- **Shipyards** now have **multi-mineral `build_costs_per_ton`**, so ship construction uses a mixture of minerals.
+- UI: Economy window mining output is now generalized (**Mine/d** total + **Top Mine**) with a tooltip breakdown.
+- Tests: added `test_resource_catalog`, and wired existing `test_mobile_mining` into the build/run.
+
+## r60 (2026-01-03)
+
+### Fuel Planner (Auto-tanker Preview)
+
+- Added a new Fuel Planner window to preview (and apply) deterministic ship-to-ship refuel routes.
+- Added a core fuel planner that builds multi-stop tanker routes using the same auto-tanker rules (threshold, fill target, reserve, min transfer).
+- Refactored auto-tanker automation to reuse the shared fuel planner (legacy behavior: 1 dispatch per idle tanker).
+- Added unit tests covering multi-stop planning, order application, and reserved-target avoidance.
 
 ## r59 (2026-01-03)
 

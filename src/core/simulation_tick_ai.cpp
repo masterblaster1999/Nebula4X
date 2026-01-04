@@ -17,6 +17,7 @@
 
 #include "nebula4x/core/scenario.h"
 #include "nebula4x/core/ai_economy.h"
+#include "nebula4x/core/fuel_planner.h"
 #include "nebula4x/util/log.h"
 #include "nebula4x/util/spatial_index.h"
 
@@ -630,134 +631,30 @@ void Simulation::tick_ai() {
   }
 
   // --- Ship-level automation: Auto-tanker (fuel logistics) ---
-  // Reserve fuel transfer targets that are already being serviced (or en-route) so we don't send
-  // multiple automated tankers to the same ship.
-  std::unordered_map<Id, std::unordered_set<Id>> reserved_fuel_targets;
-  reserved_fuel_targets.reserve(faction_ids.size() * 2 + 4);
-  for (const auto& [sid, so] : state_.ship_orders) {
-    const Ship* ship = find_ptr(state_.ships, sid);
-    if (!ship) continue;
-    if (ship->faction_id == kInvalidId) continue;
-    for (const auto& ord : so.queue) {
-      if (const auto* tf = std::get_if<TransferFuelToShip>(&ord)) {
-        if (tf->target_ship_id != kInvalidId) {
-          reserved_fuel_targets[ship->faction_id].insert(tf->target_ship_id);
-        }
-      }
+
+  // Implementation note:
+  // Use the shared Fuel Planner so UI previews and automation remain consistent.
+  {
+    FuelPlannerOptions opt;
+    opt.require_auto_tanker_flag = true;
+    opt.require_idle = true;
+    opt.restrict_to_discovered = true;
+    opt.exclude_fleet_ships = true;
+    opt.exclude_ships_with_auto_refuel = true;
+
+    // Keep legacy behavior: one dispatch per idle tanker. (Multi-stop routes can be
+    // generated/applied from the Fuel Planner UI.)
+    opt.max_legs_per_tanker = 1;
+
+    // Safety caps (large enough to not break typical automation in bigger saves).
+    opt.max_targets = 4096;
+    opt.max_tankers = 4096;
+
+    for (Id fid : faction_ids) {
+      const auto plan = compute_fuel_plan(*this, fid, opt);
+      if (!plan.ok || plan.assignments.empty()) continue;
+      (void)apply_fuel_plan(*this, plan, /*clear_existing_orders=*/false);
     }
-  }
-
-  auto issue_auto_tanker = [&](Id tanker_id) -> bool {
-    Ship* tanker = find_ptr(state_.ships, tanker_id);
-    if (!tanker) return false;
-    if (!tanker->auto_tanker) return false;
-
-    // Auto-tanker is mutually exclusive with mission-style automations.
-    if (tanker->auto_explore || tanker->auto_freight || tanker->auto_salvage || tanker->auto_colonize) return false;
-
-    if (!orders_empty(tanker_id)) return false;
-    if (tanker->system_id == kInvalidId) return false;
-    if (tanker->speed_km_s <= 0.0) return false;
-
-    // Avoid fighting the fleet movement logic. Fleets should be controlled by fleet orders.
-    if (fleet_for_ship(tanker_id) != kInvalidId) return false;
-
-    const ShipDesign* td = find_design(tanker->design_id);
-    if (!td) return false;
-    const double tanker_cap = std::max(0.0, td->fuel_capacity_tons);
-    if (tanker_cap <= 1e-9) return false;
-
-    const double reserve_frac = std::clamp(tanker->auto_tanker_reserve_fraction, 0.0, 1.0);
-    const double reserve_tons = reserve_frac * tanker_cap;
-    const double tanker_fuel = std::clamp((tanker->fuel_tons < 0.0) ? tanker_cap : tanker->fuel_tons, 0.0, tanker_cap);
-    const double available = std::max(0.0, tanker_fuel - reserve_tons);
-
-    const double min_transfer = std::max(0.0, cfg_.auto_tanker_min_transfer_tons);
-    if (available <= min_transfer + 1e-9) return false;
-
-    const Id fid = tanker->faction_id;
-    auto& reserved = reserved_fuel_targets[fid];
-
-    const double req_thresh = std::clamp(cfg_.auto_tanker_request_threshold_fraction, 0.0, 1.0);
-    const double fill_target = std::clamp(cfg_.auto_tanker_fill_target_fraction, 0.0, 1.0);
-
-    Id best_target_id = kInvalidId;
-    double best_frac = 2.0;
-    double best_eta = std::numeric_limits<double>::infinity();
-
-    for (Id tid : ship_ids) {
-      if (tid == tanker_id) continue;
-      if (reserved.contains(tid)) continue;
-
-      const Ship* target = find_ptr(state_.ships, tid);
-      if (!target) continue;
-      if (target->faction_id != fid) continue;
-      if (target->system_id == kInvalidId) continue;
-
-      // Avoid fighting the fleet movement logic.
-      if (fleet_for_ship(tid) != kInvalidId) continue;
-
-      // Only service ships that are idle and not already using colony auto-refuel.
-      if (!orders_empty(tid)) continue;
-      if (target->auto_refuel) continue;
-
-      const ShipDesign* sd = find_design(target->design_id);
-      if (!sd) continue;
-      const double cap = std::max(0.0, sd->fuel_capacity_tons);
-      if (cap <= 1e-9) continue;
-
-      const double fuel = std::clamp((target->fuel_tons < 0.0) ? cap : target->fuel_tons, 0.0, cap);
-      const double frac = (cap > 0.0) ? (fuel / cap) : 1.0;
-      if (frac + 1e-9 >= req_thresh) continue;
-
-      // Require the target system to be in our discovered map so route planning is deterministic.
-      if (!is_system_discovered_by_faction(fid, target->system_id)) continue;
-
-      const double eta = estimate_eta_days_to_pos(tanker->system_id, tanker->position_mkm, fid, tanker->speed_km_s,
-                                                  target->system_id, target->position_mkm);
-      if (!std::isfinite(eta)) continue;
-
-      // Primary: lowest fuel fraction.
-      // Secondary: shortest ETA.
-      // Tertiary: lowest id.
-      if (best_target_id == kInvalidId || frac < best_frac - 1e-9 ||
-          (std::abs(frac - best_frac) <= 1e-9 && eta < best_eta - 1e-9) ||
-          (std::abs(frac - best_frac) <= 1e-9 && std::abs(eta - best_eta) <= 1e-9 && tid < best_target_id)) {
-        best_target_id = tid;
-        best_frac = frac;
-        best_eta = eta;
-      }
-    }
-
-    if (best_target_id == kInvalidId) return false;
-
-    const Ship* tgt = find_ptr(state_.ships, best_target_id);
-    if (!tgt) return false;
-    const ShipDesign* td2 = find_design(tgt->design_id);
-    if (!td2) return false;
-    const double tgt_cap = std::max(0.0, td2->fuel_capacity_tons);
-    if (tgt_cap <= 1e-9) return false;
-
-    const double tgt_fuel = std::clamp((tgt->fuel_tons < 0.0) ? tgt_cap : tgt->fuel_tons, 0.0, tgt_cap);
-    const double desired = tgt_cap * fill_target;
-    const double need = std::max(0.0, desired - tgt_fuel);
-
-    const double give = std::min(available, need);
-    if (give <= min_transfer + 1e-9) return false;
-
-    if (!issue_transfer_fuel_to_ship(tanker_id, best_target_id, give, /*restrict_to_discovered=*/true)) return false;
-
-    reserved.insert(best_target_id);
-    return true;
-  };
-
-  for (Id sid : ship_ids) {
-    Ship* sh = find_ptr(state_.ships, sid);
-    if (!sh) continue;
-    if (!sh->auto_tanker) continue;
-    if (!orders_empty(sid)) continue;
-
-    (void)issue_auto_tanker(sid);
   }
 
   // --- Ship-level automation: Auto-salvage (wreck recovery) ---
@@ -885,11 +782,168 @@ void Simulation::tick_ai() {
     if (!sh->auto_salvage) continue;
     if (sh->auto_explore) continue;   // mutually exclusive; auto-explore handled below
     if (sh->auto_freight) continue;   // mutually exclusive; auto-freight handled below
+    if (sh->auto_mine) continue;      // mutually exclusive; auto-mine handled below
     if (sh->auto_colonize) continue;  // mutually exclusive; auto-colonize handled below
     if (sh->auto_tanker) continue;    // mutually exclusive; auto-tanker handled above
     if (!orders_empty(sid)) continue;
 
     (void)issue_auto_salvage(sid);
+  }
+
+  // --- Ship-level automation: Auto-mine (mobile mining) ---
+  // Reserve body targets that are already being mined (or en-route) so we don't
+  // send multiple automated miners to the same body.
+  std::unordered_map<Id, std::unordered_set<Id>> reserved_mine_targets;
+  reserved_mine_targets.reserve(faction_ids.size() * 2 + 4);
+  for (const auto& [sid, so] : state_.ship_orders) {
+    const Ship* ship = find_ptr(state_.ships, sid);
+    if (!ship) continue;
+    if (ship->faction_id == kInvalidId) continue;
+    for (const auto& ord : so.queue) {
+      if (const auto* mb = std::get_if<MineBody>(&ord)) {
+        if (mb->body_id != kInvalidId) reserved_mine_targets[ship->faction_id].insert(mb->body_id);
+      }
+    }
+  }
+
+  const auto body_ids = sorted_keys(state_.bodies);
+
+  auto issue_auto_mine = [&](Id ship_id) -> bool {
+    Ship* ship = find_ptr(state_.ships, ship_id);
+    if (!ship) return false;
+    if (!ship->auto_mine) return false;
+    if (!orders_empty(ship_id)) return false;
+    if (ship->system_id == kInvalidId) return false;
+    if (ship->speed_km_s <= 0.0) return false;
+
+    // Avoid fighting the fleet movement logic. Fleets should be controlled by fleet orders.
+    if (fleet_for_ship(ship_id) != kInvalidId) return false;
+
+    const ShipDesign* d = find_design(ship->design_id);
+    const double cap = d ? std::max(0.0, d->cargo_tons) : 0.0;
+    const double mine_rate = d ? std::max(0.0, d->mining_tons_per_day) : 0.0;
+    if (cap <= 1e-9 || mine_rate <= 1e-9) return false;
+
+    auto cargo_used_tons = [&](const Ship& s) {
+      double used = 0.0;
+      for (const auto& [_, tons] : s.cargo) used += std::max(0.0, tons);
+      return used;
+    };
+
+    const double used = cargo_used_tons(*ship);
+
+    // 1) If we're carrying anything, deliver it to the configured home colony (if valid),
+    //    otherwise deliver to the nearest friendly colony.
+    if (used > 1e-6) {
+      Id best_colony_id = kInvalidId;
+      double best_eta = std::numeric_limits<double>::infinity();
+
+      const auto try_colony = [&](Id cid) {
+        const Colony* c = find_ptr(state_.colonies, cid);
+        if (!c) return;
+        if (c->faction_id != ship->faction_id) return;
+        const Body* b = find_ptr(state_.bodies, c->body_id);
+        if (!b) return;
+        if (b->system_id == kInvalidId) return;
+        const double eta = estimate_eta_days_to_pos(ship->system_id, ship->position_mkm, ship->faction_id,
+                                                    ship->speed_km_s, b->system_id, b->position_mkm);
+        if (!std::isfinite(eta)) return;
+        if (eta < best_eta) {
+          best_eta = eta;
+          best_colony_id = cid;
+        }
+      };
+
+      if (ship->auto_mine_home_colony_id != kInvalidId) {
+        try_colony(ship->auto_mine_home_colony_id);
+      }
+      if (best_colony_id == kInvalidId) {
+        for (Id cid : sorted_keys(state_.colonies)) try_colony(cid);
+      }
+      if (best_colony_id == kInvalidId) return false;
+
+      return issue_unload_mineral(ship_id, best_colony_id, /*mineral=*/"", /*tons=*/0.0,
+                                 /*restrict_to_discovered=*/true);
+    }
+
+    // 2) Otherwise, find the best available deposit in discovered space.
+    const Id fid = ship->faction_id;
+    auto& reserved = reserved_mine_targets[fid];
+    const std::string want = ship->auto_mine_mineral;
+
+    Id best_body_id = kInvalidId;
+    double best_score = -std::numeric_limits<double>::infinity();
+    double best_eta = std::numeric_limits<double>::infinity();
+    double best_deposit = 0.0;
+
+    for (Id bid : body_ids) {
+      const Body* b = find_ptr(state_.bodies, bid);
+      if (!b) continue;
+      if (b->system_id == kInvalidId) continue;
+      if (!find_ptr(state_.systems, b->system_id)) continue;
+
+      // Honor fog-of-war.
+      if (!is_system_discovered_by_faction(fid, b->system_id)) continue;
+
+      // Skip unmineable body types.
+      if (b->type == BodyType::Star) continue;
+
+      if (reserved.find(bid) != reserved.end()) continue;
+
+      double deposit = 0.0;
+      if (b->mineral_deposits.empty()) {
+        // Legacy/unmodeled: treat as effectively infinite so players can keep using older saves.
+        deposit = 1.0e12;
+      } else if (!want.empty()) {
+        // Modeled deposits: missing keys mean absent.
+        auto it = b->mineral_deposits.find(want);
+        deposit = (it == b->mineral_deposits.end()) ? 0.0 : std::max(0.0, it->second);
+      } else {
+        // Sum all remaining deposits.
+        for (const auto& [_, tons] : b->mineral_deposits) deposit += std::max(0.0, tons);
+      }
+
+      // Avoid depleted deposits.
+      if (deposit <= 1e-6) continue;
+
+      const double eta = estimate_eta_days_to_pos(ship->system_id, ship->position_mkm, fid, ship->speed_km_s,
+                                                  b->system_id, b->position_mkm);
+      if (!std::isfinite(eta)) continue;
+
+      // Score: prefer big deposits, prefer nearer targets.
+      double score = std::log10(deposit + 1.0) * 100.0 - eta;
+      // Gentle bias toward asteroids/comets as "intended" mobile mining targets.
+      if (b->type == BodyType::Asteroid) score += 10.0;
+      if (b->type == BodyType::Comet) score += 8.0;
+
+      if (score > best_score + 1e-9 ||
+          (std::abs(score - best_score) <= 1e-9 && (eta < best_eta - 1e-9 ||
+                                                   (std::abs(eta - best_eta) <= 1e-9 && deposit > best_deposit + 1e-9)))) {
+        best_score = score;
+        best_body_id = bid;
+        best_eta = eta;
+        best_deposit = deposit;
+      }
+    }
+
+    if (best_body_id == kInvalidId) return false;
+    reserved.insert(best_body_id);
+    return issue_mine_body(ship_id, best_body_id, want, /*stop_when_cargo_full=*/true,
+                           /*restrict_to_discovered=*/true);
+  };
+
+  for (Id sid : ship_ids) {
+    Ship* sh = find_ptr(state_.ships, sid);
+    if (!sh) continue;
+    if (!sh->auto_mine) continue;
+    if (sh->auto_explore) continue;
+    if (sh->auto_freight) continue;
+    if (sh->auto_salvage) continue;
+    if (sh->auto_colonize) continue;
+    if (sh->auto_tanker) continue;
+    if (!orders_empty(sid)) continue;
+
+    (void)issue_auto_mine(sid);
   }
 
   // --- Ship-level automation: Auto-colonize ---
@@ -900,6 +954,7 @@ void Simulation::tick_ai() {
     if (sh->auto_explore) continue;   // mutually exclusive; auto-explore handled below
     if (sh->auto_freight) continue;   // mutually exclusive; auto-freight handled below
     if (sh->auto_salvage) continue;   // mutually exclusive; auto-salvage handled above
+    if (sh->auto_mine) continue;      // mutually exclusive; auto-mine handled above
     if (sh->auto_tanker) continue;    // mutually exclusive; auto-tanker handled above
     if (!orders_empty(sid)) continue;
 
@@ -914,6 +969,7 @@ void Simulation::tick_ai() {
     if (sh->auto_freight) continue;  // mutually exclusive; auto-freight handled below
     if (sh->auto_colonize) continue; // mutually exclusive; auto-colonize handled above
     if (sh->auto_salvage) continue;  // mutually exclusive; auto-salvage handled above
+    if (sh->auto_mine) continue;     // mutually exclusive; auto-mine handled above
     if (sh->auto_tanker) continue;   // mutually exclusive; auto-tanker handled above
     if (!orders_empty(sid)) continue;
 
@@ -939,6 +995,7 @@ void Simulation::tick_ai() {
     if (sh->auto_explore) continue;  // mutually exclusive; auto-explore handled above
     if (sh->auto_colonize) continue; // mutually exclusive; auto-colonize handled above
     if (sh->auto_salvage) continue;  // mutually exclusive; auto-salvage handled above
+    if (sh->auto_mine) continue;     // mutually exclusive; auto-mine handled above
     if (sh->auto_tanker) continue;   // mutually exclusive; auto-tanker handled above
     if (!orders_empty(sid)) continue;
     if (sh->system_id == kInvalidId) continue;

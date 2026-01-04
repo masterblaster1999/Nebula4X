@@ -113,6 +113,19 @@ struct UnloadMineral {
   double tons{0.0};
 };
 
+// Mobile mining: extract minerals directly from a body's deposits into ship cargo.
+//
+// Notes:
+// - Requires the ship to have mining capacity (from mining components).
+// - The ship must be within docking range of the target body to mine.
+// - mineral == "" means "mine all available minerals" (in deterministic order).
+// - When stop_when_cargo_full is true, the order completes once the ship has no free cargo capacity.
+struct MineBody {
+  Id body_id{kInvalidId};
+  std::string mineral;
+  bool stop_when_cargo_full{true};
+};
+
 // Load troops from a friendly colony into this ship.
 // If strength <= 0, load as much as possible (up to troop capacity).
 struct LoadTroops {
@@ -217,6 +230,7 @@ using Order = std::variant<MoveToPoint,
                            WaitDays,
                            LoadMineral,
                            UnloadMineral,
+                           MineBody,
                            LoadTroops,
                            UnloadTroops,
                            LoadColonists,

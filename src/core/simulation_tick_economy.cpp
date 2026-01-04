@@ -71,25 +71,52 @@ void Simulation::tick_colonies(double dt_days, bool emit_daily_events) {
       if (dit == content_.installations.end()) continue;
 
       const InstallationDef& def = dit->second;
-      if (def.produces_per_day.empty()) continue;
+      if (!is_mining_installation(def)) continue;
+      if (def.mining_tons_per_day <= 0.0 && def.produces_per_day.empty()) continue;
 
-      if (is_mining_installation(def)) {
-        // Mining: convert produces_per_day into a request against body deposits.
-        const Id body_id = colony.body_id;
+      // Mining: generate a request against body deposits.
+      const Id body_id = colony.body_id;
 
-        // If the body is missing (invalid save / hand-edited state), fall back to
-        // the older "unlimited" behaviour to avoid silently losing resources.
-        if (body_id == kInvalidId || state_.bodies.find(body_id) == state_.bodies.end()) {
-          for (const auto& [mineral, per_day] : def.produces_per_day) {
-            colony.minerals[mineral] += per_day * static_cast<double>(count) * mining_mult * dt_days;
-          }
-          continue;
-        }
+      // If the body is missing (invalid save / hand-edited state), fall back to
+      // the older "unlimited" behaviour to avoid silently losing resources.
+      const Body* body = find_ptr(state_.bodies, body_id);
+      if (!body) {
         for (const auto& [mineral, per_day] : def.produces_per_day) {
-          const double req = per_day * static_cast<double>(count) * mining_mult * dt_days;
-          if (req <= 1e-12) continue;
-          mine_reqs[body_id][mineral].push_back({cid, req});
+          colony.minerals[mineral] += per_day * static_cast<double>(count) * mining_mult * dt_days;
         }
+        continue;
+      }
+
+      // New model: generic mining capacity distributed across all deposits.
+      if (def.mining_tons_per_day > 0.0 && !body->mineral_deposits.empty()) {
+        const double cap = def.mining_tons_per_day * static_cast<double>(count) * mining_mult * dt_days;
+        if (cap > 1e-12) {
+          // Deterministic iteration over deposit keys.
+          const auto keys = sorted_keys(body->mineral_deposits);
+          double total_remaining = 0.0;
+          for (const auto& k : keys) {
+            const double rem = std::max(0.0, body->mineral_deposits.at(k));
+            if (rem > 1e-12) total_remaining += rem;
+          }
+
+          if (total_remaining > 1e-12) {
+            for (const auto& k : keys) {
+              const double rem = std::max(0.0, body->mineral_deposits.at(k));
+              if (rem <= 1e-12) continue;
+              const double req = cap * (rem / total_remaining);
+              if (req <= 1e-12) continue;
+              mine_reqs[body_id][k].push_back({cid, req});
+            }
+          }
+        }
+        continue;
+      }
+
+      // Legacy model: fixed per-mineral extraction rates.
+      for (const auto& [mineral, per_day] : def.produces_per_day) {
+        const double req = per_day * static_cast<double>(count) * mining_mult * dt_days;
+        if (req <= 1e-12) continue;
+        mine_reqs[body_id][mineral].push_back({cid, req});
       }
     }
 
@@ -183,13 +210,18 @@ void Simulation::tick_colonies(double dt_days, bool emit_daily_events) {
         }
         if (total_req <= 1e-12) continue;
 
-        // If the deposit key is missing, treat it as unlimited for back-compat.
+        // Deposit semantics:
+        // - If the body's mineral_deposits map is empty, treat missing keys as
+        //   "unlimited" (legacy saves / content that predates finite deposits).
+        // - Otherwise, missing keys mean this mineral is not present.
         auto it_dep = body->mineral_deposits.find(mineral);
         if (it_dep == body->mineral_deposits.end()) {
-          for (const auto& [colony_id, req] : list) {
-            if (req <= 1e-12) continue;
-            if (auto* c = find_ptr(state_.colonies, colony_id)) {
-              c->minerals[mineral] += req;
+          if (body->mineral_deposits.empty()) {
+            for (const auto& [colony_id, req] : list) {
+              if (req <= 1e-12) continue;
+              if (auto* c = find_ptr(state_.colonies, colony_id)) {
+                c->minerals[mineral] += req;
+              }
             }
           }
           continue;

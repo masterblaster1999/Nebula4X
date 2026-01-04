@@ -28,6 +28,22 @@ bool is_non_negative(double v) { return v >= 0.0 && std::isfinite(v); }
 std::vector<std::string> validate_content_db(const ContentDB& db) {
   std::vector<std::string> errors;
 
+
+  const auto resource_known = [&](const std::string& rid) -> bool {
+    if (db.resources.empty()) return true;
+    return db.resources.find(rid) != db.resources.end();
+  };
+
+  // --- Resources (optional) ---
+  for (const auto& [key, r] : db.resources) {
+    if (key.empty()) push(errors, "Resource map contains an empty key");
+    if (r.id.empty()) push(errors, join("Resource '", key, "' has an empty id field"));
+    if (!r.id.empty() && !key.empty() && r.id != key)
+      push(errors, join("Resource key/id mismatch: key '", key, "' != id '", r.id, "'"));
+    if (r.name.empty()) push(errors, join("Resource '", key, "' has an empty name"));
+    if (r.category.empty()) push(errors, join("Resource '", key, "' has an empty category"));
+  }
+
   // --- Components ---
   for (const auto& [key, c] : db.components) {
     if (key.empty()) push(errors, "Component map contains an empty key");
@@ -45,6 +61,8 @@ std::vector<std::string> validate_content_db(const ContentDB& db) {
       push(errors, join("Component '", key, "' has invalid fuel_capacity_tons: ", c.fuel_capacity_tons));
     if (!is_non_negative(c.cargo_tons))
       push(errors, join("Component '", key, "' has invalid cargo_tons: ", c.cargo_tons));
+    if (!is_non_negative(c.mining_tons_per_day))
+      push(errors, join("Component '", key, "' has invalid mining_tons_per_day: ", c.mining_tons_per_day));
     if (!is_non_negative(c.sensor_range_mkm))
       push(errors, join("Component '", key, "' has invalid sensor_range_mkm: ", c.sensor_range_mkm));
     if (!is_non_negative(c.signature_multiplier))
@@ -114,6 +132,8 @@ std::vector<std::string> validate_content_db(const ContentDB& db) {
       push(errors, join("Design '", key, "' consumes fuel but has zero fuel_capacity_tons"));
     if (!is_non_negative(d.cargo_tons))
       push(errors, join("Design '", key, "' has invalid cargo_tons: ", d.cargo_tons));
+    if (!is_non_negative(d.mining_tons_per_day))
+      push(errors, join("Design '", key, "' has invalid mining_tons_per_day: ", d.mining_tons_per_day));
     if (!is_non_negative(d.sensor_range_mkm))
       push(errors, join("Design '", key, "' has invalid sensor_range_mkm: ", d.sensor_range_mkm));
     if (!is_non_negative(d.signature_multiplier))
@@ -194,23 +214,34 @@ std::vector<std::string> validate_content_db(const ContentDB& db) {
     if (!is_non_negative(inst.fortification_points))
       push(errors, join("Installation '", key, "' has invalid fortification_points: ", inst.fortification_points));
 
+    if (!is_non_negative(inst.mining_tons_per_day))
+      push(errors, join("Installation '", key, "' has invalid mining_tons_per_day: ", inst.mining_tons_per_day));
+
     for (const auto& [mineral, amount] : inst.produces_per_day) {
       if (mineral.empty()) push(errors, join("Installation '", key, "' produces an empty mineral id"));
+      if (!resource_known(mineral))
+        push(errors, join("Installation '", key, "' references unknown resource '", mineral, "'"));
       if (!is_non_negative(amount))
         push(errors, join("Installation '", key, "' has invalid production for '", mineral, "': ", amount));
     }
     for (const auto& [mineral, amount] : inst.consumes_per_day) {
       if (mineral.empty()) push(errors, join("Installation '", key, "' consumes an empty mineral id"));
+      if (!resource_known(mineral))
+        push(errors, join("Installation '", key, "' references unknown resource '", mineral, "'"));
       if (!is_non_negative(amount))
         push(errors, join("Installation '", key, "' has invalid consumption for '", mineral, "': ", amount));
     }
     for (const auto& [mineral, amount] : inst.build_costs) {
       if (mineral.empty()) push(errors, join("Installation '", key, "' has a build_cost with empty mineral id"));
+      if (!resource_known(mineral))
+        push(errors, join("Installation '", key, "' references unknown resource '", mineral, "'"));
       if (!is_non_negative(amount))
         push(errors, join("Installation '", key, "' has invalid build_cost for '", mineral, "': ", amount));
     }
     for (const auto& [mineral, amount] : inst.build_costs_per_ton) {
       if (mineral.empty()) push(errors, join("Installation '", key, "' has a build_costs_per_ton with empty mineral id"));
+      if (!resource_known(mineral))
+        push(errors, join("Installation '", key, "' references unknown resource '", mineral, "'"));
       if (!is_non_negative(amount))
         push(errors, join("Installation '", key, "' has invalid build_costs_per_ton for '", mineral, "': ", amount));
     }

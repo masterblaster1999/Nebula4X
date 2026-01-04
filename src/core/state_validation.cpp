@@ -421,7 +421,13 @@ std::vector<std::string> validate_game_state(const GameState& s, const ContentDB
                 } else if (!has_colony(ord.colony_id)) {
                   push(errors, prefix() + join("UnloadMineral references missing colony_id ", id_u64(ord.colony_id)));
                 }
-              } else if constexpr (std::is_same_v<T, LoadTroops>) {
+                    } else if constexpr (std::is_same_v<T, MineBody>) {
+        if (ord.body_id == kInvalidId) {
+          push(errors, "MineBody order missing body_id");
+        } else if (!has_body(ord.body_id)) {
+          push(errors, "MineBody order references missing body_id=" + std::to_string(ord.body_id));
+        }
+} else if constexpr (std::is_same_v<T, LoadTroops>) {
                 if (ord.colony_id == kInvalidId) {
                   push(errors, prefix() + "LoadTroops has invalid colony_id");
                 } else if (!has_colony(ord.colony_id)) {

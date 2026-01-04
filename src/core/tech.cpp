@@ -35,6 +35,7 @@ ComponentType parse_component_type(const std::string& s) {
   if (s == "engine") return ComponentType::Engine;
   if (s == "fuel_tank" || s == "fuel") return ComponentType::FuelTank;
   if (s == "cargo") return ComponentType::Cargo;
+  if (s == "mining") return ComponentType::Mining;
   if (s == "sensor") return ComponentType::Sensor;
   if (s == "reactor") return ComponentType::Reactor;
   if (s == "weapon") return ComponentType::Weapon;
@@ -233,8 +234,9 @@ struct SourcedValue {
   fs::path source;
 };
 
-// Merge blueprint documents (components/installations/designs) into a single set of raw JSON values.
+// Merge blueprint documents (resources/components/installations/designs) into a single set of raw JSON values.
 struct RawBlueprintAggregate {
+  std::unordered_map<std::string, SourcedValue> resources;
   std::unordered_map<std::string, SourcedValue> components;
   std::unordered_map<std::string, SourcedValue> installations;
   std::unordered_map<std::string, SourcedValue> designs;
@@ -249,6 +251,38 @@ void merge_blueprint_file(RawBlueprintAggregate& agg, const fs::path& file) {
   const auto rootv = json::parse(txt);
   if (!rootv.is_object()) throw std::runtime_error("Blueprint JSON root must be an object: " + file.string());
   const auto& root = rootv.object();
+
+  // --- Resources (object of objects) ---
+  if (auto itr = root.find("resources"); itr != root.end()) {
+    if (!itr->second.is_object()) throw std::runtime_error("resources must be an object in " + file.string());
+    const auto& res = itr->second.object();
+    for (const auto& [rid, rv] : res) {
+      if (rv.is_null()) {
+        agg.resources.erase(rid);
+        continue;
+      }
+      if (!rv.is_object()) throw std::runtime_error("resource '" + rid + "' must be an object in " + file.string());
+      if (is_delete_marker(rv.object())) {
+        agg.resources.erase(rid);
+        continue;
+      }
+
+      auto it = agg.resources.find(rid);
+      if (it == agg.resources.end()) {
+        agg.resources[rid] = SourcedValue{rv, file};
+        continue;
+      }
+
+      json::Value merged = it->second.value;
+      merge_json_merge_patch(merged, rv);
+      if (!merged.is_object()) {
+        throw std::runtime_error("internal error: merged resource is not an object for id '" + rid + "'");
+      }
+      auto& mo = *merged.as_object();
+      strip_keys(mo, {"delete", "remove"});
+      agg.resources[rid] = SourcedValue{merged, file};
+    }
+  }
 
   // --- Components (object of objects) ---
   if (auto itc = root.find("components"); itc != root.end()) {
@@ -377,6 +411,20 @@ void merge_tech_file(RawTechAggregate& agg, const fs::path& file) {
   }
 }
 
+ResourceDef parse_resource_def(const std::string& rid, const json::Object& rj) {
+  ResourceDef r;
+  r.id = rid;
+  r.name = find_key(rj, "name") ? find_key(rj, "name")->string_value(rid) : rid;
+  if (const auto* cv = find_key(rj, "category")) r.category = cv->string_value("mineral");
+  if (r.category == "mineral") {
+    // Alias: some mods may prefer "type".
+    if (const auto* tv = find_key(rj, "type")) r.category = tv->string_value("mineral");
+  }
+  if (r.category.empty()) r.category = "mineral";
+  r.mineable = bool_key(rj, "mineable", true);
+  return r;
+}
+
 ComponentDef parse_component_def(const std::string& cid, const json::Object& cj) {
   ComponentDef c;
   c.id = cid;
@@ -415,6 +463,12 @@ ComponentDef parse_component_def(const std::string& cid, const json::Object& cj)
   }
 
   if (const auto* v_cargo = find_key(cj, "cargo_tons")) c.cargo_tons = v_cargo->number_value(0.0);
+
+  // Optional: mobile mining.
+  if (const auto* v_mine = find_key(cj, "mining_tons_per_day")) c.mining_tons_per_day = v_mine->number_value(0.0);
+  if (const auto* v_mine2 = find_key(cj, "mining_rate_tpd")) {
+    if (c.mining_tons_per_day <= 0.0) c.mining_tons_per_day = v_mine2->number_value(0.0);
+  }
 
   // Back-compat: sensors used to be "range_mkm".
   if (const auto* v_range = find_key(cj, "range_mkm")) c.sensor_range_mkm = v_range->number_value(0.0);
@@ -524,6 +578,22 @@ InstallationDef parse_installation_def(const std::string& inst_id, const json::O
     }
   }
 
+  // Optional: generic mining capacity (tons per day).
+  // When set > 0, mining installations distribute this capacity across all
+  // non-depleted deposits on the colony's body (weighted by remaining tons).
+  if (const auto* mt_v = find_key(vo, "mining_tons_per_day")) def.mining_tons_per_day = mt_v->number_value(0.0);
+  if (const auto* mt_v2 = find_key(vo, "mining_rate_tpd")) {
+    if (def.mining_tons_per_day <= 0.0) def.mining_tons_per_day = mt_v2->number_value(0.0);
+  }
+  if (const auto* mt_v3 = find_key(vo, "mining_capacity_tpd")) {
+    if (def.mining_tons_per_day <= 0.0) def.mining_tons_per_day = mt_v3->number_value(0.0);
+  }
+  if (const auto* mt_v4 = find_key(vo, "mining_tpd")) {
+    if (def.mining_tons_per_day <= 0.0) def.mining_tons_per_day = mt_v4->number_value(0.0);
+  }
+  if (def.mining_tons_per_day > 0.0) def.mining = true;
+
+
   if (const auto* cp_v = find_key(vo, "construction_points_per_day")) {
     def.construction_points_per_day = cp_v->number_value(0.0);
   }
@@ -627,6 +697,7 @@ ShipDesign parse_design_def(const json::Object& o,
   double fuel_cap = 0.0;
   double fuel_use = 0.0;
   double cargo = 0.0;
+  double mining_rate = 0.0;
   double sensor = 0.0;
   double colony_cap = 0.0;
   double troop_cap = 0.0;
@@ -661,6 +732,7 @@ ShipDesign parse_design_def(const json::Object& o,
     fuel_cap += c.fuel_capacity_tons;
     fuel_use += c.fuel_use_per_mkm;
     cargo += c.cargo_tons;
+    mining_rate += c.mining_tons_per_day;
     sensor = std::max(sensor, c.sensor_range_mkm);
     colony_cap += c.colony_capacity_millions;
     troop_cap += c.troop_capacity;
@@ -696,6 +768,7 @@ ShipDesign parse_design_def(const json::Object& o,
   d.fuel_capacity_tons = fuel_cap;
   d.fuel_use_per_mkm = fuel_use;
   d.cargo_tons = cargo;
+  d.mining_tons_per_day = mining_rate;
   d.sensor_range_mkm = sensor;
   d.colony_capacity_millions = colony_cap;
   d.troop_capacity = troop_cap;
@@ -762,6 +835,14 @@ ContentDB load_content_db_from_files(const std::vector<std::string>& paths) {
 
   RawBlueprintAggregate agg;
   for (const auto& f : files) merge_blueprint_file(agg, f);
+
+  // Resources (optional catalog).
+  for (const auto& [rid, sv] : agg.resources) {
+    if (!sv.value.is_object()) {
+      throw std::runtime_error("resource '" + rid + "' is not an object (" + sv.source.string() + ")");
+    }
+    db.resources[rid] = parse_resource_def(rid, sv.value.object());
+  }
 
   // Components first (designs depend on them).
   for (const auto& [cid, sv] : agg.components) {

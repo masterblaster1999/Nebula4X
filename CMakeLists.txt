@@ -30,6 +30,7 @@ target_sources(nebula4x_core
     src/core/orders.cpp
     src/core/order_planner.cpp
     src/core/freight_planner.cpp
+    src/core/fuel_planner.cpp
     src/core/research_schedule.cpp
     src/core/colony_schedule.cpp
     src/core/planner_events.cpp
@@ -146,6 +147,7 @@ if(NEBULA4X_BUILD_UI)
     src/ui/economy_window.cpp
     src/ui/planner_window.cpp
     src/ui/freight_window.cpp
+    src/ui/fuel_window.cpp
     src/ui/time_warp_window.cpp
     src/ui/production_window.cpp
     src/ui/galaxy_map.cpp
@@ -203,7 +205,10 @@ if(NEBULA4X_BUILD_TESTS)
     tests/test_attack_lead_pursuit.cpp
     tests/test_sensor_coverage.cpp
     tests/test_freight_planner.cpp
+    tests/test_fuel_planner.cpp
     tests/test_mineral_deposits.cpp
+    tests/test_mobile_mining.cpp
+    tests/test_auto_mine.cpp
     tests/test_power_system.cpp
     tests/test_digests.cpp
     tests/test_faction_economy_modifiers.cpp
@@ -216,6 +221,8 @@ if(NEBULA4X_BUILD_TESTS)
     tests/test_determinism.cpp
     tests/test_event_export.cpp
     tests/test_content_validation.cpp
+    tests/test_resource_catalog.cpp
+    tests/test_materials_processing.cpp
     tests/test_content_overlays.cpp
     tests/test_spatial_index.cpp
     tests/test_random_scenario.cpp

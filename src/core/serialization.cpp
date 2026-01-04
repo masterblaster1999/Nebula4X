@@ -280,7 +280,12 @@ Value order_to_json(const Order& order) {
           obj["colony_id"] = static_cast<double>(o.colony_id);
           if (!o.mineral.empty()) obj["mineral"] = o.mineral;
           obj["tons"] = o.tons;
-        } else if constexpr (std::is_same_v<T, LoadTroops>) {
+                } else if constexpr (std::is_same_v<T, MineBody>) {
+          obj["type"] = std::string("mine_body");
+          obj["body_id"] = static_cast<double>(o.body_id);
+          if (!o.mineral.empty()) obj["mineral"] = o.mineral;
+          if (!o.stop_when_cargo_full) obj["stop_when_cargo_full"] = false;
+} else if constexpr (std::is_same_v<T, LoadTroops>) {
           obj["type"] = std::string("load_troops");
           obj["colony_id"] = static_cast<double>(o.colony_id);
           obj["strength"] = o.strength;
@@ -420,6 +425,13 @@ Order order_from_json(const Value& v) {
     if (auto m_it = o.find("mineral"); m_it != o.end()) u.mineral = m_it->second.string_value();
     if (auto t_it = o.find("tons"); t_it != o.end()) u.tons = t_it->second.number_value(0.0);
     return u;
+  }
+  if (type == "mine_body") {
+    MineBody mb;
+    mb.body_id = static_cast<Id>(o.at("body_id").int_value(kInvalidId));
+    if (auto m_it = o.find("mineral"); m_it != o.end()) mb.mineral = m_it->second.string_value();
+    if (auto it = o.find("stop_when_cargo_full"); it != o.end()) mb.stop_when_cargo_full = it->second.bool_value(true);
+    return mb;
   }
   if (type == "load_troops") {
     LoadTroops l;
@@ -644,6 +656,13 @@ std::string serialize_game_to_json(const GameState& s) {
     o["auto_explore"] = sh.auto_explore;
     o["auto_freight"] = sh.auto_freight;
     o["auto_salvage"] = sh.auto_salvage;
+    o["auto_mine"] = sh.auto_mine;
+    if (sh.auto_mine_home_colony_id != kInvalidId) {
+      o["auto_mine_home_colony_id"] = static_cast<double>(sh.auto_mine_home_colony_id);
+    }
+    if (!sh.auto_mine_mineral.empty()) {
+      o["auto_mine_mineral"] = sh.auto_mine_mineral;
+    }
     o["auto_colonize"] = sh.auto_colonize;
     o["auto_refuel"] = sh.auto_refuel;
     o["auto_refuel_threshold_fraction"] = sh.auto_refuel_threshold_fraction;
@@ -877,6 +896,7 @@ std::string serialize_game_to_json(const GameState& s) {
     o["fuel_capacity_tons"] = d.fuel_capacity_tons;
     o["fuel_use_per_mkm"] = d.fuel_use_per_mkm;
     o["cargo_tons"] = d.cargo_tons;
+    o["mining_tons_per_day"] = d.mining_tons_per_day;
     o["sensor_range_mkm"] = d.sensor_range_mkm;
     o["colony_capacity_millions"] = d.colony_capacity_millions;
     o["troop_capacity"] = d.troop_capacity;
@@ -1113,6 +1133,11 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     if (auto it = o.find("auto_explore"); it != o.end()) sh.auto_explore = it->second.bool_value(false);
     if (auto it = o.find("auto_freight"); it != o.end()) sh.auto_freight = it->second.bool_value(false);
     if (auto it = o.find("auto_salvage"); it != o.end()) sh.auto_salvage = it->second.bool_value(false);
+    if (auto it = o.find("auto_mine"); it != o.end()) sh.auto_mine = it->second.bool_value(false);
+    if (auto it = o.find("auto_mine_home_colony_id"); it != o.end()) {
+      sh.auto_mine_home_colony_id = static_cast<Id>(it->second.int_value(kInvalidId));
+    }
+    if (auto it = o.find("auto_mine_mineral"); it != o.end()) sh.auto_mine_mineral = it->second.string_value();
     if (auto it = o.find("auto_colonize"); it != o.end()) sh.auto_colonize = it->second.bool_value(false);
     if (auto it = o.find("auto_refuel"); it != o.end()) sh.auto_refuel = it->second.bool_value(false);
     if (auto it = o.find("auto_refuel_threshold_fraction"); it != o.end()) {
@@ -1410,6 +1435,7 @@ GameState deserialize_game_from_json(const std::string& json_text) {
       if (auto itfc = o.find("fuel_capacity_tons"); itfc != o.end()) d.fuel_capacity_tons = itfc->second.number_value(0.0);
       if (auto itfu = o.find("fuel_use_per_mkm"); itfu != o.end()) d.fuel_use_per_mkm = itfu->second.number_value(0.0);
       d.cargo_tons = o.at("cargo_tons").number_value(0.0);
+      if (auto itm = o.find("mining_tons_per_day"); itm != o.end()) d.mining_tons_per_day = itm->second.number_value(0.0);
       d.sensor_range_mkm = o.at("sensor_range_mkm").number_value(0.0);
       if (auto itcc = o.find("colony_capacity_millions"); itcc != o.end()) {
         d.colony_capacity_millions = itcc->second.number_value(0.0);

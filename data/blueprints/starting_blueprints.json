@@ -22,6 +22,13 @@
       "mass_tons": 20,
       "cargo_tons": 500
     },
+    "mining_laser_mk1": {
+      "name": "Mining Laser Mk.I",
+      "type": "mining",
+      "mass_tons": 35,
+      "mining_tons_per_day": 80,
+      "power_use": 2
+    },
     "fuel_tank_mk1": {
       "name": "Fuel Tank Mk.1",
       "type": "fuel_tank",
@@ -336,7 +343,8 @@
       "build_costs": {
         "Duranium": 300,
         "Neutronium": 30
-      }
+      },
+      "mining_tons_per_day": 1.7
     },
     "construction_factory": {
       "name": "Construction Factory",
@@ -344,7 +352,9 @@
       "construction_cost": 500,
       "build_costs": {
         "Duranium": 1000,
-        "Neutronium": 100
+        "Neutronium": 100,
+        "Boronide": 200,
+        "Mercassium": 100
       }
     },
     "infrastructure": {
@@ -362,26 +372,75 @@
         "Fuel": 200.0
       },
       "consumes": {
-        "Duranium": 0.5,
-        "Neutronium": 0.25
+        "Sorium": 5.0
       },
       "construction_cost": 600,
       "build_costs": {
         "Duranium": 1500,
-        "Neutronium": 200
+        "Neutronium": 200,
+        "Corundium": 150
+      }
+    },
+    "metal_smelter": {
+      "name": "Metal Smelter",
+      "produces": {
+        "Metals": 100.0
+      },
+      "consumes": {
+        "Duranium": 2.0,
+        "Tritanium": 0.5,
+        "Boronide": 0.5
+      },
+      "construction_cost": 650,
+      "build_costs": {
+        "Duranium": 1600,
+        "Neutronium": 180,
+        "Tritanium": 120,
+        "Corundium": 80
+      }
+    },
+    "mineral_processor": {
+      "name": "Mineral Processor",
+      "produces": {
+        "Minerals": 100.0
+      },
+      "consumes": {
+        "Corundium": 1.5,
+        "Gallicite": 1.0,
+        "Uridium": 0.5,
+        "Mercassium": 0.5
+      },
+      "construction_cost": 650,
+      "build_costs": {
+        "Duranium": 1600,
+        "Neutronium": 180,
+        "Mercassium": 120,
+        "Gallicite": 80
       }
     },
     "shipyard": {
       "name": "Commercial Shipyard",
       "construction_cost": 1000,
       "build_costs": {
-        "Duranium": 5000,
-        "Neutronium": 500
+        "Duranium": 20000,
+        "Neutronium": 5000,
+        "Tritanium": 2000,
+        "Gallicite": 1500,
+        "Corundium": 1000,
+        "Uridium": 1000
       },
       "build_rate_tons_per_day": 50,
       "build_costs_per_ton": {
-        "Duranium": 1.0,
-        "Neutronium": 0.1
+        "Duranium": 0.8,
+        "Neutronium": 0.08,
+        "Tritanium": 0.05,
+        "Boronide": 0.03,
+        "Corbomite": 0.02,
+        "Mercassium": 0.03,
+        "Vendarite": 0.02,
+        "Uridium": 0.02,
+        "Corundium": 0.02,
+        "Gallicite": 0.03
       }
     },
     "research_lab": {
@@ -390,7 +449,9 @@
       "construction_cost": 150,
       "build_costs": {
         "Duranium": 500,
-        "Neutronium": 50
+        "Neutronium": 50,
+        "Mercassium": 300,
+        "Gallicite": 100
       }
     },
     "sensor_station": {
@@ -399,7 +460,9 @@
       "construction_cost": 400,
       "build_costs": {
         "Duranium": 1200,
-        "Neutronium": 120
+        "Neutronium": 120,
+        "Uridium": 200,
+        "Corbomite": 100
       }
     },
     "training_facility": {
@@ -419,7 +482,10 @@
       "construction_cost": 600,
       "build_costs": {
         "Duranium": 2000,
-        "Neutronium": 250
+        "Neutronium": 250,
+        "Tritanium": 300,
+        "Corundium": 200,
+        "Corbomite": 100
       }
     },
     "terraforming_plant": {
@@ -428,8 +494,13 @@
       "construction_cost": 800,
       "build_costs": {
         "Duranium": 2500,
-        "Neutronium": 300
+        "Neutronium": 300,
+        "Boronide": 400,
+        "Corundium": 200
       }
     }
-  }
+  },
+  "include": [
+    "resources.json"
+  ]
 }

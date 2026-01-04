@@ -16,6 +16,7 @@
 #include "ui/economy_window.h"
 #include "ui/planner_window.h"
 #include "ui/freight_window.h"
+#include "ui/fuel_window.h"
 #include "ui/time_warp_window.h"
 #include "ui/production_window.h"
 #include "ui/galaxy_map.h"
@@ -196,6 +197,7 @@ void App::frame() {
   if (ui_.show_economy_window) draw_economy_window(sim_, ui_, selected_colony_, selected_body_);
   if (ui_.show_planner_window) draw_planner_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   if (ui_.show_freight_window) draw_freight_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  if (ui_.show_fuel_window) draw_fuel_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   if (ui_.show_time_warp_window) draw_time_warp_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   if (ui_.show_timeline_window) draw_timeline_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   if (ui_.show_design_studio_window) {
@@ -647,6 +649,9 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       if (auto it = obj->find("show_freight_window"); it != obj->end()) {
         ui_.show_freight_window = it->second.bool_value(ui_.show_freight_window);
       }
+      if (auto it = obj->find("show_fuel_window"); it != obj->end()) {
+        ui_.show_fuel_window = it->second.bool_value(ui_.show_fuel_window);
+      }
       if (auto it = obj->find("show_time_warp_window"); it != obj->end()) {
         ui_.show_time_warp_window = it->second.bool_value(ui_.show_time_warp_window);
       }
@@ -789,6 +794,7 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     o["show_economy_window"] = ui_.show_economy_window;
     o["show_planner_window"] = ui_.show_planner_window;
     o["show_freight_window"] = ui_.show_freight_window;
+    o["show_fuel_window"] = ui_.show_fuel_window;
     o["show_time_warp_window"] = ui_.show_time_warp_window;
     o["show_timeline_window"] = ui_.show_timeline_window;
     o["show_design_studio_window"] = ui_.show_design_studio_window;
@@ -856,6 +862,7 @@ void App::reset_window_layout_defaults() {
   ui_.show_economy_window = false;
   ui_.show_planner_window = false;
   ui_.show_freight_window = false;
+  ui_.show_fuel_window = false;
   ui_.show_time_warp_window = false;
   ui_.show_timeline_window = false;
   ui_.show_design_studio_window = false;

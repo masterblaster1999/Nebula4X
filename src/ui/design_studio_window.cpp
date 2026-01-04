@@ -44,11 +44,13 @@ const char* component_type_label(ComponentType t) {
     case ComponentType::Reactor: return "Reactor";
     case ComponentType::FuelTank: return "Fuel Tank";
     case ComponentType::Cargo: return "Cargo";
+    case ComponentType::Mining: return "Mining";
     case ComponentType::Sensor: return "Sensor";
     case ComponentType::Weapon: return "Weapon";
     case ComponentType::Armor: return "Armor";
     case ComponentType::Shield: return "Shield";
     case ComponentType::ColonyModule: return "Colony Module";
+    case ComponentType::TroopBay: return "Troop Bay";
     default: return "Unknown";
   }
 }
@@ -59,11 +61,13 @@ int type_rank(ComponentType t) {
     case ComponentType::Reactor: return 1;
     case ComponentType::FuelTank: return 2;
     case ComponentType::Cargo: return 3;
-    case ComponentType::ColonyModule: return 4;
-    case ComponentType::Sensor: return 5;
-    case ComponentType::Weapon: return 6;
-    case ComponentType::Armor: return 7;
-    case ComponentType::Shield: return 8;
+    case ComponentType::Mining: return 4;
+    case ComponentType::ColonyModule: return 5;
+    case ComponentType::TroopBay: return 6;
+    case ComponentType::Sensor: return 7;
+    case ComponentType::Weapon: return 8;
+    case ComponentType::Armor: return 9;
+    case ComponentType::Shield: return 10;
     default: return 99;
   }
 }
@@ -93,7 +97,9 @@ ImU32 color_for_component_type(ComponentType t) {
     case ComponentType::Reactor: return IM_COL32(255, 220, 90, 220);
     case ComponentType::FuelTank: return IM_COL32(90, 235, 150, 220);
     case ComponentType::Cargo: return IM_COL32(255, 170, 90, 220);
+    case ComponentType::Mining: return IM_COL32(140, 255, 140, 220);
     case ComponentType::ColonyModule: return IM_COL32(220, 130, 255, 220);
+    case ComponentType::TroopBay: return IM_COL32(255, 200, 150, 220);
     case ComponentType::Sensor: return IM_COL32(150, 150, 255, 220);
     case ComponentType::Weapon: return IM_COL32(255, 100, 100, 220);
     case ComponentType::Armor: return IM_COL32(190, 190, 190, 220);
@@ -784,6 +790,7 @@ void draw_design_studio_window(Simulation& sim, UIState& ui, Id& selected_ship, 
             if (hovered_comp_data.power_use > 0.0) ImGui::Text("Power use: %.1f", hovered_comp_data.power_use);
             if (hovered_comp_data.fuel_cap > 0.0) ImGui::Text("Fuel cap: %.0f t", hovered_comp_data.fuel_cap);
             if (hovered_comp_data.cargo_tons > 0.0) ImGui::Text("Cargo: %.0f t", hovered_comp_data.cargo_tons);
+            if (hovered_comp_data.mining_tpd > 0.0) ImGui::Text("Mining: %.1f t/day", hovered_comp_data.mining_tpd);
             if (hovered_comp_data.sensor_range > 0.0) ImGui::Text("Sensor: %.0f mkm", hovered_comp_data.sensor_range);
             if (hovered_comp_data.weapon_dmg > 0.0) {
               ImGui::Text("Weapon: %.1f (%.1f mkm)", hovered_comp_data.weapon_dmg, hovered_comp_data.weapon_range);
@@ -831,6 +838,11 @@ void draw_design_studio_window(Simulation& sim, UIState& ui, Id& selected_ship, 
             ImGui::TextDisabled("Fuel: (none)");
           }
           ImGui::Text("Cargo: %.0f t", design->cargo_tons);
+          if (design->mining_tons_per_day > 0.0) {
+            ImGui::Text("Mining: %.1f t/day", design->mining_tons_per_day);
+          } else {
+            ImGui::TextDisabled("Mining: (none)");
+          }
           ImGui::Text("Sensor: %.0f mkm", design->sensor_range_mkm);
           if (design->weapon_damage > 0.0) {
             ImGui::Text("Weapons: %.1f", design->weapon_damage);
@@ -874,6 +886,7 @@ void draw_design_studio_window(Simulation& sim, UIState& ui, Id& selected_ship, 
               const double range_b = (cd->fuel_use_per_mkm > 0.0) ? (cd->fuel_capacity_tons / cd->fuel_use_per_mkm) : 0.0;
               colored_delta("Range", range_a, range_b, "%.0f");
               colored_delta("Cargo", design->cargo_tons, cd->cargo_tons, "%.0f");
+              colored_delta("Mining", design->mining_tons_per_day, cd->mining_tons_per_day, "%.1f");
               colored_delta("Sensors", design->sensor_range_mkm, cd->sensor_range_mkm, "%.0f");
               colored_delta("Weapons", design->weapon_damage, cd->weapon_damage);
               colored_delta("HP", design->max_hp, cd->max_hp, "%.0f");
@@ -897,6 +910,7 @@ void draw_design_studio_window(Simulation& sim, UIState& ui, Id& selected_ship, 
               if (c.power_use > 0.0) ImGui::Text("Power use: %.1f", c.power_use);
               if (c.fuel_capacity_tons > 0.0) ImGui::Text("Fuel cap: %.0f t", c.fuel_capacity_tons);
               if (c.cargo_tons > 0.0) ImGui::Text("Cargo: %.0f t", c.cargo_tons);
+              if (c.mining_tons_per_day > 0.0) ImGui::Text("Mining: %.1f t/day", c.mining_tons_per_day);
               if (c.sensor_range_mkm > 0.0) ImGui::Text("Sensor: %.0f mkm", c.sensor_range_mkm);
               if (c.weapon_damage > 0.0) ImGui::Text("Weapon: %.1f (%.1f mkm)", c.weapon_damage, c.weapon_range_mkm);
               if (c.shield_hp > 0.0) ImGui::Text("Shield: %.0f (+%.1f/day)", c.shield_hp, c.shield_regen_per_day);

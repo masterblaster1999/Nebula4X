@@ -143,6 +143,11 @@ static void hash_order(Digest64& d, const Order& ord) {
           d.add_u64(o.colony_id);
           d.add_string(o.mineral);
           d.add_double(o.tons);
+        } else if constexpr (std::is_same_v<T, MineBody>) {
+          d.add_u64(22);
+          d.add_u64(o.body_id);
+          d.add_string(o.mineral);
+          d.add_bool(o.stop_when_cargo_full);
         } else if constexpr (std::is_same_v<T, LoadTroops>) {
           d.add_u64(12);
           d.add_u64(o.colony_id);
@@ -441,6 +446,9 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
     d.add_bool(sh.auto_explore);
     d.add_bool(sh.auto_freight);
     d.add_bool(sh.auto_salvage);
+    d.add_bool(sh.auto_mine);
+    d.add_u64(sh.auto_mine_home_colony_id);
+    d.add_string(sh.auto_mine_mineral);
     d.add_bool(sh.auto_colonize);
     d.add_bool(sh.auto_refuel);
     d.add_double(sh.auto_refuel_threshold_fraction);
