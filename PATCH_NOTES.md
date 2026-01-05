@@ -1,4 +1,258 @@
-# Patch notes (generated 2026-01-04 r63)
+# Patch notes (generated 2026-01-05 r74)
+
+
+
+## r74 (2026-01-05)
+
+### Reference Graph 2.0: global scan mode + path finder + scalable layout
+
+This round upgrades the **Reference Graph** window into a much more powerful navigation + debugging tool.
+
+Highlights:
+
+- **Global graph build mode (opt-in):** incrementally scans *all* entities in the current snapshot and builds a whole-state reference graph.
+  - Tunable budgets: **entities/frame**, **scan nodes/entity**, plus **max nodes** and a new **max edges** cap.
+  - Live progress indicator and pause/resume.
+
+- **Shortest path finder** between two nodes currently present in the graph.
+  - **Directed / undirected** toggle.
+  - Path is highlighted directly in the canvas and also shown as a clickable list.
+  - Quick set endpoints via **Shift+Click** (start) and **Ctrl+Click** (end), or via right-click context menu.
+
+- **Neighbor panels** for the selected node.
+  - Quick inbound/outbound browsing to traverse dense graphs without panning around.
+
+- **Scale-friendly auto layout:** switches to a spatial-hash repulsion approximation on larger graphs to keep layout responsive.
+
+- **Prefs:** UI prefs schema bumped to **27.0** (reference graph global scan knobs + max edges).
+
+
+
+## r73 (2026-01-05)
+
+### Watchboard Aggregates: wildcard JSON pointer queries + rollups
+
+This round upgrades the Watchboard from single-value pins into a *tiny analytics layer*.
+It introduces an opt-in JSON-pointer **glob query** (wildcards) and adds aggregate pins that can
+roll up a whole set of values into one number you can chart and track over time.
+
+Highlights:
+
+- **Core util:** `query_json_pointer_glob(...)`
+  - Supports `*` (single-segment wildcard) and `**` (recursive descent globstar) in JSON Pointer-like patterns.
+  - Returns matches along with traversal stats and safety caps (`max_matches`, `max_nodes`).
+
+- **Watchboard: Aggregate query mode**
+  - Toggle any pin into **Aggregate query** mode and pick an op:
+    - **Count**, **Sum**, **Avg**, **Min**, **Max**
+  - Hover tooltips show match counts, numeric counts, traversal budget stats, and a small sample of matched pointers.
+  - **Cached evaluation** per Game JSON cache revision (avoids re-running expensive queries every frame).
+  - Query pins’ **Go** button jumps to the **first match** (and the context menu exposes copy/go helpers).
+
+- **Prefs:**
+  - Watchboard query budgets and the new per-pin query fields are persisted (schema version bumped to **26.0**).
+
+- **Tests:**
+  - Added coverage for wildcard pointer queries.
+
+## r72 (2026-01-05)
+
+### Time Machine: live state history + diffs (in-memory)
+
+This round adds a new debugging + UX power tool: **Time Machine**.
+
+It records full save-game JSON snapshots in-memory, computes compact diffs, and lets you *load* any snapshot
+back into the simulation ("time travel") — ideal for debugging why a number changed, or quickly branching from
+an earlier turn.
+
+Highlights:
+
+- **New window:** **Time Machine (State History)** (`Ctrl+Shift+D`)
+  - **Recording:** auto-capture snapshots at a configurable refresh interval, or **Capture now** on demand.
+  - **Ring buffer:** keep the last *N* snapshots (with a quick memory estimate shown in the UI).
+  - **Diff preview:** browse changes via a fast table (op/path/before/after), with filters + op toggles.
+  - **Compare modes:** compare the selected snapshot to **Prev**, or to a user-selected **Baseline**.
+  - **Export / clipboard:**
+    - Export full snapshot JSON.
+    - Export diff report JSON.
+    - Export **RFC 6902 JSON Patch** (or copy to clipboard).
+  - **Integrations:**
+    - Clicking a diff row jumps to the exact JSON Pointer in **JSON Explorer**.
+    - Right-click diff rows to **Pin** the path to the Watchboard.
+
+- **HUD / UX:**
+  - Status bar gains a **History** button.
+  - Command Palette gains an action to toggle the Time Machine window.
+  - Help window lists the new shortcut.
+
+Prefs:
+- Time Machine settings are persisted to `ui_prefs.json` (schema version bumped to **25.0**).
+
+
+## r71 (2026-01-05)
+
+### Reference Graph: procedural entity-id relationship map
+
+This round adds a new **Reference Graph** window that turns the live game-state JSON into an interactive,
+entity-aware relationship graph.
+
+Highlights:
+
+- **New window:** **Reference Graph (Entity IDs)** (`Ctrl+Shift+G`)
+  - Focus an entity id (or search by kind/name/id) and visualize its relationships as a node-link diagram.
+  - **Outbound expansion:** scans the focused entity’s JSON subtree for *id-ish* references to other entities.
+  - **Inbound scan:** incrementally scans the whole live snapshot for references *to* the focused id and adds edges back to
+    the containing top-level entity.
+  - Quality-of-life: pan/zoom canvas, drag-to-pin nodes, optional grid, force-directed auto-layout.
+  - Export: **Copy Graphviz DOT** to clipboard for external graph tooling.
+
+- **Integrations:** anywhere the UI already recognizes entity ids, you can now jump straight into the graph:
+  - JSON Explorer, OmniSearch, Watchboard, Data Lenses, and Entity Inspector context actions gained **Open in Reference Graph**.
+
+- **HUD / UX:**
+  - Status bar gets a **Graph** button (seeds focus from current selection when possible).
+  - Command Palette gains an action to toggle the Reference Graph window.
+  - Help window lists the new shortcut.
+
+Prefs:
+- Reference Graph settings are persisted to `ui_prefs.json` (schema version bumped to **24.0**).
+
+
+
+## r70 (2026-01-05)
+
+### Entity Inspector + ID links (procedural debugger-grade navigation)
+
+This round adds a new **Entity Inspector** tool and makes several existing JSON-driven windows *entity-aware*.
+
+Key additions:
+
+- **New window:** **Entity Inspector (ID Resolver)** (`Ctrl+G`)
+  - Type/paste an entity id and instantly resolve it to a live JSON path (kind/name if available).
+  - One-click actions: open in JSON Explorer, open the collection in Data Lenses, pin to Watchboard.
+  - **Inbound reference scan:** incrementally scans the live game JSON for where the id appears and lists paths you can double-click to jump to.
+  - Tunable perf knobs: nodes/frame + max hits, plus auto-scan toggle.
+
+- **New shared index:** `ui/game_entity_index` builds a best-effort map of `id → {kind, name, json_pointer_path}` from the *live* game JSON snapshot.
+
+- **Linkification / navigation upgrades (live game JSON only):**
+  - **JSON Explorer:** id-like scalar values now offer “Go to referenced entity” + “Open in Entity Inspector”.
+  - **Data Lenses:** id-ish columns resolve to an entity name (when possible) and become clickable; context menu gains entity actions.
+  - **OmniSearch / Watchboard:** context menus now surface referenced entity actions when the selected value looks like an entity id.
+
+- **HUD / UX polish:**
+  - Status bar gets an **Entity** button.
+  - Command Palette gains an action to toggle the Entity Inspector.
+  - Help window lists the new shortcut.
+
+Notes:
+- Entity resolution is intentionally conservative (only “id-ish” columns/fields are linkified) to reduce false positives from numeric collisions.
+- Reference scanning is incremental and capped to avoid UI hitches on very large states.
+
+
+
+## r69 (2026-01-05)
+
+### Shared game-state JSON cache (major perf + consistency refactor)
+
+Several procedural/debug UI tools were independently serializing + parsing the *entire* game state into JSON.
+This round introduces a **shared game JSON cache** and migrates the heaviest windows to use it.
+
+What this changes:
+
+- **New:** `ui/game_json_cache` — a shared cache that can be refreshed on-demand with a throttle.
+  - Stores the *latest* parsed JSON snapshot as a `shared_ptr` so windows can hold stable snapshots across frames.
+  - Avoids repeated full JSON parses when multiple windows refresh in the same timeframe.
+  - Tracks a monotonic `revision` number for incremental builders/caches (Dashboards/Pivots/etc.).
+
+- **Migrated windows:** Watchboard, Data Lenses, Dashboards, Pivot Tables, OmniSearch, and JSON Explorer (Current State).
+  - Each tool keeps its existing per-window refresh semantics, but pulls snapshots from the shared cache.
+  - Significantly reduces redundant work when multiple procedural tools are open.
+
+No UI prefs schema changes this round.
+
+
+## r68 (2026-01-05)
+
+### OmniSearch: global fuzzy search over live game JSON
+
+- **New window:** *OmniSearch (Game JSON)* — search keys/paths and scalar values in the live game-state JSON snapshot.
+  - Incremental traversal with configurable node budget per frame + max results cap to keep the UI responsive.
+  - Relevance scoring via lightweight fuzzy matching, plus key/value/case-sensitivity toggles.
+  - Split-view results + details with context actions:
+    - Jump to JSON Explorer at the matching JSON pointer.
+    - Pin any result to Watchboard.
+    - For array results: create Data Lens/Dashboard/Pivot Table from the selected path.
+    - Copy JSON pointer to clipboard.
+
+- **UX:** keyboard shortcut **Ctrl+F** + Status Bar **Search** button + Command Palette action + menu entries.
+
+- **Prefs:** OmniSearch settings persisted to `ui_prefs.json` (schema version bump to **22.0**).
+
+## r67 (2026-01-05)
+
+### Pivot Tables: procedural group-by aggregations over Data Lenses
+
+- **New window:** *Pivot Tables (Procedural Aggregations)* — build quick group-by tables over any Data Lens dataset.
+  - Incremental scanning (rows/frame budget) to keep the UI responsive on large arrays.
+  - Optional linkage to the lens filter (so pivots respect your current search/filter settings).
+  - Group-by column + optional value aggregation (Sum/Avg/Min/Max) for simple roll-ups.
+  - Drilldown: click a group to jump to the source lens filtered by that group; jump to JSON Explorer for an example row.
+  - Export: copy current results as CSV to the clipboard.
+
+- **Integrations:** create pivots directly from Data Lenses, JSON Explorer (arrays), and Watchboard items.
+  - Added menu entries + HUD command palette toggle.
+
+- **Prefs:** pivot configs persisted to `ui_prefs.json` (version bumped to 21.0).
+
+## r66 (2026-01-05)
+
+### Dashboards: procedural charts/widgets over Data Lenses
+
+- UI: new **Dashboards (Procedural Charts)** window:
+  - Create dashboards from existing Data Lenses or via dataset discovery (arrays-of-objects).
+  - Incremental scanning (rows-per-frame) to compute column stats without freezing the UI.
+  - Auto-selected widgets: KPI summary card, numeric histograms, categorical breakdown cards.
+  - Drill-down actions: click category values to apply a lens filter + jump to Data Lenses; click top rows to jump to JSON Explorer.
+  - Auto-grid layout adapts to window width.
+- UI: integrations:
+  - Data Lenses context menu: **Create Dashboard**.
+  - JSON Explorer: right-click array → **Create Dashboard**; details panel adds a **Dash** shortcut.
+  - Watchboard: pinned array path context menu adds **Create Dashboard**.
+- Prefs: dashboards persist to `ui_prefs.json` (schema version bump to **20.0**).
+
+## r65 (2026-01-05)
+
+### Data Lenses: procedurally generated tables from live game JSON
+
+- UI: new **Data Lenses (Procedural Tables)** window:
+  - **Discover datasets**: scans the live game JSON for arrays-of-objects and offers one-click lens creation.
+  - **Inference-driven columns**: auto-flattens nested objects into scalar columns (depth-limited) and can expose
+    container sizes as numeric columns (array length / object member count).
+  - **Sortable + filterable** tables with row clipping for large datasets.
+  - Context actions on any cell: **copy pointer**, **copy JSON**, **pin to Watchboard**, **go to JSON Explorer**,
+    and **spawn a new lens** from a nested array.
+- UI: JSON Explorer integration:
+  - Right-click any array node → **Create Data Lens (Procedural Table)**.
+  - Selected-array details adds a **Lens** shortcut button.
+- UI: Watchboard integration: right-click a pinned path that resolves to an array → **Create Data Lens**.
+- Prefs: lenses persist to `ui_prefs.json` (schema version bump to **19.0**).
+
+## r64 (2026-01-04)
+
+### Balance Lab: round-robin design duels + Elo ratings
+
+- Core/Util: added `duel_tournament` (round-robin duel runner) built on `duel_simulator`.
+  - Supports one-way or two-way (swap sides) matchups.
+  - Aggregates a full W/L/D matrix and optional Elo ratings.
+  - Includes a JSON serializer (`nebula4x_duel_round_robin_v1`) for easy scripting/analysis.
+- UI: new **Balance Lab** window:
+  - Build a roster from content + custom designs.
+  - Run a tournament incrementally (tasks-per-frame slider) with live progress.
+  - View ranking table + matchup matrix.
+  - Export JSON to disk or copy to clipboard.
+- CLI: new `--duel-roster` mode to run the same tournament headlessly and optionally emit JSON (`--duel-roster-json`).
+- Tests: added `test_duel_tournament`.
 
 ## r63 (2026-01-04)
 
@@ -883,3 +1137,36 @@ Compatibility:
 
 Compatibility:
 - **Save schema is unchanged** (still v39). New fields default to disabled on older saves.
+
+### r47: UI Layout Profiles (multiple dock layouts) + workspace presets
+
+- **New UI tool window: Layout Profiles**
+  - Save/reload the current Dear ImGui docking layout to a named profile.
+  - Switch between profiles at runtime (loads the profile's ini before `NewFrame` to keep docking stable).
+  - Duplicate, rename, and delete profile files.
+  - Uses `ui_layouts/<profile>.ini` (directory auto-created on demand).
+- **Workspace presets** (Default / Minimal / Economy / Design / Intel)
+  - Quick one-click set of window visibility to match a task.
+  - Available both in the Layout Profiles window and via the command palette.
+- **Shortcuts & menus**
+  - **Ctrl+Shift+L** toggles the Layout Profiles window.
+  - Added to **Tools** menu and the command palette.
+
+Compatibility:
+- **No save schema changes.** UI prefs schema bumped to v16 (adds layout profile fields).
+
+### r48: Procedural JSON Explorer (State Inspector) + JSON Pointer utilities
+
+- **New Tools window: JSON Explorer** (procedurally generated tree/table inspector)
+  - Inspect the **current in-memory game state** (serialize → parse) with manual **Refresh** and optional **auto-refresh**.
+  - Load and browse **arbitrary JSON files** and your **autosaves**.
+  - Data-driven UI:
+    - Tree view with **search filtering**, **match highlighting**, and **breadcrumb navigation**.
+    - **Go to JSON Pointer** (RFC 6901) to jump directly to any node and auto-open its ancestors.
+    - Array **table view**: for arrays of objects, auto-discovers keys and renders a sortable table so you can scan large structures quickly.
+- **New util module:** `json_pointer.h/.cpp`
+  - Centralized JSON Pointer helpers: escape/unescape, split, join, and resolve.
+  - Adds `test_json_pointer` for basic coverage.
+
+Compatibility:
+- **No save schema changes.** UI prefs schema bumped to v17 (adds `show_json_explorer_window`).

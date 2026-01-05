@@ -16,6 +16,8 @@
 #include "nebula4x/util/file_io.h"
 #include "nebula4x/util/event_export.h"
 #include "nebula4x/util/digest.h"
+#include "nebula4x/util/duel_simulator.h"
+#include "nebula4x/util/duel_tournament.h"
 #include "nebula4x/util/save_diff.h"
 #include "nebula4x/util/state_export.h"
 #include "nebula4x/util/timeline_export.h"
@@ -34,6 +36,13 @@ namespace {
 int get_int_arg(int argc, char** argv, const std::string& key, int def) {
   for (int i = 1; i < argc - 1; ++i) {
     if (argv[i] == key) return std::stoi(argv[i + 1]);
+  }
+  return def;
+}
+
+double get_double_arg(int argc, char** argv, const std::string& key, double def) {
+  for (int i = 1; i < argc - 1; ++i) {
+    if (argv[i] == key) return std::stod(argv[i + 1]);
   }
   return def;
 }
@@ -374,6 +383,27 @@ void print_usage(const char* exe) {
   std::cout << "  --export-timeline-jsonl PATH Export a daily timeline (counts, economy totals, digests) to JSONL/NDJSON (PATH can be '-' for stdout)\n";
   std::cout << "    --timeline-mineral NAME    (repeatable) Limit timeline mineral/cargo maps to NAME\n";
   std::cout << "    --timeline-include-cargo   Include per-faction ship cargo totals in timeline output\n";
+  std::cout << "  --duel A B       Run a combat duel between ship designs A and B (from content) and exit\n";
+  std::cout << "    --duel-a-count N    Number of A-side ships (default: 1)\n";
+  std::cout << "    --duel-b-count N    Number of B-side ships (default: 1)\n";
+  std::cout << "    --duel-days N       Max days per run (default: 200)\n";
+  std::cout << "    --duel-distance D   Initial separation in million km (default: auto)\n";
+  std::cout << "    --duel-jitter D     Random +/- spawn jitter in million km (default: 0)\n";
+  std::cout << "    --duel-runs N       Number of independent runs (default: 1)\n";
+  std::cout << "    --duel-json PATH    Write duel results JSON (PATH can be '-' for stdout)\n";
+  std::cout << "    --duel-no-orders    Do not issue AttackShip orders (ships will not close distance)\n";
+  std::cout << "  --duel-roster ID  Run a round-robin duel tournament between multiple design IDs and exit\n";
+  std::cout << "    --duel-roster ID      Repeat to add designs to the roster (requires at least 2)\n";
+  std::cout << "    --duel-roster-count N Ships per design per side (default: 1)\n";
+  std::cout << "    --duel-roster-runs N  Runs per matchup direction (default: 10)\n";
+  std::cout << "    --duel-roster-days N  Max days per run (default: 200)\n";
+  std::cout << "    --duel-roster-distance D Initial separation in million km (default: auto)\n";
+  std::cout << "    --duel-roster-jitter D  Random +/- spawn jitter in million km (default: 0)\n";
+  std::cout << "    --duel-roster-one-way   Only run i-vs-j (no side swap)\n";
+  std::cout << "    --duel-roster-no-orders Do not issue AttackShip orders\n";
+  std::cout << "    --duel-roster-k K       Elo K-factor (default: 32)\n";
+  std::cout << "    --duel-roster-seed N    Base RNG seed (default: --seed)\n";
+  std::cout << "    --duel-roster-json PATH Write tournament JSON (PATH can be '-' for stdout)\n";
   std::cout << "  --plan-research FACTION TECH  Print a prereq-ordered research plan for FACTION -> TECH\n";
   std::cout << "  --plan-research-json PATH     (optional) Export the plan as JSON (PATH can be '-' for stdout)\n";
   std::cout << "  --dump-events    Print the persistent simulation event log to stdout\n";
@@ -555,6 +585,68 @@ int main(int argc, char** argv) {
     timeline_opt.digest.include_events = !digest_no_events;
     timeline_opt.digest.include_ui_state = !digest_no_ui;
 
+
+    std::string duel_a_raw;
+    std::string duel_b_raw;
+    const bool duel = get_two_str_args(argc, argv, "--duel", duel_a_raw, duel_b_raw);
+    const bool duel_flag = has_flag(argc, argv, "--duel");
+    const int duel_a_count = get_int_arg(argc, argv, "--duel-a-count", 1);
+    const int duel_b_count = get_int_arg(argc, argv, "--duel-b-count", 1);
+    const int duel_days = get_int_arg(argc, argv, "--duel-days", 200);
+    const double duel_distance = get_double_arg(argc, argv, "--duel-distance", -1.0);
+    const double duel_jitter = get_double_arg(argc, argv, "--duel-jitter", 0.0);
+    const int duel_runs = get_int_arg(argc, argv, "--duel-runs", 1);
+    const std::string duel_json_path = get_str_arg(argc, argv, "--duel-json", "");
+    const bool duel_no_orders = has_flag(argc, argv, "--duel-no-orders");
+
+    const auto duel_roster = get_multi_str_args(argc, argv, "--duel-roster");
+    const bool duel_roster_flag = has_flag(argc, argv, "--duel-roster");
+    const int duel_roster_count = get_int_arg(argc, argv, "--duel-roster-count", 1);
+    const int duel_roster_days = get_int_arg(argc, argv, "--duel-roster-days", 200);
+    const double duel_roster_distance = get_double_arg(argc, argv, "--duel-roster-distance", -1.0);
+    const double duel_roster_jitter = get_double_arg(argc, argv, "--duel-roster-jitter", 0.0);
+    const int duel_roster_runs = get_int_arg(argc, argv, "--duel-roster-runs", 10);
+    const double duel_roster_k = get_double_arg(argc, argv, "--duel-roster-k", 32.0);
+    const int duel_roster_seed = get_int_arg(argc, argv, "--duel-roster-seed", seed);
+    const bool duel_roster_one_way = has_flag(argc, argv, "--duel-roster-one-way");
+    const bool duel_roster_no_orders = has_flag(argc, argv, "--duel-roster-no-orders");
+    const std::string duel_roster_json_path = get_str_arg(argc, argv, "--duel-roster-json", "");
+
+    if (duel_flag && !duel) {
+      std::cerr << "--duel requires two args: --duel DESIGN_A DESIGN_B\n\n";
+      print_usage(argv[0]);
+      return 2;
+    }
+
+    if (!duel && !duel_json_path.empty()) {
+      std::cerr << "--duel-json requires --duel\n\n";
+      print_usage(argv[0]);
+      return 2;
+    }
+
+    if (duel_roster_flag && duel_roster.empty()) {
+      std::cerr << "--duel-roster requires an id argument: --duel-roster DESIGN_ID (repeatable)\n\n";
+      print_usage(argv[0]);
+      return 2;
+    }
+
+    if (!duel_roster.empty() && duel) {
+      std::cerr << "--duel-roster cannot be combined with --duel\n\n";
+      print_usage(argv[0]);
+      return 2;
+    }
+
+    if (!duel_roster.empty() && duel_roster.size() < 2) {
+      std::cerr << "--duel-roster requires at least two designs\n\n";
+      print_usage(argv[0]);
+      return 2;
+    }
+
+    if (duel_roster.empty() && !duel_roster_json_path.empty()) {
+      std::cerr << "--duel-roster-json requires --duel-roster\n\n";
+      print_usage(argv[0]);
+      return 2;
+    }
     std::string plan_faction_raw;
     std::string plan_tech_raw;
     const bool plan_research = get_two_str_args(argc, argv, "--plan-research", plan_faction_raw, plan_tech_raw);
@@ -586,6 +678,8 @@ int main(int argc, char** argv) {
         (!export_tech_tree_json_path.empty() && export_tech_tree_json_path == "-") ||
         (!export_tech_tree_dot_path.empty() && export_tech_tree_dot_path == "-") ||
         (!export_timeline_jsonl_path.empty() && export_timeline_jsonl_path == "-") ||
+        (!duel_json_path.empty() && duel_json_path == "-") ||
+        (!duel_roster_json_path.empty() && duel_roster_json_path == "-") ||
         (!plan_research_json_path.empty() && plan_research_json_path == "-");
 
     const bool list_factions = has_flag(argc, argv, "--list-factions");
@@ -642,6 +736,131 @@ int main(int argc, char** argv) {
     }
 
     nebula4x::Simulation sim(std::move(content), nebula4x::SimConfig{});
+
+    if (!duel_roster.empty()) {
+      nebula4x::DuelRoundRobinOptions opt;
+      opt.count_per_side = duel_roster_count;
+      opt.two_way = !duel_roster_one_way;
+      opt.compute_elo = true;
+      opt.elo_initial = 1000.0;
+      opt.elo_k_factor = duel_roster_k;
+
+      opt.duel.max_days = duel_roster_days;
+      opt.duel.initial_separation_mkm = duel_roster_distance;
+      opt.duel.position_jitter_mkm = duel_roster_jitter;
+      opt.duel.runs = duel_roster_runs;
+      opt.duel.seed = static_cast<std::uint32_t>(duel_roster_seed);
+      opt.duel.issue_attack_orders = !duel_roster_no_orders;
+      opt.duel.include_final_state_digest = false;
+
+      std::string err;
+      const auto res = nebula4x::run_duel_round_robin(sim, duel_roster, opt, &err);
+      if (!err.empty()) {
+        std::cerr << "Duel tournament failed: " << err << "\n";
+        return 1;
+      }
+
+      const bool json_to_stdout = (!duel_roster_json_path.empty() && duel_roster_json_path == "-");
+      std::ostream& info = json_to_stdout ? std::cerr : (script_stdout ? std::cerr : std::cout);
+
+      if (!quiet) {
+        const std::uint64_t content_digest = nebula4x::digest_content_db64(sim.content());
+        info << "Duel tournament: designs=" << res.design_ids.size() << " tasks=" << (res.options.two_way ? "two-way" : "one-way")
+             << " count_per_side=" << res.options.count_per_side << " runs=" << res.options.duel.runs
+             << " days=" << res.options.duel.max_days << " seed=" << res.options.duel.seed << "\n";
+        info << "  distance_mkm=" << res.options.duel.initial_separation_mkm << " jitter_mkm=" << res.options.duel.position_jitter_mkm
+             << " attack_orders=" << (res.options.duel.issue_attack_orders ? "yes" : "no") << "\n";
+        info << "  content_digest=" << std::hex << content_digest << std::dec << "\n\n";
+
+        // Print a simple Elo leaderboard.
+        std::vector<int> idx(res.design_ids.size());
+        for (int i = 0; i < static_cast<int>(idx.size()); ++i) idx[i] = i;
+        std::sort(idx.begin(), idx.end(), [&](int a, int b) { return res.elo[a] > res.elo[b]; });
+        info << "Rank  Elo     W-L-D   Design\n";
+        for (int rank = 0; rank < static_cast<int>(idx.size()); ++rank) {
+          const int i = idx[rank];
+          info << (rank + 1) << "\t" << static_cast<int>(res.elo[i] + 0.5) << "\t" << res.total_wins[i] << "-" << res.total_losses[i]
+               << "-" << res.total_draws[i] << "\t" << res.design_ids[i] << "\n";
+        }
+        info << "\n";
+      }
+
+      if (!duel_roster_json_path.empty()) {
+        const std::string json_text = nebula4x::duel_round_robin_to_json(res);
+        if (duel_roster_json_path == "-") {
+          std::cout << json_text;
+        } else {
+          nebula4x::write_text_file(duel_roster_json_path, json_text);
+          if (!quiet) info << "Wrote tournament JSON to " << duel_roster_json_path << "\n";
+        }
+      }
+
+      return 0;
+    }
+
+
+if (duel) {
+  nebula4x::DuelSideSpec duel_a;
+  duel_a.design_id = duel_a_raw;
+  duel_a.count = duel_a_count;
+  duel_a.label = "A";
+
+  nebula4x::DuelSideSpec duel_b;
+  duel_b.design_id = duel_b_raw;
+  duel_b.count = duel_b_count;
+  duel_b.label = "B";
+
+  nebula4x::DuelOptions duel_opt;
+  duel_opt.max_days = duel_days;
+  duel_opt.initial_separation_mkm = duel_distance;
+  duel_opt.position_jitter_mkm = duel_jitter;
+  duel_opt.runs = duel_runs;
+  duel_opt.seed = static_cast<std::uint32_t>(seed);
+  duel_opt.issue_attack_orders = !duel_no_orders;
+
+  std::string err;
+  const auto duel_res = nebula4x::run_design_duel(sim, duel_a, duel_b, duel_opt, &err);
+  if (!err.empty()) {
+    std::cerr << "Duel failed: " << err << "\n";
+    return 1;
+  }
+
+  const bool duel_json_stdout = (!duel_json_path.empty() && duel_json_path == "-");
+  std::ostream& info = duel_json_stdout ? std::cerr : (script_stdout ? std::cerr : std::cout);
+
+  if (!quiet) {
+    const std::uint64_t content_digest = nebula4x::digest_content_db64(sim.content());
+    info << "Duel: " << duel_a.design_id << " x" << duel_a.count << " vs " << duel_b.design_id << " x"
+         << duel_b.count << "\n";
+    info << "  runs=" << duel_opt.runs << " days=" << duel_opt.max_days << " seed=" << duel_opt.seed
+         << " distance_mkm=" << duel_opt.initial_separation_mkm << " jitter_mkm=" << duel_opt.position_jitter_mkm
+         << " attack_orders=" << (duel_opt.issue_attack_orders ? "yes" : "no") << "\n";
+    info << "  content_digest=" << std::hex << content_digest << std::dec << "\n\n";
+
+    for (const auto& r : duel_res.runs) {
+      info << "Run " << (r.run_index + 1) << " seed=" << r.seed << " winner=" << r.winner
+           << " days=" << r.days_simulated << " survivors(A/B)=" << r.a_survivors << "/" << r.b_survivors;
+      if (!r.final_state_digest_hex.empty()) info << " digest=" << r.final_state_digest_hex;
+      info << "\n";
+    }
+
+    info << "\nAggregate: A_wins=" << duel_res.a_wins << " B_wins=" << duel_res.b_wins << " draws=" << duel_res.draws
+         << " avg_days=" << duel_res.avg_days << " avg_survivors(A/B)=" << duel_res.avg_a_survivors << "/"
+         << duel_res.avg_b_survivors << "\n";
+  }
+
+  if (!duel_json_path.empty()) {
+    const std::string json_text = nebula4x::duel_result_to_json(duel_res);
+    if (duel_json_path == "-") {
+      std::cout << json_text;
+    } else {
+      nebula4x::write_text_file(duel_json_path, json_text);
+      if (!quiet) info << "\nWrote duel JSON to " << duel_json_path << "\n";
+    }
+  }
+
+  return 0;
+}
 
     if (!load_path.empty()) {
       sim.load_game(nebula4x::deserialize_game_from_json(nebula4x::read_text_file(load_path)));

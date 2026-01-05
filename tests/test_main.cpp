@@ -25,9 +25,13 @@ int test_content_overlays();
 int test_spatial_index();
 int test_random_scenario();
 int test_file_io();
+int test_autosave();
 int test_json_unicode();
 int test_json_bom();
 int test_json_errors();
+int test_json_pointer();
+int test_json_pointer_autocomplete();
+int test_json_pointer_glob();
 int test_state_validation();
 int test_save_diff();
 int test_state_export();
@@ -57,6 +61,8 @@ int test_digests();
 int test_faction_economy_modifiers();
 int test_turn_ticks();
 int test_intercept();
+int test_duel_simulator();
+int test_duel_tournament();
 int test_attack_lead_pursuit();
 
 int main() {
@@ -98,10 +104,14 @@ int main() {
   fails += test_auto_mine();
   fails += test_power_system();
   fails += test_digests();
+  fails += test_autosave();
   fails += test_file_io();
   fails += test_json_unicode();
   fails += test_json_bom();
   fails += test_json_errors();
+  fails += test_json_pointer();
+  fails += test_json_pointer_autocomplete();
+  fails += test_json_pointer_glob();
   fails += test_state_validation();
   fails += test_save_diff();
   fails += test_state_export();
@@ -116,6 +126,8 @@ int main() {
   fails += test_shields();
   fails += test_turn_ticks();
   fails += test_intercept();
+  fails += test_duel_simulator();
+  fails += test_duel_tournament();
   fails += test_attack_lead_pursuit();
   fails += test_ship_repairs();
   fails += test_faction_economy_modifiers();

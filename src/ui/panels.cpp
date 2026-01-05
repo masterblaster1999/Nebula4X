@@ -22,6 +22,7 @@
 #include "nebula4x/core/order_planner.h"
 #include "nebula4x/core/colony_schedule.h"
 #include "nebula4x/core/ground_battle_forecast.h"
+#include "nebula4x/util/autosave.h"
 #include "nebula4x/util/event_export.h"
 #include "nebula4x/util/file_io.h"
 #include "nebula4x/util/log.h"
@@ -350,8 +351,8 @@ void draw_main_menu(Simulation& sim, UIState& ui, char* save_path, char* load_pa
                     UIPrefActions& actions) {
   if (ImGui::BeginMainMenuBar()) {
     if (ImGui::BeginMenu("Game")) {
-      if (ImGui::MenuItem("New Game")) {
-        sim.new_game();
+      if (ImGui::MenuItem("New Game...")) {
+        ui.show_new_game_modal = true;
       }
 
       ImGui::Separator();
@@ -378,6 +379,85 @@ void draw_main_menu(Simulation& sim, UIState& ui, char* save_path, char* load_pa
         }
       }
 
+      ImGui::Separator();
+
+      if (ImGui::BeginMenu("Autosave")) {
+        ImGui::Checkbox("Enable autosave", &ui.autosave_game_enabled);
+
+        ImGui::SliderInt("Interval (hours)", &ui.autosave_game_interval_hours, 1, 24 * 14);
+        ui.autosave_game_interval_hours = std::clamp(ui.autosave_game_interval_hours, 1, 24 * 365);
+
+        ImGui::SliderInt("Keep newest", &ui.autosave_game_keep_files, 1, 50);
+        ui.autosave_game_keep_files = std::clamp(ui.autosave_game_keep_files, 1, 500);
+
+        ImGui::TextDisabled("Directory");
+        ImGui::InputText("##autosave_dir", ui.autosave_game_dir, 256);
+
+        if (ImGui::MenuItem("Save autosave snapshot now")) {
+          ui.request_autosave_game_now = true;
+        }
+
+        if (ImGui::MenuItem("Prune old autosaves")) {
+          nebula4x::AutosaveConfig cfg;
+          cfg.enabled = ui.autosave_game_enabled;
+          cfg.interval_hours = ui.autosave_game_interval_hours;
+          cfg.keep_files = ui.autosave_game_keep_files;
+          cfg.dir = ui.autosave_game_dir;
+          cfg.prefix = "autosave_";
+          cfg.extension = ".json";
+
+          std::string err;
+          const int pruned = nebula4x::prune_autosaves(cfg, &err);
+          if (pruned < 0) {
+            nebula4x::log::warn(std::string("Autosave prune failed: ") + (err.empty() ? "(unknown)" : err));
+          } else {
+            nebula4x::log::info("Pruned " + std::to_string(pruned) + " autosave files.");
+          }
+        }
+
+        if (ImGui::BeginMenu("Load autosave")) {
+          nebula4x::AutosaveConfig cfg;
+          cfg.enabled = ui.autosave_game_enabled;
+          cfg.interval_hours = ui.autosave_game_interval_hours;
+          cfg.keep_files = ui.autosave_game_keep_files;
+          cfg.dir = ui.autosave_game_dir;
+          cfg.prefix = "autosave_";
+          cfg.extension = ".json";
+
+          const auto scan = nebula4x::scan_autosaves(cfg, 24);
+          if (!scan.ok) {
+            ImGui::TextDisabled("(scan failed)");
+          } else if (scan.files.empty()) {
+            ImGui::TextDisabled("(none found)");
+          } else {
+            for (const auto& f : scan.files) {
+              if (ImGui::MenuItem(f.filename.c_str())) {
+                try {
+                  sim.load_game(deserialize_game_from_json(read_text_file(f.path)));
+                  nebula4x::log::info(std::string("Loaded autosave: ") + f.filename);
+                } catch (const std::exception& e) {
+                  nebula4x::log::error(std::string("Load autosave failed: ") + e.what());
+                }
+              }
+            }
+          }
+
+          ImGui::EndMenu();
+        }
+
+        if (!ui.last_autosave_game_error.empty()) {
+          ImGui::Separator();
+          ImGui::TextDisabled("Last autosave error:");
+          ImGui::TextWrapped("%s", ui.last_autosave_game_error.c_str());
+        } else if (!ui.last_autosave_game_path.empty()) {
+          ImGui::Separator();
+          ImGui::TextDisabled("Last autosave:");
+          ImGui::TextWrapped("%s", ui.last_autosave_game_path.c_str());
+        }
+
+        ImGui::EndMenu();
+      }
+
       ImGui::EndMenu();
     }
 
@@ -394,9 +474,19 @@ void draw_main_menu(Simulation& sim, UIState& ui, char* save_path, char* load_pa
       ImGui::MenuItem("Time Warp (Until Event)", nullptr, &ui.show_time_warp_window);
       ImGui::MenuItem("Timeline (Event Timeline)", nullptr, &ui.show_timeline_window);
       ImGui::MenuItem("Design Studio (Blueprints)", nullptr, &ui.show_design_studio_window);
+      ImGui::MenuItem("Balance Lab (Duel Tournament)", nullptr, &ui.show_balance_lab_window);
       ImGui::MenuItem("Intel (Contacts/Sensors)", nullptr, &ui.show_intel_window);
       ImGui::MenuItem("Diplomacy Graph (Relations)", nullptr, &ui.show_diplomacy_window);
       ImGui::MenuItem("Settings Window", nullptr, &ui.show_settings_window);
+      ImGui::MenuItem("Save Tools (Diff/Patch)", nullptr, &ui.show_save_tools_window);
+      ImGui::MenuItem("Time Machine (State History)", "Ctrl+Shift+D", &ui.show_time_machine_window);
+      ImGui::MenuItem("OmniSearch (Game JSON)", "Ctrl+F", &ui.show_omni_search_window);
+      ImGui::MenuItem("Entity Inspector (ID Resolver)", "Ctrl+G", &ui.show_entity_inspector_window);
+      ImGui::MenuItem("Reference Graph (Entity IDs)", "Ctrl+Shift+G", &ui.show_reference_graph_window);
+      ImGui::MenuItem("Watchboard (JSON Pins)", nullptr, &ui.show_watchboard_window);
+      ImGui::MenuItem("Data Lenses (Procedural Tables)", nullptr, &ui.show_data_lenses_window);
+      ImGui::MenuItem("Dashboards (Procedural Charts)", nullptr, &ui.show_dashboards_window);
+      ImGui::MenuItem("Pivot Tables (Procedural Aggregations)", nullptr, &ui.show_pivot_tables_window);
       ImGui::MenuItem("Status Bar", nullptr, &ui.show_status_bar);
       ImGui::MenuItem("Event Toasts", nullptr, &ui.show_event_toasts);
       ImGui::Separator();
@@ -408,6 +498,9 @@ void draw_main_menu(Simulation& sim, UIState& ui, char* save_path, char* load_pa
 
     if (ImGui::BeginMenu("Tools")) {
       if (ImGui::MenuItem("Command Palette", "Ctrl+P")) ui.show_command_palette = true;
+      if (ImGui::MenuItem("OmniSearch (Game JSON)", "Ctrl+F")) ui.show_omni_search_window = true;
+      if (ImGui::MenuItem("Entity Inspector (ID Resolver)", "Ctrl+G")) ui.show_entity_inspector_window = true;
+      if (ImGui::MenuItem("Reference Graph (Entity IDs)", "Ctrl+Shift+G")) ui.show_reference_graph_window = true;
       if (ImGui::MenuItem("Help / Shortcuts", "F1")) ui.show_help_window = true;
 
       ImGui::Separator();
@@ -434,6 +527,9 @@ void draw_main_menu(Simulation& sim, UIState& ui, char* save_path, char* load_pa
       if (ImGui::MenuItem("Open Design Studio")) {
         ui.show_design_studio_window = true;
       }
+      if (ImGui::MenuItem("Open Balance Lab")) {
+        ui.show_balance_lab_window = true;
+      }
       if (ImGui::MenuItem("Open Timeline")) {
         ui.show_timeline_window = true;
       }
@@ -442,6 +538,30 @@ void draw_main_menu(Simulation& sim, UIState& ui, char* save_path, char* load_pa
       }
       if (ImGui::MenuItem("Open Diplomacy Graph")) {
         ui.show_diplomacy_window = true;
+      }
+      if (ImGui::MenuItem("Open Save Tools (Diff/Patch)")) {
+        ui.show_save_tools_window = true;
+      }
+      if (ImGui::MenuItem("Open Time Machine (State History)", "Ctrl+Shift+D")) {
+        ui.show_time_machine_window = true;
+      }
+      if (ImGui::MenuItem("Open JSON Explorer")) {
+        ui.show_json_explorer_window = true;
+      }
+      if (ImGui::MenuItem("Open Watchboard (JSON Pins)")) {
+        ui.show_watchboard_window = true;
+      }
+      if (ImGui::MenuItem("Open Data Lenses (Procedural Tables)")) {
+        ui.show_data_lenses_window = true;
+      }
+      if (ImGui::MenuItem("Open Dashboards (Procedural Charts)")) {
+        ui.show_dashboards_window = true;
+      }
+      if (ImGui::MenuItem("Open Pivot Tables (Procedural Aggregations)")) {
+        ui.show_pivot_tables_window = true;
+      }
+      if (ImGui::MenuItem("Layout Profiles", "Ctrl+Shift+L")) {
+        ui.show_layout_profiles_window = true;
       }
       if (ImGui::MenuItem("Focus System Map")) {
         ui.show_map_window = true;
@@ -6064,7 +6184,7 @@ void draw_settings_window(UIState& ui, char* ui_prefs_path, UIPrefActions& actio
     ui.event_toast_duration_sec = std::clamp(ui.event_toast_duration_sec, 0.5f, 60.0f);
   }
   ImGui::TextDisabled(
-      "Shortcuts: Ctrl+P palette, F1 help, Ctrl+S save, Ctrl+O load, Ctrl+0 diplomacy, Ctrl+7 timeline, Ctrl+8 design studio, Ctrl+9 intel, Space +1 day.");
+      "Shortcuts: Ctrl+P palette, Ctrl+F search, Ctrl+G entity, Ctrl+Shift+G graph, F1 help, Ctrl+S save, Ctrl+O load, Ctrl+0 diplomacy, Ctrl+7 timeline, Ctrl+8 design studio, Ctrl+9 intel, Space +1 day.");
 
   ImGui::SeparatorText("Timeline");
   ImGui::Checkbox("Show timeline minimap", &ui.timeline_show_minimap);
@@ -6128,6 +6248,7 @@ void draw_settings_window(UIState& ui, char* ui_prefs_path, UIPrefActions& actio
   ImGui::Checkbox("Economy", &ui.show_economy_window);
   ImGui::Checkbox("Timeline", &ui.show_timeline_window);
   ImGui::Checkbox("Design Studio", &ui.show_design_studio_window);
+  ImGui::Checkbox("Balance Lab", &ui.show_balance_lab_window);
   ImGui::Checkbox("Intel", &ui.show_intel_window);
   ImGui::Checkbox("Diplomacy Graph", &ui.show_diplomacy_window);
   if (ImGui::Button("Reset window layout")) {
@@ -6141,6 +6262,13 @@ void draw_settings_window(UIState& ui, char* ui_prefs_path, UIPrefActions& actio
   {
     const char* ini = ImGui::GetIO().IniFilename;
     ImGui::TextDisabled("Layout file: %s", (ini && ini[0]) ? ini : "(none)");
+  }
+  {
+    ImGui::TextDisabled("Layout profile: %s", ui.layout_profile);
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Manage...")) {
+      ui.show_layout_profiles_window = true;
+    }
   }
 
   ImGui::SeparatorText("Notes");

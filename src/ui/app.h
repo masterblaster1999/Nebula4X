@@ -1,10 +1,12 @@
 #pragma once
 
 #include <string>
+#include <cstdint>
 
 #include <SDL.h>
 
 #include "nebula4x/core/simulation.h"
+#include "nebula4x/util/autosave.h"
 
 #include "ui/hud.h"
 #include "ui/ui_state.h"
@@ -15,6 +17,12 @@ class App {
  public:
   App(Simulation sim);
 
+  // Called once per frame BEFORE ImGui::NewFrame().
+  //
+  // This is used for operations that Dear ImGui expects to happen prior to
+  // NewFrame (e.g. reloading docking layouts from an ini file).
+  void pre_frame();
+
   // Called once per frame.
   void frame();
 
@@ -23,6 +31,10 @@ class App {
 
   // Renderer background (RGBA floats in 0..1).
   const float* clear_color_rgba() const { return ui_.clear_color; }
+
+  // The ini file Dear ImGui uses to persist window positions/docking.
+  // This is derived from ui_.layout_profiles_dir + ui_.layout_profile.
+  const char* imgui_ini_filename() const;
 
   // UI preferences (separate from save-games).
   // Returns true on success; on failure, returns false and optionally writes an error.
@@ -39,6 +51,7 @@ class App {
   bool autosave_ui_prefs_enabled() const { return ui_.autosave_ui_prefs; }
 
  private:
+  void update_imgui_ini_path_from_ui();
   void apply_imgui_style_overrides();
   void draw_dockspace();
   void build_default_dock_layout(unsigned int dockspace_id);
@@ -57,6 +70,10 @@ class App {
   // UI prefs file (colors/layout). Separate from save-games.
   char ui_prefs_path_[256] = "ui_prefs.json";
 
+  // Dear ImGui ini file used for docking/window position persistence.
+  std::string imgui_ini_path_ = "ui_layouts/default.ini";
+  std::string last_imgui_ini_path_applied_;
+
   // Map view state
   double map_zoom_{1.0};
   Vec2 map_pan_{0.0, 0.0};
@@ -67,6 +84,10 @@ class App {
 
   // Shared UI toggles (fog-of-war etc.)
   UIState ui_{};
+
+  // Rolling autosave (separate from UI prefs autosave-on-exit).
+  nebula4x::AutosaveManager autosave_mgr_{};
+  std::uint64_t last_seen_state_generation_{0};
 
   // HUD transient state (command palette query, toast queue, etc.).
   HUDState hud_{};

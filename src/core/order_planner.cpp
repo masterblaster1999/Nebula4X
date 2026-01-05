@@ -105,7 +105,7 @@ std::optional<Vec2> body_pos(const GameState& st, Id body_id, double t_days, boo
   return compute_body_pos_at_time(st, body_id, t_days);
 }
 
-std::optional<Vec2> colony_body_pos(const GameState& st, Id colony_id, double t_days, bool predict_orbits) {
+[[maybe_unused]] std::optional<Vec2> colony_body_pos(const GameState& st, Id colony_id, double t_days, bool predict_orbits) {
   const Colony* c = find_ptr(st.colonies, colony_id);
   if (!c) return std::nullopt;
   return body_pos(st, c->body_id, t_days, predict_orbits);

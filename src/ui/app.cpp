@@ -5,6 +5,8 @@
 #include <imgui_internal.h>
 
 #include <algorithm>
+#include <cstdio>
+#include <cstring>
 #include <filesystem>
 
 #include "nebula4x/util/json.h"
@@ -13,6 +15,7 @@
 #include "nebula4x/core/serialization.h"
 #include "nebula4x/util/file_io.h"
 #include "ui/panels.h"
+#include "ui/new_game_modal.h"
 #include "ui/economy_window.h"
 #include "ui/planner_window.h"
 #include "ui/freight_window.h"
@@ -23,12 +26,26 @@
 #include "ui/system_map.h"
 #include "ui/timeline_window.h"
 #include "ui/design_studio_window.h"
+#include "ui/balance_lab_window.h"
 #include "ui/intel_window.h"
 #include "ui/diplomacy_window.h"
+#include "ui/save_tools_window.h"
+#include "ui/time_machine_window.h"
+#include "ui/omni_search_window.h"
+#include "ui/json_explorer_window.h"
+#include "ui/entity_inspector_window.h"
+#include "ui/reference_graph_window.h"
+#include "ui/watchboard_window.h"
+#include "ui/data_lenses_window.h"
+#include "ui/dashboards_window.h"
+#include "ui/pivot_tables_window.h"
+#include "ui/layout_profiles.h"
+#include "ui/layout_profiles_window.h"
 
 namespace nebula4x::ui {
 
 App::App(Simulation sim) : sim_(std::move(sim)) {
+  last_seen_state_generation_ = sim_.state_generation();
   if (!sim_.state().colonies.empty()) {
     selected_colony_ = sim_.state().colonies.begin()->first;
     if (const auto* c = find_ptr(sim_.state().colonies, selected_colony_)) {
@@ -39,13 +56,107 @@ App::App(Simulation sim) : sim_(std::move(sim)) {
   // Best-effort auto-load of UI preferences (colors/layout).
   std::string err;
   (void)load_ui_prefs(ui_prefs_path_, &err);
+
+  // Initialize the ImGui ini file path from the loaded prefs.
+  update_imgui_ini_path_from_ui();
+}
+
+const char* App::imgui_ini_filename() const {
+  return imgui_ini_path_.empty() ? nullptr : imgui_ini_path_.c_str();
 }
 
 void App::on_event(const SDL_Event& /*e*/) {
   // Reserved for future (resize, etc.)
 }
 
+void App::update_imgui_ini_path_from_ui() {
+  // Ensure a usable directory.
+  if (ui_.layout_profiles_dir[0] == '\0') {
+    std::snprintf(ui_.layout_profiles_dir, sizeof(ui_.layout_profiles_dir), "%s", "ui_layouts");
+    ui_.layout_profiles_dir[sizeof(ui_.layout_profiles_dir) - 1] = '\0';
+  }
+
+  const std::string safe_profile = sanitize_layout_profile_name(ui_.layout_profile);
+  if (safe_profile != ui_.layout_profile) {
+    std::snprintf(ui_.layout_profile, sizeof(ui_.layout_profile), "%s", safe_profile.c_str());
+    ui_.layout_profile[sizeof(ui_.layout_profile) - 1] = '\0';
+  }
+
+  imgui_ini_path_ = make_layout_profile_ini_path(ui_.layout_profiles_dir, ui_.layout_profile);
+  if (imgui_ini_path_.empty()) imgui_ini_path_ = "ui_layouts/default.ini";
+}
+
+void App::pre_frame() {
+  // If there is no ImGui context yet, do nothing.
+  if (ImGui::GetCurrentContext() == nullptr) return;
+
+  update_imgui_ini_path_from_ui();
+
+  ImGuiIO& io = ImGui::GetIO();
+  io.IniFilename = imgui_ini_filename();
+
+  // Reload request or ini path change: load before NewFrame for best results.
+  const bool path_changed = (imgui_ini_path_ != last_imgui_ini_path_applied_);
+  const bool reload = ui_.request_reload_layout_profile || path_changed;
+  if (!reload) return;
+
+  ui_.request_reload_layout_profile = false;
+  last_imgui_ini_path_applied_ = imgui_ini_path_;
+
+  // Ensure the directory exists so ImGui can save into it.
+  if (io.IniFilename && io.IniFilename[0]) {
+    std::error_code ec;
+    const std::filesystem::path p(io.IniFilename);
+    if (p.has_parent_path()) {
+      std::filesystem::create_directories(p.parent_path(), ec);
+    }
+  }
+
+  // Load the ini for this profile.
+  bool has_file = false;
+  if (io.IniFilename && io.IniFilename[0]) {
+    std::error_code ec;
+    has_file = std::filesystem::exists(io.IniFilename, ec) && !ec;
+  }
+
+  // Clear prior docking state to avoid mixing layouts.
+  ImGui::LoadIniSettingsFromMemory("");
+
+  if (has_file) {
+    ImGui::LoadIniSettingsFromDisk(io.IniFilename);
+  }
+
+  dock_layout_checked_ini_ = true;
+  dock_layout_has_existing_ini_ = has_file;
+
+  // Force the dockspace to rebuild its default layout if needed.
+  dock_layout_initialized_ = false;
+}
+
 void App::frame() {
+  auto sync_on_state_generation_change = [&]() {
+    const std::uint64_t gen = sim_.state_generation();
+    if (gen == last_seen_state_generation_) return;
+
+    last_seen_state_generation_ = gen;
+
+    // Clear any selection that might reference entities from the previous state.
+    selected_ship_ = kInvalidId;
+    selected_colony_ = kInvalidId;
+    selected_body_ = kInvalidId;
+    if (!sim_.state().colonies.empty()) {
+      selected_colony_ = sim_.state().colonies.begin()->first;
+      if (const auto* c = find_ptr(sim_.state().colonies, selected_colony_)) {
+        selected_body_ = c->body_id;
+      }
+    }
+
+    // Reset autosave cadence when the underlying state is replaced.
+    autosave_mgr_.reset();
+    ui_.last_autosave_game_path.clear();
+    ui_.last_autosave_game_error.clear();
+  };
+
   // Apply UI scaling early so every window in this frame uses it.
   {
     ImGuiIO& io = ImGui::GetIO();
@@ -68,6 +179,10 @@ void App::frame() {
     if (!io.WantTextInput) {
       // Command palette / help.
       if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_P)) ui_.show_command_palette = true;
+      if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_F)) ui_.show_omni_search_window = !ui_.show_omni_search_window;
+      if (io.KeyCtrl && !io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_G)) ui_.show_entity_inspector_window = !ui_.show_entity_inspector_window;
+      if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_G)) ui_.show_reference_graph_window = !ui_.show_reference_graph_window;
+      if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_D)) ui_.show_time_machine_window = !ui_.show_time_machine_window;
       if (ImGui::IsKeyPressed(ImGuiKey_F1)) ui_.show_help_window = !ui_.show_help_window;
 
       // Quick window toggles.
@@ -82,6 +197,9 @@ void App::frame() {
       if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_9)) ui_.show_intel_window = !ui_.show_intel_window;
       if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_0)) ui_.show_diplomacy_window = !ui_.show_diplomacy_window;
       if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Comma)) ui_.show_settings_window = !ui_.show_settings_window;
+      if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_L)) {
+        ui_.show_layout_profiles_window = !ui_.show_layout_profiles_window;
+      }
 
       // Save/load.
       if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S)) {
@@ -118,10 +236,21 @@ void App::frame() {
     draw_settings_window(ui_, ui_prefs_path_, actions);
   }
 
+  // New Game (scenario picker) modal.
+  draw_new_game_modal(sim_, ui_);
+
+  // If the user loaded/created a new game via the menu, immediately clear
+  // any stale selections before drawing the rest of the UI.
+  sync_on_state_generation_change();
+
   // Handle actions after both the menu and settings window have had a chance
   // to set action flags.
   if (actions.reset_ui_theme) reset_ui_theme_defaults();
   if (actions.reset_window_layout) reset_window_layout_defaults();
+  if (ui_.request_reset_window_layout) {
+    ui_.request_reset_window_layout = false;
+    reset_window_layout_defaults();
+  }
 
   if (actions.load_ui_prefs) {
     std::string err;
@@ -203,6 +332,9 @@ void App::frame() {
   if (ui_.show_design_studio_window) {
     draw_design_studio_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   }
+  if (ui_.show_balance_lab_window) {
+    draw_balance_lab_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  }
   if (ui_.show_intel_window) {
     draw_intel_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   }
@@ -210,12 +342,63 @@ void App::frame() {
     draw_diplomacy_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   }
 
+  if (ui_.show_save_tools_window) draw_save_tools_window(sim_, ui_, save_path_, load_path_);
+  if (ui_.show_time_machine_window) {
+    draw_time_machine_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  }
+  if (ui_.show_omni_search_window) draw_omni_search_window(sim_, ui_);
+  if (ui_.show_json_explorer_window) draw_json_explorer_window(sim_, ui_);
+  if (ui_.show_watchboard_window) draw_watchboard_window(sim_, ui_);
+  if (ui_.show_data_lenses_window) draw_data_lenses_window(sim_, ui_);
+  if (ui_.show_dashboards_window) draw_dashboards_window(sim_, ui_);
+  if (ui_.show_pivot_tables_window) draw_pivot_tables_window(sim_, ui_);
+  if (ui_.show_entity_inspector_window) draw_entity_inspector_window(sim_, ui_);
+  if (ui_.show_reference_graph_window) draw_reference_graph_window(sim_, ui_);
+  if (ui_.show_layout_profiles_window) draw_layout_profiles_window(ui_);
+
   // Help overlay/window.
   draw_help_window(ui_);
 
   // HUD chrome (status bar, command palette, event toasts).
   draw_status_bar(sim_, ui_, hud_, selected_ship_, selected_colony_, selected_body_, save_path_, load_path_);
   draw_command_palette(sim_, ui_, hud_, selected_ship_, selected_colony_, selected_body_, save_path_, load_path_);
+
+  // Load/new-game can also be triggered via the status bar or command palette.
+  // Ensure we react in the same frame (avoids dereferencing stale selections).
+  sync_on_state_generation_change();
+
+  // --- Rolling autosave (save-game snapshots) ---
+  {
+    nebula4x::AutosaveConfig cfg;
+    cfg.enabled = ui_.autosave_game_enabled;
+    cfg.interval_hours = ui_.autosave_game_interval_hours;
+    cfg.keep_files = ui_.autosave_game_keep_files;
+    cfg.dir = ui_.autosave_game_dir;
+    cfg.prefix = "autosave_";
+    cfg.extension = ".json";
+
+    nebula4x::AutosaveResult r;
+    if (ui_.request_autosave_game_now) {
+      ui_.request_autosave_game_now = false;
+      r = autosave_mgr_.force_autosave(sim_.state(), cfg, [&]() { return serialize_game_to_json(sim_.state()); });
+    } else {
+      r = autosave_mgr_.maybe_autosave(sim_.state(), cfg, [&]() { return serialize_game_to_json(sim_.state()); });
+    }
+
+    if (!r.error.empty()) {
+      ui_.last_autosave_game_error = r.error;
+    }
+    if (r.saved) {
+      ui_.last_autosave_game_path = r.path;
+      ui_.last_autosave_game_error.clear();
+
+      if (r.pruned > 0) {
+        nebula4x::log::info("Autosaved: " + r.path + " (pruned " + std::to_string(r.pruned) + ")");
+      } else {
+        nebula4x::log::info("Autosaved: " + r.path);
+      }
+    }
+  }
 
   update_event_toasts(sim_, ui_, hud_);
   draw_event_toasts(sim_, ui_, hud_, selected_ship_, selected_colony_, selected_body_);
@@ -390,6 +573,38 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
         ui_.autosave_ui_prefs = it->second.bool_value(ui_.autosave_ui_prefs);
       }
 
+      // Rolling game autosaves.
+      if (auto it = obj->find("autosave_game_enabled"); it != obj->end()) {
+        ui_.autosave_game_enabled = it->second.bool_value(ui_.autosave_game_enabled);
+      }
+      if (auto it = obj->find("autosave_game_interval_hours"); it != obj->end()) {
+        ui_.autosave_game_interval_hours = static_cast<int>(it->second.number_value(ui_.autosave_game_interval_hours));
+        ui_.autosave_game_interval_hours = std::clamp(ui_.autosave_game_interval_hours, 1, 24 * 365);
+      }
+      if (auto it = obj->find("autosave_game_keep_files"); it != obj->end()) {
+        ui_.autosave_game_keep_files = static_cast<int>(it->second.number_value(ui_.autosave_game_keep_files));
+        ui_.autosave_game_keep_files = std::clamp(ui_.autosave_game_keep_files, 1, 500);
+      }
+      if (auto it = obj->find("autosave_game_dir"); it != obj->end()) {
+        const std::string dir = it->second.string_value(std::string(ui_.autosave_game_dir));
+        std::strncpy(ui_.autosave_game_dir, dir.c_str(), sizeof(ui_.autosave_game_dir));
+        ui_.autosave_game_dir[sizeof(ui_.autosave_game_dir) - 1] = '\0';
+      }
+
+      // New Game dialog defaults.
+      if (auto it = obj->find("new_game_scenario"); it != obj->end()) {
+        ui_.new_game_scenario = static_cast<int>(it->second.number_value(ui_.new_game_scenario));
+        ui_.new_game_scenario = std::clamp(ui_.new_game_scenario, 0, 1);
+      }
+      if (auto it = obj->find("new_game_random_seed"); it != obj->end()) {
+        const std::uint64_t v = static_cast<std::uint64_t>(it->second.number_value(ui_.new_game_random_seed));
+        ui_.new_game_random_seed = static_cast<std::uint32_t>(v & 0xffffffffu);
+      }
+      if (auto it = obj->find("new_game_random_num_systems"); it != obj->end()) {
+        ui_.new_game_random_num_systems = static_cast<int>(it->second.number_value(ui_.new_game_random_num_systems));
+        ui_.new_game_random_num_systems = std::clamp(ui_.new_game_random_num_systems, 1, 64);
+      }
+
       // UI scale (accessibility). This is a UI preference (not a save-game setting).
       if (auto it = obj->find("ui_scale"); it != obj->end()) {
         ui_.ui_scale = static_cast<float>(it->second.number_value(ui_.ui_scale));
@@ -515,6 +730,18 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       }
       if (auto it = obj->find("docking_transparent_payload"); it != obj->end()) {
         ui_.docking_transparent_payload = it->second.bool_value(ui_.docking_transparent_payload);
+      }
+
+      // Dock layout profiles (ImGui ini files).
+      if (auto it = obj->find("layout_profiles_dir"); it != obj->end()) {
+        const std::string v = it->second.string_value(std::string(ui_.layout_profiles_dir));
+        std::snprintf(ui_.layout_profiles_dir, sizeof(ui_.layout_profiles_dir), "%s", v.c_str());
+        ui_.layout_profiles_dir[sizeof(ui_.layout_profiles_dir) - 1] = '\0';
+      }
+      if (auto it = obj->find("layout_profile"); it != obj->end()) {
+        const std::string v = it->second.string_value(std::string(ui_.layout_profile));
+        std::snprintf(ui_.layout_profile, sizeof(ui_.layout_profile), "%s", v.c_str());
+        ui_.layout_profile[sizeof(ui_.layout_profile) - 1] = '\0';
       }
 
       // Map rendering chrome.
@@ -661,6 +888,9 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       if (auto it = obj->find("show_design_studio_window"); it != obj->end()) {
         ui_.show_design_studio_window = it->second.bool_value(ui_.show_design_studio_window);
       }
+      if (auto it = obj->find("show_balance_lab_window"); it != obj->end()) {
+        ui_.show_balance_lab_window = it->second.bool_value(ui_.show_balance_lab_window);
+      }
       if (auto it = obj->find("show_intel_window"); it != obj->end()) {
         ui_.show_intel_window = it->second.bool_value(ui_.show_intel_window);
       }
@@ -670,12 +900,488 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       if (auto it = obj->find("show_settings_window"); it != obj->end()) {
         ui_.show_settings_window = it->second.bool_value(ui_.show_settings_window);
       }
+      if (auto it = obj->find("show_save_tools_window"); it != obj->end()) {
+        ui_.show_save_tools_window = it->second.bool_value(ui_.show_save_tools_window);
+      }
+      if (auto it = obj->find("show_time_machine_window"); it != obj->end()) {
+        ui_.show_time_machine_window = it->second.bool_value(ui_.show_time_machine_window);
+      }
+      if (auto it = obj->find("show_omni_search_window"); it != obj->end()) {
+        ui_.show_omni_search_window = it->second.bool_value(ui_.show_omni_search_window);
+      }
+      if (auto it = obj->find("show_json_explorer_window"); it != obj->end()) {
+        ui_.show_json_explorer_window = it->second.bool_value(ui_.show_json_explorer_window);
+      }
+      if (auto it = obj->find("show_entity_inspector_window"); it != obj->end()) {
+        ui_.show_entity_inspector_window = it->second.bool_value(ui_.show_entity_inspector_window);
+      }
+      if (auto it = obj->find("show_reference_graph_window"); it != obj->end()) {
+        ui_.show_reference_graph_window = it->second.bool_value(ui_.show_reference_graph_window);
+      }
+      if (auto it = obj->find("show_layout_profiles_window"); it != obj->end()) {
+        ui_.show_layout_profiles_window = it->second.bool_value(ui_.show_layout_profiles_window);
+      }
 
+      if (auto it = obj->find("show_watchboard_window"); it != obj->end()) {
+        ui_.show_watchboard_window = it->second.bool_value(ui_.show_watchboard_window);
+      }
+      if (auto it = obj->find("show_data_lenses_window"); it != obj->end()) {
+        ui_.show_data_lenses_window = it->second.bool_value(ui_.show_data_lenses_window);
+      }
+      if (auto it = obj->find("show_dashboards_window"); it != obj->end()) {
+        ui_.show_dashboards_window = it->second.bool_value(ui_.show_dashboards_window);
+      }
+      if (auto it = obj->find("show_pivot_tables_window"); it != obj->end()) {
+        ui_.show_pivot_tables_window = it->second.bool_value(ui_.show_pivot_tables_window);
+      }
       if (auto it = obj->find("show_status_bar"); it != obj->end()) {
         ui_.show_status_bar = it->second.bool_value(ui_.show_status_bar);
       }
     }
 
+    // OmniSearch (game JSON global search) preferences.
+    {
+      if (auto it = obj->find("omni_search_match_keys"); it != obj->end()) {
+        ui_.omni_search_match_keys = it->second.bool_value(ui_.omni_search_match_keys);
+      }
+      if (auto it = obj->find("omni_search_match_values"); it != obj->end()) {
+        ui_.omni_search_match_values = it->second.bool_value(ui_.omni_search_match_values);
+      }
+      if (auto it = obj->find("omni_search_case_sensitive"); it != obj->end()) {
+        ui_.omni_search_case_sensitive = it->second.bool_value(ui_.omni_search_case_sensitive);
+      }
+      if (auto it = obj->find("omni_search_auto_refresh"); it != obj->end()) {
+        ui_.omni_search_auto_refresh = it->second.bool_value(ui_.omni_search_auto_refresh);
+      }
+      if (auto it = obj->find("omni_search_refresh_sec"); it != obj->end()) {
+        ui_.omni_search_refresh_sec = static_cast<float>(it->second.number_value(ui_.omni_search_refresh_sec));
+      }
+      if (auto it = obj->find("omni_search_nodes_per_frame"); it != obj->end()) {
+        ui_.omni_search_nodes_per_frame = static_cast<int>(it->second.number_value(ui_.omni_search_nodes_per_frame));
+      }
+      if (auto it = obj->find("omni_search_max_results"); it != obj->end()) {
+        ui_.omni_search_max_results = static_cast<int>(it->second.number_value(ui_.omni_search_max_results));
+      }
+
+      if (auto it = obj->find("entity_inspector_id"); it != obj->end()) {
+        ui_.entity_inspector_id = static_cast<std::uint64_t>(it->second.number_value(ui_.entity_inspector_id));
+      }
+      if (auto it = obj->find("entity_inspector_auto_scan"); it != obj->end()) {
+        ui_.entity_inspector_auto_scan = it->second.bool_value(ui_.entity_inspector_auto_scan);
+      }
+      if (auto it = obj->find("entity_inspector_refresh_sec"); it != obj->end()) {
+        ui_.entity_inspector_refresh_sec = static_cast<float>(it->second.number_value(ui_.entity_inspector_refresh_sec));
+      }
+      if (auto it = obj->find("entity_inspector_nodes_per_frame"); it != obj->end()) {
+        ui_.entity_inspector_nodes_per_frame = static_cast<int>(it->second.number_value(ui_.entity_inspector_nodes_per_frame));
+      }
+      if (auto it = obj->find("entity_inspector_max_refs"); it != obj->end()) {
+        ui_.entity_inspector_max_refs = static_cast<int>(it->second.number_value(ui_.entity_inspector_max_refs));
+      }
+
+      // Reference Graph preferences.
+      if (auto it = obj->find("reference_graph_focus_id"); it != obj->end()) {
+        ui_.reference_graph_focus_id = static_cast<std::uint64_t>(it->second.number_value(ui_.reference_graph_focus_id));
+      }
+      if (auto it = obj->find("reference_graph_show_inbound"); it != obj->end()) {
+        ui_.reference_graph_show_inbound = it->second.bool_value(ui_.reference_graph_show_inbound);
+      }
+      if (auto it = obj->find("reference_graph_show_outbound"); it != obj->end()) {
+        ui_.reference_graph_show_outbound = it->second.bool_value(ui_.reference_graph_show_outbound);
+      }
+      if (auto it = obj->find("reference_graph_strict_id_keys"); it != obj->end()) {
+        ui_.reference_graph_strict_id_keys = it->second.bool_value(ui_.reference_graph_strict_id_keys);
+      }
+      if (auto it = obj->find("reference_graph_auto_layout"); it != obj->end()) {
+        ui_.reference_graph_auto_layout = it->second.bool_value(ui_.reference_graph_auto_layout);
+      }
+      if (auto it = obj->find("reference_graph_refresh_sec"); it != obj->end()) {
+        ui_.reference_graph_refresh_sec = static_cast<float>(it->second.number_value(ui_.reference_graph_refresh_sec));
+      }
+      if (auto it = obj->find("reference_graph_nodes_per_frame"); it != obj->end()) {
+        ui_.reference_graph_nodes_per_frame = static_cast<int>(it->second.number_value(ui_.reference_graph_nodes_per_frame));
+      }
+      if (auto it = obj->find("reference_graph_max_nodes"); it != obj->end()) {
+        ui_.reference_graph_max_nodes = static_cast<int>(it->second.number_value(ui_.reference_graph_max_nodes));
+      }
+
+      if (auto it = obj->find("reference_graph_global_mode"); it != obj->end()) {
+        ui_.reference_graph_global_mode = it->second.bool_value(ui_.reference_graph_global_mode);
+      }
+      if (auto it = obj->find("reference_graph_entities_per_frame"); it != obj->end()) {
+        ui_.reference_graph_entities_per_frame = static_cast<int>(it->second.number_value(ui_.reference_graph_entities_per_frame));
+      }
+      if (auto it = obj->find("reference_graph_scan_nodes_per_entity"); it != obj->end()) {
+        ui_.reference_graph_scan_nodes_per_entity = static_cast<int>(it->second.number_value(ui_.reference_graph_scan_nodes_per_entity));
+      }
+      if (auto it = obj->find("reference_graph_max_edges"); it != obj->end()) {
+        ui_.reference_graph_max_edges = static_cast<int>(it->second.number_value(ui_.reference_graph_max_edges));
+      }
+
+      // Time Machine preferences.
+      if (auto it = obj->find("time_machine_recording"); it != obj->end()) {
+        ui_.time_machine_recording = it->second.bool_value(ui_.time_machine_recording);
+      }
+      if (auto it = obj->find("time_machine_refresh_sec"); it != obj->end()) {
+        ui_.time_machine_refresh_sec = static_cast<float>(it->second.number_value(ui_.time_machine_refresh_sec));
+      }
+      if (auto it = obj->find("time_machine_keep_snapshots"); it != obj->end()) {
+        ui_.time_machine_keep_snapshots = static_cast<int>(it->second.number_value(ui_.time_machine_keep_snapshots));
+      }
+      if (auto it = obj->find("time_machine_max_changes"); it != obj->end()) {
+        ui_.time_machine_max_changes = static_cast<int>(it->second.number_value(ui_.time_machine_max_changes));
+      }
+      if (auto it = obj->find("time_machine_max_value_chars"); it != obj->end()) {
+        ui_.time_machine_max_value_chars = static_cast<int>(it->second.number_value(ui_.time_machine_max_value_chars));
+      }
+
+      // Watchboard query budgets.
+      if (auto it = obj->find("watchboard_query_max_matches"); it != obj->end()) {
+        ui_.watchboard_query_max_matches = static_cast<int>(it->second.number_value(ui_.watchboard_query_max_matches));
+      }
+      if (auto it = obj->find("watchboard_query_max_nodes"); it != obj->end()) {
+        ui_.watchboard_query_max_nodes = static_cast<int>(it->second.number_value(ui_.watchboard_query_max_nodes));
+      }
+
+      ui_.omni_search_refresh_sec = std::clamp(ui_.omni_search_refresh_sec, 0.10f, 30.0f);
+      ui_.omni_search_nodes_per_frame = std::clamp(ui_.omni_search_nodes_per_frame, 50, 500000);
+      ui_.omni_search_max_results = std::clamp(ui_.omni_search_max_results, 10, 50000);
+      ui_.entity_inspector_refresh_sec = std::clamp(ui_.entity_inspector_refresh_sec, 0.0f, 60.0f);
+      ui_.entity_inspector_nodes_per_frame = std::clamp(ui_.entity_inspector_nodes_per_frame, 200, 200000);
+      ui_.entity_inspector_max_refs = std::clamp(ui_.entity_inspector_max_refs, 10, 500000);
+
+      ui_.reference_graph_refresh_sec = std::clamp(ui_.reference_graph_refresh_sec, 0.0f, 60.0f);
+      ui_.reference_graph_nodes_per_frame = std::clamp(ui_.reference_graph_nodes_per_frame, 50, 200000);
+      ui_.reference_graph_max_nodes = std::clamp(ui_.reference_graph_max_nodes, 20, 2000);
+
+      ui_.reference_graph_entities_per_frame = std::clamp(ui_.reference_graph_entities_per_frame, 1, 500);
+      ui_.reference_graph_scan_nodes_per_entity = std::clamp(ui_.reference_graph_scan_nodes_per_entity, 500, 500000);
+      ui_.reference_graph_max_edges = std::clamp(ui_.reference_graph_max_edges, 50, 500000);
+
+      ui_.time_machine_refresh_sec = std::clamp(ui_.time_machine_refresh_sec, 0.05f, 30.0f);
+      ui_.time_machine_keep_snapshots = std::clamp(ui_.time_machine_keep_snapshots, 1, 512);
+      ui_.time_machine_max_changes = std::clamp(ui_.time_machine_max_changes, 1, 50000);
+      ui_.time_machine_max_value_chars = std::clamp(ui_.time_machine_max_value_chars, 16, 2000);
+
+      ui_.watchboard_query_max_matches = std::clamp(ui_.watchboard_query_max_matches, 10, 500000);
+      ui_.watchboard_query_max_nodes = std::clamp(ui_.watchboard_query_max_nodes, 100, 5000000);
+
+      if (!ui_.omni_search_match_keys && !ui_.omni_search_match_values) ui_.omni_search_match_keys = true;
+    }
+
+    // Watchboard pins (JSON pointers).
+    {
+      if (auto it = obj->find("json_watch_items"); it != obj->end()) {
+        if (const auto* arr = it->second.as_array()) {
+          ui_.json_watch_items.clear();
+          std::uint64_t max_id = 0;
+
+          for (const auto& e : *arr) {
+            const auto* o = e.as_object();
+            if (!o) continue;
+
+            JsonWatchConfig cfg;
+            if (auto it2 = o->find("id"); it2 != o->end()) {
+              cfg.id = static_cast<std::uint64_t>(it2->second.number_value(0.0));
+            }
+            if (auto it2 = o->find("label"); it2 != o->end()) {
+              cfg.label = it2->second.string_value(cfg.label);
+            }
+            if (auto it2 = o->find("path"); it2 != o->end()) {
+              cfg.path = it2->second.string_value(cfg.path);
+            }
+            if (auto it2 = o->find("track_history"); it2 != o->end()) {
+              cfg.track_history = it2->second.bool_value(cfg.track_history);
+            }
+            if (auto it2 = o->find("show_sparkline"); it2 != o->end()) {
+              cfg.show_sparkline = it2->second.bool_value(cfg.show_sparkline);
+            }
+            if (auto it2 = o->find("history_len"); it2 != o->end()) {
+              cfg.history_len = static_cast<int>(it2->second.number_value(cfg.history_len));
+              cfg.history_len = std::clamp(cfg.history_len, 2, 4000);
+            }
+
+            if (auto it2 = o->find("is_query"); it2 != o->end()) {
+              cfg.is_query = it2->second.bool_value(cfg.is_query);
+            }
+            if (auto it2 = o->find("query_op"); it2 != o->end()) {
+              cfg.query_op = static_cast<int>(it2->second.number_value(cfg.query_op));
+              cfg.query_op = std::clamp(cfg.query_op, 0, 4);
+            }
+
+            if (cfg.path.empty()) cfg.path = "/";
+            if (!cfg.path.empty() && cfg.path[0] != '/') cfg.path = "/" + cfg.path;
+
+            if (cfg.id == 0) {
+              cfg.id = ++max_id;
+            } else {
+              max_id = std::max(max_id, cfg.id);
+            }
+
+            if (cfg.label.empty()) cfg.label = cfg.path;
+            ui_.json_watch_items.push_back(std::move(cfg));
+          }
+
+          ui_.next_json_watch_id = std::max<std::uint64_t>(ui_.next_json_watch_id, max_id + 1);
+        }
+      }
+    }
+
+    // Data Lenses (procedural tables over JSON arrays).
+    {
+      if (auto it = obj->find("next_json_table_view_id"); it != obj->end()) {
+        ui_.next_json_table_view_id = static_cast<std::uint64_t>(it->second.number_value(ui_.next_json_table_view_id));
+      }
+      if (auto it = obj->find("json_table_views"); it != obj->end()) {
+        if (const auto* arr = it->second.as_array()) {
+          ui_.json_table_views.clear();
+          std::uint64_t max_id = 0;
+
+          for (const auto& e : *arr) {
+            const auto* o = e.as_object();
+            if (!o) continue;
+
+            JsonTableViewConfig cfg;
+            if (auto it2 = o->find("id"); it2 != o->end()) {
+              cfg.id = static_cast<std::uint64_t>(it2->second.number_value(0.0));
+            }
+            if (auto it2 = o->find("name"); it2 != o->end()) {
+              cfg.name = it2->second.string_value(cfg.name);
+            }
+            if (auto it2 = o->find("array_path"); it2 != o->end()) {
+              cfg.array_path = it2->second.string_value(cfg.array_path);
+            }
+            if (auto it2 = o->find("sample_rows"); it2 != o->end()) {
+              cfg.sample_rows = static_cast<int>(it2->second.number_value(cfg.sample_rows));
+              cfg.sample_rows = std::clamp(cfg.sample_rows, 1, 4096);
+            }
+            if (auto it2 = o->find("max_depth"); it2 != o->end()) {
+              cfg.max_depth = static_cast<int>(it2->second.number_value(cfg.max_depth));
+              cfg.max_depth = std::clamp(cfg.max_depth, 0, 6);
+            }
+            if (auto it2 = o->find("include_container_sizes"); it2 != o->end()) {
+              cfg.include_container_sizes = it2->second.bool_value(cfg.include_container_sizes);
+            }
+            if (auto it2 = o->find("max_infer_columns"); it2 != o->end()) {
+              cfg.max_infer_columns = static_cast<int>(it2->second.number_value(cfg.max_infer_columns));
+              cfg.max_infer_columns = std::clamp(cfg.max_infer_columns, 4, 512);
+            }
+            if (auto it2 = o->find("max_rows"); it2 != o->end()) {
+              cfg.max_rows = static_cast<int>(it2->second.number_value(cfg.max_rows));
+              cfg.max_rows = std::clamp(cfg.max_rows, 50, 500000);
+            }
+            if (auto it2 = o->find("filter"); it2 != o->end()) {
+              cfg.filter = it2->second.string_value(cfg.filter);
+            }
+            if (auto it2 = o->find("filter_case_sensitive"); it2 != o->end()) {
+              cfg.filter_case_sensitive = it2->second.bool_value(cfg.filter_case_sensitive);
+            }
+            if (auto it2 = o->find("filter_all_fields"); it2 != o->end()) {
+              cfg.filter_all_fields = it2->second.bool_value(cfg.filter_all_fields);
+            }
+
+            // Columns
+            if (auto it2 = o->find("columns"); it2 != o->end()) {
+              if (const auto* ca = it2->second.as_array()) {
+                cfg.columns.clear();
+                cfg.columns.reserve(ca->size());
+                for (const auto& ce : *ca) {
+                  const auto* co = ce.as_object();
+                  if (!co) continue;
+                  JsonTableColumnConfig col;
+                  if (auto it3 = co->find("label"); it3 != co->end()) {
+                    col.label = it3->second.string_value(col.label);
+                  }
+                  if (auto it3 = co->find("rel_path"); it3 != co->end()) {
+                    col.rel_path = it3->second.string_value(col.rel_path);
+                  }
+                  if (auto it3 = co->find("enabled"); it3 != co->end()) {
+                    col.enabled = it3->second.bool_value(col.enabled);
+                  }
+
+                  if (col.rel_path.empty()) col.rel_path = "/";
+                  if (!col.rel_path.empty() && col.rel_path[0] != '/') col.rel_path = "/" + col.rel_path;
+                  cfg.columns.push_back(std::move(col));
+                }
+              }
+            }
+
+            if (cfg.array_path.empty()) cfg.array_path = "/";
+            if (!cfg.array_path.empty() && cfg.array_path[0] != '/') cfg.array_path = "/" + cfg.array_path;
+            if (cfg.name.empty()) cfg.name = "Lens";
+
+            if (cfg.id == 0) {
+              cfg.id = ++max_id;
+            }
+            max_id = std::max(max_id, cfg.id);
+            ui_.json_table_views.push_back(std::move(cfg));
+          }
+
+          ui_.next_json_table_view_id = std::max<std::uint64_t>(ui_.next_json_table_view_id, max_id + 1);
+        }
+      }
+    }
+
+
+
+    // Dashboards (procedural widgets over Data Lenses).
+    {
+      if (auto it = obj->find("next_json_dashboard_id"); it != obj->end()) {
+        ui_.next_json_dashboard_id = static_cast<std::uint64_t>(it->second.number_value(ui_.next_json_dashboard_id));
+      }
+      if (auto it = obj->find("json_dashboards"); it != obj->end()) {
+        if (const auto* arr = it->second.as_array()) {
+          ui_.json_dashboards.clear();
+          std::uint64_t max_id = 0;
+
+          for (const auto& e : *arr) {
+            const auto* o = e.as_object();
+            if (!o) continue;
+
+            JsonDashboardConfig cfg;
+            if (auto it2 = o->find("id"); it2 != o->end()) {
+              cfg.id = static_cast<std::uint64_t>(it2->second.number_value(0.0));
+            }
+            if (auto it2 = o->find("name"); it2 != o->end()) {
+              cfg.name = it2->second.string_value(cfg.name);
+            }
+            if (auto it2 = o->find("table_view_id"); it2 != o->end()) {
+              cfg.table_view_id = static_cast<std::uint64_t>(it2->second.number_value(cfg.table_view_id));
+            }
+            if (auto it2 = o->find("scan_rows"); it2 != o->end()) {
+              cfg.scan_rows = static_cast<int>(it2->second.number_value(cfg.scan_rows));
+              cfg.scan_rows = std::clamp(cfg.scan_rows, 10, 500000);
+            }
+            if (auto it2 = o->find("rows_per_frame"); it2 != o->end()) {
+              cfg.rows_per_frame = static_cast<int>(it2->second.number_value(cfg.rows_per_frame));
+              cfg.rows_per_frame = std::clamp(cfg.rows_per_frame, 10, 20000);
+            }
+            if (auto it2 = o->find("histogram_bins"); it2 != o->end()) {
+              cfg.histogram_bins = static_cast<int>(it2->second.number_value(cfg.histogram_bins));
+              cfg.histogram_bins = std::clamp(cfg.histogram_bins, 4, 64);
+            }
+            if (auto it2 = o->find("max_numeric_charts"); it2 != o->end()) {
+              cfg.max_numeric_charts = static_cast<int>(it2->second.number_value(cfg.max_numeric_charts));
+              cfg.max_numeric_charts = std::clamp(cfg.max_numeric_charts, 0, 32);
+            }
+            if (auto it2 = o->find("max_category_cards"); it2 != o->end()) {
+              cfg.max_category_cards = static_cast<int>(it2->second.number_value(cfg.max_category_cards));
+              cfg.max_category_cards = std::clamp(cfg.max_category_cards, 0, 32);
+            }
+            if (auto it2 = o->find("top_n"); it2 != o->end()) {
+              cfg.top_n = static_cast<int>(it2->second.number_value(cfg.top_n));
+              cfg.top_n = std::clamp(cfg.top_n, 1, 100);
+            }
+            if (auto it2 = o->find("link_to_lens_filter"); it2 != o->end()) {
+              cfg.link_to_lens_filter = it2->second.bool_value(cfg.link_to_lens_filter);
+            }
+            if (auto it2 = o->find("use_all_lens_columns"); it2 != o->end()) {
+              cfg.use_all_lens_columns = it2->second.bool_value(cfg.use_all_lens_columns);
+            }
+            if (auto it2 = o->find("top_rows_rel_path"); it2 != o->end()) {
+              cfg.top_rows_rel_path = it2->second.string_value(cfg.top_rows_rel_path);
+            }
+
+            if (!cfg.top_rows_rel_path.empty() && cfg.top_rows_rel_path[0] != '/') {
+              cfg.top_rows_rel_path = "/" + cfg.top_rows_rel_path;
+            }
+
+            if (cfg.name.empty()) cfg.name = "Dashboard";
+
+            if (cfg.id == 0) {
+              cfg.id = ++max_id;
+            }
+            max_id = std::max(max_id, cfg.id);
+
+            if (cfg.table_view_id == 0) continue;
+            ui_.json_dashboards.push_back(std::move(cfg));
+          }
+
+          ui_.next_json_dashboard_id = std::max<std::uint64_t>(ui_.next_json_dashboard_id, max_id + 1);
+        }
+      }
+    }
+
+
+    // Pivot Tables (procedural group-by aggregations over Data Lenses).
+    {
+      if (auto it = obj->find("next_json_pivot_id"); it != obj->end()) {
+        ui_.next_json_pivot_id = static_cast<std::uint64_t>(it->second.number_value(ui_.next_json_pivot_id));
+      }
+      if (auto it = obj->find("json_pivots"); it != obj->end()) {
+        if (const auto* arr = it->second.as_array()) {
+          ui_.json_pivots.clear();
+          std::uint64_t max_id = 0;
+
+          for (const auto& e : *arr) {
+            const auto* o = e.as_object();
+            if (!o) continue;
+
+            JsonPivotConfig cfg;
+            if (auto it2 = o->find("id"); it2 != o->end()) {
+              cfg.id = static_cast<std::uint64_t>(it2->second.number_value(0.0));
+            }
+            if (auto it2 = o->find("name"); it2 != o->end()) {
+              cfg.name = it2->second.string_value(cfg.name);
+            }
+            if (auto it2 = o->find("table_view_id"); it2 != o->end()) {
+              cfg.table_view_id = static_cast<std::uint64_t>(it2->second.number_value(cfg.table_view_id));
+            }
+            if (auto it2 = o->find("scan_rows"); it2 != o->end()) {
+              cfg.scan_rows = static_cast<int>(it2->second.number_value(cfg.scan_rows));
+              cfg.scan_rows = std::clamp(cfg.scan_rows, 10, 500000);
+            }
+            if (auto it2 = o->find("rows_per_frame"); it2 != o->end()) {
+              cfg.rows_per_frame = static_cast<int>(it2->second.number_value(cfg.rows_per_frame));
+              cfg.rows_per_frame = std::clamp(cfg.rows_per_frame, 1, 50000);
+            }
+            if (auto it2 = o->find("link_to_lens_filter"); it2 != o->end()) {
+              cfg.link_to_lens_filter = it2->second.bool_value(cfg.link_to_lens_filter);
+            }
+            if (auto it2 = o->find("use_all_lens_columns"); it2 != o->end()) {
+              cfg.use_all_lens_columns = it2->second.bool_value(cfg.use_all_lens_columns);
+            }
+            if (auto it2 = o->find("group_by_rel_path"); it2 != o->end()) {
+              cfg.group_by_rel_path = it2->second.string_value(cfg.group_by_rel_path);
+            }
+            if (auto it2 = o->find("value_enabled"); it2 != o->end()) {
+              cfg.value_enabled = it2->second.bool_value(cfg.value_enabled);
+            }
+            if (auto it2 = o->find("value_rel_path"); it2 != o->end()) {
+              cfg.value_rel_path = it2->second.string_value(cfg.value_rel_path);
+            }
+            if (auto it2 = o->find("value_op"); it2 != o->end()) {
+              cfg.value_op = static_cast<int>(it2->second.number_value(cfg.value_op));
+              cfg.value_op = std::clamp(cfg.value_op, 0, 3);
+            }
+            if (auto it2 = o->find("top_groups"); it2 != o->end()) {
+              cfg.top_groups = static_cast<int>(it2->second.number_value(cfg.top_groups));
+              cfg.top_groups = std::clamp(cfg.top_groups, 0, 1000000);
+            }
+
+            if (cfg.group_by_rel_path.empty()) cfg.group_by_rel_path = "/";
+            if (!cfg.group_by_rel_path.empty() && cfg.group_by_rel_path[0] != '/') {
+              cfg.group_by_rel_path = "/" + cfg.group_by_rel_path;
+            }
+            if (!cfg.value_rel_path.empty() && cfg.value_rel_path[0] != '/') {
+              cfg.value_rel_path = "/" + cfg.value_rel_path;
+            }
+
+            if (cfg.name.empty()) cfg.name = "Pivot";
+
+            if (cfg.id == 0) {
+              cfg.id = ++max_id;
+            }
+            max_id = std::max(max_id, cfg.id);
+
+            if (cfg.table_view_id == 0) continue;
+            ui_.json_pivots.push_back(std::move(cfg));
+          }
+
+          ui_.next_json_pivot_id = std::max<std::uint64_t>(ui_.next_json_pivot_id, max_id + 1);
+        }
+      }
+    }
     return true;
   } catch (const std::exception& e) {
     if (error) *error = e.what();
@@ -691,7 +1397,7 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     }
 
     nebula4x::json::Object o;
-    o["version"] = 12.0;
+    o["version"] = 27.0;
 
     // Theme.
     o["clear_color"] = color_to_json(ui_.clear_color);
@@ -700,6 +1406,17 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     o["override_window_bg"] = ui_.override_window_bg;
     o["window_bg"] = color_to_json(ui_.window_bg);
     o["autosave_ui_prefs"] = ui_.autosave_ui_prefs;
+
+    // Rolling game autosaves.
+    o["autosave_game_enabled"] = ui_.autosave_game_enabled;
+    o["autosave_game_interval_hours"] = static_cast<double>(ui_.autosave_game_interval_hours);
+    o["autosave_game_keep_files"] = static_cast<double>(ui_.autosave_game_keep_files);
+    o["autosave_game_dir"] = std::string(ui_.autosave_game_dir);
+
+    // New Game dialog defaults.
+    o["new_game_scenario"] = static_cast<double>(ui_.new_game_scenario);
+    o["new_game_random_seed"] = static_cast<double>(ui_.new_game_random_seed);
+    o["new_game_random_num_systems"] = static_cast<double>(ui_.new_game_random_num_systems);
 
     // Accessibility / HUD.
     o["ui_scale"] = static_cast<double>(ui_.ui_scale);
@@ -748,6 +1465,10 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     o["docking_with_shift"] = ui_.docking_with_shift;
     o["docking_always_tab_bar"] = ui_.docking_always_tab_bar;
     o["docking_transparent_payload"] = ui_.docking_transparent_payload;
+
+    // Dock layout profiles (ImGui ini files).
+    o["layout_profiles_dir"] = std::string(ui_.layout_profiles_dir);
+    o["layout_profile"] = std::string(ui_.layout_profile);
 
     // Map rendering chrome.
     o["system_map_starfield"] = ui_.system_map_starfield;
@@ -798,13 +1519,170 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     o["show_time_warp_window"] = ui_.show_time_warp_window;
     o["show_timeline_window"] = ui_.show_timeline_window;
     o["show_design_studio_window"] = ui_.show_design_studio_window;
+    o["show_balance_lab_window"] = ui_.show_balance_lab_window;
     o["show_intel_window"] = ui_.show_intel_window;
     o["show_diplomacy_window"] = ui_.show_diplomacy_window;
     o["show_settings_window"] = ui_.show_settings_window;
+    o["show_save_tools_window"] = ui_.show_save_tools_window;
+    o["show_time_machine_window"] = ui_.show_time_machine_window;
+    o["show_omni_search_window"] = ui_.show_omni_search_window;
+    o["show_json_explorer_window"] = ui_.show_json_explorer_window;
+    o["show_entity_inspector_window"] = ui_.show_entity_inspector_window;
+    o["show_reference_graph_window"] = ui_.show_reference_graph_window;
+    o["show_layout_profiles_window"] = ui_.show_layout_profiles_window;
+    o["show_watchboard_window"] = ui_.show_watchboard_window;
+    o["show_data_lenses_window"] = ui_.show_data_lenses_window;
+    o["show_dashboards_window"] = ui_.show_dashboards_window;
+    o["show_pivot_tables_window"] = ui_.show_pivot_tables_window;
     o["show_status_bar"] = ui_.show_status_bar;
 
+    // OmniSearch (game JSON global search) preferences.
+    o["omni_search_match_keys"] = ui_.omni_search_match_keys;
+    o["omni_search_match_values"] = ui_.omni_search_match_values;
+    o["omni_search_case_sensitive"] = ui_.omni_search_case_sensitive;
+    o["omni_search_auto_refresh"] = ui_.omni_search_auto_refresh;
+    o["omni_search_refresh_sec"] = static_cast<double>(ui_.omni_search_refresh_sec);
+    o["omni_search_nodes_per_frame"] = static_cast<double>(ui_.omni_search_nodes_per_frame);
+    o["omni_search_max_results"] = static_cast<double>(ui_.omni_search_max_results);
+
+    // Entity Inspector preferences.
+    o["entity_inspector_id"] = static_cast<double>(ui_.entity_inspector_id);
+    o["entity_inspector_auto_scan"] = ui_.entity_inspector_auto_scan;
+    o["entity_inspector_refresh_sec"] = static_cast<double>(ui_.entity_inspector_refresh_sec);
+    o["entity_inspector_nodes_per_frame"] = static_cast<double>(ui_.entity_inspector_nodes_per_frame);
+    o["entity_inspector_max_refs"] = static_cast<double>(ui_.entity_inspector_max_refs);
+
+    // Reference Graph preferences.
+    o["reference_graph_focus_id"] = static_cast<double>(ui_.reference_graph_focus_id);
+    o["reference_graph_show_inbound"] = ui_.reference_graph_show_inbound;
+    o["reference_graph_show_outbound"] = ui_.reference_graph_show_outbound;
+    o["reference_graph_strict_id_keys"] = ui_.reference_graph_strict_id_keys;
+    o["reference_graph_auto_layout"] = ui_.reference_graph_auto_layout;
+    o["reference_graph_refresh_sec"] = static_cast<double>(ui_.reference_graph_refresh_sec);
+    o["reference_graph_nodes_per_frame"] = static_cast<double>(ui_.reference_graph_nodes_per_frame);
+    o["reference_graph_max_nodes"] = static_cast<double>(ui_.reference_graph_max_nodes);
+    o["reference_graph_global_mode"] = ui_.reference_graph_global_mode;
+    o["reference_graph_entities_per_frame"] = static_cast<double>(ui_.reference_graph_entities_per_frame);
+    o["reference_graph_scan_nodes_per_entity"] = static_cast<double>(ui_.reference_graph_scan_nodes_per_entity);
+    o["reference_graph_max_edges"] = static_cast<double>(ui_.reference_graph_max_edges);
+
+    // Time Machine preferences.
+    o["time_machine_recording"] = ui_.time_machine_recording;
+    o["time_machine_refresh_sec"] = static_cast<double>(ui_.time_machine_refresh_sec);
+    o["time_machine_keep_snapshots"] = static_cast<double>(ui_.time_machine_keep_snapshots);
+    o["time_machine_max_changes"] = static_cast<double>(ui_.time_machine_max_changes);
+    o["time_machine_max_value_chars"] = static_cast<double>(ui_.time_machine_max_value_chars);
+
+    // Watchboard pins (JSON pointers).
+    o["watchboard_query_max_matches"] = static_cast<double>(ui_.watchboard_query_max_matches);
+    o["watchboard_query_max_nodes"] = static_cast<double>(ui_.watchboard_query_max_nodes);
+    {
+      nebula4x::json::Array a;
+      a.reserve(ui_.json_watch_items.size());
+      for (const auto& w : ui_.json_watch_items) {
+        nebula4x::json::Object wo;
+        wo["id"] = static_cast<double>(w.id);
+        wo["label"] = w.label;
+        wo["path"] = w.path;
+        wo["track_history"] = w.track_history;
+        wo["show_sparkline"] = w.show_sparkline;
+        wo["history_len"] = static_cast<double>(w.history_len);
+        wo["is_query"] = w.is_query;
+        wo["query_op"] = static_cast<double>(w.query_op);
+        a.push_back(nebula4x::json::object(std::move(wo)));
+      }
+      o["json_watch_items"] = nebula4x::json::array(std::move(a));
+    }
+
+    // Data Lenses (procedural tables over JSON arrays).
+    o["next_json_table_view_id"] = static_cast<double>(ui_.next_json_table_view_id);
+    {
+      nebula4x::json::Array a;
+      a.reserve(ui_.json_table_views.size());
+      for (const auto& v : ui_.json_table_views) {
+        nebula4x::json::Object vo;
+        vo["id"] = static_cast<double>(v.id);
+        vo["name"] = v.name;
+        vo["array_path"] = v.array_path;
+        vo["sample_rows"] = static_cast<double>(v.sample_rows);
+        vo["max_depth"] = static_cast<double>(v.max_depth);
+        vo["include_container_sizes"] = v.include_container_sizes;
+        vo["max_infer_columns"] = static_cast<double>(v.max_infer_columns);
+        vo["max_rows"] = static_cast<double>(v.max_rows);
+        vo["filter"] = v.filter;
+        vo["filter_case_sensitive"] = v.filter_case_sensitive;
+        vo["filter_all_fields"] = v.filter_all_fields;
+
+        nebula4x::json::Array ca;
+        ca.reserve(v.columns.size());
+        for (const auto& c : v.columns) {
+          nebula4x::json::Object co;
+          co["label"] = c.label;
+          co["rel_path"] = c.rel_path;
+          co["enabled"] = c.enabled;
+          ca.push_back(nebula4x::json::object(std::move(co)));
+        }
+        vo["columns"] = nebula4x::json::array(std::move(ca));
+        a.push_back(nebula4x::json::object(std::move(vo)));
+      }
+      o["json_table_views"] = nebula4x::json::array(std::move(a));
+    }
+
+
+
+    // Dashboards (procedural widgets over Data Lenses).
+    o["next_json_dashboard_id"] = static_cast<double>(ui_.next_json_dashboard_id);
+    {
+      nebula4x::json::Array a;
+      a.reserve(ui_.json_dashboards.size());
+      for (const auto& d : ui_.json_dashboards) {
+        nebula4x::json::Object dbo;
+        dbo["id"] = static_cast<double>(d.id);
+        dbo["name"] = d.name;
+        dbo["table_view_id"] = static_cast<double>(d.table_view_id);
+        dbo["scan_rows"] = static_cast<double>(d.scan_rows);
+        dbo["rows_per_frame"] = static_cast<double>(d.rows_per_frame);
+        dbo["histogram_bins"] = static_cast<double>(d.histogram_bins);
+        dbo["max_numeric_charts"] = static_cast<double>(d.max_numeric_charts);
+        dbo["max_category_cards"] = static_cast<double>(d.max_category_cards);
+        dbo["top_n"] = static_cast<double>(d.top_n);
+        dbo["link_to_lens_filter"] = d.link_to_lens_filter;
+        dbo["use_all_lens_columns"] = d.use_all_lens_columns;
+        dbo["top_rows_rel_path"] = d.top_rows_rel_path;
+        a.push_back(nebula4x::json::object(std::move(dbo)));
+      }
+      o["json_dashboards"] = nebula4x::json::array(std::move(a));
+    }
+
+
+    // Pivot Tables (procedural group-by aggregations over Data Lenses).
+    o["next_json_pivot_id"] = static_cast<double>(ui_.next_json_pivot_id);
+    {
+      nebula4x::json::Array a;
+      a.reserve(ui_.json_pivots.size());
+      for (const auto& p : ui_.json_pivots) {
+        nebula4x::json::Object po;
+        po["id"] = static_cast<double>(p.id);
+        po["name"] = p.name;
+        po["table_view_id"] = static_cast<double>(p.table_view_id);
+        po["scan_rows"] = static_cast<double>(p.scan_rows);
+        po["rows_per_frame"] = static_cast<double>(p.rows_per_frame);
+        po["link_to_lens_filter"] = p.link_to_lens_filter;
+        po["use_all_lens_columns"] = p.use_all_lens_columns;
+        po["group_by_rel_path"] = p.group_by_rel_path;
+        po["value_enabled"] = p.value_enabled;
+        po["value_rel_path"] = p.value_rel_path;
+        po["value_op"] = static_cast<double>(p.value_op);
+        po["top_groups"] = static_cast<double>(p.top_groups);
+        a.push_back(nebula4x::json::object(std::move(po)));
+      }
+      o["json_pivots"] = nebula4x::json::array(std::move(a));
+    }
     const std::string text = nebula4x::json::stringify(nebula4x::json::object(std::move(o)), 2);
     nebula4x::write_text_file(path, text);
+
+    
+
     return true;
   } catch (const std::exception& e) {
     if (error) *error = e.what();
@@ -866,9 +1744,21 @@ void App::reset_window_layout_defaults() {
   ui_.show_time_warp_window = false;
   ui_.show_timeline_window = false;
   ui_.show_design_studio_window = false;
+  ui_.show_balance_lab_window = false;
   ui_.show_intel_window = false;
   ui_.show_diplomacy_window = false;
   ui_.show_settings_window = false;
+  ui_.show_save_tools_window = false;
+  ui_.show_time_machine_window = false;
+  ui_.show_omni_search_window = false;
+  ui_.show_json_explorer_window = false;
+  ui_.show_entity_inspector_window = false;
+  ui_.show_reference_graph_window = false;
+  ui_.show_layout_profiles_window = false;
+  ui_.show_watchboard_window = false;
+  ui_.show_data_lenses_window = false;
+  ui_.show_dashboards_window = false;
+  ui_.show_pivot_tables_window = false;
 
   ui_.show_status_bar = true;
   ui_.show_event_toasts = true;

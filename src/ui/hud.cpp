@@ -149,16 +149,36 @@ enum class PaletteAction {
   ToggleEconomy,
   ToggleTimeline,
   ToggleDesignStudio,
+  ToggleBalanceLab,
   ToggleIntel,
   ToggleDiplomacyGraph,
   ToggleSettings,
+  ToggleSaveTools,
+  ToggleOmniSearch,
+  ToggleJsonExplorer,
+  ToggleEntityInspector,
+  ToggleReferenceGraph,
+  ToggleTimeMachine,
+  ToggleWatchboard,
+  ToggleDataLenses,
+  ToggleDashboards,
+  TogglePivotTables,
+  ToggleLayoutProfiles,
   ToggleStatusBar,
   ToggleFogOfWar,
   ToggleToasts,
+  WorkspaceDefault,
+  WorkspaceMinimal,
+  WorkspaceEconomy,
+  WorkspaceDesign,
+  WorkspaceIntel,
   OpenLogTab,
   OpenHelp,
   FocusSystemMap,
   FocusGalaxyMap,
+  NewGameDialog,
+  NewGameSol,
+  NewGameRandom,
   Save,
   Load,
 };
@@ -203,6 +223,9 @@ void activate_palette_item(PaletteItem& item, Simulation& sim, UIState& ui, Id& 
         case PaletteAction::ToggleDesignStudio:
           ui.show_design_studio_window = !ui.show_design_studio_window;
           break;
+        case PaletteAction::ToggleBalanceLab:
+          ui.show_balance_lab_window = !ui.show_balance_lab_window;
+          break;
         case PaletteAction::ToggleIntel:
           ui.show_intel_window = !ui.show_intel_window;
           break;
@@ -212,6 +235,39 @@ void activate_palette_item(PaletteItem& item, Simulation& sim, UIState& ui, Id& 
         case PaletteAction::ToggleSettings:
           ui.show_settings_window = !ui.show_settings_window;
           break;
+        case PaletteAction::ToggleSaveTools:
+          ui.show_save_tools_window = !ui.show_save_tools_window;
+          break;
+        case PaletteAction::ToggleOmniSearch:
+          ui.show_omni_search_window = !ui.show_omni_search_window;
+          break;
+        case PaletteAction::ToggleJsonExplorer:
+          ui.show_json_explorer_window = !ui.show_json_explorer_window;
+          break;
+        case PaletteAction::ToggleEntityInspector:
+          ui.show_entity_inspector_window = !ui.show_entity_inspector_window;
+          break;
+        case PaletteAction::ToggleReferenceGraph:
+          ui.show_reference_graph_window = !ui.show_reference_graph_window;
+          break;
+        case PaletteAction::ToggleTimeMachine:
+          ui.show_time_machine_window = !ui.show_time_machine_window;
+          break;
+        case PaletteAction::ToggleWatchboard:
+          ui.show_watchboard_window = !ui.show_watchboard_window;
+          break;
+        case PaletteAction::ToggleDataLenses:
+          ui.show_data_lenses_window = !ui.show_data_lenses_window;
+          break;
+        case PaletteAction::ToggleDashboards:
+          ui.show_dashboards_window = !ui.show_dashboards_window;
+          break;
+        case PaletteAction::TogglePivotTables:
+          ui.show_pivot_tables_window = !ui.show_pivot_tables_window;
+          break;
+        case PaletteAction::ToggleLayoutProfiles:
+          ui.show_layout_profiles_window = !ui.show_layout_profiles_window;
+          break;
         case PaletteAction::ToggleStatusBar:
           ui.show_status_bar = !ui.show_status_bar;
           break;
@@ -220,6 +276,96 @@ void activate_palette_item(PaletteItem& item, Simulation& sim, UIState& ui, Id& 
           break;
         case PaletteAction::ToggleToasts:
           ui.show_event_toasts = !ui.show_event_toasts;
+          break;
+        case PaletteAction::WorkspaceDefault:
+          ui.show_controls_window = true;
+          ui.show_map_window = true;
+          ui.show_details_window = true;
+          ui.show_directory_window = true;
+          ui.show_production_window = false;
+          ui.show_economy_window = false;
+          ui.show_planner_window = false;
+          ui.show_freight_window = false;
+          ui.show_fuel_window = false;
+          ui.show_time_warp_window = false;
+          ui.show_timeline_window = false;
+          ui.show_design_studio_window = false;
+          ui.show_balance_lab_window = false;
+          ui.show_intel_window = false;
+          ui.show_diplomacy_window = false;
+          ui.show_status_bar = true;
+          break;
+        case PaletteAction::WorkspaceMinimal:
+          ui.show_controls_window = false;
+          ui.show_map_window = true;
+          ui.show_details_window = true;
+          ui.show_directory_window = false;
+          ui.show_production_window = false;
+          ui.show_economy_window = false;
+          ui.show_planner_window = false;
+          ui.show_freight_window = false;
+          ui.show_fuel_window = false;
+          ui.show_time_warp_window = false;
+          ui.show_timeline_window = false;
+          ui.show_design_studio_window = false;
+          ui.show_balance_lab_window = false;
+          ui.show_intel_window = false;
+          ui.show_diplomacy_window = false;
+          ui.show_status_bar = true;
+          break;
+        case PaletteAction::WorkspaceEconomy:
+          ui.show_controls_window = false;
+          ui.show_map_window = true;
+          ui.show_details_window = true;
+          ui.show_directory_window = true;
+          ui.show_production_window = true;
+          ui.show_economy_window = true;
+          ui.show_planner_window = true;
+          ui.show_freight_window = false;
+          ui.show_fuel_window = false;
+          ui.show_time_warp_window = false;
+          ui.show_timeline_window = true;
+          ui.show_design_studio_window = false;
+          ui.show_balance_lab_window = false;
+          ui.show_intel_window = false;
+          ui.show_diplomacy_window = false;
+          ui.show_status_bar = true;
+          break;
+        case PaletteAction::WorkspaceDesign:
+          ui.show_controls_window = false;
+          ui.show_map_window = true;
+          ui.show_details_window = true;
+          ui.show_directory_window = false;
+          ui.show_production_window = false;
+          ui.show_economy_window = false;
+          ui.show_planner_window = false;
+          ui.show_freight_window = false;
+          ui.show_fuel_window = false;
+          ui.show_time_warp_window = false;
+          ui.show_timeline_window = false;
+          ui.show_design_studio_window = true;
+          ui.show_balance_lab_window = true;
+          ui.show_intel_window = false;
+          ui.show_diplomacy_window = false;
+          ui.show_status_bar = true;
+          break;
+        case PaletteAction::WorkspaceIntel:
+          ui.show_controls_window = false;
+          ui.show_map_window = true;
+          ui.show_details_window = true;
+          ui.show_directory_window = false;
+          ui.show_production_window = false;
+          ui.show_economy_window = false;
+          ui.show_planner_window = false;
+          ui.show_freight_window = false;
+          ui.show_fuel_window = false;
+          ui.show_time_warp_window = false;
+          ui.show_timeline_window = true;
+          ui.show_design_studio_window = false;
+          ui.show_balance_lab_window = false;
+          ui.show_intel_window = true;
+          ui.show_diplomacy_window = true;
+          ui.show_status_bar = true;
           break;
         case PaletteAction::OpenLogTab:
           ui.show_details_window = true;
@@ -234,6 +380,17 @@ void activate_palette_item(PaletteItem& item, Simulation& sim, UIState& ui, Id& 
           break;
         case PaletteAction::FocusGalaxyMap:
           ui.show_map_window = true;
+          ui.request_map_tab = MapTab::Galaxy;
+          break;
+        case PaletteAction::NewGameDialog:
+          ui.show_new_game_modal = true;
+          break;
+        case PaletteAction::NewGameSol:
+          sim.new_game();
+          ui.request_map_tab = MapTab::System;
+          break;
+        case PaletteAction::NewGameRandom:
+          sim.new_game_random(ui.new_game_random_seed, ui.new_game_random_num_systems);
           ui.request_map_tab = MapTab::Galaxy;
           break;
         case PaletteAction::Save:
@@ -388,12 +545,61 @@ void draw_status_bar(Simulation& sim, UIState& ui, HUDState& /*hud*/, Id& select
     }
   }
 
+  ImGui::SameLine();
+  if (ImGui::SmallButton("AutoSave")) {
+    ui.request_autosave_game_now = true;
+  }
+  if (ImGui::IsItemHovered()) {
+    std::string tip = "Write an autosave snapshot now.";
+    tip += "\nInterval: " + std::to_string(ui.autosave_game_interval_hours) + "h";
+    tip += "\nKeep: " + std::to_string(ui.autosave_game_keep_files);
+    tip += "\nDir: " + std::string(ui.autosave_game_dir);
+    if (!ui.last_autosave_game_error.empty()) {
+      tip += "\n\nLast error: " + ui.last_autosave_game_error;
+    } else if (!ui.last_autosave_game_path.empty()) {
+      tip += "\n\nLast autosave: " + ui.last_autosave_game_path;
+    }
+    ImGui::SetTooltip("%s", tip.c_str());
+  }
+
   VerticalSeparator();
 
   if (ImGui::SmallButton("Palette")) ui.show_command_palette = true;
   if (ImGui::IsItemHovered()) {
     ImGui::SetTooltip("Command Palette (Ctrl+P)");
   }
+  ImGui::SameLine();
+  if (ImGui::SmallButton("Search")) ui.show_omni_search_window = true;
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip("OmniSearch (Ctrl+F)");
+  }
+
+  ImGui::SameLine();
+  if (ImGui::SmallButton("Entity")) ui.show_entity_inspector_window = true;
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip("Entity Inspector (Ctrl+G)");
+  }
+
+  ImGui::SameLine();
+  if (ImGui::SmallButton("Graph")) {
+    ui.show_reference_graph_window = true;
+    if (ui.reference_graph_focus_id == 0) {
+      // Try to seed focus from the current selection.
+      if (selected_ship != 0) ui.reference_graph_focus_id = selected_ship;
+      else if (selected_colony != 0) ui.reference_graph_focus_id = selected_colony;
+      else if (selected_body != 0) ui.reference_graph_focus_id = selected_body;
+    }
+  }
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip("Reference Graph (Ctrl+Shift+G)");
+  }
+
+  ImGui::SameLine();
+  if (ImGui::SmallButton("History")) ui.show_time_machine_window = true;
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip("Time Machine (Ctrl+Shift+D)\nCapture state snapshots + inspect diffs.");
+  }
+
   ImGui::SameLine();
   if (ImGui::SmallButton("Help")) ui.show_help_window = !ui.show_help_window;
   if (ImGui::IsItemHovered()) {
@@ -468,10 +674,15 @@ void draw_help_window(UIState& ui) {
 
   ImGui::SeparatorText("Global shortcuts");
   ImGui::BulletText("Ctrl+P: Command palette (search actions, systems, ships, colonies, bodies)");
+  ImGui::BulletText("Ctrl+F: OmniSearch (global game JSON search)");
+  ImGui::BulletText("Ctrl+G: Entity Inspector (resolve an entity id + find inbound refs)");
+  ImGui::BulletText("Ctrl+Shift+G: Reference Graph (visualize id relationships)");
+  ImGui::BulletText("Ctrl+Shift+D: Time Machine (state history + diffs)");
   ImGui::BulletText("F1: Toggle this help window");
   ImGui::BulletText("Ctrl+S: Save (uses current save path)");
   ImGui::BulletText("Ctrl+O: Load (uses current load path)");
   ImGui::BulletText("Space: Advance +1 day (Shift=+5, Ctrl=+30)");
+  ImGui::BulletText("Ctrl+Shift+L: Layout Profiles (switch dock layouts)");
 
   ImGui::SeparatorText("Window toggles");
   ImGui::BulletText("Drag window tabs to dock/undock and rearrange the workspace");
@@ -570,16 +781,36 @@ void draw_command_palette(Simulation& sim, UIState& ui, HUDState& hud, Id& selec
   add_action("[Action] Toggle Economy window", PaletteAction::ToggleEconomy);
   add_action("[Action] Toggle Timeline window", PaletteAction::ToggleTimeline);
   add_action("[Action] Toggle Design Studio window", PaletteAction::ToggleDesignStudio);
+  add_action("[Action] Toggle Balance Lab window", PaletteAction::ToggleBalanceLab);
   add_action("[Action] Toggle Intel window", PaletteAction::ToggleIntel);
   add_action("[Action] Toggle Diplomacy Graph window", PaletteAction::ToggleDiplomacyGraph);
   add_action("[Action] Open Settings", PaletteAction::ToggleSettings);
+  add_action("[Action] Toggle Save Tools window", PaletteAction::ToggleSaveTools);
+  add_action("[Action] Toggle Time Machine (State History)", PaletteAction::ToggleTimeMachine);
+  add_action("[Action] Toggle OmniSearch (Game JSON)", PaletteAction::ToggleOmniSearch);
+  add_action("[Action] Toggle JSON Explorer window", PaletteAction::ToggleJsonExplorer);
+  add_action("[Action] Toggle Entity Inspector (ID Resolver)", PaletteAction::ToggleEntityInspector);
+  add_action("[Action] Toggle Reference Graph (Entity IDs)", PaletteAction::ToggleReferenceGraph);
+  add_action("[Action] Toggle Watchboard (JSON Pins)", PaletteAction::ToggleWatchboard);
+  add_action("[Action] Toggle Data Lenses window", PaletteAction::ToggleDataLenses);
+  add_action("[Action] Toggle Dashboards window", PaletteAction::ToggleDashboards);
+  add_action("[Action] Toggle Pivot Tables window", PaletteAction::TogglePivotTables);
+  add_action("[Action] Toggle Layout Profiles window", PaletteAction::ToggleLayoutProfiles);
   add_action("[Action] Toggle Status Bar", PaletteAction::ToggleStatusBar);
   add_action("[Action] Toggle Fog of War", PaletteAction::ToggleFogOfWar);
   add_action("[Action] Toggle Event Toasts", PaletteAction::ToggleToasts);
+  add_action("[Action] Workspace: Default", PaletteAction::WorkspaceDefault);
+  add_action("[Action] Workspace: Minimal", PaletteAction::WorkspaceMinimal);
+  add_action("[Action] Workspace: Economy", PaletteAction::WorkspaceEconomy);
+  add_action("[Action] Workspace: Design", PaletteAction::WorkspaceDesign);
+  add_action("[Action] Workspace: Intel", PaletteAction::WorkspaceIntel);
   add_action("[Action] Open Event Log", PaletteAction::OpenLogTab);
   add_action("[Action] Help / Shortcuts", PaletteAction::OpenHelp);
   add_action("[Action] Focus System Map", PaletteAction::FocusSystemMap);
   add_action("[Action] Focus Galaxy Map", PaletteAction::FocusGalaxyMap);
+  add_action("[Action] New Game...", PaletteAction::NewGameDialog);
+  add_action("[Action] New Game (Sol)", PaletteAction::NewGameSol);
+  add_action("[Action] New Game (Random)", PaletteAction::NewGameRandom);
   add_action("[Action] Save game", PaletteAction::Save);
   add_action("[Action] Load game", PaletteAction::Load);
 

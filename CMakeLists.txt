@@ -59,9 +59,14 @@ target_sources(nebula4x_core
     src/util/state_export.cpp
     src/util/strings.cpp
     src/util/save_diff.cpp
+    src/util/json_pointer.cpp
+    src/util/json_pointer_autocomplete.cpp
     src/util/digest.cpp
     src/util/timeline_export.cpp
     src/util/tech_export.cpp
+    src/util/duel_simulator.cpp
+    src/util/duel_tournament.cpp
+    src/util/autosave.cpp
 )
 
 target_include_directories(nebula4x_core
@@ -141,6 +146,7 @@ if(NEBULA4X_BUILD_UI)
   add_executable(nebula4x
     src/main.cpp
     src/ui/app.cpp
+    src/ui/new_game_modal.cpp
     src/ui/hud.cpp
     src/ui/map_render.cpp
     src/ui/panels.cpp
@@ -149,11 +155,26 @@ if(NEBULA4X_BUILD_UI)
     src/ui/freight_window.cpp
     src/ui/fuel_window.cpp
     src/ui/time_warp_window.cpp
+    src/ui/save_tools_window.cpp
+    src/ui/time_machine_window.cpp
+    src/ui/game_json_cache.cpp
+  src/ui/game_entity_index.cpp
+    src/ui/omni_search_window.cpp
+    src/ui/json_explorer_window.cpp
+  src/ui/entity_inspector_window.cpp
+  src/ui/reference_graph_window.cpp
+    src/ui/watchboard_window.cpp
+    src/ui/data_lenses_window.cpp
+    src/ui/dashboards_window.cpp
+    src/ui/pivot_tables_window.cpp
+    src/ui/layout_profiles.cpp
+    src/ui/layout_profiles_window.cpp
     src/ui/production_window.cpp
     src/ui/galaxy_map.cpp
     src/ui/system_map.cpp
     src/ui/timeline_window.cpp
     src/ui/design_studio_window.cpp
+    src/ui/balance_lab_window.cpp
     src/ui/intel_window.cpp
     src/ui/diplomacy_window.cpp
   )
@@ -202,6 +223,8 @@ if(NEBULA4X_BUILD_TESTS)
     tests/test_time_warp.cpp
     tests/test_contact_prediction.cpp
     tests/test_intercept.cpp
+    tests/test_duel_simulator.cpp
+    tests/test_duel_tournament.cpp
     tests/test_attack_lead_pursuit.cpp
     tests/test_sensor_coverage.cpp
     tests/test_freight_planner.cpp
@@ -226,10 +249,14 @@ if(NEBULA4X_BUILD_TESTS)
     tests/test_content_overlays.cpp
     tests/test_spatial_index.cpp
     tests/test_random_scenario.cpp
+    tests/test_autosave.cpp
     tests/test_file_io.cpp
     tests/test_json_unicode.cpp
     tests/test_json_bom.cpp
     tests/test_json_errors.cpp
+    tests/test_json_pointer.cpp
+    tests/test_json_pointer_autocomplete.cpp
+    tests/test_json_pointer_glob.cpp
     tests/test_state_validation.cpp
     tests/test_save_diff.cpp
     tests/test_state_export.cpp

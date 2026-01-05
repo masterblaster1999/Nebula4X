@@ -131,7 +131,8 @@ int main(int /*argc*/, char** /*argv*/) {
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
 
     // Keep ImGui's layout/settings in a project-specific file.
-    io.IniFilename = "ui_layout.ini";
+    // Derive the ini filename from the UI's persisted layout profile.
+    io.IniFilename = app.imgui_ini_filename();
 
     ImGui_ImplSDL2_InitForSDLRenderer(window, renderer);
     ImGui_ImplSDLRenderer2_Init(renderer);
@@ -150,6 +151,8 @@ int main(int /*argc*/, char** /*argv*/) {
 
       ImGui_ImplSDLRenderer2_NewFrame();
       ImGui_ImplSDL2_NewFrame();
+      // Give the app a chance to reload docking/ini state before NewFrame.
+      app.pre_frame();
       ImGui::NewFrame();
 
       app.frame();

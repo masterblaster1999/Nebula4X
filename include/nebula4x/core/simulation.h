@@ -484,7 +484,17 @@ class Simulation {
   GameState& state() { return state_; }
   const GameState& state() const { return state_; }
 
+  // Monotonic counter that increments whenever the simulation's GameState is replaced
+  // (new_game/load_game). UI code can use this to clear stale selections / caches.
+  std::uint64_t state_generation() const { return state_generation_; }
+
   void new_game();
+
+  // Create a new procedurally-generated scenario.
+  //
+  // This is a convenience wrapper around make_random_scenario(seed, num_systems).
+  void new_game_random(std::uint32_t seed, int num_systems = 12);
+
   void load_game(GameState loaded);
 
   // Advance simulation by N days.
@@ -1074,6 +1084,9 @@ mutable std::uint64_t jump_route_cache_misses_{0};
   ContentDB content_;
   SimConfig cfg_;
   GameState state_;
+
+  // Incremented when state_ is replaced (new_game/load_game).
+  std::uint64_t state_generation_{0};
 };
 
 } // namespace nebula4x

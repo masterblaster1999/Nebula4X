@@ -463,6 +463,19 @@ void Simulation::survey_jump_point_for_faction(Id faction_id, Id jump_point_id) 
 
 void Simulation::new_game() {
   state_ = make_sol_scenario();
+  ++state_generation_;
+  for (auto& [_, ship] : state_.ships) {
+    apply_design_stats_to_ship(ship);
+  }
+  for (auto& [_, f] : state_.factions) initialize_unlocks_for_faction(f);
+  recompute_body_positions();
+  tick_contacts(false);
+  invalidate_jump_route_cache();
+}
+
+void Simulation::new_game_random(std::uint32_t seed, int num_systems) {
+  state_ = make_random_scenario(seed, num_systems);
+  ++state_generation_;
   for (auto& [_, ship] : state_.ships) {
     apply_design_stats_to_ship(ship);
   }
@@ -474,6 +487,7 @@ void Simulation::new_game() {
 
 void Simulation::load_game(GameState loaded) {
   state_ = std::move(loaded);
+  ++state_generation_;
 
   {
     std::uint64_t max_seq = 0;
