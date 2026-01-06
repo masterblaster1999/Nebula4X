@@ -29,11 +29,15 @@ int test_autosave();
 int test_json_unicode();
 int test_json_bom();
 int test_json_errors();
+int test_json_merge_patch();
 int test_json_pointer();
 int test_json_pointer_autocomplete();
 int test_json_pointer_glob();
+int test_trace_events();
 int test_state_validation();
 int test_save_diff();
+int test_save_delta();
+int test_regression_tape();
 int test_state_export();
 int test_population_growth();
 int test_combat_events();
@@ -49,6 +53,7 @@ int test_ai_economy();
 int test_research_planner();
 int test_research_schedule();
 int test_colony_schedule();
+int test_colony_profiles();
 int test_planner_events();
 int test_time_warp();
 int test_contact_prediction();
@@ -63,7 +68,9 @@ int test_turn_ticks();
 int test_intercept();
 int test_duel_simulator();
 int test_duel_tournament();
+int test_duel_swiss_tournament();
 int test_attack_lead_pursuit();
+int test_advisor();
 
 int main() {
   int fails = 0;
@@ -109,11 +116,15 @@ int main() {
   fails += test_json_unicode();
   fails += test_json_bom();
   fails += test_json_errors();
+  fails += test_json_merge_patch();
   fails += test_json_pointer();
   fails += test_json_pointer_autocomplete();
   fails += test_json_pointer_glob();
+  fails += test_trace_events();
   fails += test_state_validation();
   fails += test_save_diff();
+  fails += test_save_delta();
+  fails += test_regression_tape();
   fails += test_state_export();
   fails += test_fleets();
   fails += test_population_growth();
@@ -128,9 +139,11 @@ int main() {
   fails += test_intercept();
   fails += test_duel_simulator();
   fails += test_duel_tournament();
+  fails += test_duel_swiss_tournament();
   fails += test_attack_lead_pursuit();
   fails += test_ship_repairs();
   fails += test_faction_economy_modifiers();
+  fails += test_advisor();
 
   if (fails == 0) {
     std::cout << "All tests passed\n";

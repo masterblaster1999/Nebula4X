@@ -403,6 +403,10 @@ enum class LogisticsNeedKind {
   Shipyard,
   Construction,
 
+  // Troop training inputs (currently Duranium/Neutronium per strength), expressed
+  // as a desired buffer stockpile at the colony so training doesn't stall.
+  TroopTraining,
+
   // Daily-running industry inputs (non-mining installations with consumes_per_day),
   // expressed as a desired buffer stockpile at the colony.
   IndustryInput,

@@ -33,8 +33,10 @@ target_sources(nebula4x_core
     src/core/fuel_planner.cpp
     src/core/research_schedule.cpp
     src/core/colony_schedule.cpp
+    src/core/colony_profiles.cpp
     src/core/planner_events.cpp
     src/core/ground_battle_forecast.cpp
+    src/core/advisor.cpp
     src/core/research_planner.cpp
     src/core/scenario.cpp
     src/core/simulation.cpp
@@ -59,6 +61,8 @@ target_sources(nebula4x_core
     src/util/state_export.cpp
     src/util/strings.cpp
     src/util/save_diff.cpp
+    src/util/save_delta.cpp
+    src/util/json_merge_patch.cpp
     src/util/json_pointer.cpp
     src/util/json_pointer_autocomplete.cpp
     src/util/digest.cpp
@@ -66,7 +70,10 @@ target_sources(nebula4x_core
     src/util/tech_export.cpp
     src/util/duel_simulator.cpp
     src/util/duel_tournament.cpp
+    src/util/duel_swiss_tournament.cpp
+    src/util/trace_events.cpp
     src/util/autosave.cpp
+    src/util/regression_tape.cpp
 )
 
 target_include_directories(nebula4x_core
@@ -154,6 +161,8 @@ if(NEBULA4X_BUILD_UI)
     src/ui/planner_window.cpp
     src/ui/freight_window.cpp
     src/ui/fuel_window.cpp
+    src/ui/advisor_window.cpp
+    src/ui/colony_profiles_window.cpp
     src/ui/time_warp_window.cpp
     src/ui/save_tools_window.cpp
     src/ui/time_machine_window.cpp
@@ -219,12 +228,14 @@ if(NEBULA4X_BUILD_TESTS)
     tests/test_research_planner.cpp
     tests/test_research_schedule.cpp
     tests/test_colony_schedule.cpp
+    tests/test_colony_profiles.cpp
     tests/test_planner_events.cpp
     tests/test_time_warp.cpp
     tests/test_contact_prediction.cpp
     tests/test_intercept.cpp
     tests/test_duel_simulator.cpp
     tests/test_duel_tournament.cpp
+    tests/test_duel_swiss_tournament.cpp
     tests/test_attack_lead_pursuit.cpp
     tests/test_sensor_coverage.cpp
     tests/test_freight_planner.cpp
@@ -254,11 +265,15 @@ if(NEBULA4X_BUILD_TESTS)
     tests/test_json_unicode.cpp
     tests/test_json_bom.cpp
     tests/test_json_errors.cpp
+    tests/test_json_merge_patch.cpp
     tests/test_json_pointer.cpp
     tests/test_json_pointer_autocomplete.cpp
     tests/test_json_pointer_glob.cpp
+    tests/test_trace_events.cpp
     tests/test_state_validation.cpp
     tests/test_save_diff.cpp
+    tests/test_save_delta.cpp
+    tests/test_regression_tape.cpp
     tests/test_state_export.cpp
     tests/test_fleets.cpp
     tests/test_combat_events.cpp
@@ -270,6 +285,7 @@ if(NEBULA4X_BUILD_TESTS)
     tests/test_auto_salvage.cpp
     tests/test_auto_tanker.cpp
     tests/test_ship_repairs.cpp
+    tests/test_advisor.cpp
   )
   target_link_libraries(nebula4x_tests PRIVATE nebula4x::core)
   nebula4x_set_project_warnings(nebula4x_tests ${NEBULA4X_WARNINGS_AS_ERRORS})

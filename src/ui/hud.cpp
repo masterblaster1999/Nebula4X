@@ -147,6 +147,8 @@ enum class PaletteAction {
   ToggleDirectory,
   ToggleProduction,
   ToggleEconomy,
+  ToggleAdvisor,
+  ToggleColonyProfiles,
   ToggleTimeline,
   ToggleDesignStudio,
   ToggleBalanceLab,
@@ -216,6 +218,12 @@ void activate_palette_item(PaletteItem& item, Simulation& sim, UIState& ui, Id& 
           break;
         case PaletteAction::ToggleEconomy:
           ui.show_economy_window = !ui.show_economy_window;
+          break;
+        case PaletteAction::ToggleAdvisor:
+          ui.show_advisor_window = !ui.show_advisor_window;
+          break;
+        case PaletteAction::ToggleColonyProfiles:
+          ui.show_colony_profiles_window = !ui.show_colony_profiles_window;
           break;
         case PaletteAction::ToggleTimeline:
           ui.show_timeline_window = !ui.show_timeline_window;
@@ -518,6 +526,18 @@ void draw_status_bar(Simulation& sim, UIState& ui, HUDState& /*hud*/, Id& select
   }
 
   ImGui::SameLine();
+  if (ImGui::SmallButton("Advisor")) ui.show_advisor_window = true;
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip("Open the Advisor (issues + quick fixes)");
+  }
+
+  ImGui::SameLine();
+  if (ImGui::SmallButton("Profiles")) ui.show_colony_profiles_window = true;
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip("Open Colony Profiles (automation presets)");
+  }
+
+  ImGui::SameLine();
   if (ImGui::SmallButton("Warp")) ui.show_time_warp_window = true;
   if (ImGui::IsItemHovered()) {
     ImGui::SetTooltip("Time warp until an event matches your filter");
@@ -678,6 +698,8 @@ void draw_help_window(UIState& ui) {
   ImGui::BulletText("Ctrl+G: Entity Inspector (resolve an entity id + find inbound refs)");
   ImGui::BulletText("Ctrl+Shift+G: Reference Graph (visualize id relationships)");
   ImGui::BulletText("Ctrl+Shift+D: Time Machine (state history + diffs)");
+  ImGui::BulletText("Ctrl+Shift+A: Advisor (issues + quick fixes)");
+  ImGui::BulletText("Ctrl+Shift+B: Colony Profiles (automation presets)");
   ImGui::BulletText("F1: Toggle this help window");
   ImGui::BulletText("Ctrl+S: Save (uses current save path)");
   ImGui::BulletText("Ctrl+O: Load (uses current load path)");
@@ -779,6 +801,8 @@ void draw_command_palette(Simulation& sim, UIState& ui, HUDState& hud, Id& selec
   add_action("[Action] Toggle Directory window", PaletteAction::ToggleDirectory);
   add_action("[Action] Toggle Production window", PaletteAction::ToggleProduction);
   add_action("[Action] Toggle Economy window", PaletteAction::ToggleEconomy);
+  add_action("[Action] Toggle Advisor (Issues)", PaletteAction::ToggleAdvisor);
+  add_action("[Action] Toggle Colony Profiles (Automation Presets)", PaletteAction::ToggleColonyProfiles);
   add_action("[Action] Toggle Timeline window", PaletteAction::ToggleTimeline);
   add_action("[Action] Toggle Design Studio window", PaletteAction::ToggleDesignStudio);
   add_action("[Action] Toggle Balance Lab window", PaletteAction::ToggleBalanceLab);

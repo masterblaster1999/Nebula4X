@@ -18,6 +18,7 @@
 #include "nebula4x/core/scenario.h"
 #include "nebula4x/core/ai_economy.h"
 #include "nebula4x/util/log.h"
+#include "nebula4x/util/trace_events.h"
 #include "nebula4x/util/spatial_index.h"
 
 namespace nebula4x {
@@ -37,6 +38,7 @@ using sim_internal::compute_power_allocation;
 
 void Simulation::tick_colonies(double dt_days, bool emit_daily_events) {
   if (dt_days <= 0.0) return;
+  NEBULA4X_TRACE_SCOPE("tick_colonies", "sim.econ");
   // Precompute faction-wide economy modifiers once per tick for determinism
   // and to avoid repeated tech scanning in inner loops.
   std::unordered_map<Id, FactionEconomyMultipliers> fac_mult;
@@ -358,6 +360,7 @@ void Simulation::tick_colonies(double dt_days, bool emit_daily_events) {
 
 void Simulation::tick_research(double dt_days) {
   if (dt_days <= 0.0) return;
+  NEBULA4X_TRACE_SCOPE("tick_research", "sim.econ");
   std::unordered_map<Id, FactionEconomyMultipliers> fac_mult;
   fac_mult.reserve(state_.factions.size());
   for (Id fid : sorted_keys(state_.factions)) {
@@ -512,6 +515,7 @@ void Simulation::tick_research(double dt_days) {
 
 void Simulation::tick_shipyards(double dt_days) {
   if (dt_days <= 0.0) return;
+  NEBULA4X_TRACE_SCOPE("tick_shipyards", "sim.econ");
   const auto it_def = content_.installations.find("shipyard");
   if (it_def == content_.installations.end()) return;
 
@@ -914,6 +918,7 @@ void Simulation::tick_shipyards(double dt_days) {
 
 void Simulation::tick_construction(double dt_days) {
   if (dt_days <= 0.0) return;
+  NEBULA4X_TRACE_SCOPE("tick_construction", "sim.econ");
   for (Id cid : sorted_keys(state_.colonies)) {
     auto& colony = state_.colonies.at(cid);
 

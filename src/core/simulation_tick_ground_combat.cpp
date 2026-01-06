@@ -1,5 +1,7 @@
 #include "nebula4x/core/simulation.h"
 
+#include "nebula4x/util/trace_events.h"
+
 #include <algorithm>
 #include <cmath>
 #include <string>
@@ -15,8 +17,59 @@ double clamp_nonneg(double x) { return (x < 0.0) ? 0.0 : x; }
 } // namespace
 
 void Simulation::tick_ground_combat() {
+  NEBULA4X_TRACE_SCOPE("tick_ground_combat", "sim.ground");
+
+  // --- Sync active ground battles into colonies before any training/automation ---
+  // GroundBattle stores the authoritative defender strength while a battle is active.
+  // This avoids a long-standing edge case where troop training would add garrison
+  // strength to Colony::ground_forces, only for the battle loop to immediately
+  // overwrite it from GroundBattle::defender_strength.
+  for (auto& [cid, b] : state_.ground_battles) {
+    b.defender_strength = std::max(0.0, b.defender_strength);
+    b.attacker_strength = std::max(0.0, b.attacker_strength);
+    if (auto* col = find_ptr(state_.colonies, cid)) {
+      col->ground_forces = b.defender_strength;
+    }
+  }
+
   // --- Troop training (per-colony) ---
   for (auto& [_, col] : state_.colonies) {
+    // Gameplay QoL: colony garrison target automation.
+    //
+    // If the player sets garrison_target_strength, the simulation keeps enough
+    // *auto-queued* training in the queue to reach that target.
+    //
+    // We track auto-queued strength separately so that reducing the target can
+    // prune only the auto-generated portion without deleting manual training.
+    col.ground_forces = clamp_nonneg(col.ground_forces);
+    col.troop_training_queue = clamp_nonneg(col.troop_training_queue);
+    col.troop_training_auto_queued = std::clamp(col.troop_training_auto_queued, 0.0, col.troop_training_queue);
+    col.garrison_target_strength = clamp_nonneg(col.garrison_target_strength);
+
+    if (col.garrison_target_strength > 1e-9) {
+      const double desired = col.garrison_target_strength;
+      const double manual_q = clamp_nonneg(col.troop_training_queue - col.troop_training_auto_queued);
+
+      // Total queue needed to reach the target (ignoring ongoing battles).
+      const double required_queue_total = clamp_nonneg(desired - col.ground_forces);
+
+      // Auto portion required after accounting for manual queue already present.
+      const double required_auto = clamp_nonneg(required_queue_total - manual_q);
+      const double current_auto = col.troop_training_auto_queued;
+
+      if (required_auto > current_auto + 1e-9) {
+        const double add = required_auto - current_auto;
+        col.troop_training_auto_queued = required_auto;
+        col.troop_training_queue = clamp_nonneg(col.troop_training_queue + add);
+      } else if (required_auto + 1e-9 < current_auto) {
+        const double remove = current_auto - required_auto;
+        col.troop_training_auto_queued = required_auto;
+        col.troop_training_queue = clamp_nonneg(col.troop_training_queue - remove);
+      }
+
+      col.troop_training_auto_queued = std::clamp(col.troop_training_auto_queued, 0.0, col.troop_training_queue);
+    }
+
     if (col.troop_training_queue <= 1e-9) continue;
 
     const double points = std::max(0.0, troop_training_points_per_day(col));
@@ -51,7 +104,17 @@ void Simulation::tick_ground_combat() {
     }
 
     col.troop_training_queue = clamp_nonneg(col.troop_training_queue - strength);
+
+    // Treat manual training as being "ahead" of the auto-queued tail. This keeps
+    // the manual portion stable unless the total queue drops below it.
+    col.troop_training_auto_queued = std::min(col.troop_training_auto_queued, col.troop_training_queue);
+
     col.ground_forces += strength;
+
+    // If this colony is in an active ground battle, training reinforces the defender.
+    if (auto itb = state_.ground_battles.find(col.id); itb != state_.ground_battles.end()) {
+      itb->second.defender_strength = col.ground_forces;
+    }
   }
 
   // --- Battles (deterministic order) ---
@@ -75,6 +138,8 @@ void Simulation::tick_ground_combat() {
     }
 
     // Keep colony garrison in sync with the battle record.
+    // (Battle record is authoritative during the battle, but troop training above
+    // may have reinforced it already.)
     b.defender_strength = std::max(0.0, b.defender_strength);
     b.attacker_strength = std::max(0.0, b.attacker_strength);
     col->ground_forces = b.defender_strength;
@@ -106,6 +171,8 @@ void Simulation::tick_ground_combat() {
       col->faction_id = b.attacker_faction_id;
       col->ground_forces = b.attacker_strength;
       col->troop_training_queue = 0.0;
+      col->troop_training_auto_queued = 0.0;
+      col->garrison_target_strength = 0.0;
       state_.ground_battles.erase(itb);
 
       EventContext ctx;

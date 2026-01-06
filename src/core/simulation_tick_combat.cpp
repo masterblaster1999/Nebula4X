@@ -12,6 +12,7 @@
 #include <unordered_set>
 
 #include "nebula4x/util/log.h"
+#include "nebula4x/util/trace_events.h"
 #include "nebula4x/util/spatial_index.h"
 #include "nebula4x/util/time.h"
 
@@ -46,6 +47,7 @@ static double clamp01(double x) {
 
 void Simulation::tick_combat(double dt_days) {
   dt_days = std::clamp(dt_days, 0.0, 10.0);
+  NEBULA4X_TRACE_SCOPE("tick_combat", "sim.combat");
   std::unordered_map<Id, double> incoming_damage;
   std::unordered_map<Id, std::vector<Id>> attackers_for_target;
   std::unordered_map<Id, std::vector<Id>> colony_attackers_for_target;

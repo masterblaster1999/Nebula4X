@@ -523,7 +523,9 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
     hash_string_int_map(d, c.installation_targets);
     hash_string_int_map(d, c.installations);
     d.add_double(c.ground_forces);
+    d.add_double(c.garrison_target_strength);
     d.add_double(c.troop_training_queue);
+    d.add_double(c.troop_training_auto_queued);
 
     d.add_size(c.shipyard_queue.size());
     for (const auto& bo : c.shipyard_queue) {
@@ -572,6 +574,13 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
     d.add_size(ui.size());
     for (const auto& iid : ui) d.add_string(iid);
     hash_string_int_map(d, f.ship_design_targets);
+
+    // Colony founding defaults (affects colony creation automation).
+    d.add_bool(f.auto_apply_colony_founding_profile);
+    hash_string_int_map(d, f.colony_founding_profile.installation_targets);
+    hash_string_double_map(d, f.colony_founding_profile.mineral_reserves);
+    hash_string_double_map(d, f.colony_founding_profile.mineral_targets);
+    d.add_double(f.colony_founding_profile.garrison_target_strength);
 
 
     auto disc = sorted_unique_copy(f.discovered_systems);

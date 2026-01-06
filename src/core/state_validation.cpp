@@ -859,6 +859,40 @@ std::vector<std::string> validate_game_state(const GameState& s, const ContentDB
       }
     }
 
+    // Validate ground combat / training values.
+    if (!std::isfinite(c.ground_forces)) {
+      push(errors, join("Colony ", id_u64(cid), " ('", c.name, "') has non-finite ground_forces: ", c.ground_forces));
+    } else if (c.ground_forces < -1e-6) {
+      push(errors, join("Colony ", id_u64(cid), " ('", c.name, "') has negative ground_forces: ", c.ground_forces));
+    }
+
+    if (!std::isfinite(c.troop_training_queue)) {
+      push(errors, join("Colony ", id_u64(cid), " ('", c.name, "') has non-finite troop_training_queue: ",
+                        c.troop_training_queue));
+    } else if (c.troop_training_queue < -1e-6) {
+      push(errors, join("Colony ", id_u64(cid), " ('", c.name, "') has negative troop_training_queue: ",
+                        c.troop_training_queue));
+    }
+
+    if (!std::isfinite(c.troop_training_auto_queued)) {
+      push(errors, join("Colony ", id_u64(cid), " ('", c.name, "') has non-finite troop_training_auto_queued: ",
+                        c.troop_training_auto_queued));
+    } else if (c.troop_training_auto_queued < -1e-6) {
+      push(errors, join("Colony ", id_u64(cid), " ('", c.name, "') has negative troop_training_auto_queued: ",
+                        c.troop_training_auto_queued));
+    } else if (c.troop_training_auto_queued > c.troop_training_queue + 1e-6) {
+      push(errors, join("Colony ", id_u64(cid), " ('", c.name, "') has troop_training_auto_queued > troop_training_queue (",
+                        c.troop_training_auto_queued, " > ", c.troop_training_queue, ")"));
+    }
+
+    if (!std::isfinite(c.garrison_target_strength)) {
+      push(errors, join("Colony ", id_u64(cid), " ('", c.name, "') has non-finite garrison_target_strength: ",
+                        c.garrison_target_strength));
+    } else if (c.garrison_target_strength < -1e-6) {
+      push(errors, join("Colony ", id_u64(cid), " ('", c.name, "') has negative garrison_target_strength: ",
+                        c.garrison_target_strength));
+    }
+
 
   }
 
@@ -969,6 +1003,52 @@ std::vector<std::string> validate_game_state(const GameState& s, const ContentDB
       if (content && !design_exists(s, *content, design_id)) {
         push(errors, join("Faction ", id_u64(fid), " ('", f.name, "') ship_design_targets references unknown design_id '",
                           design_id, "'"));
+      }
+    }
+
+    // Colony founding defaults (optional).
+    {
+      const ColonyAutomationProfile& p = f.colony_founding_profile;
+      if (!std::isfinite(p.garrison_target_strength) || p.garrison_target_strength < 0.0) {
+        push(errors,
+             join("Faction ", id_u64(fid), " ('", f.name,
+                  "') colony_founding_profile has invalid garrison_target_strength: ", p.garrison_target_strength));
+      }
+      for (const auto& [k, v] : p.installation_targets) {
+        if (k.empty()) {
+          push(errors,
+               join("Faction ", id_u64(fid), " ('", f.name, "') colony_founding_profile has empty installation_targets key"));
+          continue;
+        }
+        if (v < 0) {
+          push(errors,
+               join("Faction ", id_u64(fid), " ('", f.name, "') colony_founding_profile has negative installation target for '",
+                    k, "': ", v));
+        }
+      }
+      for (const auto& [k, v] : p.mineral_reserves) {
+        if (k.empty()) {
+          push(errors,
+               join("Faction ", id_u64(fid), " ('", f.name, "') colony_founding_profile has empty mineral_reserves key"));
+          continue;
+        }
+        if (!std::isfinite(v) || v < 0.0) {
+          push(errors,
+               join("Faction ", id_u64(fid), " ('", f.name,
+                    "') colony_founding_profile has invalid mineral_reserve for '", k, "': ", v));
+        }
+      }
+      for (const auto& [k, v] : p.mineral_targets) {
+        if (k.empty()) {
+          push(errors,
+               join("Faction ", id_u64(fid), " ('", f.name, "') colony_founding_profile has empty mineral_targets key"));
+          continue;
+        }
+        if (!std::isfinite(v) || v < 0.0) {
+          push(errors,
+               join("Faction ", id_u64(fid), " ('", f.name,
+                    "') colony_founding_profile has invalid mineral_target for '", k, "': ", v));
+        }
       }
     }
   }
@@ -1391,6 +1471,42 @@ FixReport fix_game_state(GameState& s, const ContentDB* content) {
           note(join("Fix: Colony ", id_u64(cid), " had unknown faction_id ", id_u64(c.faction_id), "; set to ",
                     id_u64(first_faction)));
           c.faction_id = first_faction;
+        }
+      }
+
+      // Clamp ground combat / training automation fields.
+      {
+        if (!std::isfinite(c.ground_forces) || c.ground_forces < 0.0) {
+          const double old = c.ground_forces;
+          c.ground_forces = std::max(0.0, std::isfinite(old) ? old : 0.0);
+          note(join("Fix: Colony ", id_u64(cid), " ground_forces clamped ", old, " -> ", c.ground_forces));
+        }
+
+        if (!std::isfinite(c.troop_training_queue) || c.troop_training_queue < 0.0) {
+          const double old = c.troop_training_queue;
+          c.troop_training_queue = std::max(0.0, std::isfinite(old) ? old : 0.0);
+          note(join("Fix: Colony ", id_u64(cid), " troop_training_queue clamped ", old, " -> ", c.troop_training_queue));
+        }
+
+        if (!std::isfinite(c.troop_training_auto_queued) || c.troop_training_auto_queued < 0.0) {
+          const double old = c.troop_training_auto_queued;
+          c.troop_training_auto_queued = std::max(0.0, std::isfinite(old) ? old : 0.0);
+          note(join("Fix: Colony ", id_u64(cid), " troop_training_auto_queued clamped ", old, " -> ",
+                    c.troop_training_auto_queued));
+        }
+
+        const double before_auto = c.troop_training_auto_queued;
+        c.troop_training_auto_queued = std::clamp(c.troop_training_auto_queued, 0.0, c.troop_training_queue);
+        if (c.troop_training_auto_queued != before_auto) {
+          note(join("Fix: Colony ", id_u64(cid), " troop_training_auto_queued clamped to queue: ", before_auto, " -> ",
+                    c.troop_training_auto_queued));
+        }
+
+        if (!std::isfinite(c.garrison_target_strength) || c.garrison_target_strength < 0.0) {
+          const double old = c.garrison_target_strength;
+          c.garrison_target_strength = std::max(0.0, std::isfinite(old) ? old : 0.0);
+          note(join("Fix: Colony ", id_u64(cid), " garrison_target_strength clamped ", old, " -> ",
+                    c.garrison_target_strength));
         }
       }
 

@@ -19,6 +19,7 @@
 #include "nebula4x/core/ai_economy.h"
 #include "nebula4x/core/fuel_planner.h"
 #include "nebula4x/util/log.h"
+#include "nebula4x/util/trace_events.h"
 #include "nebula4x/util/spatial_index.h"
 
 namespace nebula4x {
@@ -37,6 +38,7 @@ using sim_internal::compute_power_allocation;
 } // namespace
 
 void Simulation::tick_ai() {
+  NEBULA4X_TRACE_SCOPE("tick_ai", "sim.ai");
   // Economic planning for AI factions (research, construction, shipbuilding).
   tick_ai_economy(*this);
   const auto ship_ids = sorted_keys(state_.ships);
@@ -1381,6 +1383,929 @@ void Simulation::tick_ai() {
     }
   }
 
+
+
+  // --- Fleet missions (player automation) ---
+  {
+    NEBULA4X_TRACE_SCOPE("tick_fleet_missions", "sim.ai");
+
+    const int now_day = static_cast<int>(state_.date.days_since_epoch());
+    const auto fleet_ids = sorted_keys(state_.fleets);
+
+    auto is_overrideable_order = [&](const Order& o) -> bool {
+      return std::holds_alternative<OrbitBody>(o) || std::holds_alternative<WaitDays>(o) ||
+             std::holds_alternative<MoveToPoint>(o) || std::holds_alternative<MoveToBody>(o) ||
+             std::holds_alternative<EscortShip>(o);
+    };
+
+    auto fleet_orders_overrideable = [&](const Fleet& fl) -> bool {
+      for (Id sid : fl.ship_ids) {
+        auto it = state_.ship_orders.find(sid);
+        if (it == state_.ship_orders.end()) continue;
+        if (it->second.queue.empty()) continue;
+        if (!is_overrideable_order(it->second.queue.front())) return false;
+      }
+      return true;
+    };
+
+    auto fleet_all_orders_empty = [&](const Fleet& fl) -> bool {
+      for (Id sid : fl.ship_ids) {
+        if (!orders_empty(sid)) return false;
+      }
+      return true;
+    };
+
+    // For non-combat missions (e.g. explore), we don't want to constantly
+    // override movement orders. Consider the fleet "retaskable" only when
+    // it's idle or parked (orbiting / waiting).
+    auto is_parked_order = [&](const Order& ord) -> bool {
+      return std::holds_alternative<OrbitBody>(ord) || std::holds_alternative<WaitDays>(ord);
+    };
+
+    auto fleet_is_idle_or_parked = [&](const Fleet& fl) -> bool {
+      for (Id sid : fl.ship_ids) {
+        auto it = state_.ship_orders.find(sid);
+        if (it == state_.ship_orders.end()) continue;
+        const auto& q = it->second.queue;
+        if (q.empty()) continue;
+        if (!is_parked_order(q.front())) return false;
+      }
+      return true;
+    };
+
+
+    auto pick_fleet_leader = [&](Fleet& fl) -> Ship* {
+      Ship* leader = find_ptr(state_.ships, fl.leader_ship_id);
+      if (leader && leader->faction_id == fl.faction_id) return leader;
+      for (Id sid : fl.ship_ids) {
+        Ship* sh = find_ptr(state_.ships, sid);
+        if (!sh) continue;
+        if (sh->faction_id != fl.faction_id) continue;
+        fl.leader_ship_id = sid;
+        return sh;
+      }
+      return nullptr;
+    };
+
+    auto fleet_min_speed_km_s = [&](const Fleet& fl, double fallback) -> double {
+      double slowest = std::numeric_limits<double>::infinity();
+      for (Id sid : fl.ship_ids) {
+        const Ship* sh = find_ptr(state_.ships, sid);
+        if (!sh) continue;
+        if (sh->speed_km_s <= 0.0) continue;
+        slowest = std::min(slowest, sh->speed_km_s);
+      }
+      if (!std::isfinite(slowest)) return fallback;
+      return slowest;
+    };
+
+    auto ship_fuel_fraction = [&](const Ship& sh) -> double {
+      const ShipDesign* d = find_design(sh.design_id);
+      if (!d) return 1.0;
+      const double cap = std::max(0.0, d->fuel_capacity_tons);
+      if (cap <= 1e-9) return 1.0;
+      const double fuel = (sh.fuel_tons < 0.0) ? cap : std::clamp(sh.fuel_tons, 0.0, cap);
+      return std::clamp(fuel / cap, 0.0, 1.0);
+    };
+
+    auto ship_hp_fraction = [&](const Ship& sh) -> double {
+      const ShipDesign* d = find_design(sh.design_id);
+      const double max_hp = d ? std::max(0.0, d->max_hp) : std::max(0.0, sh.hp);
+      if (max_hp <= 1e-9) return 1.0;
+      const double hp = std::clamp(sh.hp, 0.0, max_hp);
+      return std::clamp(hp / max_hp, 0.0, 1.0);
+    };
+
+    auto select_refuel_colony_for_fleet = [&](Id fleet_faction_id, Id start_sys, Vec2 start_pos, double speed_km_s) -> Id {
+      if (speed_km_s <= 0.0) return kInvalidId;
+
+      Id best_cid = kInvalidId;
+      double best_eta = std::numeric_limits<double>::infinity();
+      bool best_has_fuel = false;
+
+      for (Id cid : sorted_keys(state_.colonies)) {
+        const Colony* c = find_ptr(state_.colonies, cid);
+        if (!c) continue;
+        if (!are_factions_mutual_friendly(fleet_faction_id, c->faction_id)) continue;
+        const Body* b = find_ptr(state_.bodies, c->body_id);
+        if (!b) continue;
+        if (b->system_id == kInvalidId) continue;
+        if (!is_system_discovered_by_faction(fleet_faction_id, b->system_id)) continue;
+
+        const double eta = estimate_eta_days_to_pos(start_sys, start_pos, fleet_faction_id, speed_km_s,
+                                                    b->system_id, b->position_mkm);
+        if (!std::isfinite(eta)) continue;
+
+        const double fuel_avail = [&]() {
+          auto it = c->minerals.find("Fuel");
+          return (it != c->minerals.end()) ? std::max(0.0, it->second) : 0.0;
+        }();
+        const bool has_fuel = (fuel_avail > 1e-6);
+
+        if (best_cid == kInvalidId) {
+          best_cid = cid;
+          best_eta = eta;
+          best_has_fuel = has_fuel;
+          continue;
+        }
+
+        if (has_fuel != best_has_fuel) {
+          if (has_fuel && !best_has_fuel) {
+            best_cid = cid;
+            best_eta = eta;
+            best_has_fuel = true;
+          }
+          continue;
+        }
+
+        if (eta + 1e-9 < best_eta || (std::abs(eta - best_eta) <= 1e-9 && cid < best_cid)) {
+          best_cid = cid;
+          best_eta = eta;
+          best_has_fuel = has_fuel;
+        }
+      }
+
+      return best_cid;
+    };
+
+    auto select_repair_colony_for_fleet = [&](const Fleet& fl, Id start_sys, Vec2 start_pos, double speed_km_s) -> Id {
+      if (speed_km_s <= 0.0) return kInvalidId;
+
+      // Total damage across the fleet.
+      double total_missing_hp = 0.0;
+      for (Id sid : fl.ship_ids) {
+        const Ship* sh = find_ptr(state_.ships, sid);
+        if (!sh) continue;
+        if (sh->faction_id != fl.faction_id) continue;
+        const ShipDesign* d = find_design(sh->design_id);
+        const double max_hp = d ? std::max(0.0, d->max_hp) : std::max(0.0, sh->hp);
+        if (max_hp <= 1e-9) continue;
+        const double hp = std::clamp(sh->hp, 0.0, max_hp);
+        if (hp < max_hp - 1e-9) total_missing_hp += (max_hp - hp);
+      }
+
+      if (total_missing_hp <= 1e-9) return kInvalidId;
+
+      Id best_cid = kInvalidId;
+      double best_score = std::numeric_limits<double>::infinity();
+      int best_yards = 0;
+
+      const double per_yard = std::max(0.0, cfg_.repair_hp_per_day_per_shipyard);
+      if (per_yard <= 1e-9) return kInvalidId;
+
+      for (Id cid : sorted_keys(state_.colonies)) {
+        const Colony* c = find_ptr(state_.colonies, cid);
+        if (!c) continue;
+        if (!are_factions_mutual_friendly(fl.faction_id, c->faction_id)) continue;
+
+        const auto it_yard = c->installations.find("shipyard");
+        const int yards = (it_yard != c->installations.end()) ? it_yard->second : 0;
+        if (yards <= 0) continue;
+
+        const Body* b = find_ptr(state_.bodies, c->body_id);
+        if (!b) continue;
+        if (b->system_id == kInvalidId) continue;
+        if (!is_system_discovered_by_faction(fl.faction_id, b->system_id)) continue;
+
+        const double eta = estimate_eta_days_to_pos(start_sys, start_pos, fl.faction_id, speed_km_s,
+                                                    b->system_id, b->position_mkm);
+        if (!std::isfinite(eta)) continue;
+
+        const double repair_time = total_missing_hp / (per_yard * static_cast<double>(yards));
+        const double score = eta + repair_time;
+
+        if (best_cid == kInvalidId || score + 1e-9 < best_score ||
+            (std::abs(score - best_score) <= 1e-9 && yards > best_yards) ||
+            (std::abs(score - best_score) <= 1e-9 && yards == best_yards && cid < best_cid)) {
+          best_cid = cid;
+          best_score = score;
+          best_yards = yards;
+        }
+      }
+
+      return best_cid;
+    };
+
+    auto combat_target_priority = [&](ShipRole r) -> int {
+      // For player-side missions we bias toward removing armed threats first.
+      switch (r) {
+        case ShipRole::Combatant: return 0;
+        case ShipRole::Freighter: return 1;
+        case ShipRole::Surveyor: return 2;
+        default: return 3;
+      }
+    };
+
+    for (Id fid : fleet_ids) {
+      Fleet& fl = state_.fleets.at(fid);
+      if (fl.mission.type == FleetMissionType::None) continue;
+
+      const Faction* fac = find_ptr(state_.factions, fl.faction_id);
+      if (!fac || fac->control != FactionControl::Player) continue;
+
+      Ship* leader = pick_fleet_leader(fl);
+      if (!leader) continue;
+
+      const double fleet_speed = fleet_min_speed_km_s(fl, leader->speed_km_s);
+
+      // --- Sustainment (refuel/repair) ---
+      const double refuel_thr = std::clamp(fl.mission.refuel_threshold_fraction, 0.0, 1.0);
+      const double refuel_resume = std::clamp(fl.mission.refuel_resume_fraction, 0.0, 1.0);
+      const double repair_thr = std::clamp(fl.mission.repair_threshold_fraction, 0.0, 1.0);
+      const double repair_resume = std::clamp(fl.mission.repair_resume_fraction, 0.0, 1.0);
+
+      bool any_need_refuel = false;
+      bool all_refueled = true;
+      bool any_need_repair = false;
+      bool all_repaired = true;
+
+      for (Id sid : fl.ship_ids) {
+        const Ship* sh = find_ptr(state_.ships, sid);
+        if (!sh) continue;
+        if (sh->faction_id != fl.faction_id) continue;
+
+        const double ffrac = ship_fuel_fraction(*sh);
+        if (ffrac + 1e-9 < refuel_thr) any_need_refuel = true;
+        if (ffrac + 1e-9 < refuel_resume) all_refueled = false;
+
+        const double hfrac = ship_hp_fraction(*sh);
+        if (hfrac + 1e-9 < repair_thr) any_need_repair = true;
+        if (hfrac + 1e-9 < repair_resume) all_repaired = false;
+      }
+
+      if (!fl.mission.auto_refuel) {
+        any_need_refuel = false;
+        all_refueled = true;
+      }
+      if (!fl.mission.auto_repair) {
+        any_need_repair = false;
+        all_repaired = true;
+      }
+
+      // Sustainment state transitions.
+      if (fl.mission.sustainment_mode == FleetSustainmentMode::Refuel && all_refueled) {
+        fl.mission.sustainment_mode = FleetSustainmentMode::None;
+        fl.mission.sustainment_colony_id = kInvalidId;
+      }
+      if (fl.mission.sustainment_mode == FleetSustainmentMode::Repair && all_repaired) {
+        fl.mission.sustainment_mode = FleetSustainmentMode::None;
+        fl.mission.sustainment_colony_id = kInvalidId;
+      }
+
+      if (fl.mission.sustainment_mode == FleetSustainmentMode::None) {
+        if (any_need_refuel) {
+          fl.mission.sustainment_mode = FleetSustainmentMode::Refuel;
+          fl.mission.sustainment_colony_id = select_refuel_colony_for_fleet(fl.faction_id, leader->system_id,
+                                                                            leader->position_mkm, fleet_speed);
+        } else if (any_need_repair) {
+          fl.mission.sustainment_mode = FleetSustainmentMode::Repair;
+          fl.mission.sustainment_colony_id = select_repair_colony_for_fleet(fl, leader->system_id, leader->position_mkm,
+                                                                            fleet_speed);
+        }
+      }
+
+      if (fl.mission.sustainment_mode != FleetSustainmentMode::None) {
+        // Maintain or acquire a sustainment dock.
+        const Id cid = fl.mission.sustainment_colony_id;
+        const Colony* col = find_ptr(state_.colonies, cid);
+        const Body* body = col ? find_ptr(state_.bodies, col->body_id) : nullptr;
+        const Id sys_id = body ? body->system_id : kInvalidId;
+
+        if (!col || !body || sys_id == kInvalidId || !are_factions_mutual_friendly(fl.faction_id, col->faction_id) ||
+            !is_system_discovered_by_faction(fl.faction_id, sys_id)) {
+          // Can't sustain here; fall back to no sustainment.
+          fl.mission.sustainment_mode = FleetSustainmentMode::None;
+          fl.mission.sustainment_colony_id = kInvalidId;
+        } else {
+          if (fleet_orders_overrideable(fl)) {
+            // Route the fleet to the sustainment colony and keep it docked.
+            const double dock_range = std::max(0.0, cfg_.docking_range_mkm);
+            const bool leader_docked = (leader->system_id == sys_id) &&
+                                       ((leader->position_mkm - body->position_mkm).length() <= dock_range + 1e-9);
+
+            // If we're not docked (or not already orbiting the sustainment body), issue a docking stack.
+            bool need_orders = !leader_docked;
+            if (!need_orders) {
+              auto it_ord = state_.ship_orders.find(leader->id);
+              if (it_ord == state_.ship_orders.end() || it_ord->second.queue.empty()) {
+                need_orders = true;
+              } else if (const auto* ob = std::get_if<OrbitBody>(&it_ord->second.queue.front())) {
+                if (ob->body_id != body->id) need_orders = true;
+              } else {
+                // At the body, but not in orbit; keep docked.
+                need_orders = true;
+              }
+            }
+
+            if (need_orders) {
+              (void)clear_fleet_orders(fid);
+              (void)issue_fleet_travel_to_system(fid, sys_id, /*restrict_to_discovered=*/true);
+              (void)issue_fleet_move_to_body(fid, body->id);
+              (void)issue_fleet_orbit_body(fid, body->id, /*duration_days=*/-1);
+            }
+          }
+
+          // Sustainment takes priority over combat/patrol directives.
+          continue;
+        }
+      }
+
+      // --- Mission behavior ---
+      if (fl.mission.type == FleetMissionType::DefendColony) {
+        const Colony* col = find_ptr(state_.colonies, fl.mission.defend_colony_id);
+        const Body* body = col ? find_ptr(state_.bodies, col->body_id) : nullptr;
+        if (!col || !body || body->system_id == kInvalidId) continue;
+
+        const Id defend_sys = body->system_id;
+        const Vec2 anchor_pos = body->position_mkm;
+        const double r_mkm = std::max(0.0, fl.mission.defend_radius_mkm);
+
+        // Look for detected hostiles in the defended system.
+        std::vector<Id> hostiles = detected_hostile_ships_in_system(fl.faction_id, defend_sys);
+        if (r_mkm > 1e-9) {
+          hostiles.erase(std::remove_if(hostiles.begin(), hostiles.end(), [&](Id tid) {
+            const Ship* t = find_ptr(state_.ships, tid);
+            if (!t) return true;
+            return (t->position_mkm - anchor_pos).length() > r_mkm + 1e-9;
+          }), hostiles.end());
+        }
+
+        if (!hostiles.empty()) {
+          // Choose a target (combatants first, then nearest to the defended body).
+          Id best = kInvalidId;
+          int best_prio = 999;
+          double best_dist = 0.0;
+
+          for (Id tid : hostiles) {
+            const Ship* tgt = find_ptr(state_.ships, tid);
+            if (!tgt) continue;
+            const ShipDesign* td = find_design(tgt->design_id);
+            const ShipRole tr = td ? td->role : ShipRole::Unknown;
+            const int prio = combat_target_priority(tr);
+            const double dist = (tgt->position_mkm - anchor_pos).length();
+
+            if (best == kInvalidId || prio < best_prio ||
+                (prio == best_prio && (dist < best_dist - 1e-9 ||
+                                       (std::abs(dist - best_dist) <= 1e-9 && tid < best)))) {
+              best = tid;
+              best_prio = prio;
+              best_dist = dist;
+            }
+          }
+
+          if (best != kInvalidId && fleet_orders_overrideable(fl)) {
+            (void)clear_fleet_orders(fid);
+            (void)issue_fleet_attack_ship(fid, best, /*restrict_to_discovered=*/true);
+            fl.mission.last_target_ship_id = best;
+          }
+          continue;
+        }
+
+        // No hostiles: return to / maintain a defensive orbit around the defended body.
+        if (fleet_orders_overrideable(fl)) {
+          const double dock_range = std::max(0.0, cfg_.docking_range_mkm);
+          const bool at_body = (leader->system_id == defend_sys) &&
+                               ((leader->position_mkm - anchor_pos).length() <= dock_range + 1e-9);
+
+          bool need_orders = false;
+          if (!at_body) {
+            need_orders = true;
+          } else {
+            auto it_ord = state_.ship_orders.find(leader->id);
+            if (it_ord == state_.ship_orders.end() || it_ord->second.queue.empty()) {
+              need_orders = true;
+            } else if (const auto* ob = std::get_if<OrbitBody>(&it_ord->second.queue.front())) {
+              if (ob->body_id != body->id) need_orders = true;
+            } else {
+              need_orders = true;
+            }
+          }
+
+          if (need_orders) {
+            (void)clear_fleet_orders(fid);
+            (void)issue_fleet_travel_to_system(fid, defend_sys, /*restrict_to_discovered=*/true);
+            (void)issue_fleet_move_to_body(fid, body->id);
+            (void)issue_fleet_orbit_body(fid, body->id, /*duration_days=*/-1);
+          }
+        }
+
+        continue;
+      }
+
+      if (fl.mission.type == FleetMissionType::PatrolSystem) {
+        Id patrol_sys = fl.mission.patrol_system_id;
+        if (patrol_sys == kInvalidId) patrol_sys = leader->system_id;
+        if (patrol_sys == kInvalidId) continue;
+
+        const StarSystem* sys = find_ptr(state_.systems, patrol_sys);
+        if (!sys) continue;
+
+        // If we're not in the patrol system yet, go there first.
+        if (leader->system_id != patrol_sys) {
+          if (fleet_orders_overrideable(fl)) {
+            (void)clear_fleet_orders(fid);
+            (void)issue_fleet_travel_to_system(fid, patrol_sys, /*restrict_to_discovered=*/true);
+          }
+          continue;
+        }
+
+        // Engage detected hostiles in the patrol system.
+        const auto hostiles = detected_hostile_ships_in_system(fl.faction_id, patrol_sys);
+        if (!hostiles.empty()) {
+          Id best = kInvalidId;
+          int best_prio = 999;
+          double best_dist = 0.0;
+
+          for (Id tid : hostiles) {
+            const Ship* tgt = find_ptr(state_.ships, tid);
+            if (!tgt) continue;
+            const ShipDesign* td = find_design(tgt->design_id);
+            const ShipRole tr = td ? td->role : ShipRole::Unknown;
+            const int prio = combat_target_priority(tr);
+            const double dist = (tgt->position_mkm - leader->position_mkm).length();
+
+            if (best == kInvalidId || prio < best_prio ||
+                (prio == best_prio && (dist < best_dist - 1e-9 ||
+                                       (std::abs(dist - best_dist) <= 1e-9 && tid < best)))) {
+              best = tid;
+              best_prio = prio;
+              best_dist = dist;
+            }
+          }
+
+          if (best != kInvalidId && fleet_orders_overrideable(fl)) {
+            (void)clear_fleet_orders(fid);
+            (void)issue_fleet_attack_ship(fid, best, /*restrict_to_discovered=*/true);
+            fl.mission.last_target_ship_id = best;
+          }
+          continue;
+        }
+
+        // Continue patrol when idle.
+        if (!fleet_all_orders_empty(fl)) continue;
+
+        // Build a deterministic list of waypoints: prefer jump points, else major bodies, else sit.
+        std::vector<Vec2> waypoints;
+        waypoints.reserve(sys->jump_points.size());
+        for (Id jid : sys->jump_points) {
+          const JumpPoint* jp = find_ptr(state_.jump_points, jid);
+          if (!jp) continue;
+          waypoints.push_back(jp->position_mkm);
+        }
+
+        if (waypoints.empty()) {
+          for (Id bid : sys->bodies) {
+            const Body* b = find_ptr(state_.bodies, bid);
+            if (!b) continue;
+            if (b->type == BodyType::Asteroid) continue;
+            waypoints.push_back(b->position_mkm);
+          }
+        }
+
+        if (waypoints.empty()) {
+          (void)issue_fleet_wait_days(fid, std::max(1, fl.mission.patrol_dwell_days));
+          continue;
+        }
+
+        const int idx = (fl.mission.patrol_leg_index < 0) ? 0 : fl.mission.patrol_leg_index;
+        const int widx = idx % static_cast<int>(waypoints.size());
+        fl.mission.patrol_leg_index = widx + 1;
+
+        (void)issue_fleet_move_to_point(fid, waypoints[widx]);
+        (void)issue_fleet_wait_days(fid, std::max(1, fl.mission.patrol_dwell_days));
+        continue;
+      }
+
+
+      if (fl.mission.type == FleetMissionType::Explore) {
+        // Only retask when we're idle or parked (avoid fighting movement).
+        if (!fleet_is_idle_or_parked(fl)) continue;
+
+        const Id faction_id = fl.faction_id;
+        const auto* sys = find_ptr(state_.systems, leader->system_id);
+        if (!sys) continue;
+
+        const auto it_cache = explore_cache.find(faction_id);
+        const ExploreFactionCache* cache = (it_cache != explore_cache.end()) ? &it_cache->second : nullptr;
+
+        auto& reserved_jumps = reserved_explore_jump_targets[faction_id];
+        auto& reserved_frontiers = reserved_explore_frontier_targets[faction_id];
+
+        std::vector<Id> jps = sys->jump_points;
+        std::sort(jps.begin(), jps.end());
+
+        const bool survey_first = fl.mission.explore_survey_first;
+        const bool allow_transit = fl.mission.explore_allow_transit;
+
+        auto pick_transit_jump = [&]() -> Id {
+          if (!allow_transit) return kInvalidId;
+
+          Id best_jump = kInvalidId;
+          double best_dist = std::numeric_limits<double>::infinity();
+          for (Id jp_id : jps) {
+            if (jp_id == kInvalidId) continue;
+            if (reserved_jumps.contains(jp_id)) continue;
+
+            if (cache && !cache->surveyed.contains(jp_id)) continue;
+
+            const JumpPoint* jp = find_ptr(state_.jump_points, jp_id);
+            if (!jp) continue;
+            const JumpPoint* other = find_ptr(state_.jump_points, jp->linked_jump_id);
+            if (!other) continue;
+
+            const Id dest_sys = other->system_id;
+            if (dest_sys == kInvalidId) continue;
+
+            const bool dest_known = cache ? cache->discovered.contains(dest_sys)
+                                          : is_system_discovered_by_faction(faction_id, dest_sys);
+            if (dest_known) continue;
+
+            const double dist = (leader->position_mkm - jp->position_mkm).length();
+            if (best_jump == kInvalidId || dist + 1e-9 < best_dist ||
+                (std::abs(dist - best_dist) <= 1e-9 && jp_id < best_jump)) {
+              best_jump = jp_id;
+              best_dist = dist;
+            }
+          }
+          return best_jump;
+        };
+
+        auto pick_survey_jump = [&]() -> Id {
+          Id best_jump = kInvalidId;
+          double best_dist = std::numeric_limits<double>::infinity();
+          for (Id jp_id : jps) {
+            if (jp_id == kInvalidId) continue;
+            if (reserved_jumps.contains(jp_id)) continue;
+
+            const bool surveyed = cache ? cache->surveyed.contains(jp_id) : is_jump_point_surveyed_by_faction(faction_id, jp_id);
+            if (surveyed) continue;
+
+            const JumpPoint* jp = find_ptr(state_.jump_points, jp_id);
+            if (!jp) continue;
+
+            const double dist = (leader->position_mkm - jp->position_mkm).length();
+            if (best_jump == kInvalidId || dist + 1e-9 < best_dist ||
+                (std::abs(dist - best_dist) <= 1e-9 && jp_id < best_jump)) {
+              best_jump = jp_id;
+              best_dist = dist;
+            }
+          }
+          return best_jump;
+        };
+
+        const Id transit_jump = pick_transit_jump();
+        const Id survey_jump = pick_survey_jump();
+
+        auto issue_survey = [&](Id jp_id) {
+          if (jp_id == kInvalidId) return;
+          const JumpPoint* jp = find_ptr(state_.jump_points, jp_id);
+          if (!jp) return;
+          reserved_jumps.insert(jp_id);
+          clear_fleet_orders(fid);
+          issue_fleet_move_to_point(fid, jp->position_mkm);
+        };
+
+        auto issue_transit = [&](Id jp_id) {
+          if (jp_id == kInvalidId) return;
+          reserved_jumps.insert(jp_id);
+          clear_fleet_orders(fid);
+          issue_fleet_travel_via_jump(fid, jp_id);
+        };
+
+        // Local system work first.
+        if (survey_first) {
+          if (survey_jump != kInvalidId) {
+            issue_survey(survey_jump);
+            continue;
+          }
+          if (transit_jump != kInvalidId) {
+            issue_transit(transit_jump);
+            continue;
+          }
+        } else {
+          if (transit_jump != kInvalidId) {
+            issue_transit(transit_jump);
+            continue;
+          }
+          if (survey_jump != kInvalidId) {
+            issue_survey(survey_jump);
+            continue;
+          }
+        }
+
+        // No local work: route to the best frontier system.
+        if (!cache) continue;
+
+        const double fleet_speed = fleet_min_speed_km_s(fl, leader->speed_km_s);
+        if (fleet_speed <= 0.0) continue;
+
+        Id best_frontier = kInvalidId;
+        double best_score = -1e9;
+        for (const auto& fr : cache->frontiers) {
+          const Id sys_id = fr.system_id;
+          if (sys_id == leader->system_id) continue;
+          if (reserved_frontiers.contains(sys_id)) continue;
+
+          const int work = fr.unknown_exits + (allow_transit ? fr.known_exits_to_undiscovered : 0);
+          if (work <= 0) continue;
+
+          const double eta = estimate_eta_days_to_system(leader->system_id, leader->position_mkm, faction_id, fleet_speed, sys_id);
+          if (!std::isfinite(eta)) continue;
+
+          const double score = static_cast<double>(work) * 1000.0 - eta * 10.0;
+          if (best_frontier == kInvalidId || score > best_score + 1e-9 ||
+              (std::abs(score - best_score) <= 1e-9 && sys_id < best_frontier)) {
+            best_frontier = sys_id;
+            best_score = score;
+          }
+        }
+
+        if (best_frontier != kInvalidId) {
+          reserved_frontiers.insert(best_frontier);
+          clear_fleet_orders(fid);
+          issue_fleet_travel_to_system(fid, best_frontier, /*restrict_to_discovered=*/true);
+        }
+
+        continue;
+      }
+
+      if (fl.mission.type == FleetMissionType::HuntHostiles) {
+        // 1) If hostiles are currently detected in-system, attack.
+        const auto hostiles = detected_hostile_ships_in_system(fl.faction_id, leader->system_id);
+        if (!hostiles.empty()) {
+          Id best = kInvalidId;
+          int best_prio = 999;
+          double best_dist = 0.0;
+
+          for (Id tid : hostiles) {
+            const Ship* tgt = find_ptr(state_.ships, tid);
+            if (!tgt) continue;
+            const ShipDesign* td = find_design(tgt->design_id);
+            const ShipRole tr = td ? td->role : ShipRole::Unknown;
+            const int prio = combat_target_priority(tr);
+            const double dist = (tgt->position_mkm - leader->position_mkm).length();
+
+            if (best == kInvalidId || prio < best_prio ||
+                (prio == best_prio && (dist < best_dist - 1e-9 ||
+                                       (std::abs(dist - best_dist) <= 1e-9 && tid < best)))) {
+              best = tid;
+              best_prio = prio;
+              best_dist = dist;
+            }
+          }
+
+          if (best != kInvalidId && fleet_orders_overrideable(fl)) {
+            (void)clear_fleet_orders(fid);
+            (void)issue_fleet_attack_ship(fid, best, /*restrict_to_discovered=*/true);
+            fl.mission.last_target_ship_id = best;
+          }
+          continue;
+        }
+
+        // 2) Otherwise, pursue the most recent hostile contact within the chase age window.
+        const int max_age = std::max(0, fl.mission.hunt_max_contact_age_days);
+
+        const Faction* f = find_ptr(state_.factions, fl.faction_id);
+        if (!f) continue;
+
+        Id best_target = kInvalidId;
+        int best_age = 0;
+        int best_prio = 999;
+
+        for (const auto& [sid, c] : f->ship_contacts) {
+          if (sid == kInvalidId) continue;
+          if (!find_ptr(state_.ships, sid)) continue;  // don't chase deleted ships
+          if (c.system_id == kInvalidId) continue;
+          if (!is_system_discovered_by_faction(fl.faction_id, c.system_id)) continue;
+          if (!are_factions_hostile(fl.faction_id, c.last_seen_faction_id)) continue;
+
+          const int age = now_day - c.last_seen_day;
+          if (age < 0) continue;
+          if (age > max_age) continue;
+
+          const Ship* tgt = find_ptr(state_.ships, sid);
+          const ShipDesign* td = tgt ? find_design(tgt->design_id) : nullptr;
+          const ShipRole tr = td ? td->role : ShipRole::Unknown;
+          const int prio = combat_target_priority(tr);
+
+          if (best_target == kInvalidId || age < best_age ||
+              (age == best_age && (prio < best_prio || (prio == best_prio && sid < best_target)))) {
+            best_target = sid;
+            best_age = age;
+            best_prio = prio;
+          }
+        }
+
+        if (best_target != kInvalidId && fleet_orders_overrideable(fl)) {
+          (void)clear_fleet_orders(fid);
+          (void)issue_fleet_attack_ship(fid, best_target, /*restrict_to_discovered=*/true);
+          fl.mission.last_target_ship_id = best_target;
+        }
+
+        continue;
+      }
+
+      if (fl.mission.type == FleetMissionType::EscortFreighters) {
+        auto cargo_used_tons = [&](const Ship& s) {
+          double used = 0.0;
+          for (const auto& [_, tons] : s.cargo) used += std::max(0.0, tons);
+          return used;
+        };
+
+        // Precompute friendly docking points by system once per planning pass.
+        std::unordered_map<Id, std::vector<Vec2>> friendly_docks_by_system;
+        friendly_docks_by_system.reserve(state_.colonies.size() * 2 + 8);
+        for (Id cid : sorted_keys(state_.colonies)) {
+          const Colony* c = find_ptr(state_.colonies, cid);
+          if (!c) continue;
+          if (!are_factions_mutual_friendly(fl.faction_id, c->faction_id)) continue;
+          const Body* b = find_ptr(state_.bodies, c->body_id);
+          if (!b) continue;
+          if (b->system_id == kInvalidId) continue;
+          friendly_docks_by_system[b->system_id].push_back(b->position_mkm);
+        }
+
+        auto ship_is_docked_at_any_friendly_colony = [&](const Ship& sh) -> bool {
+          const double dock_range = std::max(0.0, cfg_.docking_range_mkm);
+          if (dock_range <= 1e-9) return false;
+          auto it = friendly_docks_by_system.find(sh.system_id);
+          if (it == friendly_docks_by_system.end()) return false;
+          for (const auto& pos : it->second) {
+            if ((sh.position_mkm - pos).length() <= dock_range + 1e-9) return true;
+          }
+          return false;
+        };
+
+        auto is_basic_escort_target = [&](Id sid) -> bool {
+          const Ship* sh = find_ptr(state_.ships, sid);
+          if (!sh) return false;
+          if (sid == kInvalidId) return false;
+          if (!are_factions_mutual_friendly(fl.faction_id, sh->faction_id)) return false;
+
+          // Only escort civilian-ish roles by default.
+          const ShipDesign* d = find_design(sh->design_id);
+          const ShipRole r = d ? d->role : ShipRole::Unknown;
+          return (r == ShipRole::Freighter || r == ShipRole::Surveyor || r == ShipRole::Unknown);
+        };
+
+        auto is_auto_escort_target = [&](Id sid) -> bool {
+          const Ship* sh = find_ptr(state_.ships, sid);
+          if (!sh) return false;
+          if (!is_basic_escort_target(sid)) return false;
+          if (fl.mission.escort_only_auto_freight && !sh->auto_freight) return false;
+          return true;
+        };
+
+        Id escort_target = kInvalidId;
+
+        if (fl.mission.escort_target_ship_id != kInvalidId) {
+          if (is_basic_escort_target(fl.mission.escort_target_ship_id)) {
+            escort_target = fl.mission.escort_target_ship_id;
+            fl.mission.escort_active_ship_id = escort_target;
+          } else {
+            // Fixed target no longer valid.
+            fl.mission.escort_active_ship_id = kInvalidId;
+            escort_target = kInvalidId;
+          }
+        } else {
+          // Auto-select an eligible friendly freighter.
+          const int interval = std::max(0, fl.mission.escort_retarget_interval_days);
+          const bool can_retarget = (interval == 0) || (now_day - fl.mission.escort_last_retarget_day >= interval);
+
+          if (!is_auto_escort_target(fl.mission.escort_active_ship_id)) {
+            fl.mission.escort_active_ship_id = kInvalidId;
+          }
+
+          escort_target = fl.mission.escort_active_ship_id;
+
+          if (escort_target == kInvalidId || can_retarget) {
+            // Pick the best candidate: prefer ships that are currently moving or carrying cargo,
+            // then minimize ETA.
+            Id best = kInvalidId;
+            int best_prio = 999;
+            double best_eta = std::numeric_limits<double>::infinity();
+            double best_cargo = 0.0;
+
+            for (Id sid : sorted_keys(state_.ships)) {
+              const Ship* sh = find_ptr(state_.ships, sid);
+              if (!sh) continue;
+              if (!is_auto_escort_target(sid)) continue;
+              // Avoid escorting ships that are already managed by another fleet.
+              if (fleet_for_ship(sid) != kInvalidId) continue;
+
+              const bool moving = !orders_empty(sid);
+              const double cargo = cargo_used_tons(*sh);
+              const bool has_cargo = cargo > 1e-6;
+              const bool docked = (!moving && !has_cargo) ? ship_is_docked_at_any_friendly_colony(*sh) : false;
+
+              int prio = 0;
+              if (moving || has_cargo) {
+                prio = 0;
+              } else if (!docked) {
+                prio = 1;
+              } else {
+                prio = 2;
+              }
+
+              const double eta = estimate_eta_days_to_pos(leader->system_id, leader->position_mkm,
+                                                         fl.faction_id, fleet_speed,
+                                                         sh->system_id, sh->position_mkm);
+              if (!std::isfinite(eta)) continue;
+
+              if (best == kInvalidId || prio < best_prio ||
+                  (prio == best_prio && (eta < best_eta - 1e-9 ||
+                                         (std::abs(eta - best_eta) <= 1e-9 &&
+                                          (cargo > best_cargo + 1e-9 ||
+                                           (std::abs(cargo - best_cargo) <= 1e-9 && sid < best)))))) {
+                best = sid;
+                best_prio = prio;
+                best_eta = eta;
+                best_cargo = cargo;
+              }
+            }
+
+            if (best != kInvalidId) {
+              escort_target = best;
+              fl.mission.escort_active_ship_id = best;
+              fl.mission.escort_last_retarget_day = now_day;
+            }
+          }
+        }
+
+        if (escort_target == kInvalidId) continue;
+
+        const Ship* escorted = find_ptr(state_.ships, escort_target);
+        if (!escorted) {
+          fl.mission.escort_active_ship_id = kInvalidId;
+          continue;
+        }
+
+        const Id escort_sys = escorted->system_id;
+        if (escort_sys == kInvalidId) continue;
+
+        // Engage detected hostiles that threaten the escorted ship.
+        std::vector<Id> hostiles = detected_hostile_ships_in_system(fl.faction_id, escort_sys);
+        const double r_mkm = std::max(0.0, fl.mission.escort_defense_radius_mkm);
+        if (r_mkm > 1e-9) {
+          hostiles.erase(std::remove_if(hostiles.begin(), hostiles.end(), [&](Id tid) {
+            const Ship* t = find_ptr(state_.ships, tid);
+            if (!t) return true;
+            return (t->position_mkm - escorted->position_mkm).length() > r_mkm + 1e-9;
+          }), hostiles.end());
+        }
+
+        if (!hostiles.empty()) {
+          Id best = kInvalidId;
+          int best_prio = 999;
+          double best_dist = 0.0;
+          for (Id tid : hostiles) {
+            const Ship* tgt = find_ptr(state_.ships, tid);
+            if (!tgt) continue;
+            const ShipDesign* td = find_design(tgt->design_id);
+            const ShipRole tr = td ? td->role : ShipRole::Unknown;
+            const int prio = combat_target_priority(tr);
+            const double dist = (tgt->position_mkm - escorted->position_mkm).length();
+            if (best == kInvalidId || prio < best_prio ||
+                (prio == best_prio && (dist < best_dist - 1e-9 ||
+                                       (std::abs(dist - best_dist) <= 1e-9 && tid < best)))) {
+              best = tid;
+              best_prio = prio;
+              best_dist = dist;
+            }
+          }
+
+          if (best != kInvalidId && fleet_orders_overrideable(fl)) {
+            (void)clear_fleet_orders(fid);
+            (void)issue_fleet_attack_ship(fid, best, /*restrict_to_discovered=*/true);
+            fl.mission.last_target_ship_id = best;
+          }
+          continue;
+        }
+
+        // No immediate threats: ensure we're escorting the target.
+        if (fleet_orders_overrideable(fl)) {
+          const double follow = std::max(0.0, fl.mission.escort_follow_distance_mkm);
+
+          bool need_orders = false;
+          auto it_ord = state_.ship_orders.find(leader->id);
+          if (it_ord == state_.ship_orders.end() || it_ord->second.queue.empty()) {
+            need_orders = true;
+          } else if (const auto* eo = std::get_if<EscortShip>(&it_ord->second.queue.front())) {
+            if (eo->target_ship_id != escorted->id) need_orders = true;
+          } else {
+            need_orders = true;
+          }
+
+          if (need_orders) {
+            (void)clear_fleet_orders(fid);
+            (void)issue_fleet_escort_ship(fid, escorted->id, follow, /*restrict_to_discovered=*/true);
+          }
+        }
+
+        continue;
+      }
+    }
+  }
   // --- Faction-level AI profiles ---
   const int now = static_cast<int>(state_.date.days_since_epoch());
   constexpr int kMaxChaseAgeDays = 60;
@@ -1508,6 +2433,7 @@ void Simulation::tick_ai() {
 }
 
 void Simulation::tick_refuel() {
+  NEBULA4X_TRACE_SCOPE("tick_refuel", "sim.maintenance");
   constexpr const char* kFuelKey = "Fuel";
 
   // Fast(ish) lookup: system -> colony ids.
@@ -1574,6 +2500,7 @@ void Simulation::tick_refuel() {
 
 void Simulation::tick_repairs(double dt_days) {
   if (dt_days <= 0.0) return;
+  NEBULA4X_TRACE_SCOPE("tick_repairs", "sim.maintenance");
   const double per_yard = std::max(0.0, cfg_.repair_hp_per_day_per_shipyard);
   if (per_yard <= 0.0) return;
 

@@ -18,7 +18,11 @@
 #include "nebula4x/util/digest.h"
 #include "nebula4x/util/duel_simulator.h"
 #include "nebula4x/util/duel_tournament.h"
+#include "nebula4x/util/duel_swiss_tournament.h"
 #include "nebula4x/util/save_diff.h"
+#include "nebula4x/util/json_merge_patch.h"
+#include "nebula4x/util/save_delta.h"
+#include "nebula4x/util/regression_tape.h"
 #include "nebula4x/util/state_export.h"
 #include "nebula4x/util/timeline_export.h"
 #include "nebula4x/util/tech_export.h"
@@ -26,6 +30,7 @@
 #include "nebula4x/util/log.h"
 #include "nebula4x/util/strings.h"
 #include "nebula4x/util/time.h"
+#include "nebula4x/util/trace_events.h"
 
 namespace {
 
@@ -87,6 +92,33 @@ bool has_flag(int argc, char** argv, const std::string& flag) {
     if (argv[i] == flag) return true;
   }
   return false;
+}
+
+bool is_absolute_path(const std::string& p) {
+  if (p.empty()) return false;
+  if (p[0] == '/' || p[0] == '\\') return true; // POSIX or UNC
+  if (p.size() >= 2 && std::isalpha(static_cast<unsigned char>(p[0])) && p[1] == ':') return true; // Windows drive
+  return false;
+}
+
+std::string path_dirname(const std::string& path) {
+  const std::size_t pos = path.find_last_of("/\\");
+  if (pos == std::string::npos) return ".";
+  if (pos == 0) return "/";
+  return path.substr(0, pos);
+}
+
+std::string join_path(const std::string& a, const std::string& b) {
+  if (a.empty() || a == ".") return b;
+  if (b.empty()) return a;
+  const char sep = '/';
+  if (a.back() == '/' || a.back() == '\\') return a + b;
+  return a + sep + b;
+}
+
+std::string resolve_relative_path(const std::string& base_dir, const std::string& path) {
+  if (path.empty() || is_absolute_path(path)) return path;
+  return join_path(base_dir, path);
 }
 
 const char* event_level_label(nebula4x::EventLevel l) {
@@ -161,6 +193,7 @@ bool parse_event_category(const std::string& raw, nebula4x::EventCategory& out) 
   }
   if (s == "exploration") {
     out = nebula4x::EventCategory::Exploration;
+    return true;
   } else if (s == "diplomacy") {
     out = nebula4x::EventCategory::Diplomacy;
     return true;
@@ -359,8 +392,21 @@ void print_usage(const char* exe) {
   std::cout << "  --diff-saves A B Compare two save JSON files and print a structural diff\n";
   std::cout << "  --diff-saves-json PATH  (optional) Also emit a JSON diff report (PATH can be '-' for stdout)\n";
   std::cout << "  --diff-saves-jsonpatch PATH  (optional) Also emit an RFC 6902 JSON Patch (PATH can be '-' for stdout)\n";
+  std::cout << "  --diff-saves-jsonmergepatch PATH  (optional) Also emit an RFC 7386 JSON Merge Patch (PATH can be '-' for stdout)\n";
   std::cout << "  --apply-save-patch SAVE PATCH  Apply an RFC 6902 JSON Patch to SAVE\n";
   std::cout << "  --apply-save-patch-out PATH   (optional) Output path for the patched save (PATH can be '-' for stdout; default: -)\n";
+  std::cout << "  --apply-save-mergepatch SAVE PATCH  Apply an RFC 7386 JSON Merge Patch to SAVE\n";
+  std::cout << "  --apply-save-mergepatch-out PATH   (optional) Output path for the patched save (PATH can be '-' for stdout; default: -)\n";
+  std::cout << "  --make-delta-save BASE SAVE   Create a delta-save file (base + RFC 7386 merge patch chain)\n";
+  std::cout << "  --append-delta-save DELTA SAVE  Append SAVE to an existing delta-save file\n";
+  std::cout << "  --reconstruct-delta-save DELTA  Reconstruct a save from a delta-save file\n";
+  std::cout << "  --verify-delta-save DELTA   Verify a delta-save by replaying patches and checking recorded digests\n";
+  std::cout << "    --delta-save-out PATH     Output path for delta-save/reconstructed save (PATH can be '-' for stdout; default: -)\n";
+  std::cout << "    --delta-save-index N      For reconstruct: apply first N patches (0=base, default: -1=all)\n";
+  std::cout << "  --make-regression-tape PATH   Generate a regression tape (timeline digests + metrics) and exit\n";
+  std::cout << "    --tape-step-days N         Snapshot cadence for tape generation (default: 1)\n";
+  std::cout << "  --verify-regression-tape PATH Verify a regression tape by re-running the simulation and comparing digests\n";
+  std::cout << "    --verify-regression-tape-report PATH  (optional) Write a machine-readable JSON report (PATH can be '-' for stdout)\n";
   std::cout << "  --validate-content  Validate content + tech files and exit\n";
   std::cout << "  --validate-save     Validate loaded/new game state and exit\n";
   std::cout << "  --digest         Print stable content/state digests (useful for bug reports)\n";
@@ -404,12 +450,26 @@ void print_usage(const char* exe) {
   std::cout << "    --duel-roster-k K       Elo K-factor (default: 32)\n";
   std::cout << "    --duel-roster-seed N    Base RNG seed (default: --seed)\n";
   std::cout << "    --duel-roster-json PATH Write tournament JSON (PATH can be '-' for stdout)\n";
+  std::cout << "  --duel-swiss ID   Run a Swiss-system duel tournament between multiple design IDs and exit\n";
+  std::cout << "    --duel-swiss ID        Repeat to add designs to the roster (requires at least 2)\n";
+  std::cout << "    --duel-swiss-rounds N  Number of Swiss rounds (default: 5)\n";
+  std::cout << "    --duel-swiss-count N   Ships per design per side (default: 1)\n";
+  std::cout << "    --duel-swiss-runs N    Runs per matchup direction (default: 10)\n";
+  std::cout << "    --duel-swiss-days N    Max days per run (default: 200)\n";
+  std::cout << "    --duel-swiss-distance D Initial separation in million km (default: auto)\n";
+  std::cout << "    --duel-swiss-jitter D   Random +/- spawn jitter in million km (default: 0)\n";
+  std::cout << "    --duel-swiss-one-way    Only run i-vs-j (no side swap)\n";
+  std::cout << "    --duel-swiss-no-orders  Do not issue AttackShip orders\n";
+  std::cout << "    --duel-swiss-k K        Elo K-factor (default: 32)\n";
+  std::cout << "    --duel-swiss-seed N     Base RNG seed (default: --seed)\n";
+  std::cout << "    --duel-swiss-json PATH  Write tournament JSON (PATH can be '-' for stdout)\n";
   std::cout << "  --plan-research FACTION TECH  Print a prereq-ordered research plan for FACTION -> TECH\n";
   std::cout << "  --plan-research-json PATH     (optional) Export the plan as JSON (PATH can be '-' for stdout)\n";
   std::cout << "  --dump-events    Print the persistent simulation event log to stdout\n";
   std::cout << "  --export-events-csv PATH  Export the persistent simulation event log to CSV (PATH can be '-' for stdout)\n";
   std::cout << "  --export-events-json PATH Export the persistent simulation event log to JSON (PATH can be '-' for stdout)\n";
   std::cout << "  --export-events-jsonl PATH Export the persistent simulation event log to JSONL/NDJSON (PATH can be '-' for stdout)\n";
+  std::cout << "  --trace PATH     Write a Chrome trace JSON (PATH can be '-' for stdout)\n";
   std::cout << "    --events-last N         Only print the last N matching events (0 = all)\n";
   std::cout << "    --events-category NAME  Filter by category (general|research|shipyard|construction|movement|combat|intel|exploration)\n";
   std::cout << "    --events-faction X      Filter by faction id or exact name (case-insensitive)\n";
@@ -442,18 +502,29 @@ int main(int argc, char** argv) {
 
     const bool quiet = has_flag(argc, argv, "--quiet");
 
+    // Optional performance tracing (Chrome/Perfetto trace event format).
+    //
+    // Example:
+    //   nebula4x --load-scenario foo --ticks 100 --trace trace.json
+    const std::string trace_path = get_str_arg(argc, argv, "--trace", "");
+    nebula4x::trace::Session trace_session(trace_path, /*process_name=*/"nebula4x_cli");
+    NEBULA4X_TRACE_SCOPE("cli_main", "cli");
+
     // Save diff utility:
     //   --diff-saves A B
     //   --diff-saves A B --diff-saves-json OUT.json
     //   --diff-saves A B --diff-saves-json -   (JSON to stdout; human diff to stderr unless --quiet)
     //   --diff-saves A B --diff-saves-jsonpatch OUT.patch.json
     //   --diff-saves A B --diff-saves-jsonpatch -   (patch to stdout; human diff to stderr unless --quiet)
+    //   --diff-saves A B --diff-saves-jsonmergepatch OUT.mergepatch.json
+    //   --diff-saves A B --diff-saves-jsonmergepatch -   (merge patch to stdout; human diff to stderr unless --quiet)
     std::string diff_a;
     std::string diff_b;
     const bool diff_saves = get_two_str_args(argc, argv, "--diff-saves", diff_a, diff_b);
     const bool diff_flag = has_flag(argc, argv, "--diff-saves");
     const std::string diff_json_path = get_str_arg(argc, argv, "--diff-saves-json", "");
     const std::string diff_patch_path = get_str_arg(argc, argv, "--diff-saves-jsonpatch", "");
+    const std::string diff_merge_patch_path = get_str_arg(argc, argv, "--diff-saves-jsonmergepatch", "");
 
     if (diff_flag && !diff_saves) {
       std::cerr << "--diff-saves requires two paths: --diff-saves A B\n\n";
@@ -464,8 +535,13 @@ int main(int argc, char** argv) {
     if (diff_saves) {
       const bool json_to_stdout = (!diff_json_path.empty() && diff_json_path == "-");
       const bool patch_to_stdout = (!diff_patch_path.empty() && diff_patch_path == "-");
-      if (json_to_stdout && patch_to_stdout) {
-        std::cerr << "--diff-saves-json and --diff-saves-jsonpatch cannot both write to stdout ('-')\n";
+      const bool merge_to_stdout = (!diff_merge_patch_path.empty() && diff_merge_patch_path == "-");
+
+      const int stdout_writers = (json_to_stdout ? 1 : 0) + (patch_to_stdout ? 1 : 0) + (merge_to_stdout ? 1 : 0);
+      if (stdout_writers > 1) {
+        std::cerr
+            << "--diff-saves-json, --diff-saves-jsonpatch, and --diff-saves-jsonmergepatch cannot\n"
+            << "all write to stdout ('-') at the same time\n";
         return 2;
       }
 
@@ -498,8 +574,20 @@ int main(int argc, char** argv) {
         }
       }
 
+      if (!diff_merge_patch_path.empty()) {
+        const std::string merge_patch = nebula4x::diff_json_merge_patch(a_canon, b_canon, /*indent=*/2);
+        if (diff_merge_patch_path == "-") {
+          std::cout << merge_patch;
+        } else {
+          nebula4x::write_text_file(diff_merge_patch_path, merge_patch);
+          if (!quiet) {
+            std::cout << "JSON Merge Patch written to " << diff_merge_patch_path << "\n";
+          }
+        }
+      }
+
       if (!quiet) {
-        const bool machine_to_stdout = json_to_stdout || patch_to_stdout;
+        const bool machine_to_stdout = json_to_stdout || patch_to_stdout || merge_to_stdout;
         std::ostream& out = machine_to_stdout ? std::cerr : std::cout;
         out << nebula4x::diff_saves_to_text(a_canon, b_canon);
       }
@@ -549,6 +637,254 @@ int main(int argc, char** argv) {
       return 0;
     }
 
+    // Save merge patch apply utility (RFC 7386):
+    //   --apply-save-mergepatch SAVE.json PATCH.json
+    //   --apply-save-mergepatch SAVE.json PATCH.json --apply-save-mergepatch-out OUT.json
+    //   --apply-save-mergepatch SAVE.json PATCH.json --apply-save-mergepatch-out -  (save to stdout; info to stderr unless --quiet)
+    std::string apply_merge_save_path;
+    std::string apply_merge_patch_path;
+    const bool apply_save_mergepatch =
+        get_two_str_args(argc, argv, "--apply-save-mergepatch", apply_merge_save_path, apply_merge_patch_path);
+    const bool apply_save_mergepatch_flag = has_flag(argc, argv, "--apply-save-mergepatch");
+    const std::string apply_merge_out_path = get_str_arg(argc, argv, "--apply-save-mergepatch-out", "-");
+
+    if (apply_save_mergepatch_flag && !apply_save_mergepatch) {
+      std::cerr << "--apply-save-mergepatch requires two paths: --apply-save-mergepatch SAVE PATCH\n\n";
+      print_usage(argv[0]);
+      return 2;
+    }
+
+    if (apply_save_mergepatch) {
+      const bool out_to_stdout = (apply_merge_out_path == "-");
+      const auto base_state = nebula4x::deserialize_game_from_json(nebula4x::read_text_file(apply_merge_save_path));
+      const std::string base_canon = nebula4x::serialize_game_to_json(base_state);
+
+      const std::string patch_json = nebula4x::read_text_file(apply_merge_patch_path);
+      const std::string patched_json = nebula4x::apply_json_merge_patch(base_canon, patch_json, /*indent=*/2);
+
+      // Validate the patched document is still a valid Nebula4X save.
+      const auto patched_state = nebula4x::deserialize_game_from_json(patched_json);
+      const std::string patched_canon = nebula4x::serialize_game_to_json(patched_state);
+
+      if (out_to_stdout) {
+        std::cout << patched_canon;
+      } else {
+        nebula4x::write_text_file(apply_merge_out_path, patched_canon);
+        if (!quiet) {
+          std::cout << "Patched save written to " << apply_merge_out_path << "\n";
+        }
+      }
+
+      if (!quiet && out_to_stdout) {
+        std::cerr << "Patched save written to stdout\n";
+      }
+      return 0;
+    }
+
+    // Delta-save utilities (base save + RFC 7386 merge patch chain).
+    //
+    // Examples:
+    //   --make-delta-save BASE.json NEXT.json --delta-save-out OUT.delta.json
+    //   --append-delta-save OUT.delta.json NEXT2.json   (defaults --delta-save-out to input path)
+    //   --reconstruct-delta-save OUT.delta.json --delta-save-out SNAP.json --delta-save-index 1
+    //   --verify-delta-save OUT.delta.json
+    std::string delta_base_path;
+    std::string delta_target_path;
+    const bool make_delta_save = get_two_str_args(argc, argv, "--make-delta-save", delta_base_path, delta_target_path);
+    const bool make_delta_save_flag = has_flag(argc, argv, "--make-delta-save");
+
+    std::string append_delta_path;
+    std::string append_delta_target_path;
+    const bool append_delta_save =
+        get_two_str_args(argc, argv, "--append-delta-save", append_delta_path, append_delta_target_path);
+    const bool append_delta_save_flag = has_flag(argc, argv, "--append-delta-save");
+
+    const std::string reconstruct_delta_path = get_str_arg(argc, argv, "--reconstruct-delta-save", "");
+    const bool reconstruct_delta_flag = has_flag(argc, argv, "--reconstruct-delta-save");
+
+    const std::string verify_delta_path = get_str_arg(argc, argv, "--verify-delta-save", "");
+    const bool verify_delta_flag = has_flag(argc, argv, "--verify-delta-save");
+
+    const int delta_index_raw = get_int_arg(argc, argv, "--delta-save-index", -1);
+    const int delta_index = (delta_index_raw < 0) ? -1 : delta_index_raw;
+
+    // For append, default --delta-save-out to input delta path (so you can edit in-place without extra flags).
+    std::string delta_out_path = get_str_arg(argc, argv, "--delta-save-out", "-");
+    if (append_delta_save && !has_kv_arg(argc, argv, "--delta-save-out")) {
+      delta_out_path = append_delta_path;
+    }
+
+    if (make_delta_save_flag && !make_delta_save) {
+      std::cerr << "--make-delta-save requires two paths: --make-delta-save BASE SAVE\n\n";
+      print_usage(argv[0]);
+      return 2;
+    }
+    if (append_delta_save_flag && !append_delta_save) {
+      std::cerr << "--append-delta-save requires two paths: --append-delta-save DELTA SAVE\n\n";
+      print_usage(argv[0]);
+      return 2;
+    }
+    if (reconstruct_delta_flag && reconstruct_delta_path.empty()) {
+      std::cerr << "--reconstruct-delta-save requires a path: --reconstruct-delta-save DELTA\n\n";
+      print_usage(argv[0]);
+      return 2;
+    }
+    if (verify_delta_flag && verify_delta_path.empty()) {
+      std::cerr << "--verify-delta-save requires a path: --verify-delta-save DELTA\n\n";
+      print_usage(argv[0]);
+      return 2;
+    }
+
+    const bool do_reconstruct_delta = reconstruct_delta_flag && !reconstruct_delta_path.empty();
+    const bool do_verify_delta = verify_delta_flag && !verify_delta_path.empty();
+    const int delta_ops = (make_delta_save ? 1 : 0) + (append_delta_save ? 1 : 0) + (do_reconstruct_delta ? 1 : 0) +
+                          (do_verify_delta ? 1 : 0);
+    if (delta_ops > 1) {
+      std::cerr << "Only one of --make-delta-save / --append-delta-save / --reconstruct-delta-save / --verify-delta-save may be used at a time.\n\n";
+      print_usage(argv[0]);
+      return 2;
+    }
+
+    auto digest_hex_for_save = [](const std::string& save_json) -> std::string {
+      const auto st = nebula4x::deserialize_game_from_json(save_json);
+      return nebula4x::digest64_to_hex(nebula4x::digest_game_state64(st));
+    };
+
+    if (make_delta_save) {
+      const bool out_to_stdout = (delta_out_path == "-");
+      std::ostream& info = out_to_stdout ? std::cerr : std::cout;
+
+      const auto base_state = nebula4x::deserialize_game_from_json(nebula4x::read_text_file(delta_base_path));
+      const std::string base_canon = nebula4x::serialize_game_to_json(base_state);
+
+      const auto target_state = nebula4x::deserialize_game_from_json(nebula4x::read_text_file(delta_target_path));
+      const std::string target_canon = nebula4x::serialize_game_to_json(target_state);
+
+      nebula4x::DeltaSaveFile ds = nebula4x::make_delta_save(base_canon, target_canon);
+      const std::string ds_json = nebula4x::stringify_delta_save_file(ds, /*indent=*/2);
+
+      if (out_to_stdout) {
+        std::cout << ds_json;
+      } else {
+        nebula4x::write_text_file(delta_out_path, ds_json);
+      }
+
+      if (!quiet) {
+        const std::size_t full_bytes = base_canon.size() + target_canon.size();
+        const std::size_t delta_bytes = ds_json.size();
+        const std::size_t patch_bytes = nebula4x::json::stringify(ds.patches.empty() ? nebula4x::json::Object{} : ds.patches[0].patch, 0).size();
+        info << "Delta-save patches: " << ds.patches.size() << "\n";
+        if (!ds.base_state_digest_hex.empty()) info << "Base digest:   " << ds.base_state_digest_hex << "\n";
+        if (!ds.patches.empty() && !ds.patches[0].state_digest_hex.empty()) {
+          info << "Target digest: " << ds.patches[0].state_digest_hex << "\n";
+        }
+        info << "Sizes (bytes): base=" << base_canon.size() << ", target=" << target_canon.size() << ", patch~=" << patch_bytes
+             << ", delta_file=" << delta_bytes << ", full_pair=" << full_bytes << "\n";
+      }
+      return 0;
+    }
+
+    if (append_delta_save) {
+      const bool out_to_stdout = (delta_out_path == "-");
+      std::ostream& info = out_to_stdout ? std::cerr : std::cout;
+
+      nebula4x::DeltaSaveFile ds = nebula4x::parse_delta_save_file(nebula4x::read_text_file(append_delta_path));
+
+      const auto target_state =
+          nebula4x::deserialize_game_from_json(nebula4x::read_text_file(append_delta_target_path));
+      const std::string target_canon = nebula4x::serialize_game_to_json(target_state);
+
+      nebula4x::append_delta_save(ds, target_canon);
+      const std::string ds_json = nebula4x::stringify_delta_save_file(ds, /*indent=*/2);
+
+      if (out_to_stdout) {
+        std::cout << ds_json;
+      } else {
+        nebula4x::write_text_file(delta_out_path, ds_json);
+      }
+
+      if (!quiet) {
+        info << "Delta-save patches: " << ds.patches.size() << "\n";
+        if (!ds.patches.empty()) {
+          const auto& last = ds.patches.back();
+          if (!last.state_digest_hex.empty()) info << "Latest digest: " << last.state_digest_hex << "\n";
+        }
+        if (!out_to_stdout) info << "Delta-save written to " << delta_out_path << "\n";
+      }
+      return 0;
+    }
+
+    if (do_reconstruct_delta) {
+      const bool out_to_stdout = (delta_out_path == "-");
+      std::ostream& info = out_to_stdout ? std::cerr : std::cout;
+
+      const nebula4x::DeltaSaveFile ds = nebula4x::parse_delta_save_file(nebula4x::read_text_file(reconstruct_delta_path));
+      if (delta_index > static_cast<int>(ds.patches.size())) {
+        std::cerr << "--delta-save-index " << delta_index << " is out of range (patches=" << ds.patches.size() << ")\n";
+        return 2;
+      }
+
+      const std::string snap_json = nebula4x::reconstruct_delta_save_json(ds, delta_index, /*indent=*/2);
+      const auto snap_state = nebula4x::deserialize_game_from_json(snap_json);
+      const std::string snap_canon = nebula4x::serialize_game_to_json(snap_state);
+
+      if (out_to_stdout) {
+        std::cout << snap_canon;
+      } else {
+        nebula4x::write_text_file(delta_out_path, snap_canon);
+      }
+
+      if (!quiet) {
+        const std::string got = digest_hex_for_save(snap_canon);
+        info << "Reconstructed digest: " << got << "\n";
+        if (delta_index == 0 && !ds.base_state_digest_hex.empty() && got != ds.base_state_digest_hex) {
+          info << "WARNING: base digest mismatch (file has " << ds.base_state_digest_hex << ")\n";
+        }
+        if (delta_index > 0 && delta_index <= static_cast<int>(ds.patches.size())) {
+          const auto& want = ds.patches[static_cast<std::size_t>(delta_index - 1)].state_digest_hex;
+          if (!want.empty() && got != want) info << "WARNING: digest mismatch (file has " << want << ")\n";
+        }
+      }
+      return 0;
+    }
+
+    if (do_verify_delta) {
+      const nebula4x::DeltaSaveFile ds = nebula4x::parse_delta_save_file(nebula4x::read_text_file(verify_delta_path));
+
+      int mismatches = 0;
+
+      // Base.
+      {
+        const std::string base_json = nebula4x::reconstruct_delta_save_json(ds, 0, /*indent=*/2);
+        const std::string got = digest_hex_for_save(base_json);
+        if (!quiet) {
+          std::cout << "Base digest:   " << got;
+          if (!ds.base_state_digest_hex.empty()) std::cout << " (file " << ds.base_state_digest_hex << ")";
+          std::cout << "\n";
+        }
+        if (!ds.base_state_digest_hex.empty() && got != ds.base_state_digest_hex) ++mismatches;
+      }
+
+      for (std::size_t i = 0; i < ds.patches.size(); ++i) {
+        const std::string snap_json = nebula4x::reconstruct_delta_save_json(ds, static_cast<int>(i + 1), /*indent=*/2);
+        const std::string got = digest_hex_for_save(snap_json);
+        const std::string want = ds.patches[i].state_digest_hex;
+        const bool ok = want.empty() || (got == want);
+        if (!quiet) {
+          std::cout << "Patch[" << i << "] digest: " << got;
+          if (!want.empty()) std::cout << " (file " << want << ")";
+          std::cout << (ok ? "\n" : "  MISMATCH\n");
+        }
+        if (!ok) ++mismatches;
+      }
+
+      if (!quiet) {
+        std::cout << "Verify result: " << (mismatches == 0 ? "OK" : "FAIL") << " (patches=" << ds.patches.size()
+                  << ", mismatches=" << mismatches << ")\n";
+      }
+      return (mismatches == 0) ? 0 : 1;
+    }
+
     const int days = get_int_arg(argc, argv, "--days", 30);
     const int until_event_days = get_int_arg(argc, argv, "--until-event", -1);
     const bool until_event = (until_event_days != -1);
@@ -573,6 +909,28 @@ int main(int argc, char** argv) {
     const std::string export_tech_tree_json_path = get_str_arg(argc, argv, "--export-tech-tree-json", "");
     const std::string export_tech_tree_dot_path = get_str_arg(argc, argv, "--export-tech-tree-dot", "");
     const std::string export_timeline_jsonl_path = get_str_arg(argc, argv, "--export-timeline-jsonl", "");
+
+    const std::string make_regression_tape_path = get_str_arg(argc, argv, "--make-regression-tape", "");
+    const std::string verify_regression_tape_path = get_str_arg(argc, argv, "--verify-regression-tape", "");
+    const std::string verify_regression_tape_report_path =
+        get_str_arg(argc, argv, "--verify-regression-tape-report", "");
+    const int tape_step_days = get_int_arg(argc, argv, "--tape-step-days", 1);
+
+    if (!make_regression_tape_path.empty() && !verify_regression_tape_path.empty()) {
+      std::cerr << "--make-regression-tape and --verify-regression-tape cannot be used together\n\n";
+      print_usage(argv[0]);
+      return 2;
+    }
+    if (verify_regression_tape_path.empty() && !verify_regression_tape_report_path.empty()) {
+      std::cerr << "--verify-regression-tape-report requires --verify-regression-tape\n\n";
+      print_usage(argv[0]);
+      return 2;
+    }
+    if (tape_step_days < 1) {
+      std::cerr << "--tape-step-days must be >= 1\n\n";
+      print_usage(argv[0]);
+      return 2;
+    }
 
     const bool print_digests = has_flag(argc, argv, "--digest");
     const bool digest_no_events = has_flag(argc, argv, "--digest-no-events");
@@ -612,6 +970,20 @@ int main(int argc, char** argv) {
     const bool duel_roster_no_orders = has_flag(argc, argv, "--duel-roster-no-orders");
     const std::string duel_roster_json_path = get_str_arg(argc, argv, "--duel-roster-json", "");
 
+    const auto duel_swiss_roster = get_multi_str_args(argc, argv, "--duel-swiss");
+    const bool duel_swiss_flag = has_flag(argc, argv, "--duel-swiss");
+    const int duel_swiss_rounds = get_int_arg(argc, argv, "--duel-swiss-rounds", 5);
+    const int duel_swiss_count = get_int_arg(argc, argv, "--duel-swiss-count", 1);
+    const int duel_swiss_days = get_int_arg(argc, argv, "--duel-swiss-days", 200);
+    const double duel_swiss_distance = get_double_arg(argc, argv, "--duel-swiss-distance", -1.0);
+    const double duel_swiss_jitter = get_double_arg(argc, argv, "--duel-swiss-jitter", 0.0);
+    const int duel_swiss_runs = get_int_arg(argc, argv, "--duel-swiss-runs", 10);
+    const double duel_swiss_k = get_double_arg(argc, argv, "--duel-swiss-k", 32.0);
+    const int duel_swiss_seed = get_int_arg(argc, argv, "--duel-swiss-seed", seed);
+    const bool duel_swiss_one_way = has_flag(argc, argv, "--duel-swiss-one-way");
+    const bool duel_swiss_no_orders = has_flag(argc, argv, "--duel-swiss-no-orders");
+    const std::string duel_swiss_json_path = get_str_arg(argc, argv, "--duel-swiss-json", "");
+
     if (duel_flag && !duel) {
       std::cerr << "--duel requires two args: --duel DESIGN_A DESIGN_B\n\n";
       print_usage(argv[0]);
@@ -644,6 +1016,36 @@ int main(int argc, char** argv) {
 
     if (duel_roster.empty() && !duel_roster_json_path.empty()) {
       std::cerr << "--duel-roster-json requires --duel-roster\n\n";
+      print_usage(argv[0]);
+      return 2;
+    }
+
+    if (duel_swiss_flag && duel_swiss_roster.empty()) {
+      std::cerr << "--duel-swiss requires an id argument: --duel-swiss DESIGN_ID (repeatable)\n\n";
+      print_usage(argv[0]);
+      return 2;
+    }
+
+    if (!duel_swiss_roster.empty() && duel) {
+      std::cerr << "--duel-swiss cannot be combined with --duel\n\n";
+      print_usage(argv[0]);
+      return 2;
+    }
+
+    if (!duel_swiss_roster.empty() && !duel_roster.empty()) {
+      std::cerr << "--duel-swiss cannot be combined with --duel-roster\n\n";
+      print_usage(argv[0]);
+      return 2;
+    }
+
+    if (!duel_swiss_roster.empty() && duel_swiss_roster.size() < 2) {
+      std::cerr << "--duel-swiss requires at least two designs\n\n";
+      print_usage(argv[0]);
+      return 2;
+    }
+
+    if (duel_swiss_roster.empty() && !duel_swiss_json_path.empty()) {
+      std::cerr << "--duel-swiss-json requires --duel-swiss\n\n";
       print_usage(argv[0]);
       return 2;
     }
@@ -680,7 +1082,10 @@ int main(int argc, char** argv) {
         (!export_timeline_jsonl_path.empty() && export_timeline_jsonl_path == "-") ||
         (!duel_json_path.empty() && duel_json_path == "-") ||
         (!duel_roster_json_path.empty() && duel_roster_json_path == "-") ||
-        (!plan_research_json_path.empty() && plan_research_json_path == "-");
+        (!duel_swiss_json_path.empty() && duel_swiss_json_path == "-") ||
+        (!plan_research_json_path.empty() && plan_research_json_path == "-") ||
+        (!make_regression_tape_path.empty() && make_regression_tape_path == "-") ||
+        (!verify_regression_tape_report_path.empty() && verify_regression_tape_report_path == "-");
 
     const bool list_factions = has_flag(argc, argv, "--list-factions");
     const bool list_systems = has_flag(argc, argv, "--list-systems");
@@ -693,6 +1098,25 @@ int main(int argc, char** argv) {
     const bool fix_save = has_flag(argc, argv, "--fix-save");
     const bool validate_content = has_flag(argc, argv, "--validate-content");
     const bool validate_save = has_flag(argc, argv, "--validate-save");
+
+    const bool make_regression_tape = !make_regression_tape_path.empty();
+    const bool verify_regression_tape = !verify_regression_tape_path.empty();
+
+    if ((make_regression_tape || verify_regression_tape) &&
+        (format_save || fix_save || validate_content || validate_save || until_event || print_digests ||
+         list_factions || list_systems || list_bodies || list_jumps || list_ships || list_colonies ||
+         duel || duel_roster_flag || duel_swiss_flag || plan_research_flag ||
+         !save_path.empty() || has_flag(argc, argv, "--dump") || has_flag(argc, argv, "--dump-events") ||
+         !export_events_csv_path.empty() || !export_events_json_path.empty() || !export_events_jsonl_path.empty() ||
+         !events_summary_json_path.empty() || !events_summary_csv_path.empty() ||
+         !export_ships_json_path.empty() || !export_colonies_json_path.empty() || !export_fleets_json_path.empty() ||
+         !export_bodies_json_path.empty() || !export_tech_tree_json_path.empty() || !export_tech_tree_dot_path.empty() ||
+         !export_timeline_jsonl_path.empty())) {
+      std::cerr
+          << "--make-regression-tape/--verify-regression-tape is a standalone mode and cannot be combined with other actions\n\n";
+      print_usage(argv[0]);
+      return 2;
+    }
 
     if (format_save) {
       if (load_path.empty() || save_path.empty()) {
@@ -718,6 +1142,153 @@ int main(int argc, char** argv) {
       }
     }
 
+    if (verify_regression_tape) {
+      const std::string tape_json = nebula4x::read_text_file(verify_regression_tape_path);
+      nebula4x::RegressionTape expected = nebula4x::regression_tape_from_json(tape_json);
+      nebula4x::RegressionTapeConfig cfg = expected.config;
+
+      const std::string base_dir = path_dirname(verify_regression_tape_path);
+      for (auto& p : cfg.content_paths) p = resolve_relative_path(base_dir, p);
+      for (auto& p : cfg.tech_paths) p = resolve_relative_path(base_dir, p);
+      cfg.load_path = resolve_relative_path(base_dir, cfg.load_path);
+
+      if (cfg.content_paths.empty()) cfg.content_paths.push_back("data/blueprints/starting_blueprints.json");
+      if (cfg.tech_paths.empty()) cfg.tech_paths.push_back("data/tech/tech_tree.json");
+
+      auto content_verify = nebula4x::load_content_db_from_files(cfg.content_paths);
+      content_verify.techs = nebula4x::load_tech_db_from_files(cfg.tech_paths);
+      nebula4x::Simulation sim_verify(std::move(content_verify), nebula4x::SimConfig{});
+
+      if (!cfg.load_path.empty()) {
+        sim_verify.load_game(nebula4x::deserialize_game_from_json(nebula4x::read_text_file(cfg.load_path)));
+      } else if (cfg.scenario == "random") {
+        sim_verify.load_game(nebula4x::make_random_scenario(cfg.seed, cfg.systems));
+      } else if (cfg.scenario == "sol") {
+        sim_verify.load_game(nebula4x::make_sol_scenario());
+      } else {
+        std::cerr << "Unknown scenario in regression tape: " << cfg.scenario << "\n";
+        return 2;
+      }
+
+      if (expected.snapshots.empty()) {
+        std::cerr << "Regression tape has no snapshots to verify\n";
+        return 2;
+      }
+
+      // Generate actual snapshots matching the expected tape's snapshot days.
+      nebula4x::RegressionTape actual;
+      actual.config = cfg;
+      actual.nebula4x_version = NEBULA4X_VERSION;
+
+      const std::uint64_t content_digest = nebula4x::digest_content_db64(sim_verify.content());
+      std::uint64_t prev_next_event_seq = sim_verify.state().next_event_seq;
+      std::int64_t cur_day = sim_verify.state().date.days_since_epoch();
+
+      actual.snapshots.reserve(expected.snapshots.size());
+      for (std::size_t i = 0; i < expected.snapshots.size(); ++i) {
+        const std::int64_t target_day = expected.snapshots[i].day;
+        const std::int64_t delta = target_day - cur_day;
+        if (delta < 0) {
+          std::cerr << "Regression tape snapshot days are behind the simulation start day\n";
+          return 2;
+        }
+        if (delta > 0) {
+          sim_verify.advance_days(static_cast<int>(delta));
+          cur_day = target_day;
+        }
+
+        actual.snapshots.push_back(
+            nebula4x::compute_timeline_snapshot(sim_verify.state(), sim_verify.content(), content_digest,
+                                                prev_next_event_seq, cfg.timeline_opt));
+        prev_next_event_seq = sim_verify.state().next_event_seq;
+      }
+
+      const auto rep = nebula4x::compare_regression_tapes(expected, actual, /*compare_metrics=*/true);
+
+      if (!verify_regression_tape_report_path.empty()) {
+        const std::string report_json = nebula4x::regression_verify_report_to_json(rep, 2);
+        if (verify_regression_tape_report_path == "-") {
+          std::cout << report_json;
+        } else {
+          nebula4x::write_text_file(verify_regression_tape_report_path, report_json);
+        }
+      }
+
+      if (!quiet) {
+        std::ostream& info = script_stdout ? std::cerr : std::cout;
+        info << "Verify regression tape: " << (rep.ok ? "OK" : "FAIL") << "\n";
+        if (!rep.ok) {
+          info << "  first mismatch: index=" << rep.first_mismatch.index << " day=" << rep.first_mismatch.day
+               << " date=" << rep.first_mismatch.date << "\n";
+          info << "  expected digest=" << rep.first_mismatch.expected_state_digest
+               << " actual digest=" << rep.first_mismatch.actual_state_digest << "\n";
+          info << "  detail=" << rep.first_mismatch.message << "\n";
+        }
+      }
+
+      return rep.ok ? 0 : 1;
+    }
+
+    if (make_regression_tape) {
+      nebula4x::RegressionTape tape;
+      tape.nebula4x_version = NEBULA4X_VERSION;
+
+      tape.config.scenario = scenario;
+      tape.config.seed = static_cast<std::uint32_t>(seed);
+      tape.config.systems = systems;
+      tape.config.days = days;
+      tape.config.step_days = tape_step_days;
+      tape.config.load_path = load_path;
+      tape.config.content_paths = content_paths;
+      tape.config.tech_paths = tech_paths;
+      tape.config.timeline_opt = timeline_opt;
+
+      auto content_make = nebula4x::load_content_db_from_files(content_paths);
+      content_make.techs = nebula4x::load_tech_db_from_files(tech_paths);
+      nebula4x::Simulation sim_make(std::move(content_make), nebula4x::SimConfig{});
+
+      if (!load_path.empty()) {
+        sim_make.load_game(nebula4x::deserialize_game_from_json(nebula4x::read_text_file(load_path)));
+      } else if (scenario == "random") {
+        sim_make.load_game(nebula4x::make_random_scenario(static_cast<std::uint32_t>(seed), systems));
+      } else {
+        sim_make.load_game(nebula4x::make_sol_scenario());
+      }
+
+      const std::uint64_t content_digest = nebula4x::digest_content_db64(sim_make.content());
+      std::uint64_t prev_next_event_seq = sim_make.state().next_event_seq;
+      const std::int64_t start_day = sim_make.state().date.days_since_epoch();
+      const std::int64_t end_day = start_day + static_cast<std::int64_t>(std::max(days, 0));
+
+      std::int64_t cur_day = start_day;
+      while (true) {
+        tape.snapshots.push_back(
+            nebula4x::compute_timeline_snapshot(sim_make.state(), sim_make.content(), content_digest,
+                                                prev_next_event_seq, timeline_opt));
+        prev_next_event_seq = sim_make.state().next_event_seq;
+
+        if (cur_day >= end_day) break;
+        std::int64_t next_day = cur_day + static_cast<std::int64_t>(tape_step_days);
+        if (next_day > end_day) next_day = end_day;
+        sim_make.advance_days(static_cast<int>(next_day - cur_day));
+        cur_day = next_day;
+      }
+
+      const std::string tape_out = nebula4x::regression_tape_to_json(tape, 2);
+      if (make_regression_tape_path == "-") {
+        std::cout << tape_out;
+      } else {
+        nebula4x::write_text_file(make_regression_tape_path, tape_out);
+        if (!quiet) {
+          std::ostream& info = script_stdout ? std::cerr : std::cout;
+          info << "Regression tape written to " << make_regression_tape_path << " (snapshots=" << tape.snapshots.size()
+               << ")\n";
+        }
+      }
+
+      return 0;
+    }
+
     auto content = nebula4x::load_content_db_from_files(content_paths);
     content.techs = nebula4x::load_tech_db_from_files(tech_paths);
 
@@ -736,6 +1307,72 @@ int main(int argc, char** argv) {
     }
 
     nebula4x::Simulation sim(std::move(content), nebula4x::SimConfig{});
+
+    if (!duel_swiss_roster.empty()) {
+      nebula4x::DuelSwissOptions opt;
+      opt.count_per_side = duel_swiss_count;
+      opt.rounds = duel_swiss_rounds;
+      opt.two_way = !duel_swiss_one_way;
+      opt.compute_elo = true;
+      opt.elo_initial = 1000.0;
+      opt.elo_k_factor = duel_swiss_k;
+
+      opt.duel.max_days = duel_swiss_days;
+      opt.duel.initial_separation_mkm = duel_swiss_distance;
+      opt.duel.position_jitter_mkm = duel_swiss_jitter;
+      opt.duel.runs = duel_swiss_runs;
+      opt.duel.seed = static_cast<std::uint32_t>(duel_swiss_seed);
+      opt.duel.issue_attack_orders = !duel_swiss_no_orders;
+      opt.duel.include_final_state_digest = false;
+
+      std::string err;
+      const auto res = nebula4x::run_duel_swiss(sim, duel_swiss_roster, opt, &err);
+      if (!err.empty()) {
+        std::cerr << "Swiss duel tournament failed: " << err << "\n";
+        return 1;
+      }
+
+      const bool json_to_stdout = (!duel_swiss_json_path.empty() && duel_swiss_json_path == "-");
+      std::ostream& info = json_to_stdout ? std::cerr : (script_stdout ? std::cerr : std::cout);
+
+      if (!quiet) {
+        const std::uint64_t content_digest = nebula4x::digest_content_db64(sim.content());
+        info << "Swiss duel tournament: designs=" << res.design_ids.size() << " rounds=" << res.options.rounds
+             << " tasks=" << (res.options.two_way ? "two-way" : "one-way") << " count_per_side=" << res.options.count_per_side
+             << " runs=" << res.options.duel.runs << " days=" << res.options.duel.max_days << " seed=" << res.options.duel.seed
+             << "\n";
+        info << "  distance_mkm=" << res.options.duel.initial_separation_mkm << " jitter_mkm=" << res.options.duel.position_jitter_mkm
+             << " attack_orders=" << (res.options.duel.issue_attack_orders ? "yes" : "no") << "\n";
+        info << "  content_digest=" << std::hex << content_digest << std::dec << "\n\n";
+
+        // Print a simple leaderboard ordered by points, then Elo.
+        std::vector<int> idx(res.design_ids.size());
+        for (int i = 0; i < static_cast<int>(idx.size()); ++i) idx[i] = i;
+        std::sort(idx.begin(), idx.end(), [&](int a, int b) {
+          if (res.points[a] != res.points[b]) return res.points[a] > res.points[b];
+          return res.elo[a] > res.elo[b];
+        });
+        info << "Rank  Pts   Elo     W-L-D   Design\n";
+        for (int rank = 0; rank < static_cast<int>(idx.size()); ++rank) {
+          const int i = idx[rank];
+          info << (rank + 1) << "\t" << res.points[i] << "\t" << static_cast<int>(res.elo[i] + 0.5) << "\t" << res.total_wins[i]
+               << "-" << res.total_losses[i] << "-" << res.total_draws[i] << "\t" << res.design_ids[i] << "\n";
+        }
+        info << "\n";
+      }
+
+      if (!duel_swiss_json_path.empty()) {
+        const std::string json_text = nebula4x::duel_swiss_to_json(res);
+        if (duel_swiss_json_path == "-") {
+          std::cout << json_text;
+        } else {
+          nebula4x::write_text_file(duel_swiss_json_path, json_text);
+          if (!quiet) info << "Wrote Swiss tournament JSON to " << duel_swiss_json_path << "\n";
+        }
+      }
+
+      return 0;
+    }
 
     if (!duel_roster.empty()) {
       nebula4x::DuelRoundRobinOptions opt;

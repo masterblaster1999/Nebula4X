@@ -34,6 +34,9 @@ std::string need_kind_label(LogisticsNeedKind k, const std::string& context_id) 
     case LogisticsNeedKind::Construction:
       if (!context_id.empty()) return "Construction:" + context_id;
       return "Construction";
+    case LogisticsNeedKind::TroopTraining:
+      if (!context_id.empty()) return "TroopTraining:" + context_id;
+      return "TroopTraining";
     case LogisticsNeedKind::IndustryInput:
       if (!context_id.empty()) return "IndustryInput:" + context_id;
       return "IndustryInput";

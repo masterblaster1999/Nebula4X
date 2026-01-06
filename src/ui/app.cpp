@@ -20,6 +20,8 @@
 #include "ui/planner_window.h"
 #include "ui/freight_window.h"
 #include "ui/fuel_window.h"
+#include "ui/advisor_window.h"
+#include "ui/colony_profiles_window.h"
 #include "ui/time_warp_window.h"
 #include "ui/production_window.h"
 #include "ui/galaxy_map.h"
@@ -183,6 +185,8 @@ void App::frame() {
       if (io.KeyCtrl && !io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_G)) ui_.show_entity_inspector_window = !ui_.show_entity_inspector_window;
       if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_G)) ui_.show_reference_graph_window = !ui_.show_reference_graph_window;
       if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_D)) ui_.show_time_machine_window = !ui_.show_time_machine_window;
+      if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_A)) ui_.show_advisor_window = !ui_.show_advisor_window;
+      if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_B)) ui_.show_colony_profiles_window = !ui_.show_colony_profiles_window;
       if (ImGui::IsKeyPressed(ImGuiKey_F1)) ui_.show_help_window = !ui_.show_help_window;
 
       // Quick window toggles.
@@ -327,6 +331,8 @@ void App::frame() {
   if (ui_.show_planner_window) draw_planner_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   if (ui_.show_freight_window) draw_freight_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   if (ui_.show_fuel_window) draw_fuel_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  if (ui_.show_advisor_window) draw_advisor_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  if (ui_.show_colony_profiles_window) draw_colony_profiles_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   if (ui_.show_time_warp_window) draw_time_warp_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   if (ui_.show_timeline_window) draw_timeline_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   if (ui_.show_design_studio_window) {
@@ -1034,6 +1040,12 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       if (auto it = obj->find("time_machine_max_value_chars"); it != obj->end()) {
         ui_.time_machine_max_value_chars = static_cast<int>(it->second.number_value(ui_.time_machine_max_value_chars));
       }
+      if (auto it = obj->find("time_machine_storage_mode"); it != obj->end()) {
+        ui_.time_machine_storage_mode = static_cast<int>(it->second.number_value(ui_.time_machine_storage_mode));
+      }
+      if (auto it = obj->find("time_machine_checkpoint_stride"); it != obj->end()) {
+        ui_.time_machine_checkpoint_stride = static_cast<int>(it->second.number_value(ui_.time_machine_checkpoint_stride));
+      }
 
       // Watchboard query budgets.
       if (auto it = obj->find("watchboard_query_max_matches"); it != obj->end()) {
@@ -1062,6 +1074,8 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       ui_.time_machine_keep_snapshots = std::clamp(ui_.time_machine_keep_snapshots, 1, 512);
       ui_.time_machine_max_changes = std::clamp(ui_.time_machine_max_changes, 1, 50000);
       ui_.time_machine_max_value_chars = std::clamp(ui_.time_machine_max_value_chars, 16, 2000);
+      ui_.time_machine_storage_mode = std::clamp(ui_.time_machine_storage_mode, 0, 1);
+      ui_.time_machine_checkpoint_stride = std::clamp(ui_.time_machine_checkpoint_stride, 1, 128);
 
       ui_.watchboard_query_max_matches = std::clamp(ui_.watchboard_query_max_matches, 10, 500000);
       ui_.watchboard_query_max_nodes = std::clamp(ui_.watchboard_query_max_nodes, 100, 5000000);
@@ -1572,6 +1586,8 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     o["time_machine_keep_snapshots"] = static_cast<double>(ui_.time_machine_keep_snapshots);
     o["time_machine_max_changes"] = static_cast<double>(ui_.time_machine_max_changes);
     o["time_machine_max_value_chars"] = static_cast<double>(ui_.time_machine_max_value_chars);
+    o["time_machine_storage_mode"] = static_cast<double>(ui_.time_machine_storage_mode);
+    o["time_machine_checkpoint_stride"] = static_cast<double>(ui_.time_machine_checkpoint_stride);
 
     // Watchboard pins (JSON pointers).
     o["watchboard_query_max_matches"] = static_cast<double>(ui_.watchboard_query_max_matches);

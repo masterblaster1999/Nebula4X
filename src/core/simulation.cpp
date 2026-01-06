@@ -565,6 +565,66 @@ std::vector<LogisticsNeed> Simulation::logistics_needs_for_faction(Id faction_id
       }
     }
 
+    // Troop training needs: keep enough minerals to train troops at full capacity
+    // for one day.
+    //
+    // This covers both:
+    // - explicit troop_training_queue, and
+    // - implicit queue implied by garrison_target_strength (even if tick_ground_combat
+    //   hasn't yet topped up troop_training_queue).
+    //
+    // The goal is QoL: with auto-freight enabled, colonies won't export the very
+    // minerals required to keep training running, and will request imports when
+    // short.
+    {
+      const bool has_costs = (cfg_.troop_training_duranium_per_strength > 1e-9) ||
+                             (cfg_.troop_training_neutronium_per_strength > 1e-9);
+      if (has_costs && cfg_.troop_strength_per_training_point > 1e-9) {
+        const double points = std::max(0.0, troop_training_points_per_day(*colony));
+        if (points > 1e-9) {
+          const double strength_per_day = points * std::max(0.0, cfg_.troop_strength_per_training_point);
+          if (strength_per_day > 1e-9) {
+            // If a battle is ongoing, the battle record is authoritative.
+            const double defender_strength = [&]() {
+              if (auto itb = state_.ground_battles.find(cid); itb != state_.ground_battles.end()) {
+                return std::max(0.0, itb->second.defender_strength);
+              }
+              return std::max(0.0, colony->ground_forces);
+            }();
+
+            const double target = std::max(0.0, colony->garrison_target_strength);
+            const double required_queue_total = (target > 1e-9) ? std::max(0.0, target - defender_strength) : 0.0;
+
+            const double planned_queue = std::max(0.0, std::max(colony->troop_training_queue, required_queue_total));
+            const double strength_buffer = std::min(planned_queue, strength_per_day);
+
+            auto add_need = [&](const char* mineral, double per_strength) {
+              const double desired = strength_buffer * std::max(0.0, per_strength);
+              if (desired <= 1e-9) return;
+              const double have = [&]() {
+                if (auto it2 = colony->minerals.find(mineral); it2 != colony->minerals.end()) return it2->second;
+                return 0.0;
+              }();
+
+              LogisticsNeed n;
+              n.colony_id = cid;
+              n.kind = LogisticsNeedKind::TroopTraining;
+              n.mineral = mineral;
+              n.desired_tons = desired;
+              n.have_tons = have;
+              n.missing_tons = std::max(0.0, desired - have);
+              out.push_back(std::move(n));
+            };
+
+            if (strength_buffer > 1e-9) {
+              add_need("Duranium", cfg_.troop_training_duranium_per_strength);
+              add_need("Neutronium", cfg_.troop_training_neutronium_per_strength);
+            }
+          }
+        }
+      }
+    }
+
     // Industry input needs: keep a buffer of minerals required by daily-running non-mining industry.
     const double buffer_days = std::max(0.0, cfg_.auto_freight_industry_input_buffer_days);
     if (buffer_days > 1e-9) {

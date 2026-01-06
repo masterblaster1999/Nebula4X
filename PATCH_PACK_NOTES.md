@@ -1,8 +1,18 @@
-# Patch pack notes (generated 2026-01-03 r59)
+# Patch pack notes (generated 2026-01-06 r75)
 
 This patch pack is designed for **GitHub web uploads** (Add file → Upload files).
 
 It is **cumulative**: it contains the union of files changed/added in all rounds so far, so you can apply it in one upload.
+
+
+## New in this patch pack: Colony Profiles (r75)
+
+- UI: adds a **Colony Profiles** window to create reusable automation presets for colonies.
+  - Capture a colony's **installation targets**, **mineral reserves/targets**, and **garrison target** into a named profile.
+  - Apply to the selected colony or **apply-to-all** colonies in a faction.
+  - Access: View → Colony Profiles, Tools → Open Colony Profiles, Status bar → Profiles, Ctrl+Shift+B, Command Palette.
+- Core: adds `ColonyAutomationProfile` + helpers to capture/apply profiles.
+- Savegames: profiles persist as `faction.colony_profiles` in JSON saves.
 
 ## New in this patch pack: Planner-driven Time Warp (r58)
 
@@ -455,3 +465,8 @@ GitHub does **not** auto-extract a zip you upload.
 - Core: Lead pursuit for AttackShip (intercept-based aim point when target velocity can be estimated from contacts; bounded lead pursuit on predicted tracks when contact is lost).
 - Core: new `include/nebula4x/core/intercept.h` helper with unit tests.
 - UI: Intel window copy updated to mention lead pursuit.
+
+## r60 (2026-01-06)
+- Gameplay: **Colony founding defaults** — a faction-level automation profile that can be auto-applied to new colonies created via colonization (manual or AI).
+- UI: Colony Profiles window gains a **Founding Defaults** tab with an editor + load/capture/save helpers, and optional "apply to existing colonies" actions.
+- Core: Colonization applies the founding defaults and includes the applied profile label in the colony-established event.

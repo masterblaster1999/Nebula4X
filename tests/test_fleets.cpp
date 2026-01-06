@@ -21,7 +21,7 @@ nebula4x::GameState make_minimal_state() {
   using namespace nebula4x;
 
   GameState s;
-  s.save_version = 13;
+  s.save_version = GameState{}.save_version;
   s.date = Date::from_ymd(2200, 1, 1);
   s.next_id = 100;
 
@@ -83,11 +83,69 @@ nebula4x::GameState make_minimal_state() {
   return s;
 }
 
+nebula4x::GameState make_defend_mission_state() {
+  using namespace nebula4x;
+
+  GameState s = make_minimal_state();
+
+  // Add a single body + colony to defend.
+  {
+    Body b;
+    b.id = 100;
+    b.name = "Earth";
+    b.system_id = 10;
+    b.position_mkm = Vec2{0.0, 0.0};
+    s.bodies[b.id] = b;
+    s.systems[b.system_id].bodies.push_back(b.id);
+
+    Colony c;
+    c.id = 500;
+    c.name = "Earth Colony";
+    c.faction_id = 1;
+    c.body_id = b.id;
+    s.colonies[c.id] = c;
+  }
+
+  // Place ships within sensor range.
+  s.ships.at(10).position_mkm = Vec2{0.0, 0.0};
+  s.ships.at(11).position_mkm = Vec2{0.0, 1.0};
+  s.ships.at(12).position_mkm = Vec2{100.0, 0.0};
+
+  return s;
+}
+
+nebula4x::GameState make_escort_mission_state() {
+  using namespace nebula4x;
+
+  GameState s = make_minimal_state();
+
+  // Add a single freighter to escort.
+  {
+    Ship f;
+    f.id = 13;
+    f.name = "Freighter";
+    f.faction_id = 1;
+    f.system_id = 10;
+    f.design_id = "freighter";
+    f.auto_freight = true;
+    f.position_mkm = Vec2{0.0, 0.0};
+    s.ships[f.id] = f;
+    s.systems[f.system_id].ships.push_back(f.id);
+  }
+
+  // Position the escorts near the freighter and keep the hostile far away.
+  s.ships.at(10).position_mkm = Vec2{-1.0, 0.0};
+  s.ships.at(11).position_mkm = Vec2{-1.0, 1.0};
+  s.ships.at(12).position_mkm = Vec2{100.0, 0.0};
+
+  return s;
+}
+
 nebula4x::GameState make_jump_state() {
   using namespace nebula4x;
 
   GameState s;
-  s.save_version = 13;
+  s.save_version = GameState{}.save_version;
   s.date = Date::from_ymd(2200, 1, 1);
   s.next_id = 2000;
 
@@ -274,6 +332,29 @@ int test_fleets() {
     // Newer saves should persist optional formation settings.
     N4X_ASSERT(sim.configure_fleet_formation(fid, FleetFormation::Wedge, 2.5));
 
+    // ...and fleet mission automation config / runtime.
+    sim.state().fleets.at(fid).mission.type = FleetMissionType::EscortFreighters;
+    sim.state().fleets.at(fid).mission.patrol_system_id = 12345;
+    sim.state().fleets.at(fid).mission.patrol_dwell_days = 7;
+    sim.state().fleets.at(fid).mission.patrol_leg_index = 3;
+    sim.state().fleets.at(fid).mission.hunt_max_contact_age_days = 31;
+    sim.state().fleets.at(fid).mission.escort_target_ship_id = 777;
+    sim.state().fleets.at(fid).mission.escort_active_ship_id = 778;
+    sim.state().fleets.at(fid).mission.escort_follow_distance_mkm = 2.0;
+    sim.state().fleets.at(fid).mission.escort_defense_radius_mkm = 123.0;
+    sim.state().fleets.at(fid).mission.escort_only_auto_freight = false;
+    sim.state().fleets.at(fid).mission.escort_retarget_interval_days = 9;
+    sim.state().fleets.at(fid).mission.escort_last_retarget_day = 321;
+    sim.state().fleets.at(fid).mission.auto_refuel = true;
+    sim.state().fleets.at(fid).mission.refuel_threshold_fraction = 0.2;
+    sim.state().fleets.at(fid).mission.refuel_resume_fraction = 0.95;
+    sim.state().fleets.at(fid).mission.auto_repair = false;
+    sim.state().fleets.at(fid).mission.repair_threshold_fraction = 0.4;
+    sim.state().fleets.at(fid).mission.repair_resume_fraction = 0.9;
+    sim.state().fleets.at(fid).mission.sustainment_mode = FleetSustainmentMode::Refuel;
+    sim.state().fleets.at(fid).mission.sustainment_colony_id = 999;
+    sim.state().fleets.at(fid).mission.last_target_ship_id = 4242;
+
     const std::string json_text = serialize_game_to_json(sim.state());
     const GameState loaded = deserialize_game_from_json(json_text);
 
@@ -288,6 +369,158 @@ int test_fleets() {
 
     N4X_ASSERT(fl.formation == FleetFormation::Wedge);
     N4X_ASSERT(std::fabs(fl.formation_spacing_mkm - 2.5) < 1e-9);
+
+    // Fleet mission should also round-trip.
+    N4X_ASSERT(fl.mission.type == FleetMissionType::EscortFreighters);
+    N4X_ASSERT(fl.mission.patrol_system_id == 12345);
+    N4X_ASSERT(fl.mission.patrol_dwell_days == 7);
+    N4X_ASSERT(fl.mission.patrol_leg_index == 3);
+    N4X_ASSERT(fl.mission.hunt_max_contact_age_days == 31);
+    N4X_ASSERT(fl.mission.escort_target_ship_id == 777);
+    N4X_ASSERT(fl.mission.escort_active_ship_id == 778);
+    N4X_ASSERT(std::fabs(fl.mission.escort_follow_distance_mkm - 2.0) < 1e-9);
+    N4X_ASSERT(std::fabs(fl.mission.escort_defense_radius_mkm - 123.0) < 1e-9);
+    N4X_ASSERT(fl.mission.escort_only_auto_freight == false);
+    N4X_ASSERT(fl.mission.escort_retarget_interval_days == 9);
+    N4X_ASSERT(fl.mission.escort_last_retarget_day == 321);
+    N4X_ASSERT(fl.mission.auto_refuel == true);
+    N4X_ASSERT(std::fabs(fl.mission.refuel_threshold_fraction - 0.2) < 1e-9);
+    N4X_ASSERT(std::fabs(fl.mission.refuel_resume_fraction - 0.95) < 1e-9);
+    N4X_ASSERT(fl.mission.auto_repair == false);
+    N4X_ASSERT(std::fabs(fl.mission.repair_threshold_fraction - 0.4) < 1e-9);
+    N4X_ASSERT(std::fabs(fl.mission.repair_resume_fraction - 0.9) < 1e-9);
+    N4X_ASSERT(fl.mission.sustainment_mode == FleetSustainmentMode::Refuel);
+    N4X_ASSERT(fl.mission.sustainment_colony_id == 999);
+    N4X_ASSERT(fl.mission.last_target_ship_id == 4242);
+  }
+
+
+  // --- Fleet mission automation: defend colony engages hostiles ---
+  {
+    using namespace nebula4x;
+
+    ContentDB content;
+    {
+      ShipDesign d;
+      d.id = "sensor";
+      d.name = "Sensor";
+      d.sensor_range_mkm = 1e9;
+      d.speed_km_s = 100.0;
+      d.max_hp = 10.0;
+      content.designs[d.id] = d;
+    }
+
+    Simulation sim(content, SimConfig{});
+    sim.load_game(make_defend_mission_state());
+
+    // Give both sides basic sensors so the hostile is detectable.
+    sim.state().ships.at(10).design_id = "sensor";
+    sim.state().ships.at(11).design_id = "sensor";
+    sim.state().ships.at(12).design_id = "sensor";
+
+    std::string err;
+    const Id fid = sim.create_fleet(1, "Defenders", std::vector<Id>{10, 11}, &err);
+    N4X_ASSERT(fid != kInvalidId);
+
+    auto& fl = sim.state().fleets.at(fid);
+    fl.mission.type = FleetMissionType::DefendColony;
+    fl.mission.defend_colony_id = 500;
+    fl.mission.auto_refuel = false;
+    fl.mission.auto_repair = false;
+
+    // Advance one day: fleet mission planning runs in tick_ai() and should
+    // push an AttackShip order against the detected hostile.
+    sim.advance_days(1);
+
+    const auto& q10 = sim.state().ship_orders.at(10).queue;
+    const auto& q11 = sim.state().ship_orders.at(11).queue;
+    N4X_ASSERT(!q10.empty());
+    N4X_ASSERT(!q11.empty());
+    N4X_ASSERT(std::holds_alternative<AttackShip>(q10.front()));
+    N4X_ASSERT(std::holds_alternative<AttackShip>(q11.front()));
+    N4X_ASSERT(std::get<AttackShip>(q10.front()).target_ship_id == 12);
+    N4X_ASSERT(std::get<AttackShip>(q11.front()).target_ship_id == 12);
+  }
+
+
+  // --- Fleet mission automation: escort freighters ---
+  {
+    using namespace nebula4x;
+
+    ContentDB content;
+    {
+      ShipDesign d;
+      d.id = "escort";
+      d.name = "Escort";
+      d.role = ShipRole::Combatant;
+      d.sensor_range_mkm = 1e9;
+      d.speed_km_s = 200.0;
+      d.max_hp = 10.0;
+      content.designs[d.id] = d;
+    }
+    {
+      ShipDesign d;
+      d.id = "freighter";
+      d.name = "Freighter";
+      d.role = ShipRole::Freighter;
+      d.speed_km_s = 100.0;
+      d.max_hp = 10.0;
+      content.designs[d.id] = d;
+    }
+    {
+      ShipDesign d;
+      d.id = "hostile";
+      d.name = "Hostile";
+      d.role = ShipRole::Combatant;
+      d.sensor_range_mkm = 1e9;
+      d.speed_km_s = 100.0;
+      d.max_hp = 10.0;
+      content.designs[d.id] = d;
+    }
+
+    Simulation sim(content, SimConfig{});
+    sim.load_game(make_escort_mission_state());
+
+    sim.state().ships.at(10).design_id = "escort";
+    sim.state().ships.at(11).design_id = "escort";
+    sim.state().ships.at(12).design_id = "hostile";
+    sim.state().ships.at(13).design_id = "freighter";
+
+    std::string err;
+    const Id fid = sim.create_fleet(1, "Escorts", std::vector<Id>{10, 11}, &err);
+    N4X_ASSERT(fid != kInvalidId);
+    N4X_ASSERT(err.empty());
+
+    auto& fl = sim.state().fleets.at(fid);
+    fl.mission.type = FleetMissionType::EscortFreighters;
+    fl.mission.escort_target_ship_id = kInvalidId;  // auto
+    fl.mission.escort_defense_radius_mkm = 10.0;
+    fl.mission.auto_refuel = false;
+    fl.mission.auto_repair = false;
+
+    // Day 1: with the hostile far outside the defense radius, the fleet should escort.
+    sim.advance_days(1);
+    const auto& q10 = sim.state().ship_orders.at(10).queue;
+    const auto& q11 = sim.state().ship_orders.at(11).queue;
+    N4X_ASSERT(!q10.empty());
+    N4X_ASSERT(!q11.empty());
+    N4X_ASSERT(std::holds_alternative<EscortShip>(q10.front()));
+    N4X_ASSERT(std::holds_alternative<EscortShip>(q11.front()));
+    N4X_ASSERT(std::get<EscortShip>(q10.front()).target_ship_id == 13);
+    N4X_ASSERT(std::get<EscortShip>(q11.front()).target_ship_id == 13);
+
+    // Move hostile close to the freighter: the escorts should immediately attack.
+    sim.state().ships.at(12).position_mkm = Vec2{5.0, 0.0};
+    sim.advance_days(1);
+
+    const auto& q10b = sim.state().ship_orders.at(10).queue;
+    const auto& q11b = sim.state().ship_orders.at(11).queue;
+    N4X_ASSERT(!q10b.empty());
+    N4X_ASSERT(!q11b.empty());
+    N4X_ASSERT(std::holds_alternative<AttackShip>(q10b.front()));
+    N4X_ASSERT(std::holds_alternative<AttackShip>(q11b.front()));
+    N4X_ASSERT(std::get<AttackShip>(q10b.front()).target_ship_id == 12);
+    N4X_ASSERT(std::get<AttackShip>(q11b.front()).target_ship_id == 12);
   }
 
   // --- Coordinated fleet jump transit ---
@@ -391,5 +624,63 @@ int test_fleets() {
     N4X_ASSERT(b.position_mkm.y * c.position_mkm.y < 0.0);
   }
 
-  return 0;
+
+// Fleet explore mission: survey unknown exit, then transit into undiscovered space.
+{
+  ContentDB content;
+
+  // Provide the designs referenced by make_jump_state().
+  {
+    ShipDesign d;
+    d.id = "fast";
+    d.name = "Fast";
+    d.speed_km_s = 10000.0;
+    d.max_hp = 10.0;
+    content.designs[d.id] = d;
+  }
+  {
+    ShipDesign d;
+    d.id = "slow";
+    d.name = "Slow";
+    d.speed_km_s = 10.0;
+    d.max_hp = 10.0;
+    content.designs[d.id] = d;
+  }
+
+  Simulation sim(content, SimConfig{});
+  sim.load_game(make_jump_state());
+  auto& s = sim.state();
+
+  // Enable the new explore mission.
+  auto& fl = s.fleets.at(1000);
+  fl.mission.type = FleetMissionType::Explore;
+  fl.mission.explore_survey_first = true;
+  fl.mission.explore_allow_transit = true;
+
+  // Ensure the local jump point starts as *unsurveyed* so we exercise the
+  // survey-first behavior.
+  auto& fac = s.factions.at(1);
+  fac.surveyed_jump_points.clear();
+
+  // Park both ships on top of the jump point so the survey completes instantly.
+  s.ships.at(1).position_mkm = {0.0, 0.0};
+  s.ships.at(2).position_mkm = {0.0, 0.0};
+
+  // Day 1: mission should move to/survey the jump point, but not transit yet
+  // (transit decision happens on the next AI tick).
+  sim.advance_days(1);
+  N4X_ASSERT(s.ships.at(1).system_id == 10);
+  N4X_ASSERT(s.ships.at(2).system_id == 10);
+  N4X_ASSERT(sim.is_jump_point_surveyed_by_faction(1, 100));
+
+  // Day 2: jump point is now surveyed, so the mission should transit into the
+  // undiscovered system.
+  sim.advance_days(1);
+  N4X_ASSERT(s.ships.at(1).system_id == 20);
+  N4X_ASSERT(s.ships.at(2).system_id == 20);
+  N4X_ASSERT(sim.is_system_discovered_by_faction(1, 20));
 }
+
+return 0;
+}
+

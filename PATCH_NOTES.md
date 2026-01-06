@@ -1,5 +1,36 @@
-# Patch notes (generated 2026-01-05 r74)
+## r76: Fleet "Explore systems" mission
 
+Adds a new fleet automation mission aimed at reducing exploration micro for groups of survey ships:
+
+- **Survey-first option:** survey unknown jump points in the current system before transiting any surveyed exits.
+- **Expansion toggle:** optionally transit surveyed exits that lead to undiscovered systems (otherwise only survey within already-discovered space).
+- **Frontier routing:** if there is no local work, route to the best frontier system (weighted by remaining exploration work vs. ETA), reusing the existing exploration cache/reservation logic.
+
+UI: Fleet details → Mission → **Explore systems**.
+
+
+# Patch notes (generated 2026-01-06 r75)
+
+
+
+
+
+## r75 (2026-01-06)
+
+### Colony Profiles: automation presets for colony management
+
+This round adds **Colony Profiles**, a quality-of-life feature to reduce colony micromanagement.
+Profiles let you capture a colony's automation knobs (installation targets, mineral reserves/targets, garrison target) into a named preset and then apply it to other colonies—or to **all colonies** in a faction.
+
+Highlights:
+
+- **Core:** `ColonyAutomationProfile` + helpers to capture/apply profiles (`make_colony_profile_from_colony`, `apply_colony_profile`).
+- **Savegame:** profiles persist under each faction as `colony_profiles` (JSON).
+- **UI:** new **Colony Profiles** window (View menu, Tools menu, Status bar button, Command Palette).
+  - Hotkey: **Ctrl+Shift+B**
+  - Per-profile actions: **New / Rename / Delete / Capture / Apply / Apply-to-all**
+  - Fine-grained apply toggles: installations, reserves, targets, garrison
+- **Tests:** added `test_colony_profiles` to cover roundtrip serialization and apply sanitization.
 
 
 ## r74 (2026-01-05)
@@ -1170,3 +1201,18 @@ Compatibility:
 
 Compatibility:
 - **No save schema changes.** UI prefs schema bumped to v17 (adds `show_json_explorer_window`).
+
+### r49: Colony founding defaults (auto-apply automation profile on colonization)
+
+- **New faction-level "Colony founding defaults" profile**
+  - Installation targets (auto-build), mineral reserves (export floor), mineral targets (import goal), and garrison target.
+  - When enabled, this profile is **auto-applied** to **newly established colonies** created via **ColonizeBody** (manual or AI).
+- **UI: Colony Profiles window**
+  - Adds a new **"Founding Defaults"** tab with a full editor for the founding profile.
+  - Quick workflow: load from a saved profile, capture from a colony, save as a reusable profile.
+  - Optional helpers to apply the founding defaults to existing colonies (selected / all).
+- **Simulation**
+  - Colonization now optionally applies the founding defaults and annotates the "Colony established" event with the applied profile label.
+
+Compatibility:
+- **Save schema is unchanged** (still v42). New faction fields default to disabled on older saves.

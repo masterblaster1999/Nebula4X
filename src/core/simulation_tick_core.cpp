@@ -20,6 +20,7 @@
 #include "nebula4x/core/scenario.h"
 #include "nebula4x/core/ai_economy.h"
 #include "nebula4x/util/log.h"
+#include "nebula4x/util/trace_events.h"
 #include "nebula4x/util/spatial_index.h"
 
 namespace nebula4x {
@@ -41,6 +42,7 @@ using sim_sensors::gather_sensor_sources;
 } // namespace
 
 void Simulation::recompute_body_positions() {
+  NEBULA4X_TRACE_SCOPE("recompute_body_positions", "sim");
   const double t = static_cast<double>(state_.date.days_since_epoch()) +
                    static_cast<double>(std::clamp(state_.hour_of_day, 0, 23)) / 24.0;
 
@@ -129,11 +131,13 @@ void Simulation::recompute_body_positions() {
 }
 
 void Simulation::tick_one_day() {
+  NEBULA4X_TRACE_SCOPE("tick_one_day", "sim");
   // A "day" is 24 hours, even if the simulation is currently mid-day.
   advance_hours(24);
 }
 
 void Simulation::tick_one_tick_hours(int hours) {
+  NEBULA4X_TRACE_SCOPE("tick_one_tick_hours", "sim");
   if (hours <= 0) return;
   hours = std::clamp(hours, 1, 24);
 
@@ -271,6 +275,7 @@ void Simulation::push_event(EventLevel level, EventCategory category, std::strin
 }
 
 void Simulation::tick_contacts(bool emit_contact_lost_events) {
+  NEBULA4X_TRACE_SCOPE("tick_contacts", "sim.sensors");
   const int now = static_cast<int>(state_.date.days_since_epoch());
   constexpr int kMaxContactAgeDays = 180;
 
@@ -506,6 +511,7 @@ void Simulation::tick_contacts(bool emit_contact_lost_events) {
 }
 
 void Simulation::tick_shields(double dt_days) {
+  NEBULA4X_TRACE_SCOPE("tick_shields", "sim.combat");
   dt_days = std::clamp(dt_days, 0.0, 10.0);
   const auto ship_ids = sorted_keys(state_.ships);
   for (Id sid : ship_ids) {

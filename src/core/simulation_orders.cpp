@@ -1398,6 +1398,7 @@ bool Simulation::clear_troop_training_queue(Id colony_id) {
   auto* colony = find_ptr(state_.colonies, colony_id);
   if (!colony) return false;
   colony->troop_training_queue = 0.0;
+  colony->troop_training_auto_queued = 0.0;
   return true;
 }
 

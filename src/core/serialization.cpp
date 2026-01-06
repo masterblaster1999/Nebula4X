@@ -189,6 +189,43 @@ FleetFormation fleet_formation_from_string(const std::string& s) {
   return FleetFormation::None;
 }
 
+const char* fleet_mission_type_to_string(FleetMissionType t) {
+  switch (t) {
+    case FleetMissionType::None: return "none";
+    case FleetMissionType::DefendColony: return "defend_colony";
+    case FleetMissionType::PatrolSystem: return "patrol_system";
+    case FleetMissionType::HuntHostiles: return "hunt_hostiles";
+    case FleetMissionType::EscortFreighters: return "escort_freighters";
+    case FleetMissionType::Explore: return "explore";
+  }
+  return "none";
+}
+
+FleetMissionType fleet_mission_type_from_string(const std::string& s) {
+  if (s == "defend_colony" || s == "defend") return FleetMissionType::DefendColony;
+  if (s == "patrol_system" || s == "patrol") return FleetMissionType::PatrolSystem;
+  if (s == "hunt_hostiles" || s == "hunt") return FleetMissionType::HuntHostiles;
+  if (s == "escort_freighters" || s == "escort_freighter" || s == "escort") return FleetMissionType::EscortFreighters;
+  if (s == "explore" || s == "explore_systems" || s == "exploration") return FleetMissionType::Explore;
+  return FleetMissionType::None;
+}
+
+const char* fleet_sustainment_mode_to_string(FleetSustainmentMode m) {
+  switch (m) {
+    case FleetSustainmentMode::None: return "none";
+    case FleetSustainmentMode::Refuel: return "refuel";
+    case FleetSustainmentMode::Repair: return "repair";
+  }
+  return "none";
+}
+
+FleetSustainmentMode fleet_sustainment_mode_from_string(const std::string& s) {
+  if (s == "refuel" || s == "fuel") return FleetSustainmentMode::Refuel;
+  if (s == "repair" || s == "rep") return FleetSustainmentMode::Repair;
+  return FleetSustainmentMode::None;
+}
+
+
 const char* event_level_to_string(EventLevel l) {
   switch (l) {
     case EventLevel::Info: return "info";
@@ -545,6 +582,63 @@ std::vector<std::string> string_vector_from_json(const Value& v) {
   return out;
 }
 
+Object colony_automation_profile_to_json(const ColonyAutomationProfile& p) {
+  Object o;
+  if (p.garrison_target_strength > 0.0) o["garrison_target_strength"] = p.garrison_target_strength;
+  if (!p.mineral_reserves.empty()) o["mineral_reserves"] = map_string_double_to_json(p.mineral_reserves);
+  if (!p.mineral_targets.empty()) o["mineral_targets"] = map_string_double_to_json(p.mineral_targets);
+  if (!p.installation_targets.empty()) o["installation_targets"] = map_string_int_to_json(p.installation_targets);
+  return o;
+}
+
+ColonyAutomationProfile colony_automation_profile_from_json_value(const Value& v) {
+  ColonyAutomationProfile p;
+  if (!v.is_object()) return p;
+  const auto& po = v.object();
+
+  if (auto itg = po.find("garrison_target_strength"); itg != po.end()) {
+    p.garrison_target_strength = itg->second.number_value(0.0);
+  }
+  if (auto it2 = po.find("mineral_reserves"); it2 != po.end() && it2->second.is_object()) {
+    p.mineral_reserves = map_string_double_from_json(it2->second);
+  }
+  if (auto it2 = po.find("mineral_targets"); it2 != po.end() && it2->second.is_object()) {
+    p.mineral_targets = map_string_double_from_json(it2->second);
+  }
+  if (auto it2 = po.find("installation_targets"); it2 != po.end() && it2->second.is_object()) {
+    p.installation_targets = map_string_int_from_json(it2->second);
+  }
+
+  // Sanitize for legacy/modded saves.
+  if (!std::isfinite(p.garrison_target_strength) || p.garrison_target_strength < 0.0) {
+    p.garrison_target_strength = 0.0;
+  }
+  for (auto it2 = p.installation_targets.begin(); it2 != p.installation_targets.end();) {
+    if (it2->first.empty() || it2->second <= 0) {
+      it2 = p.installation_targets.erase(it2);
+    } else {
+      ++it2;
+    }
+  }
+  for (auto it2 = p.mineral_reserves.begin(); it2 != p.mineral_reserves.end();) {
+    if (it2->first.empty() || !std::isfinite(it2->second) || it2->second <= 1e-9) {
+      it2 = p.mineral_reserves.erase(it2);
+    } else {
+      ++it2;
+    }
+  }
+  for (auto it2 = p.mineral_targets.begin(); it2 != p.mineral_targets.end();) {
+    if (it2->first.empty() || !std::isfinite(it2->second) || it2->second <= 1e-9) {
+      it2 = p.mineral_targets.erase(it2);
+    } else {
+      ++it2;
+    }
+  }
+
+  return p;
+}
+
+
 } // namespace
 
 std::string serialize_game_to_json(const GameState& s) {
@@ -755,7 +849,9 @@ std::string serialize_game_to_json(const GameState& s) {
     }
     o["installations"] = map_string_int_to_json(c.installations);
     if (c.ground_forces > 0.0) o["ground_forces"] = c.ground_forces;
+    if (c.garrison_target_strength > 0.0) o["garrison_target_strength"] = c.garrison_target_strength;
     if (c.troop_training_queue > 0.0) o["troop_training_queue"] = c.troop_training_queue;
+    if (c.troop_training_auto_queued > 0.0) o["troop_training_auto_queued"] = c.troop_training_auto_queued;
 
     Array q;
     for (const auto& bo : c.shipyard_queue) {
@@ -806,6 +902,26 @@ std::string serialize_game_to_json(const GameState& s) {
       o["ship_design_targets"] = map_string_int_to_json(f.ship_design_targets);
     }
 
+    // Colony automation profiles (optional).
+    if (!f.colony_profiles.empty()) {
+      Object profiles;
+      for (const auto& name : sorted_keys(f.colony_profiles)) {
+        const auto itp = f.colony_profiles.find(name);
+        if (itp == f.colony_profiles.end()) continue;
+        profiles[name] = colony_automation_profile_to_json(itp->second);
+      }
+      o["colony_profiles"] = profiles;
+    }
+
+    // Colony founding defaults (optional).
+    {
+      const Object founding_po = colony_automation_profile_to_json(f.colony_founding_profile);
+      if (f.auto_apply_colony_founding_profile || !founding_po.empty() || !f.colony_founding_profile_name.empty()) {
+        if (f.auto_apply_colony_founding_profile) o["auto_apply_colony_founding_profile"] = true;
+        if (!f.colony_founding_profile_name.empty()) o["colony_founding_profile_name"] = f.colony_founding_profile_name;
+        if (!founding_po.empty()) o["colony_founding_profile"] = founding_po;
+      }
+    }
 
     // Diplomatic relations (optional; omitted when empty or default-hostile).
     if (!f.relations.empty()) {
@@ -868,6 +984,45 @@ std::string serialize_game_to_json(const GameState& s) {
 
     o["formation"] = std::string(fleet_formation_to_string(f.formation));
     o["formation_spacing_mkm"] = f.formation_spacing_mkm;
+
+
+    // Fleet mission automation (optional).
+    {
+      Object m;
+      m["type"] = std::string(fleet_mission_type_to_string(f.mission.type));
+      m["defend_colony_id"] = static_cast<double>(f.mission.defend_colony_id);
+      m["defend_radius_mkm"] = f.mission.defend_radius_mkm;
+
+      m["patrol_system_id"] = static_cast<double>(f.mission.patrol_system_id);
+      m["patrol_dwell_days"] = static_cast<double>(f.mission.patrol_dwell_days);
+      m["patrol_leg_index"] = static_cast<double>(f.mission.patrol_leg_index);
+
+      m["hunt_max_contact_age_days"] = static_cast<double>(f.mission.hunt_max_contact_age_days);
+
+      m["escort_target_ship_id"] = static_cast<double>(f.mission.escort_target_ship_id);
+      m["escort_active_ship_id"] = static_cast<double>(f.mission.escort_active_ship_id);
+      m["escort_follow_distance_mkm"] = f.mission.escort_follow_distance_mkm;
+      m["escort_defense_radius_mkm"] = f.mission.escort_defense_radius_mkm;
+      m["escort_only_auto_freight"] = f.mission.escort_only_auto_freight;
+      m["escort_retarget_interval_days"] = static_cast<double>(f.mission.escort_retarget_interval_days);
+      m["escort_last_retarget_day"] = static_cast<double>(f.mission.escort_last_retarget_day);
+      m["explore_survey_first"] = f.mission.explore_survey_first;
+      m["explore_allow_transit"] = f.mission.explore_allow_transit;
+
+      m["auto_refuel"] = f.mission.auto_refuel;
+      m["refuel_threshold_fraction"] = f.mission.refuel_threshold_fraction;
+      m["refuel_resume_fraction"] = f.mission.refuel_resume_fraction;
+
+      m["auto_repair"] = f.mission.auto_repair;
+      m["repair_threshold_fraction"] = f.mission.repair_threshold_fraction;
+      m["repair_resume_fraction"] = f.mission.repair_resume_fraction;
+
+      m["sustainment_mode"] = std::string(fleet_sustainment_mode_to_string(f.mission.sustainment_mode));
+      m["sustainment_colony_id"] = static_cast<double>(f.mission.sustainment_colony_id);
+
+      m["last_target_ship_id"] = static_cast<double>(f.mission.last_target_ship_id);
+      o["mission"] = m;
+    }
 
     auto fleet_ship_ids = f.ship_ids;
     std::sort(fleet_ship_ids.begin(), fleet_ship_ids.end());
@@ -1262,7 +1417,15 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     c.installations = map_string_int_from_json(o.at("installations"));
 
     if (auto it = o.find("ground_forces"); it != o.end()) c.ground_forces = it->second.number_value(0.0);
-    if (auto it = o.find("troop_training_queue"); it != o.end()) c.troop_training_queue = it->second.number_value(0.0);
+    if (auto it = o.find("garrison_target_strength"); it != o.end()) {
+      c.garrison_target_strength = it->second.number_value(0.0);
+    }
+    if (auto it = o.find("troop_training_queue"); it != o.end()) {
+      c.troop_training_queue = it->second.number_value(0.0);
+    }
+    if (auto it = o.find("troop_training_auto_queued"); it != o.end()) {
+      c.troop_training_auto_queued = it->second.number_value(0.0);
+    }
 
     if (auto itq = o.find("shipyard_queue"); itq != o.end()) {
       for (const auto& qv : itq->second.array()) {
@@ -1291,6 +1454,18 @@ GameState deserialize_game_from_json(const std::string& json_text) {
       }
     }
 
+    // Sanitize new gameplay automation fields for legacy/modded saves.
+    if (!std::isfinite(c.garrison_target_strength) || c.garrison_target_strength < 0.0) {
+      c.garrison_target_strength = 0.0;
+    }
+    if (!std::isfinite(c.troop_training_auto_queued) || c.troop_training_auto_queued < 0.0) {
+      c.troop_training_auto_queued = 0.0;
+    }
+    if (!std::isfinite(c.troop_training_queue) || c.troop_training_queue < 0.0) {
+      c.troop_training_queue = 0.0;
+    }
+    c.troop_training_auto_queued = std::clamp(c.troop_training_auto_queued, 0.0, c.troop_training_queue);
+
     s.colonies[c.id] = c;
   }
 
@@ -1317,6 +1492,36 @@ GameState deserialize_game_from_json(const std::string& json_text) {
       f.ship_design_targets = map_string_int_from_json(it->second);
     }
 
+    // Colony automation profiles (optional).
+    if (auto it = o.find("colony_profiles"); it != o.end()) {
+      if (it->second.is_object()) {
+        for (const auto& [name, pv] : it->second.object()) {
+          if (name.empty()) continue;
+          f.colony_profiles[name] = colony_automation_profile_from_json_value(pv);
+        }
+      } else if (it->second.is_array()) {
+        // Also accept an array-of-objects format:
+        //   [{"name":"Core Worlds", "garrison_target_strength": 500, ...}, ...]
+        for (const auto& pv : it->second.array()) {
+          if (!pv.is_object()) continue;
+          const auto& po = pv.object();
+          const std::string name = (po.find("name") != po.end()) ? po.at("name").string_value() : std::string();
+          if (name.empty()) continue;
+          f.colony_profiles[name] = colony_automation_profile_from_json_value(pv);
+        }
+      }
+    }
+
+    // Colony founding defaults (optional).
+    if (auto it = o.find("auto_apply_colony_founding_profile"); it != o.end()) {
+      f.auto_apply_colony_founding_profile = it->second.bool_value(false);
+    }
+    if (auto it = o.find("colony_founding_profile_name"); it != o.end()) {
+      f.colony_founding_profile_name = it->second.string_value();
+    }
+    if (auto it = o.find("colony_founding_profile"); it != o.end()) {
+      f.colony_founding_profile = colony_automation_profile_from_json_value(it->second);
+    }
 
     // Diplomatic relations (optional in saves; if missing, default stance is Hostile).
     if (auto it = o.find("relations"); it != o.end()) {
@@ -1414,6 +1619,88 @@ GameState deserialize_game_from_json(const std::string& json_text) {
         }
         if (auto its = o.find("formation_spacing_mkm"); its != o.end()) {
           fl.formation_spacing_mkm = std::max(0.0, its->second.number_value(1.0));
+        }
+
+
+        // Fleet mission automation (optional).
+        if (auto itm = o.find("mission"); itm != o.end() && itm->second.is_object()) {
+          const auto& m = itm->second.object();
+          if (auto itt = m.find("type"); itt != m.end()) {
+            fl.mission.type = fleet_mission_type_from_string(itt->second.string_value("none"));
+          }
+          if (auto itc = m.find("defend_colony_id"); itc != m.end()) {
+            fl.mission.defend_colony_id = static_cast<Id>(itc->second.int_value(kInvalidId));
+          }
+          if (auto itr = m.find("defend_radius_mkm"); itr != m.end()) {
+            fl.mission.defend_radius_mkm = std::max(0.0, itr->second.number_value(fl.mission.defend_radius_mkm));
+          }
+          if (auto itp = m.find("patrol_system_id"); itp != m.end()) {
+            fl.mission.patrol_system_id = static_cast<Id>(itp->second.int_value(kInvalidId));
+          }
+          if (auto itd = m.find("patrol_dwell_days"); itd != m.end()) {
+            fl.mission.patrol_dwell_days = std::max(0, static_cast<int>(itd->second.int_value(fl.mission.patrol_dwell_days)));
+          }
+          if (auto itl = m.find("patrol_leg_index"); itl != m.end()) {
+            fl.mission.patrol_leg_index = std::max(0, static_cast<int>(itl->second.int_value(fl.mission.patrol_leg_index)));
+          }
+          if (auto ith = m.find("hunt_max_contact_age_days"); ith != m.end()) {
+            fl.mission.hunt_max_contact_age_days = std::max(0, static_cast<int>(ith->second.int_value(fl.mission.hunt_max_contact_age_days)));
+          }
+          if (auto iet = m.find("escort_target_ship_id"); iet != m.end()) {
+            fl.mission.escort_target_ship_id = static_cast<Id>(iet->second.int_value(kInvalidId));
+          }
+          if (auto iea = m.find("escort_active_ship_id"); iea != m.end()) {
+            fl.mission.escort_active_ship_id = static_cast<Id>(iea->second.int_value(kInvalidId));
+          }
+          if (auto ief = m.find("escort_follow_distance_mkm"); ief != m.end()) {
+            fl.mission.escort_follow_distance_mkm = std::max(0.0, ief->second.number_value(fl.mission.escort_follow_distance_mkm));
+          }
+          if (auto ied = m.find("escort_defense_radius_mkm"); ied != m.end()) {
+            fl.mission.escort_defense_radius_mkm = std::max(0.0, ied->second.number_value(fl.mission.escort_defense_radius_mkm));
+          }
+          if (auto ieo = m.find("escort_only_auto_freight"); ieo != m.end()) {
+            fl.mission.escort_only_auto_freight = ieo->second.bool_value(fl.mission.escort_only_auto_freight);
+          }
+          if (auto ier = m.find("escort_retarget_interval_days"); ier != m.end()) {
+            fl.mission.escort_retarget_interval_days = std::max(0, static_cast<int>(ier->second.int_value(fl.mission.escort_retarget_interval_days)));
+          }
+          if (auto iel = m.find("escort_last_retarget_day"); iel != m.end()) {
+            fl.mission.escort_last_retarget_day = static_cast<int>(iel->second.int_value(fl.mission.escort_last_retarget_day));
+          }
+
+          if (auto iesf = m.find("explore_survey_first"); iesf != m.end()) {
+            fl.mission.explore_survey_first = iesf->second.bool_value(fl.mission.explore_survey_first);
+          }
+          if (auto ieat = m.find("explore_allow_transit"); ieat != m.end()) {
+            fl.mission.explore_allow_transit = ieat->second.bool_value(fl.mission.explore_allow_transit);
+          }
+          if (auto itar = m.find("auto_refuel"); itar != m.end()) {
+            fl.mission.auto_refuel = itar->second.bool_value(fl.mission.auto_refuel);
+          }
+          if (auto itrt = m.find("refuel_threshold_fraction"); itrt != m.end()) {
+            fl.mission.refuel_threshold_fraction = std::clamp(itrt->second.number_value(fl.mission.refuel_threshold_fraction), 0.0, 1.0);
+          }
+          if (auto itrr = m.find("refuel_resume_fraction"); itrr != m.end()) {
+            fl.mission.refuel_resume_fraction = std::clamp(itrr->second.number_value(fl.mission.refuel_resume_fraction), 0.0, 1.0);
+          }
+          if (auto itap = m.find("auto_repair"); itap != m.end()) {
+            fl.mission.auto_repair = itap->second.bool_value(fl.mission.auto_repair);
+          }
+          if (auto itpt = m.find("repair_threshold_fraction"); itpt != m.end()) {
+            fl.mission.repair_threshold_fraction = std::clamp(itpt->second.number_value(fl.mission.repair_threshold_fraction), 0.0, 1.0);
+          }
+          if (auto itpr = m.find("repair_resume_fraction"); itpr != m.end()) {
+            fl.mission.repair_resume_fraction = std::clamp(itpr->second.number_value(fl.mission.repair_resume_fraction), 0.0, 1.0);
+          }
+          if (auto itsm = m.find("sustainment_mode"); itsm != m.end()) {
+            fl.mission.sustainment_mode = fleet_sustainment_mode_from_string(itsm->second.string_value("none"));
+          }
+          if (auto itsc = m.find("sustainment_colony_id"); itsc != m.end()) {
+            fl.mission.sustainment_colony_id = static_cast<Id>(itsc->second.int_value(kInvalidId));
+          }
+          if (auto itlt = m.find("last_target_ship_id"); itlt != m.end()) {
+            fl.mission.last_target_ship_id = static_cast<Id>(itlt->second.int_value(kInvalidId));
+          }
         }
 
         s.fleets[fl.id] = std::move(fl);

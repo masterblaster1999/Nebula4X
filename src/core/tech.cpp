@@ -12,6 +12,7 @@
 
 #include "nebula4x/util/file_io.h"
 #include "nebula4x/util/json.h"
+#include "nebula4x/util/json_merge_patch.h"
 
 namespace nebula4x {
 namespace {
@@ -102,28 +103,8 @@ std::string format_include_cycle(const std::vector<fs::path>& stack, const fs::p
   return oss.str();
 }
 
-void merge_json_merge_patch(json::Value& base, const json::Value& patch) {
-  // RFC 7386-style merge patch semantics (objects recursively patch objects; arrays/primitive replace).
-  if (!patch.is_object()) {
-    base = patch;
-    return;
-  }
-  if (!base.is_object()) base = json::Object{};
-  auto* bobj = base.as_object();
-  const auto& pobj = patch.object();
-  for (const auto& [k, pv] : pobj) {
-    if (pv.is_null()) {
-      bobj->erase(k);
-      continue;
-    }
-    auto it = bobj->find(k);
-    if (it == bobj->end()) {
-      (*bobj)[k] = pv;
-    } else {
-      merge_json_merge_patch(it->second, pv);
-    }
-  }
-}
+// NOTE: Merge patch semantics are implemented as a shared utility (RFC 7386).
+// Core data loaders use this to support layered content/tech overlays.
 
 void apply_string_list_patch(json::Object& merged,
                             const json::Object& patch,
@@ -274,7 +255,7 @@ void merge_blueprint_file(RawBlueprintAggregate& agg, const fs::path& file) {
       }
 
       json::Value merged = it->second.value;
-      merge_json_merge_patch(merged, rv);
+      apply_json_merge_patch(merged, rv);
       if (!merged.is_object()) {
         throw std::runtime_error("internal error: merged resource is not an object for id '" + rid + "'");
       }
@@ -304,7 +285,7 @@ void merge_blueprint_file(RawBlueprintAggregate& agg, const fs::path& file) {
         agg.components[cid] = SourcedValue{cv, file};
       } else {
         json::Value merged = it->second.value;
-        merge_json_merge_patch(merged, cv);
+        apply_json_merge_patch(merged, cv);
         agg.components[cid] = SourcedValue{merged, file};
       }
     }
@@ -330,7 +311,7 @@ void merge_blueprint_file(RawBlueprintAggregate& agg, const fs::path& file) {
         agg.installations[iid] = SourcedValue{iv, file};
       } else {
         json::Value merged = it->second.value;
-        merge_json_merge_patch(merged, iv);
+        apply_json_merge_patch(merged, iv);
         agg.installations[iid] = SourcedValue{merged, file};
       }
     }
@@ -352,7 +333,7 @@ void merge_blueprint_file(RawBlueprintAggregate& agg, const fs::path& file) {
 
       auto it = agg.designs.find(id);
       json::Value merged = (it == agg.designs.end()) ? dv : it->second.value;
-      merge_json_merge_patch(merged, dv);
+      apply_json_merge_patch(merged, dv);
 
       if (!merged.is_object()) {
         throw std::runtime_error("internal error: merged design is not an object for id '" + id + "'");
@@ -396,7 +377,7 @@ void merge_tech_file(RawTechAggregate& agg, const fs::path& file) {
 
     auto itx = agg.techs.find(id);
     json::Value merged = (itx == agg.techs.end()) ? tv : itx->second.value;
-    merge_json_merge_patch(merged, tv);
+    apply_json_merge_patch(merged, tv);
 
     if (!merged.is_object()) {
       throw std::runtime_error("internal error: merged tech is not an object for id '" + id + "'");

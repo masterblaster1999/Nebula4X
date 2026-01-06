@@ -1,5 +1,7 @@
 #include "nebula4x/core/simulation.h"
 
+#include "nebula4x/core/colony_profiles.h"
+
 #include "nebula4x/core/contact_prediction.h"
 #include "nebula4x/core/intercept.h"
 
@@ -19,6 +21,7 @@
 #include <unordered_set>
 
 #include "nebula4x/util/log.h"
+#include "nebula4x/util/trace_events.h"
 
 namespace nebula4x {
 namespace {
@@ -30,6 +33,7 @@ using sim_internal::compute_power_allocation;
 
 void Simulation::tick_ships(double dt_days) {
   dt_days = std::clamp(dt_days, 0.0, 10.0);
+  NEBULA4X_TRACE_SCOPE("tick_ships", "sim.ships");
   auto cargo_used_tons = [](const Ship& s) {
     double used = 0.0;
     for (const auto& [_, tons] : s.cargo) used += std::max(0.0, tons);
@@ -1823,6 +1827,24 @@ void Simulation::tick_ships(double dt_days) {
           if (tons > 1e-9) new_col.minerals[mineral] += tons;
         }
 
+        // Apply faction-level colony founding defaults (QoL automation preset).
+        bool applied_founding_profile = false;
+        std::string applied_profile_label;
+        if (const auto* fac = find_ptr(state_.factions, ship_snapshot.faction_id)) {
+          if (fac->auto_apply_colony_founding_profile) {
+            const ColonyAutomationProfile& p = fac->colony_founding_profile;
+            const bool has = (p.garrison_target_strength > 0.0) || !p.installation_targets.empty() ||
+                             !p.mineral_reserves.empty() || !p.mineral_targets.empty();
+            if (has) {
+              apply_colony_profile(new_col, p);
+              applied_founding_profile = true;
+              applied_profile_label = !fac->colony_founding_profile_name.empty()
+                                          ? fac->colony_founding_profile_name
+                                          : std::string("Founding Defaults");
+            }
+          }
+        }
+
         state_.colonies[new_col.id] = new_col;
 
         // Ensure the faction has this system discovered (also invalidates route caches if newly discovered).
@@ -1850,8 +1872,11 @@ void Simulation::tick_ships(double dt_days) {
           ss.setf(std::ios::fixed);
           ss.precision(0);
           ss << cap;
-          const std::string msg = "Colony established: " + final_name + " on " + body->name +
-                                  " (population " + ss.str() + "M)";
+          std::string msg = "Colony established: " + final_name + " on " + body->name +
+                            " (population " + ss.str() + "M)";
+          if (applied_founding_profile) {
+            msg += "; applied profile '" + applied_profile_label + "'";
+          }
           EventContext ctx;
           ctx.faction_id = new_col.faction_id;
           ctx.system_id = ship_snapshot.system_id;

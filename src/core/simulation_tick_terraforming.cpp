@@ -1,5 +1,7 @@
 #include "nebula4x/core/simulation.h"
 
+#include "nebula4x/util/trace_events.h"
+
 #include <algorithm>
 #include <cmath>
 #include <string>
@@ -20,6 +22,7 @@ double step_toward(double cur, double target, double max_step) {
 
 void Simulation::tick_terraforming(double dt_days) {
   if (dt_days <= 0.0) return;
+  NEBULA4X_TRACE_SCOPE("tick_terraforming", "sim.terraform");
   // Aggregate terraforming points per body from colonies.
   // (Multiple colonies on the same body is unusual, but supported.)
   std::unordered_map<Id, double> points_by_body;

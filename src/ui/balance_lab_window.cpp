@@ -4,12 +4,15 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <cstring>
+#include <exception>
 #include <memory>
 #include <string>
 #include <vector>
 
 #include "nebula4x/util/duel_tournament.h"
+#include "nebula4x/util/duel_swiss_tournament.h"
 #include "nebula4x/util/file_io.h"
 #include "nebula4x/util/strings.h"
 
@@ -82,12 +85,16 @@ void draw_balance_lab_window(Simulation& sim, UIState& ui, Id&, Id&, Id&) {
   }
 
   ImGui::TextDisabled(
-      "Round-robin duel tournaments for balancing ship designs.\n"
+      "Duel tournaments for balancing ship designs (Round-robin or Swiss).\n"
       "Tip: Use this with the Design Studio to iterate quickly on blueprint changes.");
 
   static char search_buf[96] = "";
   static std::vector<std::string> roster;
   static int selected_all_idx = -1;
+
+  // 0 = round-robin, 1 = swiss
+  static int tournament_mode = 0;
+  static int swiss_rounds = 5;
 
   static int count_per_side = 1;
   static int runs_per_task = 10;
@@ -110,27 +117,54 @@ void draw_balance_lab_window(Simulation& sim, UIState& ui, Id&, Id&, Id&) {
   static std::string last_error;
 
   static std::unique_ptr<Simulation> sandbox;
-  static std::unique_ptr<nebula4x::DuelRoundRobinRunner> runner;
+  static std::unique_ptr<nebula4x::DuelRoundRobinRunner> rr_runner;
+  static std::unique_ptr<nebula4x::DuelSwissRunner> swiss_runner;
 
   // Advance the running tournament a few tasks per frame to keep the UI responsive.
-  if (runner && runner->ok() && !runner->done()) {
-    runner->step(tasks_per_frame);
-    if (!runner->ok()) {
-      last_error = runner->error();
+  const bool running_rr = (rr_runner && rr_runner->ok() && !rr_runner->done());
+  const bool running_swiss = (swiss_runner && swiss_runner->ok() && !swiss_runner->done());
+
+  if (running_rr) {
+    rr_runner->step(tasks_per_frame);
+    if (!rr_runner->ok()) {
+      last_error = rr_runner->error();
+    }
+  } else if (running_swiss) {
+    swiss_runner->step(tasks_per_frame);
+    if (!swiss_runner->ok()) {
+      last_error = swiss_runner->error();
     }
   }
 
-  const bool running = (runner && runner->ok() && !runner->done());
-  const bool have_result = (runner && runner->ok() && runner->done());
+  const bool running = running_rr || running_swiss;
+  const bool have_result_rr = (rr_runner && rr_runner->ok() && rr_runner->done());
+  const bool have_result_swiss = (swiss_runner && swiss_runner->ok() && swiss_runner->done());
+  const bool have_result = have_result_rr || have_result_swiss;
+
+  // Keep a reasonable default output filename as the user switches modes.
+  static int last_mode = tournament_mode;
+  if (!running && !have_result && tournament_mode != last_mode) {
+    last_mode = tournament_mode;
+    const char* def = (tournament_mode == 0) ? "duel_round_robin.json" : "duel_swiss.json";
+#ifdef _MSC_VER
+    strncpy_s(out_path, sizeof(out_path), def, _TRUNCATE);
+#else
+    std::snprintf(out_path, sizeof(out_path), "%s", def);
+#endif
+    last_status.clear();
+    last_error.clear();
+  }
 
   if (running) {
-    const float p = static_cast<float>(runner->progress());
+    const float p = static_cast<float>(running_rr ? rr_runner->progress() : swiss_runner->progress());
     ImGui::ProgressBar(p, ImVec2(-1, 0));
-    ImGui::Text("%d / %d tasks", runner->completed_tasks(), runner->total_tasks());
+    ImGui::Text("%d / %d tasks", running_rr ? rr_runner->completed_tasks() : swiss_runner->completed_tasks(),
+                running_rr ? rr_runner->total_tasks() : swiss_runner->total_tasks());
     ImGui::SameLine();
-    ImGui::TextDisabled("%s", runner->current_task_label().c_str());
+    ImGui::TextDisabled("%s", (running_rr ? rr_runner->current_task_label() : swiss_runner->current_task_label()).c_str());
     if (ImGui::Button("Cancel")) {
-      runner.reset();
+      rr_runner.reset();
+      swiss_runner.reset();
       sandbox.reset();
       last_status.clear();
       last_error = "Cancelled.";
@@ -236,6 +270,16 @@ void draw_balance_lab_window(Simulation& sim, UIState& ui, Id&, Id&, Id&) {
 
   ImGui::SeparatorText("Tournament Settings");
   ImGui::BeginDisabled(running);
+
+  {
+    const char* modes = "Round-robin (complete)\0Swiss (fast, scales to large rosters)\0";
+    ImGui::Combo("Mode", &tournament_mode, modes);
+    if (tournament_mode == 1) {
+      swiss_rounds = std::clamp(swiss_rounds, 1, 100);
+      ImGui::InputInt("Swiss rounds", &swiss_rounds);
+    }
+  }
+
   ImGui::InputInt("Ships per side", &count_per_side);
   ImGui::InputInt("Runs per matchup direction", &runs_per_task);
   ImGui::InputInt("Max days per run", &max_days);
@@ -264,40 +308,69 @@ void draw_balance_lab_window(Simulation& sim, UIState& ui, Id&, Id&, Id&) {
 
     sandbox = make_duel_sandbox(sim);
 
-    nebula4x::DuelRoundRobinOptions opt;
-    opt.count_per_side = count_per_side;
-    opt.two_way = two_way;
-    opt.compute_elo = compute_elo;
-    opt.elo_initial = elo_initial;
-    opt.elo_k_factor = elo_k;
+    // Only one runner may be active at a time.
+    rr_runner.reset();
+    swiss_runner.reset();
 
-    opt.duel.max_days = max_days;
-    opt.duel.initial_separation_mkm = distance_mkm;
-    opt.duel.position_jitter_mkm = jitter_mkm;
-    opt.duel.runs = std::max(1, runs_per_task);
-    opt.duel.seed = static_cast<std::uint32_t>(seed);
-    opt.duel.issue_attack_orders = attack_orders;
-    opt.duel.include_final_state_digest = false;
+    if (tournament_mode == 0) {
+      nebula4x::DuelRoundRobinOptions opt;
+      opt.count_per_side = count_per_side;
+      opt.two_way = two_way;
+      opt.compute_elo = compute_elo;
+      opt.elo_initial = elo_initial;
+      opt.elo_k_factor = elo_k;
 
-    runner = std::make_unique<nebula4x::DuelRoundRobinRunner>(*sandbox, roster, opt);
-    if (!runner->ok()) {
-      last_error = runner->error();
-      runner.reset();
-      sandbox.reset();
+      opt.duel.max_days = max_days;
+      opt.duel.initial_separation_mkm = distance_mkm;
+      opt.duel.position_jitter_mkm = jitter_mkm;
+      opt.duel.runs = std::max(1, runs_per_task);
+      opt.duel.seed = static_cast<std::uint32_t>(seed);
+      opt.duel.issue_attack_orders = attack_orders;
+      opt.duel.include_final_state_digest = false;
+
+      rr_runner = std::make_unique<nebula4x::DuelRoundRobinRunner>(*sandbox, roster, opt);
+      if (!rr_runner->ok()) {
+        last_error = rr_runner->error();
+        rr_runner.reset();
+        sandbox.reset();
+      }
+    } else {
+      nebula4x::DuelSwissOptions opt;
+      opt.count_per_side = count_per_side;
+      opt.rounds = swiss_rounds;
+      opt.two_way = two_way;
+      opt.compute_elo = compute_elo;
+      opt.elo_initial = elo_initial;
+      opt.elo_k_factor = elo_k;
+
+      opt.duel.max_days = max_days;
+      opt.duel.initial_separation_mkm = distance_mkm;
+      opt.duel.position_jitter_mkm = jitter_mkm;
+      opt.duel.runs = std::max(1, runs_per_task);
+      opt.duel.seed = static_cast<std::uint32_t>(seed);
+      opt.duel.issue_attack_orders = attack_orders;
+      opt.duel.include_final_state_digest = false;
+
+      swiss_runner = std::make_unique<nebula4x::DuelSwissRunner>(*sandbox, roster, opt);
+      if (!swiss_runner->ok()) {
+        last_error = swiss_runner->error();
+        swiss_runner.reset();
+        sandbox.reset();
+      }
     }
   }
   ImGui::EndDisabled();
   ImGui::EndDisabled();
 
-  if (have_result) {
-    const auto& res = runner->result();
+  if (have_result_rr) {
+    const auto& res = rr_runner->result();
 
     ImGui::SeparatorText("Results");
 
     // Leaderboard.
     std::vector<int> idx(res.design_ids.size());
     for (int i = 0; i < static_cast<int>(idx.size()); ++i) idx[i] = i;
-    if (compute_elo) {
+    if (res.options.compute_elo) {
       std::sort(idx.begin(), idx.end(), [&](int a, int b) { return res.elo[a] > res.elo[b]; });
     } else {
       std::sort(idx.begin(), idx.end(), [&](int a, int b) { return res.total_wins[a] > res.total_wins[b]; });
@@ -401,6 +474,101 @@ void draw_balance_lab_window(Simulation& sim, UIState& ui, Id&, Id&, Id&) {
     ImGui::SameLine();
     if (ImGui::Button("Copy JSON to clipboard")) {
       const std::string json = nebula4x::duel_round_robin_to_json(res, 2);
+      ImGui::SetClipboardText(json.c_str());
+      last_status = "JSON copied to clipboard.";
+      last_error.clear();
+    }
+  } else if (have_result_swiss) {
+    const auto& res = swiss_runner->result();
+
+    ImGui::SeparatorText("Results");
+
+    // Leaderboard sorted by points, then Buchholz, then Elo.
+    std::vector<int> idx(res.design_ids.size());
+    for (int i = 0; i < static_cast<int>(idx.size()); ++i) idx[i] = i;
+    std::sort(idx.begin(), idx.end(), [&](int a, int b) {
+      if (res.points[a] != res.points[b]) return res.points[a] > res.points[b];
+      if (res.buchholz[a] != res.buchholz[b]) return res.buchholz[a] > res.buchholz[b];
+      return res.elo[a] > res.elo[b];
+    });
+
+    if (ImGui::BeginTable("balance_swiss_leaderboard", 6, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders)) {
+      ImGui::TableSetupColumn("Rank", ImGuiTableColumnFlags_WidthFixed, 50);
+      ImGui::TableSetupColumn("Design", ImGuiTableColumnFlags_WidthStretch);
+      ImGui::TableSetupColumn("Pts", ImGuiTableColumnFlags_WidthFixed, 60);
+      ImGui::TableSetupColumn("Buchholz", ImGuiTableColumnFlags_WidthFixed, 80);
+      ImGui::TableSetupColumn("Elo", ImGuiTableColumnFlags_WidthFixed, 80);
+      ImGui::TableSetupColumn("Record", ImGuiTableColumnFlags_WidthFixed, 90);
+      ImGui::TableHeadersRow();
+
+      for (int r = 0; r < static_cast<int>(idx.size()); ++r) {
+        const int i = idx[r];
+        const int w = res.total_wins[i];
+        const int l = res.total_losses[i];
+        const int d = res.total_draws[i];
+
+        ImGui::TableNextRow();
+        ImGui::TableSetColumnIndex(0);
+        ImGui::Text("%d", r + 1);
+        ImGui::TableSetColumnIndex(1);
+        const auto* design = sim.find_design(res.design_ids[i]);
+        const std::string name = design ? design->name : res.design_ids[i];
+        if (ImGui::Selectable((name + "##swiss_leader_" + res.design_ids[i]).c_str(), false,
+                              ImGuiSelectableFlags_SpanAllColumns)) {
+          ui.show_design_studio_window = true;
+          ui.request_focus_design_studio_id = res.design_ids[i];
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("(%s)", res.design_ids[i].c_str());
+        ImGui::TableSetColumnIndex(2);
+        ImGui::Text("%.1f", res.points[i]);
+        ImGui::TableSetColumnIndex(3);
+        ImGui::Text("%.1f", res.buchholz[i]);
+        ImGui::TableSetColumnIndex(4);
+        ImGui::Text("%.0f", res.elo[i]);
+        ImGui::TableSetColumnIndex(5);
+        ImGui::Text("%d-%d-%d", w, l, d);
+      }
+
+      ImGui::EndTable();
+    }
+
+    if (ImGui::CollapsingHeader("Rounds", ImGuiTreeNodeFlags_DefaultOpen)) {
+      for (const auto& rr : res.rounds) {
+        const std::string header = "Round " + std::to_string(rr.round_index + 1);
+        if (ImGui::TreeNode(header.c_str())) {
+          for (const auto& m : rr.matches) {
+            if (m.bye) {
+              const std::string a_id = (m.a >= 0 && m.a < static_cast<int>(res.design_ids.size())) ? res.design_ids[m.a] : "?";
+              ImGui::TextDisabled("%s gets a bye", a_id.c_str());
+              continue;
+            }
+            const std::string a_id = (m.a >= 0 && m.a < static_cast<int>(res.design_ids.size())) ? res.design_ids[m.a] : "?";
+            const std::string b_id = (m.b >= 0 && m.b < static_cast<int>(res.design_ids.size())) ? res.design_ids[m.b] : "?";
+            ImGui::Text("%s vs %s: %d-%d-%d  (games=%d, avg_days=%.1f)", a_id.c_str(), b_id.c_str(), m.a_wins, m.b_wins, m.draws,
+                        m.games, m.avg_days);
+          }
+          ImGui::TreePop();
+        }
+      }
+    }
+
+    ImGui::SeparatorText("Export");
+    ImGui::InputText("Output path##balance_out", out_path, sizeof(out_path));
+    if (ImGui::Button("Save JSON")) {
+      try {
+        const std::string json = nebula4x::duel_swiss_to_json(res, 2);
+        nebula4x::write_text_file(out_path, json);
+        last_status = std::string("Wrote ") + out_path;
+        last_error.clear();
+      } catch (const std::exception& e) {
+        last_error = e.what();
+        last_status.clear();
+      }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Copy JSON to clipboard")) {
+      const std::string json = nebula4x::duel_swiss_to_json(res, 2);
       ImGui::SetClipboardText(json.c_str());
       last_status = "JSON copied to clipboard.";
       last_error.clear();

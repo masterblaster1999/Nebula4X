@@ -102,7 +102,38 @@ int test_colonization() {
     N4X_ASSERT(col.minerals.count("Duranium") && std::abs(col.minerals.at("Duranium") - 123.0) < 1e-9);
   }
 
-  // 2) ColonizeBody aborts if the body already has a colony (ship remains).
+  // 2) Optional colony founding profile is applied to newly established colonies.
+  {
+    ContentDB content = minimal_content_for_colonization();
+    Simulation sim(content, SimConfig{});
+    GameState s = minimal_state_for_colonization();
+
+    // Configure faction-level founding defaults.
+    auto& f = s.factions.at(2);
+    f.auto_apply_colony_founding_profile = true;
+    f.colony_founding_profile_name = "Default Outpost";
+    f.colony_founding_profile.garrison_target_strength = 250.0;
+    f.colony_founding_profile.installation_targets["mine"] = 7;
+    f.colony_founding_profile.mineral_reserves["Duranium"] = 1000.0;
+    f.colony_founding_profile.mineral_targets["Duranium"] = 5000.0;
+
+    sim.load_game(std::move(s));
+
+    N4X_ASSERT(sim.issue_colonize_body(100, 10, "Profiled Colony"));
+    sim.advance_days(1);
+
+    const auto& st = sim.state();
+    N4X_ASSERT(st.colonies.size() == 1);
+    const Colony& col = st.colonies.begin()->second;
+
+    N4X_ASSERT(col.name == "Profiled Colony");
+    N4X_ASSERT(col.garrison_target_strength > 249.9);
+    N4X_ASSERT(col.installation_targets.count("mine") && col.installation_targets.at("mine") == 7);
+    N4X_ASSERT(col.mineral_reserves.count("Duranium") && std::abs(col.mineral_reserves.at("Duranium") - 1000.0) < 1e-9);
+    N4X_ASSERT(col.mineral_targets.count("Duranium") && std::abs(col.mineral_targets.at("Duranium") - 5000.0) < 1e-9);
+  }
+
+  // 3) ColonizeBody aborts if the body already has a colony (ship remains).
   {
     ContentDB content = minimal_content_for_colonization();
     Simulation sim(content, SimConfig{});

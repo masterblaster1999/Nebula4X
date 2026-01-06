@@ -682,8 +682,24 @@ struct Colony {
   // Ground forces stationed at this colony (abstract "strength" points).
   double ground_forces{0.0};
 
+  // Optional garrison automation target.
+  //
+  // When > 0, the simulation will automatically keep enough (auto-queued)
+  // troop training in the queue so that ground_forces + queued_training reaches
+  // this target.
+  //
+  // This is a pure QoL feature: it doesn't change the training rules, it
+  // simply keeps the training queue topped up.
+  double garrison_target_strength{0.0};
+
   // Training queue for new troops at this colony (strength points remaining).
   double troop_training_queue{0.0};
+
+  // Portion of troop_training_queue that was auto-queued by garrison_target_strength.
+  //
+  // This allows the simulation to prune only the auto-generated portion when
+  // the target is reduced, while leaving manual training intact.
+  double troop_training_auto_queued{0.0};
 
   // Shipyard queue (very simplified)
   std::vector<BuildOrder> shipyard_queue;
@@ -691,6 +707,27 @@ struct Colony {
   // Colony construction queue (for building installations)
   std::vector<InstallationBuildOrder> construction_queue;
 };
+
+
+
+// A reusable set of colony automation knobs (targets/reserves).
+//
+// This is a pure QoL/presets feature: profiles can be applied to colonies to
+// quickly configure auto-build/auto-freight + garrison targets.
+struct ColonyAutomationProfile {
+  // Desired installation counts (auto-build).
+  std::unordered_map<std::string, int> installation_targets;
+
+  // Stockpile reserve floors (auto-freight export).
+  std::unordered_map<std::string, double> mineral_reserves;
+
+  // Desired stockpile targets (auto-freight import).
+  std::unordered_map<std::string, double> mineral_targets;
+
+  // Optional garrison automation target.
+  double garrison_target_strength{0.0};
+};
+
 
 // A persistent ground battle at a colony.
 //
@@ -770,6 +807,25 @@ struct Faction {
   // Manual build/refit orders are never modified.
   std::unordered_map<std::string, int> ship_design_targets;
 
+  // Player-defined colony automation profiles (presets).
+  //
+  // Profiles can be applied to colonies to quickly configure installation
+  // targets, mineral reserves/targets, and garrison targets.
+  std::unordered_map<std::string, ColonyAutomationProfile> colony_profiles;
+
+  // Colony founding defaults (auto-applied to new colonies).
+  //
+  // When enabled, the simulation will apply this profile to newly established
+  // colonies created via ColonizeBody (manual or AI).
+  bool auto_apply_colony_founding_profile{false};
+
+  // Profile values to apply when auto_apply_colony_founding_profile is enabled.
+  ColonyAutomationProfile colony_founding_profile;
+
+  // Optional UI label for the above profile (does not affect simulation).
+  std::string colony_founding_profile_name;
+
+
   // Exploration / map knowledge.
   // Systems this faction has discovered. Seeded from starting ships/colonies and
   // updated when ships transit jump points into new systems.
@@ -804,6 +860,110 @@ enum class FleetFormation : std::uint8_t {
   Wedge = 3,
   Ring = 4,
 };
+
+// Persistent high-level fleet automation.
+//
+// This is a player-facing QoL layer: when enabled, the simulation will generate
+// and maintain fleet orders (e.g. defending a colony, patrolling a system) and
+// optionally handle sustainment (refuel/repair) at friendly colonies.
+//
+// NOTE: This is intentionally lightweight and best-effort; it should never be
+// required for core simulation correctness.
+
+enum class FleetMissionType : std::uint8_t {
+  None = 0,
+  DefendColony = 1,
+  PatrolSystem = 2,
+  HuntHostiles = 3,
+  EscortFreighters = 4,
+  Explore = 5,
+};
+
+enum class FleetSustainmentMode : std::uint8_t {
+  None = 0,
+  Refuel = 1,
+  Repair = 2,
+};
+
+struct FleetMission {
+  FleetMissionType type{FleetMissionType::None};
+
+  // --- DefendColony ---
+  // Colony (not body) id to defend.
+  Id defend_colony_id{kInvalidId};
+
+  // Response radius around the defended body's current position.
+  // 0 => treat as "anywhere in-system".
+  double defend_radius_mkm{0.0};
+
+  // --- PatrolSystem ---
+  Id patrol_system_id{kInvalidId};
+
+  // How long to loiter at each patrol waypoint.
+  int patrol_dwell_days{5};
+
+  // Internal: current waypoint index.
+  int patrol_leg_index{0};
+
+  // --- HuntHostiles ---
+  // Maximum age (in days) of a hostile contact to pursue.
+  int hunt_max_contact_age_days{30};
+
+  // --- EscortFreighters ---
+  // If set, the fleet will escort this specific ship. If kInvalidId, the
+  // simulation will auto-select a suitable friendly freighter to escort.
+  Id escort_target_ship_id{kInvalidId};
+
+  // Runtime: currently escorted ship id (may differ from escort_target_ship_id
+  // when auto-selecting).
+  Id escort_active_ship_id{kInvalidId};
+
+  // Follow distance to maintain behind the escorted ship.
+  double escort_follow_distance_mkm{1.0};
+
+  // How far the fleet may range from the escorted ship to intercept detected
+  // hostiles.
+  // 0 => treat as "anywhere in-system".
+  double escort_defense_radius_mkm{50.0};
+
+  // When true, only ships with auto_freight enabled are eligible escort targets.
+  bool escort_only_auto_freight{true};
+
+  // To reduce thrashing, auto-selection will only retarget at most once per
+  // interval (unless the current target becomes invalid).
+  int escort_retarget_interval_days{5};
+
+  // Runtime: day of last escort target selection.
+  int escort_last_retarget_day{0};
+
+
+  // --- Explore ---
+  // If true, the fleet will survey unknown exits in the current system before
+  // transiting any surveyed exits to undiscovered systems.
+  bool explore_survey_first{true};
+
+  // If true, the fleet may transit surveyed exits that lead to undiscovered
+  // systems (expansion). If false, it will only survey exits in already-
+  // discovered systems.
+  bool explore_allow_transit{true};
+
+  // --- Sustainment (all mission types) ---
+  bool auto_refuel{true};
+  double refuel_threshold_fraction{0.25};
+  double refuel_resume_fraction{0.90};
+
+  bool auto_repair{true};
+  double repair_threshold_fraction{0.50};
+  double repair_resume_fraction{0.95};
+
+  // Runtime state: active sustainment target.
+  FleetSustainmentMode sustainment_mode{FleetSustainmentMode::None};
+  Id sustainment_colony_id{kInvalidId};
+
+  // Best-effort status/debug info.
+  Id last_target_ship_id{kInvalidId};
+};
+
 struct Fleet {
   Id id{kInvalidId};
   std::string name;
@@ -821,6 +981,9 @@ struct Fleet {
   // Optional formation settings.
   FleetFormation formation{FleetFormation::None};
   double formation_spacing_mkm{1.0};
+
+  // Optional fleet automation mission / stance.
+  FleetMission mission{};
 };
 
 // Jump points connect star systems.

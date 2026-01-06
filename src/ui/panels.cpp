@@ -471,6 +471,8 @@ void draw_main_menu(Simulation& sim, UIState& ui, char* save_path, char* load_pa
       ImGui::MenuItem("Planner (Forecast Dashboard)", nullptr, &ui.show_planner_window);
       ImGui::MenuItem("Freight Planner (Auto-freight Preview)", nullptr, &ui.show_freight_window);
       ImGui::MenuItem("Fuel Planner (Auto-tanker Preview)", nullptr, &ui.show_fuel_window);
+      ImGui::MenuItem("Advisor (Issues)", "Ctrl+Shift+A", &ui.show_advisor_window);
+      ImGui::MenuItem("Colony Profiles (Automation Presets)", "Ctrl+Shift+B", &ui.show_colony_profiles_window);
       ImGui::MenuItem("Time Warp (Until Event)", nullptr, &ui.show_time_warp_window);
       ImGui::MenuItem("Timeline (Event Timeline)", nullptr, &ui.show_timeline_window);
       ImGui::MenuItem("Design Studio (Blueprints)", nullptr, &ui.show_design_studio_window);
@@ -520,6 +522,9 @@ void draw_main_menu(Simulation& sim, UIState& ui, char* save_path, char* load_pa
       }
       if (ImGui::MenuItem("Open Fuel Planner")) {
         ui.show_fuel_window = true;
+      }
+      if (ImGui::MenuItem("Open Colony Profiles")) {
+        ui.show_colony_profiles_window = true;
       }
       if (ImGui::MenuItem("Open Time Warp")) {
         ui.show_time_warp_window = true;
@@ -3000,6 +3005,242 @@ const bool can_up = (i > 0);
           fleet_status = "Disbanded fleet.";
         }
 
+
+
+        // --- Mission automation ---
+        ImGui::Separator();
+        ImGui::Text("Mission");
+        ImGui::TextDisabled("Automation for fleets: defend, patrol, hunt, escort, or explore. Disable to regain full manual control.");
+
+        Fleet* fleet_mut = find_ptr(s.fleets, selected_fleet->id);
+        if (fleet_mut) {
+          static const char* kMissionNames[] = {"None", "Defend colony", "Patrol system", "Hunt hostiles", "Escort freighters", "Explore systems"};
+          int mission_idx = static_cast<int>(fleet_mut->mission.type);
+          if (mission_idx < 0 || mission_idx >= static_cast<int>(IM_ARRAYSIZE(kMissionNames))) mission_idx = 0;
+          if (ImGui::Combo("Type##fleet_mission_type", &mission_idx, kMissionNames, IM_ARRAYSIZE(kMissionNames))) {
+            fleet_mut->mission.type = static_cast<FleetMissionType>(mission_idx);
+            fleet_mut->mission.sustainment_mode = FleetSustainmentMode::None;
+            fleet_mut->mission.sustainment_colony_id = kInvalidId;
+            fleet_mut->mission.last_target_ship_id = kInvalidId;
+            fleet_mut->mission.escort_active_ship_id = kInvalidId;
+            fleet_mut->mission.escort_last_retarget_day = 0;
+
+            // Best-effort defaults.
+            if (fleet_mut->mission.type == FleetMissionType::DefendColony && fleet_mut->mission.defend_colony_id == kInvalidId) {
+              for (Id cid : sorted_keys(s.colonies)) {
+                const auto* c = find_ptr(s.colonies, cid);
+                if (!c) continue;
+                if (c->faction_id != fleet_mut->faction_id) continue;
+                fleet_mut->mission.defend_colony_id = cid;
+                break;
+              }
+            }
+            if (fleet_mut->mission.type == FleetMissionType::PatrolSystem && fleet_mut->mission.patrol_system_id == kInvalidId) {
+              if (s.selected_system != kInvalidId) fleet_mut->mission.patrol_system_id = s.selected_system;
+            }
+            if (fleet_mut->mission.type == FleetMissionType::Explore) {
+              fleet_mut->mission.explore_survey_first = true;
+              fleet_mut->mission.explore_allow_transit = true;
+            }
+          }
+
+          if (fleet_mut->mission.type != FleetMissionType::None) {
+            if (ImGui::SmallButton("Start mission (clear orders)##fleet_mission_start")) {
+              sim.clear_fleet_orders(selected_fleet->id);
+              fleet_status = "Mission started.";
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Stop mission##fleet_mission_stop")) {
+              fleet_mut->mission = FleetMission{};
+              fleet_status = "Mission stopped.";
+            }
+
+            // Mission-specific config.
+            if (fleet_mut->mission.type == FleetMissionType::DefendColony) {
+              ImGui::Spacing();
+              ImGui::Text("Defend colony");
+
+              // Colony picker (owned colonies only).
+              const Colony* selc = (fleet_mut->mission.defend_colony_id != kInvalidId)
+                                     ? find_ptr(s.colonies, fleet_mut->mission.defend_colony_id)
+                                     : nullptr;
+              const char* col_label = selc ? selc->name.c_str() : "(select colony)";
+              if (ImGui::BeginCombo("Colony##fleet_mission_defend_colony", col_label)) {
+                for (Id cid : sorted_keys(s.colonies)) {
+                  const auto* c = find_ptr(s.colonies, cid);
+                  if (!c) continue;
+                  if (c->faction_id != fleet_mut->faction_id) continue;
+                  const bool sel = (fleet_mut->mission.defend_colony_id == cid);
+                  if (ImGui::Selectable((c->name + "##def_col_" + std::to_string(static_cast<unsigned long long>(cid))).c_str(), sel)) {
+                    fleet_mut->mission.defend_colony_id = cid;
+                  }
+                }
+                ImGui::EndCombo();
+              }
+
+              double r = fleet_mut->mission.defend_radius_mkm;
+              if (ImGui::InputDouble("Response radius mkm##fleet_mission_defend_r", &r, 10.0, 100.0, "%.1f")) {
+                fleet_mut->mission.defend_radius_mkm = std::max(0.0, r);
+              }
+              ImGui::TextDisabled("0 = whole system (may chase far targets).\nHigher = stay closer to the defended colony.");
+            }
+
+            if (fleet_mut->mission.type == FleetMissionType::PatrolSystem) {
+              ImGui::Spacing();
+              ImGui::Text("Patrol system");
+
+              // System picker (discovered systems only).
+              const StarSystem* selsys = (fleet_mut->mission.patrol_system_id != kInvalidId)
+                                           ? find_ptr(s.systems, fleet_mut->mission.patrol_system_id)
+                                           : nullptr;
+              const char* sys_label = selsys ? selsys->name.c_str() : "(select system)";
+              if (ImGui::BeginCombo("System##fleet_mission_patrol_sys", sys_label)) {
+                for (Id sid : sorted_keys(s.systems)) {
+                  const auto* sys = find_ptr(s.systems, sid);
+                  if (!sys) continue;
+                  if (!sim.is_system_discovered_by_faction(fleet_mut->faction_id, sid)) continue;
+                  const bool sel = (fleet_mut->mission.patrol_system_id == sid);
+                  if (ImGui::Selectable((sys->name + "##pat_sys_" + std::to_string(static_cast<unsigned long long>(sid))).c_str(), sel)) {
+                    fleet_mut->mission.patrol_system_id = sid;
+                  }
+                }
+                ImGui::EndCombo();
+              }
+
+              int dwell = std::max(1, fleet_mut->mission.patrol_dwell_days);
+              if (ImGui::InputInt("Dwell days##fleet_mission_patrol_dwell", &dwell)) {
+                fleet_mut->mission.patrol_dwell_days = std::max(1, dwell);
+              }
+              ImGui::TextDisabled("Patrol waypoints: jump points first, then major bodies.");
+            }
+
+            if (fleet_mut->mission.type == FleetMissionType::HuntHostiles) {
+              ImGui::Spacing();
+              ImGui::Text("Hunt hostiles");
+              int age = std::max(0, fleet_mut->mission.hunt_max_contact_age_days);
+              if (ImGui::InputInt("Max contact age (days)##fleet_mission_hunt_age", &age)) {
+                fleet_mut->mission.hunt_max_contact_age_days = std::max(0, age);
+              }
+              ImGui::TextDisabled("Chases recent hostile contacts across discovered jump routes.");
+            }
+
+            if (fleet_mut->mission.type == FleetMissionType::EscortFreighters) {
+              ImGui::Spacing();
+              ImGui::Text("Escort freighters");
+
+              // Runtime status.
+              const Ship* active = (fleet_mut->mission.escort_active_ship_id != kInvalidId)
+                                      ? find_ptr(s.ships, fleet_mut->mission.escort_active_ship_id)
+                                      : nullptr;
+              if (active) {
+                std::string sys_name;
+                if (const auto* sys = find_ptr(s.systems, active->system_id)) sys_name = sys->name;
+                const std::string msg = "Active: " + active->name + (sys_name.empty() ? "" : " (" + sys_name + ")");
+                ImGui::TextDisabled(msg.c_str());
+              } else {
+                ImGui::TextDisabled("Active: (none)");
+              }
+
+              // Target ship picker.
+              const Ship* fixed = (fleet_mut->mission.escort_target_ship_id != kInvalidId)
+                                     ? find_ptr(s.ships, fleet_mut->mission.escort_target_ship_id)
+                                     : nullptr;
+              const char* tgt_label = fixed ? fixed->name.c_str() : "Auto (best eligible)";
+              if (ImGui::BeginCombo("Target ship##fleet_mission_escort_target", tgt_label)) {
+                const bool sel_auto = (fleet_mut->mission.escort_target_ship_id == kInvalidId);
+                if (ImGui::Selectable("Auto (best eligible)", sel_auto)) {
+                  fleet_mut->mission.escort_target_ship_id = kInvalidId;
+                }
+                ImGui::Separator();
+
+                for (Id sid : sorted_keys(s.ships)) {
+                  const auto* sh = find_ptr(s.ships, sid);
+                  if (!sh) continue;
+                  if (!sim.are_factions_mutual_friendly(fleet_mut->faction_id, sh->faction_id)) continue;
+                  if (sim.fleet_for_ship(sid) != kInvalidId) continue;
+
+                  const auto* d = sim.find_design(sh->design_id);
+                  const ShipRole r = d ? d->role : ShipRole::Unknown;
+                  if (!(r == ShipRole::Freighter || r == ShipRole::Surveyor || r == ShipRole::Unknown)) continue;
+
+                  std::string label = sh->name;
+                  if (sh->auto_freight) label += " [auto]";
+                  if (const auto* sys = find_ptr(s.systems, sh->system_id)) label += " (" + sys->name + ")";
+
+                  const bool sel = (fleet_mut->mission.escort_target_ship_id == sid);
+                  const std::string key = label + "##fleet_mission_escort_ship_" + std::to_string(static_cast<unsigned long long>(sid));
+                  if (ImGui::Selectable(key.c_str(), sel)) {
+                    fleet_mut->mission.escort_target_ship_id = sid;
+                  }
+                }
+                ImGui::EndCombo();
+              }
+
+              ImGui::Checkbox("Auto-select only auto-freight targets##fleet_mission_escort_only_auto", &fleet_mut->mission.escort_only_auto_freight);
+              int interval = std::max(0, fleet_mut->mission.escort_retarget_interval_days);
+              if (ImGui::InputInt("Retarget interval (days)##fleet_mission_escort_interval", &interval)) {
+                fleet_mut->mission.escort_retarget_interval_days = std::max(0, interval);
+              }
+
+              double follow = fleet_mut->mission.escort_follow_distance_mkm;
+              if (ImGui::InputDouble("Follow distance mkm##fleet_mission_escort_follow", &follow, 0.5, 5.0, "%.1f")) {
+                fleet_mut->mission.escort_follow_distance_mkm = std::max(0.0, follow);
+              }
+
+              double r = fleet_mut->mission.escort_defense_radius_mkm;
+              if (ImGui::InputDouble("Defense radius mkm##fleet_mission_escort_def_r", &r, 10.0, 100.0, "%.1f")) {
+                fleet_mut->mission.escort_defense_radius_mkm = std::max(0.0, r);
+              }
+              ImGui::TextDisabled("Automatically escorts a civilian ship and intercepts detected hostiles near it.\n0 radius = anywhere in-system.");
+            }
+
+            if (fleet_mut->mission.type == FleetMissionType::Explore) {
+              ImGui::Spacing();
+              ImGui::Text("Explore systems");
+            
+              ImGui::Checkbox("Survey exits before transiting##fleet_mission_explore_survey_first", &fleet_mut->mission.explore_survey_first);
+              ImGui::Checkbox("Transit to undiscovered systems##fleet_mission_explore_allow_transit", &fleet_mut->mission.explore_allow_transit);
+            
+              ImGui::TextDisabled("Surveys unknown jump points, then transits surveyed exits into undiscovered systems\nwhen enabled. Routes to the best frontier system when idle.");
+            }
+
+            // Sustainment toggles.
+            ImGui::Spacing();
+            ImGui::Text("Sustainment");
+            ImGui::Checkbox("Auto-refuel##fleet_mission_auto_refuel", &fleet_mut->mission.auto_refuel);
+            if (fleet_mut->mission.auto_refuel) {
+              float thr = static_cast<float>(std::clamp(fleet_mut->mission.refuel_threshold_fraction, 0.0, 1.0));
+              float res = static_cast<float>(std::clamp(fleet_mut->mission.refuel_resume_fraction, 0.0, 1.0));
+              ImGui::SliderFloat("Refuel at##fleet_mission_refuel_thr", &thr, 0.0f, 1.0f, "%.2f");
+              ImGui::SliderFloat("Resume at##fleet_mission_refuel_res", &res, 0.0f, 1.0f, "%.2f");
+              fleet_mut->mission.refuel_threshold_fraction = std::clamp(static_cast<double>(thr), 0.0, 1.0);
+              fleet_mut->mission.refuel_resume_fraction = std::clamp(static_cast<double>(res), 0.0, 1.0);
+            }
+
+            ImGui::Checkbox("Auto-repair##fleet_mission_auto_repair", &fleet_mut->mission.auto_repair);
+            if (fleet_mut->mission.auto_repair) {
+              float thr = static_cast<float>(std::clamp(fleet_mut->mission.repair_threshold_fraction, 0.0, 1.0));
+              float res = static_cast<float>(std::clamp(fleet_mut->mission.repair_resume_fraction, 0.0, 1.0));
+              ImGui::SliderFloat("Repair at##fleet_mission_repair_thr", &thr, 0.0f, 1.0f, "%.2f");
+              ImGui::SliderFloat("Resume at##fleet_mission_repair_res", &res, 0.0f, 1.0f, "%.2f");
+              fleet_mut->mission.repair_threshold_fraction = std::clamp(static_cast<double>(thr), 0.0, 1.0);
+              fleet_mut->mission.repair_resume_fraction = std::clamp(static_cast<double>(res), 0.0, 1.0);
+            }
+
+            // Status
+            if (fleet_mut->mission.sustainment_mode != FleetSustainmentMode::None) {
+              const char* mode = (fleet_mut->mission.sustainment_mode == FleetSustainmentMode::Refuel) ? "Refueling" : "Repairing";
+              std::string at = "(unknown)";
+              if (fleet_mut->mission.sustainment_colony_id != kInvalidId) {
+                if (const auto* c = find_ptr(s.colonies, fleet_mut->mission.sustainment_colony_id)) {
+                  at = c->name;
+                }
+              }
+              ImGui::TextDisabled((std::string(mode) + " at " + at).c_str());
+            }
+          }
+        }
+
         // --- Orders ---
         ImGui::Separator();
         ImGui::Text("Orders");
@@ -3164,6 +3405,35 @@ const bool can_up = (i > 0);
         const double forts = sim.fortification_points(*colony);
         if (forts > 1e-9) ImGui::Text("Fortifications: %.1f", forts);
 
+        // --- Garrison target automation (QoL) ---
+        // Keeps enough *auto-queued* training in the queue to reach a desired
+        // garrison strength, without consuming or pruning manual training.
+        {
+          double target = colony->garrison_target_strength;
+          ImGui::InputDouble("Garrison target##garrison_target", &target, 50.0, 200.0, "%.1f");
+          target = std::max(0.0, target);
+          colony->garrison_target_strength = target;
+
+          if (ImGui::SmallButton("Set = current##garrison_target_now")) {
+            colony->garrison_target_strength = std::max(0.0, colony->ground_forces);
+          }
+          ImGui::SameLine();
+          if (ImGui::SmallButton("Clear##garrison_target_clear")) {
+            colony->garrison_target_strength = 0.0;
+          }
+
+          if (colony->garrison_target_strength > 1e-9) {
+            const double auto_q = std::clamp(colony->troop_training_auto_queued, 0.0, colony->troop_training_queue);
+            const double manual_q = std::max(0.0, colony->troop_training_queue - auto_q);
+            const double needed = std::max(0.0, colony->garrison_target_strength - colony->ground_forces);
+
+            ImGui::TextDisabled("Need: %.1f  Queued: %.1f (manual %.1f / auto %.1f)",
+                                needed, colony->troop_training_queue, manual_q, auto_q);
+          } else {
+            ImGui::TextDisabled("(No target; training queue is fully manual)");
+          }
+        }
+
         // Active battle status
         if (auto itb = s.ground_battles.find(colony->id); itb != s.ground_battles.end()) {
           const auto& b = itb->second;
@@ -3193,7 +3463,17 @@ const bool can_up = (i > 0);
         } else {
           ImGui::TextDisabled("Training: 0 (build a Training Facility)");
         }
-        ImGui::Text("Training queue: %.1f", colony->troop_training_queue);
+        {
+          const double auto_q = std::clamp(colony->troop_training_auto_queued, 0.0, colony->troop_training_queue);
+          const double manual_q = std::max(0.0, colony->troop_training_queue - auto_q);
+          ImGui::Text("Training queue: %.1f (manual %.1f / auto %.1f)", colony->troop_training_queue, manual_q, auto_q);
+
+          const double str_per_day = train_pts * std::max(0.0, sim.cfg().troop_strength_per_training_point);
+          if (str_per_day > 1e-9 && colony->troop_training_queue > 1e-9) {
+            const double eta_days = colony->troop_training_queue / str_per_day;
+            ImGui::TextDisabled("ETA: ~%.1f days (if minerals available)", eta_days);
+          }
+        }
 
         static double queue_strength = 0.0;
         ImGui::InputDouble("Queue strength##troop_train", &queue_strength, 50.0, 200.0, "%.1f");
@@ -4401,7 +4681,7 @@ if (colony->shipyard_queue.empty()) {
         ImGui::TextWrapped(
             "Enable Auto-freight on cargo ships to have them automatically haul minerals between your colonies "
             "whenever they are idle. Auto-freight tries to relieve mineral shortages that stall shipyards, "
-            "unpaid construction orders, and colony stockpile targets (set in Colony Details).");
+            "unpaid construction orders, troop training, and colony stockpile targets (set in Colony Details).");
 
         if (ImGui::Button("Enable auto-freight for all freighters")) {
           for (auto& [sid, ship] : s.ships) {
@@ -4440,6 +4720,9 @@ if (colony->shipyard_queue.empty()) {
               break;
             case LogisticsNeedKind::Construction:
               reason = "Construction";
+              break;
+            case LogisticsNeedKind::TroopTraining:
+              reason = "Troop training";
               break;
             case LogisticsNeedKind::IndustryInput:
               reason = "Industry";
@@ -6184,7 +6467,7 @@ void draw_settings_window(UIState& ui, char* ui_prefs_path, UIPrefActions& actio
     ui.event_toast_duration_sec = std::clamp(ui.event_toast_duration_sec, 0.5f, 60.0f);
   }
   ImGui::TextDisabled(
-      "Shortcuts: Ctrl+P palette, Ctrl+F search, Ctrl+G entity, Ctrl+Shift+G graph, F1 help, Ctrl+S save, Ctrl+O load, Ctrl+0 diplomacy, Ctrl+7 timeline, Ctrl+8 design studio, Ctrl+9 intel, Space +1 day.");
+      "Shortcuts: Ctrl+P palette, Ctrl+F search, Ctrl+G entity, Ctrl+Shift+G graph, Ctrl+Shift+A advisor, Ctrl+Shift+B colony profiles, F1 help, Ctrl+S save, Ctrl+O load, Ctrl+0 diplomacy, Ctrl+7 timeline, Ctrl+8 design studio, Ctrl+9 intel, Space +1 day.");
 
   ImGui::SeparatorText("Timeline");
   ImGui::Checkbox("Show timeline minimap", &ui.timeline_show_minimap);

@@ -204,12 +204,14 @@ struct UIState {
   bool show_planner_window{false};
   bool show_freight_window{false};
   bool show_fuel_window{false};
+  bool show_advisor_window{false};
   bool show_time_warp_window{false};
   bool show_timeline_window{false};
   bool show_design_studio_window{false};
   bool show_balance_lab_window{false};
   bool show_intel_window{false};
   bool show_diplomacy_window{false};
+  bool show_colony_profiles_window{false};
   bool show_settings_window{false};
 
   // Debug/tooling windows.
@@ -291,6 +293,12 @@ struct UIState {
   // These are UI preferences persisted in ui_prefs.json.
   bool time_machine_recording{false};
   float time_machine_refresh_sec{0.75f};
+  // 0 = Full JSON snapshots (fastest access; higher memory).
+  // 1 = Delta chain of RFC 7386 JSON Merge Patches (lower memory).
+  int time_machine_storage_mode{1};
+  // When in delta mode, store a full checkpoint snapshot every N captures.
+  // 1 => every snapshot is a checkpoint (equivalent to full snapshots, but still stores patches).
+  int time_machine_checkpoint_stride{8};
   int time_machine_keep_snapshots{32};
   int time_machine_max_changes{200};
   int time_machine_max_value_chars{160};
