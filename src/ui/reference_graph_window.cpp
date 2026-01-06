@@ -10,6 +10,7 @@
 #include <cstring>
 #include <deque>
 #include <limits>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -110,7 +111,7 @@ struct PathState {
 struct ReferenceGraphState {
   std::uint64_t doc_revision{0};
   bool doc_loaded{false};
-  const Value* root{nullptr};
+  std::shared_ptr<const Value> root;
 
   // Mode + focus.
   bool global_mode{false};
@@ -319,7 +320,7 @@ void scan_outbound_from_entity(ReferenceGraphState& s,
   const auto* ent = find_game_entity(from_id);
   if (!ent) return;
 
-  const Value* entity_v = nebula4x::resolve_json_pointer(&root, ent->path);
+  const Value* entity_v = nebula4x::resolve_json_pointer(root, ent->path, /*accept_root_slash=*/true);
   if (!entity_v) return;
 
   ensure_node(s, from_id);
@@ -857,16 +858,16 @@ void apply_force_layout(ReferenceGraphState& s, float dt, bool enable) {
 
   // --- Integrate ---
   for (GraphNode* n0 : ns) {
-    GraphNode& n = *n0;
-    if (n.fixed) {
-      n.vel = ImVec2(0, 0);
+    GraphNode& node = *n0;
+    if (node.fixed) {
+      node.vel = ImVec2(0, 0);
       continue;
     }
 
-    n.vel.x *= s.damping;
-    n.vel.y *= s.damping;
-    n.pos.x += n.vel.x * dt;
-    n.pos.y += n.vel.y * dt;
+    node.vel.x *= s.damping;
+    node.vel.y *= s.damping;
+    node.pos.x += node.vel.x * dt;
+    node.pos.y += node.vel.y * dt;
   }
 }
 
@@ -928,7 +929,7 @@ void step_inbound_scan(ReferenceGraphState& s, const Value& root, const UIState&
       base = nebula4x::json_pointer_join(base, idxs);
       std::string pid = nebula4x::json_pointer_join(base, "id");
 
-      const Value* v = nebula4x::resolve_json_pointer(&root, pid);
+      const Value* v = nebula4x::resolve_json_pointer(root, pid, /*accept_root_slash=*/true);
       if (!v) return 0;
       if (!json_to_u64_id(*v, id)) return 0;
       return id;
@@ -1677,7 +1678,7 @@ void draw_reference_graph_window(Simulation& sim, UIState& ui) {
               s.expanded_out.insert(ctx_id);
             }
             if (ImGui::MenuItem("Scan inbound (whole state)")) {
-              start_inbound_scan(s, ctx_id, s.doc_revision, s.root);
+              start_inbound_scan(s, ctx_id, s.doc_revision, s.root.get());
               s.expanded_in.insert(ctx_id);
             }
             ImGui::Separator();

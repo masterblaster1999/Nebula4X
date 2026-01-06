@@ -73,7 +73,8 @@ bool ensure_game_json_cache(const Simulation& sim, double now_sec, double min_re
 
     // Still bump revision so windows can notice the refresh attempt and show the error.
     g_cache.revision++;
-    NEBULA_LOG_WARN("Game JSON cache refresh failed: %s", g_cache.error.c_str());
+    // Use the project's simple logger instead of a missing macro.
+    nebula4x::log::warn(std::string("Game JSON cache refresh failed: ") + g_cache.error);
     return g_cache.loaded && (bool)g_cache.root;
   }
 }

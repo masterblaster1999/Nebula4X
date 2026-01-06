@@ -30,6 +30,16 @@ std::string trim_copy(std::string_view s) {
   return std::string(s.substr(a, b - a));
 }
 
+inline void copy_cstr_trunc(char* dst, const char* src, std::size_t dst_cap) {
+  if (!dst || dst_cap == 0) return;
+#if defined(_MSC_VER)
+  strncpy_s(dst, dst_cap, src ? src : "", _TRUNCATE);
+#else
+  std::strncpy(dst, src ? src : "", dst_cap);
+  dst[dst_cap - 1] = '\0';
+#endif
+}
+
 bool icontains(std::string_view hay, std::string_view needle) {
   if (needle.empty()) return true;
   if (hay.size() < needle.size()) return false;
@@ -301,7 +311,7 @@ void draw_autosave_picker(UIState& ui) {
   // Convenience button: newest autosave vs current.
   if (ImGui::SmallButton("A = newest autosave, B = current")) {
     const auto& f0 = s.autosaves.files.front();
-    std::strncpy(s.a_path, f0.path.c_str(), sizeof(s.a_path));
+    copy_cstr_trunc(s.a_path, f0.path.c_str(), sizeof(s.a_path));
     s.a_path[sizeof(s.a_path) - 1] = '\0';
     s.a_is_current = false;
     s.b_is_current = true;
@@ -335,14 +345,14 @@ void draw_autosave_picker(UIState& ui) {
     ImGui::TextDisabled("Selected: %s", chosen->path.c_str());
 
     if (ImGui::Button("Set as A")) {
-      std::strncpy(s.a_path, chosen->path.c_str(), sizeof(s.a_path));
+      copy_cstr_trunc(s.a_path, chosen->path.c_str(), sizeof(s.a_path));
       s.a_path[sizeof(s.a_path) - 1] = '\0';
       s.a_is_current = false;
       s.diff_dirty = true;
     }
     ImGui::SameLine();
     if (ImGui::Button("Set as B")) {
-      std::strncpy(s.b_path, chosen->path.c_str(), sizeof(s.b_path));
+      copy_cstr_trunc(s.b_path, chosen->path.c_str(), sizeof(s.b_path));
       s.b_path[sizeof(s.b_path) - 1] = '\0';
       s.b_is_current = false;
       s.diff_dirty = true;
@@ -438,7 +448,6 @@ void draw_diff_results_table() {
         if (!icontains(before_p, f_txt) && !icontains(after_p, f_txt)) continue;
       }
 
-      ++visible_idx;
 
       ImGui::TableNextRow();
 
@@ -532,30 +541,30 @@ void draw_save_tools_window(Simulation& sim, UIState& ui, const char* save_path,
   if (!s.initialized) {
     // Seed paths from the main menu defaults.
     if (save_path && save_path[0] != '\0') {
-      std::strncpy(s.a_path, save_path, sizeof(s.a_path));
+      copy_cstr_trunc(s.a_path, save_path, sizeof(s.a_path));
       s.a_path[sizeof(s.a_path) - 1] = '\0';
     } else {
-      std::strncpy(s.a_path, "saves/save.json", sizeof(s.a_path));
+      copy_cstr_trunc(s.a_path, "saves/save.json", sizeof(s.a_path));
       s.a_path[sizeof(s.a_path) - 1] = '\0';
     }
 
     if (load_path && load_path[0] != '\0') {
-      std::strncpy(s.b_path, load_path, sizeof(s.b_path));
+      copy_cstr_trunc(s.b_path, load_path, sizeof(s.b_path));
       s.b_path[sizeof(s.b_path) - 1] = '\0';
     } else {
-      std::strncpy(s.b_path, "saves/load.json", sizeof(s.b_path));
+      copy_cstr_trunc(s.b_path, "saves/load.json", sizeof(s.b_path));
       s.b_path[sizeof(s.b_path) - 1] = '\0';
     }
 
     // Apply tab defaults.
     if (save_path && save_path[0] != '\0') {
-      std::strncpy(s.apply_doc_path, save_path, sizeof(s.apply_doc_path));
+      copy_cstr_trunc(s.apply_doc_path, save_path, sizeof(s.apply_doc_path));
       s.apply_doc_path[sizeof(s.apply_doc_path) - 1] = '\0';
     } else {
-      std::strncpy(s.apply_doc_path, "saves/save.json", sizeof(s.apply_doc_path));
+      copy_cstr_trunc(s.apply_doc_path, "saves/save.json", sizeof(s.apply_doc_path));
       s.apply_doc_path[sizeof(s.apply_doc_path) - 1] = '\0';
     }
-    std::strncpy(s.apply_patch_path, s.export_patch_json_path, sizeof(s.apply_patch_path));
+    copy_cstr_trunc(s.apply_patch_path, s.export_patch_json_path, sizeof(s.apply_patch_path));
     s.apply_patch_path[sizeof(s.apply_patch_path) - 1] = '\0';
 
     s.initialized = true;
@@ -594,7 +603,7 @@ void draw_save_tools_window(Simulation& sim, UIState& ui, const char* save_path,
 
         if (ImGui::SmallButton("A <- Save path")) {
           if (save_path && save_path[0] != '\0') {
-            std::strncpy(s.a_path, save_path, sizeof(s.a_path));
+            copy_cstr_trunc(s.a_path, save_path, sizeof(s.a_path));
             s.a_path[sizeof(s.a_path) - 1] = '\0';
             s.a_is_current = false;
             dirty = true;
@@ -603,7 +612,7 @@ void draw_save_tools_window(Simulation& sim, UIState& ui, const char* save_path,
         ImGui::SameLine();
         if (ImGui::SmallButton("A <- Load path")) {
           if (load_path && load_path[0] != '\0') {
-            std::strncpy(s.a_path, load_path, sizeof(s.a_path));
+            copy_cstr_trunc(s.a_path, load_path, sizeof(s.a_path));
             s.a_path[sizeof(s.a_path) - 1] = '\0';
             s.a_is_current = false;
             dirty = true;
@@ -627,7 +636,7 @@ void draw_save_tools_window(Simulation& sim, UIState& ui, const char* save_path,
 
         if (ImGui::SmallButton("B <- Save path")) {
           if (save_path && save_path[0] != '\0') {
-            std::strncpy(s.b_path, save_path, sizeof(s.b_path));
+            copy_cstr_trunc(s.b_path, save_path, sizeof(s.b_path));
             s.b_path[sizeof(s.b_path) - 1] = '\0';
             s.b_is_current = false;
             dirty = true;
@@ -636,7 +645,7 @@ void draw_save_tools_window(Simulation& sim, UIState& ui, const char* save_path,
         ImGui::SameLine();
         if (ImGui::SmallButton("B <- Load path")) {
           if (load_path && load_path[0] != '\0') {
-            std::strncpy(s.b_path, load_path, sizeof(s.b_path));
+            copy_cstr_trunc(s.b_path, load_path, sizeof(s.b_path));
             s.b_path[sizeof(s.b_path) - 1] = '\0';
             s.b_is_current = false;
             dirty = true;
@@ -732,7 +741,7 @@ void draw_save_tools_window(Simulation& sim, UIState& ui, const char* save_path,
             s.export_status = std::string("Wrote ") + s.export_patch_json_path;
 
             // Keep apply tab seeded.
-            std::strncpy(s.apply_patch_path, s.export_patch_json_path, sizeof(s.apply_patch_path));
+            copy_cstr_trunc(s.apply_patch_path, s.export_patch_json_path, sizeof(s.apply_patch_path));
             s.apply_patch_path[sizeof(s.apply_patch_path) - 1] = '\0';
           } catch (const std::exception& e) {
             s.export_status = std::string("Patch generation failed: ") + e.what();

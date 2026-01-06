@@ -1118,9 +1118,9 @@ void draw_data_lenses_window(Simulation& sim, UIState& ui) {
               const bool idish = (!last_tok.empty() && (last_tok == "id" ||
                                                        (last_tok.size() >= 3 && last_tok.substr(last_tok.size() - 3) == "_id") ||
                                                        (last_tok.size() >= 4 && last_tok.substr(last_tok.size() - 4) == "_ids"))) ||
-                                 (!col->name.empty() && (col->name == "id" ||
-                                                        (col->name.size() >= 3 && col->name.substr(col->name.size() - 3) == "_id") ||
-                                                        (col->name.size() >= 4 && col->name.substr(col->name.size() - 4) == "_ids")));
+                                 (!col->label.empty() && (col->label == "id" ||
+                                                        (col->label.size() >= 3 && col->label.substr(col->label.size() - 3) == "_id") ||
+                                                        (col->label.size() >= 4 && col->label.substr(col->label.size() - 4) == "_ids")));
               if (idish) {
                 ent = find_game_entity(ent_id);
               }

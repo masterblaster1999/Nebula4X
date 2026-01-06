@@ -24,6 +24,7 @@
 #include "nebula4x/util/json_pointer_autocomplete.h"
 #include "nebula4x/util/log.h"
 
+#include "ui/game_entity_index.h"
 #include "ui/game_json_cache.h"
 
 namespace nebula4x::ui {

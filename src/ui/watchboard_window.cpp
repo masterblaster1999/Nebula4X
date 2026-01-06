@@ -83,6 +83,31 @@ std::string format_number(const double x) {
   return std::string(buf);
 }
 
+
+std::int64_t sim_tick_hours(const GameState& st) {
+  const std::int64_t day = st.date.days_since_epoch();
+  const int hod = std::clamp(st.hour_of_day, 0, 23);
+  return day * 24 + static_cast<std::int64_t>(hod);
+}
+
+void draw_autocomplete_list(const char* id, char* buf, const int buf_cap, const nebula4x::json::Value& root) {
+  if (!id || !buf || buf_cap <= 0) return;
+
+  const std::vector<std::string> sugg =
+      nebula4x::suggest_json_pointer_completions(root, buf, 10, /*accept_root_slash=*/true, /*case_sensitive=*/false);
+  if (sugg.empty()) return;
+
+  const float h = std::min(140.0f, 18.0f * static_cast<float>(sugg.size()) + 6.0f);
+  if (ImGui::BeginListBox(id, ImVec2(-1.0f, h))) {
+    for (const auto& s : sugg) {
+      if (ImGui::Selectable(s.c_str(), false)) {
+        std::snprintf(buf, static_cast<std::size_t>(buf_cap), "%s", s.c_str());
+      }
+    }
+    ImGui::EndListBox();
+  }
+}
+
 // Coerce common JSON types into a numeric value for aggregation.
 //
 // - number: the number
@@ -349,8 +374,7 @@ struct WatchboardState {
   bool initialized{false};
 
   // Cached doc.
-  std::string doc_text;
-  std::shared_ptr<nebula4x::json::Value> root;
+  std::shared_ptr<const nebula4x::json::Value> root;
   std::string doc_error;
   bool doc_loaded{false};
   std::uint64_t doc_revision{0};
@@ -374,31 +398,22 @@ struct WatchboardState {
 };
 
 void refresh_doc(WatchboardState& st, Simulation& sim, const bool force) {
-  std::string err;
-  if (!ensure_game_json_cache(sim, /*refresh_interval=*/0.0f, force, &err)) {
-    st.doc_error = err;
-    st.doc_loaded = false;
-    return;
-  }
+  const double now = ImGui::GetTime();
+  // Ask the shared cache to refresh if needed. We keep a local snapshot so the user can
+  // freeze the watchboard even if other windows refresh the cache.
+  ensure_game_json_cache(sim, now, st.refresh_sec, force);
+  const auto& cache = game_json_cache();
 
-  const auto* cache = get_game_json_cache();
-  if (!cache) {
-    st.doc_error = "Game JSON cache unavailable";
-    st.doc_loaded = false;
-    return;
-  }
-
-  if (!force && cache->revision == st.doc_revision) {
+  if (!force && cache.revision == st.doc_revision) {
     // nothing changed
-    st.doc_loaded = true;
+    st.doc_loaded = (bool)st.root;
     return;
   }
 
-  st.doc_revision = cache->revision;
-  st.doc_text = cache->text;
-  st.doc_error = cache->error;
-  st.doc_loaded = cache->ok;
-  st.root = cache->root;
+  st.doc_revision = cache.revision;
+  st.doc_error = cache.error;
+  st.root = cache.root;
+  st.doc_loaded = cache.loaded && (bool)st.root;
 }
 
 std::string default_label_from_path(const std::string& path) {
