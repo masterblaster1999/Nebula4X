@@ -1667,8 +1667,8 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
 
     std::vector<Id> region_ids;
     region_ids.reserve(center_idxs.size());
-    std::unordered_set<std::string> used_names;
-    used_names.reserve(center_idxs.size() * 2);
+    std::unordered_set<std::string> used_region_names;
+    used_region_names.reserve(center_idxs.size() * 2);
 
     auto sample_range = [&](double lo, double hi) {
       return rand_real(rrng, lo, hi);
@@ -1680,7 +1680,7 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
 
       Region reg;
       reg.id = allocate_id(s);
-      reg.name = gen_region_name(used_names);
+      reg.name = gen_region_name(used_region_names);
       reg.center = systems[static_cast<std::size_t>(ci)].galaxy_pos;
       reg.theme = def.theme;
 

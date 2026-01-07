@@ -596,8 +596,7 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       }
       if (auto it = obj->find("autosave_game_dir"); it != obj->end()) {
         const std::string dir = it->second.string_value(std::string(ui_.autosave_game_dir));
-        std::strncpy(ui_.autosave_game_dir, dir.c_str(), sizeof(ui_.autosave_game_dir));
-        ui_.autosave_game_dir[sizeof(ui_.autosave_game_dir) - 1] = '\0';
+        std::snprintf(ui_.autosave_game_dir, sizeof(ui_.autosave_game_dir), "%s", dir.c_str());
       }
 
       // New Game dialog defaults.
@@ -982,7 +981,7 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       }
 
       if (auto it = obj->find("entity_inspector_id"); it != obj->end()) {
-        ui_.entity_inspector_id = static_cast<std::uint64_t>(it->second.number_value(ui_.entity_inspector_id));
+        ui_.entity_inspector_id = static_cast<std::uint64_t>(it->second.number_value(static_cast<double>(ui_.entity_inspector_id)));
       }
       if (auto it = obj->find("entity_inspector_auto_scan"); it != obj->end()) {
         ui_.entity_inspector_auto_scan = it->second.bool_value(ui_.entity_inspector_auto_scan);
@@ -999,7 +998,7 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
 
       // Reference Graph preferences.
       if (auto it = obj->find("reference_graph_focus_id"); it != obj->end()) {
-        ui_.reference_graph_focus_id = static_cast<std::uint64_t>(it->second.number_value(ui_.reference_graph_focus_id));
+        ui_.reference_graph_focus_id = static_cast<std::uint64_t>(it->second.number_value(static_cast<double>(ui_.reference_graph_focus_id)));
       }
       if (auto it = obj->find("reference_graph_show_inbound"); it != obj->end()) {
         ui_.reference_graph_show_inbound = it->second.bool_value(ui_.reference_graph_show_inbound);
@@ -1156,7 +1155,7 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
     // Data Lenses (procedural tables over JSON arrays).
     {
       if (auto it = obj->find("next_json_table_view_id"); it != obj->end()) {
-        ui_.next_json_table_view_id = static_cast<std::uint64_t>(it->second.number_value(ui_.next_json_table_view_id));
+        ui_.next_json_table_view_id = static_cast<std::uint64_t>(it->second.number_value(static_cast<double>(ui_.next_json_table_view_id)));
       }
       if (auto it = obj->find("json_table_views"); it != obj->end()) {
         if (const auto* arr = it->second.as_array()) {
@@ -1253,7 +1252,7 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
     // Dashboards (procedural widgets over Data Lenses).
     {
       if (auto it = obj->find("next_json_dashboard_id"); it != obj->end()) {
-        ui_.next_json_dashboard_id = static_cast<std::uint64_t>(it->second.number_value(ui_.next_json_dashboard_id));
+        ui_.next_json_dashboard_id = static_cast<std::uint64_t>(it->second.number_value(static_cast<double>(ui_.next_json_dashboard_id)));
       }
       if (auto it = obj->find("json_dashboards"); it != obj->end()) {
         if (const auto* arr = it->second.as_array()) {
@@ -1272,7 +1271,7 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
               cfg.name = it2->second.string_value(cfg.name);
             }
             if (auto it2 = o->find("table_view_id"); it2 != o->end()) {
-              cfg.table_view_id = static_cast<std::uint64_t>(it2->second.number_value(cfg.table_view_id));
+              cfg.table_view_id = static_cast<std::uint64_t>(it2->second.number_value(static_cast<double>(cfg.table_view_id)));
             }
             if (auto it2 = o->find("scan_rows"); it2 != o->end()) {
               cfg.scan_rows = static_cast<int>(it2->second.number_value(cfg.scan_rows));
@@ -1332,7 +1331,7 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
     // Pivot Tables (procedural group-by aggregations over Data Lenses).
     {
       if (auto it = obj->find("next_json_pivot_id"); it != obj->end()) {
-        ui_.next_json_pivot_id = static_cast<std::uint64_t>(it->second.number_value(ui_.next_json_pivot_id));
+        ui_.next_json_pivot_id = static_cast<std::uint64_t>(it->second.number_value(static_cast<double>(ui_.next_json_pivot_id)));
       }
       if (auto it = obj->find("json_pivots"); it != obj->end()) {
         if (const auto* arr = it->second.as_array()) {
@@ -1351,7 +1350,7 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
               cfg.name = it2->second.string_value(cfg.name);
             }
             if (auto it2 = o->find("table_view_id"); it2 != o->end()) {
-              cfg.table_view_id = static_cast<std::uint64_t>(it2->second.number_value(cfg.table_view_id));
+              cfg.table_view_id = static_cast<std::uint64_t>(it2->second.number_value(static_cast<double>(cfg.table_view_id)));
             }
             if (auto it2 = o->find("scan_rows"); it2 != o->end()) {
               cfg.scan_rows = static_cast<int>(it2->second.number_value(cfg.scan_rows));

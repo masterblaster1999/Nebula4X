@@ -11,7 +11,6 @@
 namespace nebula4x {
 namespace {
 
-constexpr const char* kDeltaSaveFormatV1 = "nebula4x.delta_save.v1";
 
 const json::Value& require_key(const json::Object& o, const std::string& key) {
   auto it = o.find(key);

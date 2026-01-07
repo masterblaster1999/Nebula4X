@@ -7,6 +7,9 @@
 
 namespace nebula4x {
 
+// Delta-save format strings.
+inline constexpr const char kDeltaSaveFormatV1[] = "nebula4x.delta_save.v1";
+
 // A lightweight container for storing a base Nebula4X save plus a sequence of
 // RFC 7386 JSON Merge Patches.
 //
@@ -38,7 +41,7 @@ struct DeltaSavePatch {
 };
 
 struct DeltaSaveFile {
-  std::string format{"nebula4x.delta_save.v1"};
+  std::string format{kDeltaSaveFormatV1};
   json::Value base;
   std::string base_state_digest_hex;
   std::vector<DeltaSavePatch> patches;

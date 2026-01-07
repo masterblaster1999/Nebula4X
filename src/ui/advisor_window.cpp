@@ -179,12 +179,22 @@ void draw_advisor_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& se
   if (ImGui::Checkbox("Colonies", &st.opt.include_colonies)) st.dirty = true;
 
   if (st.opt.include_ships) {
-    if (ImGui::SliderFloat("Low fuel threshold", &st.opt.low_fuel_fraction, 0.05f, 0.95f, "%.0f%%",
-                           ImGuiSliderFlags_AlwaysClamp)) {
+    // Show sliders in percent for UI clarity but store as fractions in [0, 1].
+    double fuel_pct = std::clamp(st.opt.low_fuel_fraction, 0.0, 1.0) * 100.0;
+    const double fuel_min = 5.0;
+    const double fuel_max = 95.0;
+    if (ImGui::SliderScalar("Low fuel threshold", ImGuiDataType_Double, &fuel_pct, &fuel_min, &fuel_max, "%.0f%%",
+                            ImGuiSliderFlags_AlwaysClamp)) {
+      st.opt.low_fuel_fraction = std::clamp(fuel_pct / 100.0, 0.0, 1.0);
       st.dirty = true;
     }
-    if (ImGui::SliderFloat("Low HP threshold", &st.opt.low_hp_fraction, 0.10f, 0.99f, "%.0f%%",
-                           ImGuiSliderFlags_AlwaysClamp)) {
+
+    double hp_pct = std::clamp(st.opt.low_hp_fraction, 0.0, 1.0) * 100.0;
+    const double hp_min = 10.0;
+    const double hp_max = 99.0;
+    if (ImGui::SliderScalar("Low HP threshold", ImGuiDataType_Double, &hp_pct, &hp_min, &hp_max, "%.0f%%",
+                            ImGuiSliderFlags_AlwaysClamp)) {
+      st.opt.low_hp_fraction = std::clamp(hp_pct / 100.0, 0.0, 1.0);
       st.dirty = true;
     }
   }

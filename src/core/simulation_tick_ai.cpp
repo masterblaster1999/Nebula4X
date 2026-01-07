@@ -1910,8 +1910,6 @@ void Simulation::tick_ai() {
         }
         if (region_systems.empty()) continue;
 
-        const double fleet_speed = fleet_min_speed_km_s(fl, leader->speed_km_s);
-
         // Engage detected hostiles anywhere in the region.
         {
           Id best = kInvalidId;
@@ -2212,7 +2210,6 @@ void Simulation::tick_ai() {
         // No local work: route to the best frontier system.
         if (!cache) continue;
 
-        const double fleet_speed = fleet_min_speed_km_s(fl, leader->speed_km_s);
         if (fleet_speed <= 0.0) continue;
 
         Id best_frontier = kInvalidId;
@@ -2322,12 +2319,6 @@ void Simulation::tick_ai() {
       }
 
       if (fl.mission.type == FleetMissionType::EscortFreighters) {
-        auto cargo_used_tons = [&](const Ship& s) {
-          double used = 0.0;
-          for (const auto& [_, tons] : s.cargo) used += std::max(0.0, tons);
-          return used;
-        };
-
         // Precompute friendly docking points by system once per planning pass.
         std::unordered_map<Id, std::vector<Vec2>> friendly_docks_by_system;
         friendly_docks_by_system.reserve(state_.colonies.size() * 2 + 8);
