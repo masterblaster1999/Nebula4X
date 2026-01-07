@@ -15,6 +15,7 @@
 #include <string>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <variant>
 #include <vector>
 
@@ -1214,7 +1215,8 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   ImGui::BulletText("Wheel: zoom (to cursor)");
   ImGui::BulletText("Middle drag: pan");
   ImGui::BulletText("Minimap (M): click/drag to pan");
-  ImGui::BulletText("Hold D + click: route ruler (plan A\xe2\x86\x92B)");
+  // Avoid \x escape parsing pitfalls on MSVC (\x consumes all following hex digits).
+  ImGui::BulletText("Hold D + click: route ruler (plan A->B)");
   ImGui::BulletText("R: reset view");
   ImGui::BulletText("Left click: select system");
   ImGui::BulletText("Right click: route selected ship (Shift queues)");

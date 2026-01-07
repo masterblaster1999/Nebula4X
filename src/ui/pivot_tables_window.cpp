@@ -175,14 +175,14 @@ static std::string value_to_key_string(const nebula4x::json::Value* v, int max_l
   return "(unknown)";
 }
 
-static JsonTableViewConfig* find_table_view(UIState& ui, std::uint64_t id) {
+[[maybe_unused]] static JsonTableViewConfig* find_table_view(UIState& ui, std::uint64_t id) {
   for (auto& v : ui.json_table_views) {
     if (v.id == id) return &v;
   }
   return nullptr;
 }
 
-static const JsonTableViewConfig* find_table_view(const UIState& ui, std::uint64_t id) {
+[[maybe_unused]] static const JsonTableViewConfig* find_table_view(const UIState& ui, std::uint64_t id) {
   for (const auto& v : ui.json_table_views) {
     if (v.id == id) return &v;
   }
