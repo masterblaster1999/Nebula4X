@@ -18,6 +18,7 @@
 #include "ui/new_game_modal.h"
 #include "ui/economy_window.h"
 #include "ui/planner_window.h"
+#include "ui/regions_window.h"
 #include "ui/freight_window.h"
 #include "ui/fuel_window.h"
 #include "ui/advisor_window.h"
@@ -187,6 +188,7 @@ void App::frame() {
       if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_D)) ui_.show_time_machine_window = !ui_.show_time_machine_window;
       if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_A)) ui_.show_advisor_window = !ui_.show_advisor_window;
       if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_B)) ui_.show_colony_profiles_window = !ui_.show_colony_profiles_window;
+      if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_R)) ui_.show_regions_window = !ui_.show_regions_window;
       if (ImGui::IsKeyPressed(ImGuiKey_F1)) ui_.show_help_window = !ui_.show_help_window;
 
       // Quick window toggles.
@@ -329,6 +331,7 @@ void App::frame() {
   if (ui_.show_production_window) draw_production_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   if (ui_.show_economy_window) draw_economy_window(sim_, ui_, selected_colony_, selected_body_);
   if (ui_.show_planner_window) draw_planner_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  if (ui_.show_regions_window) draw_regions_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   if (ui_.show_freight_window) draw_freight_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   if (ui_.show_fuel_window) draw_fuel_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   if (ui_.show_advisor_window) draw_advisor_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
@@ -769,6 +772,9 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       if (auto it = obj->find("system_map_follow_selected"); it != obj->end()) {
         ui_.system_map_follow_selected = it->second.bool_value(ui_.system_map_follow_selected);
       }
+      if (auto it = obj->find("system_map_show_minimap"); it != obj->end()) {
+        ui_.system_map_show_minimap = it->second.bool_value(ui_.system_map_show_minimap);
+      }
       if (auto it = obj->find("galaxy_map_starfield"); it != obj->end()) {
         ui_.galaxy_map_starfield = it->second.bool_value(ui_.galaxy_map_starfield);
       }
@@ -777,6 +783,9 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       }
       if (auto it = obj->find("galaxy_map_selected_route"); it != obj->end()) {
         ui_.galaxy_map_selected_route = it->second.bool_value(ui_.galaxy_map_selected_route);
+      }
+      if (auto it = obj->find("galaxy_map_show_minimap"); it != obj->end()) {
+        ui_.galaxy_map_show_minimap = it->second.bool_value(ui_.galaxy_map_show_minimap);
       }
       if (auto it = obj->find("map_starfield_density"); it != obj->end()) {
         ui_.map_starfield_density = static_cast<float>(it->second.number_value(ui_.map_starfield_density));
@@ -878,6 +887,9 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       }
       if (auto it = obj->find("show_planner_window"); it != obj->end()) {
         ui_.show_planner_window = it->second.bool_value(ui_.show_planner_window);
+      }
+      if (auto it = obj->find("show_regions_window"); it != obj->end()) {
+        ui_.show_regions_window = it->second.bool_value(ui_.show_regions_window);
       }
       if (auto it = obj->find("show_freight_window"); it != obj->end()) {
         ui_.show_freight_window = it->second.bool_value(ui_.show_freight_window);
@@ -1491,9 +1503,11 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     o["system_map_fleet_formation_preview"] = ui_.system_map_fleet_formation_preview;
     o["system_map_missile_salvos"] = ui_.system_map_missile_salvos;
     o["system_map_follow_selected"] = ui_.system_map_follow_selected;
+    o["system_map_show_minimap"] = ui_.system_map_show_minimap;
     o["galaxy_map_starfield"] = ui_.galaxy_map_starfield;
     o["galaxy_map_grid"] = ui_.galaxy_map_grid;
     o["galaxy_map_selected_route"] = ui_.galaxy_map_selected_route;
+    o["galaxy_map_show_minimap"] = ui_.galaxy_map_show_minimap;
     o["map_starfield_density"] = static_cast<double>(ui_.map_starfield_density);
     o["map_starfield_parallax"] = static_cast<double>(ui_.map_starfield_parallax);
     o["map_grid_opacity"] = static_cast<double>(ui_.map_grid_opacity);
@@ -1528,6 +1542,7 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     o["show_production_window"] = ui_.show_production_window;
     o["show_economy_window"] = ui_.show_economy_window;
     o["show_planner_window"] = ui_.show_planner_window;
+    o["show_regions_window"] = ui_.show_regions_window;
     o["show_freight_window"] = ui_.show_freight_window;
     o["show_fuel_window"] = ui_.show_fuel_window;
     o["show_time_warp_window"] = ui_.show_time_warp_window;
@@ -1735,10 +1750,12 @@ void App::reset_ui_theme_defaults() {
   ui_.system_map_fleet_formation_preview = true;
   ui_.system_map_missile_salvos = false;
   ui_.system_map_follow_selected = false;
+  ui_.system_map_show_minimap = true;
   ui_.system_map_missile_salvos = false;
   ui_.galaxy_map_starfield = true;
   ui_.galaxy_map_grid = false;
   ui_.galaxy_map_selected_route = true;
+  ui_.galaxy_map_show_minimap = true;
   ui_.map_starfield_density = 1.0f;
   ui_.map_starfield_parallax = 0.15f;
   ui_.map_grid_opacity = 1.0f;
@@ -1755,6 +1772,7 @@ void App::reset_window_layout_defaults() {
   ui_.show_production_window = false;
   ui_.show_economy_window = false;
   ui_.show_planner_window = false;
+  ui_.show_regions_window = false;
   ui_.show_freight_window = false;
   ui_.show_fuel_window = false;
   ui_.show_time_warp_window = false;

@@ -414,9 +414,13 @@ void Simulation::survey_jump_point_for_faction(Id faction_id, Id jump_point_id) 
     if (jid == kInvalidId) return false;
     if (std::find(f.surveyed_jump_points.begin(), f.surveyed_jump_points.end(), jid) !=
         f.surveyed_jump_points.end()) {
+      // If we already know this jump, discard any stale partial progress.
+      f.jump_survey_progress.erase(jid);
       return false;
     }
     f.surveyed_jump_points.push_back(jid);
+    // Survey completed: clear any partial progress entry.
+    f.jump_survey_progress.erase(jid);
     return true;
   };
 

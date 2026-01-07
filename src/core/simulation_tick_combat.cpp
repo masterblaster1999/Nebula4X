@@ -1,6 +1,7 @@
 #include "nebula4x/core/simulation.h"
 
 #include "simulation_internal.h"
+#include "simulation_sensors.h"
 
 #include <algorithm>
 #include <cmath>
@@ -73,6 +74,7 @@ void Simulation::tick_combat(double dt_days) {
     Id faction_id{kInvalidId};
     Id system_id{kInvalidId};
     Vec2 position_mkm{0.0, 0.0};
+    double sensor_range_mkm{0.0};
     double weapon_damage{0.0};
     double weapon_range_mkm{0.0};
   };
@@ -86,11 +88,13 @@ void Simulation::tick_combat(double dt_days) {
 
     double dmg = 0.0;
     double range = 0.0;
+    double sensor = 0.0;
     for (const auto& [inst_id, count] : col.installations) {
       if (count <= 0) continue;
       const auto it = content_.installations.find(inst_id);
       if (it == content_.installations.end()) continue;
       const auto& def = it->second;
+      sensor = std::max(sensor, std::max(0.0, def.sensor_range_mkm));
       if (def.weapon_damage <= 0.0 || def.weapon_range_mkm <= 0.0) continue;
       dmg += def.weapon_damage * static_cast<double>(count);
       range = std::max(range, def.weapon_range_mkm);
@@ -102,6 +106,7 @@ void Simulation::tick_combat(double dt_days) {
       b.faction_id = col.faction_id;
       b.system_id = body->system_id;
       b.position_mkm = body->position_mkm;
+      b.sensor_range_mkm = sensor;
       b.weapon_damage = dmg;
       b.weapon_range_mkm = range;
       colony_batteries.push_back(b);
@@ -190,6 +195,75 @@ void Simulation::tick_combat(double dt_days) {
     ss.setf(std::ios::fixed);
     ss << std::setprecision(1) << x;
     return ss.str();
+  };
+
+  // Environmental attenuation factor for a system (match simulation_sensors).
+  auto system_env_mult = [&](Id system_id) -> double {
+    const auto* sys = find_ptr(state_.systems, system_id);
+    if (!sys) return 1.0;
+    const double nebula = std::clamp(sys->nebula_density, 0.0, 1.0);
+    return std::clamp(1.0 - 0.65 * nebula, 0.25, 1.0);
+  };
+
+  // Expected beam hit chance (no RNG) based on range + relative angular velocity
+  // (tracking) + target signature.
+  //
+  // This is inspired by classic space-4X / space-sim mechanics where weapon
+  // accuracy degrades with range and with poor tracking against fast targets.
+  auto beam_hit_chance = [&](Id system_id, const Vec2& attacker_pos, const Vec2& attacker_vel_mkm_per_day,
+                             double attacker_sensor_mkm_raw, double tracking_ref_ang_per_day,
+                             double weapon_range_mkm, const Ship& target, const ShipDesign* target_design,
+                             double dist_mkm) -> double {
+    if (!cfg_.enable_beam_hit_chance) return 1.0;
+
+    const double dist = std::max(1e-9, dist_mkm);
+    const double range = std::max(1e-9, weapon_range_mkm);
+
+    // --- range factor ---
+    const double x = std::clamp(dist / range, 0.0, 1.0);
+    const double range_pen = std::clamp(cfg_.beam_range_penalty_at_max, 0.0, 1.0);
+    double range_factor = 1.0 - range_pen * x * x;
+    if (!std::isfinite(range_factor)) range_factor = 0.0;
+    range_factor = std::clamp(range_factor, 0.0, 1.0);
+
+    // --- tracking factor ---
+    const double env_mult = system_env_mult(system_id);
+    double attacker_sensor_mkm = std::max(0.0, attacker_sensor_mkm_raw) * env_mult;
+    attacker_sensor_mkm = std::max(attacker_sensor_mkm, std::max(0.0, cfg_.beam_tracking_min_sensor_range_mkm));
+
+    const double ref_sensor = std::max(1e-9, cfg_.beam_tracking_reference_sensor_range_mkm);
+    double tracking_ang = std::max(1e-9, tracking_ref_ang_per_day) * (attacker_sensor_mkm / ref_sensor);
+
+    // Signature influences tracking: stealth/EMCON makes it harder to keep a lock.
+    double sig = sim_sensors::effective_signature_multiplier(*this, target, target_design);
+    if (!std::isfinite(sig) || sig <= 0.0) sig = 1.0;
+    const double max_sig = sim_sensors::max_signature_multiplier_for_detection(*this);
+    sig = std::clamp(sig, 0.05, std::max(0.05, max_sig));
+
+    const double exp = std::clamp(cfg_.beam_signature_exponent, 0.0, 2.0);
+    double sig_scale = std::pow(sig, exp);
+    if (!std::isfinite(sig_scale) || sig_scale <= 0.0) sig_scale = 1.0;
+    tracking_ang *= sig_scale;
+
+    const Vec2 r = target.position_mkm - attacker_pos;
+    const Vec2 r_unit = r.normalized();
+    const Vec2 rel_v = target.velocity_mkm_per_day - attacker_vel_mkm_per_day;
+    const double radial = rel_v.x * r_unit.x + rel_v.y * r_unit.y;
+    const Vec2 trans = rel_v - r_unit * radial;
+    const double ang = trans.length() / dist;
+    const double denom = std::max(1e-9, tracking_ang);
+    const double ratio = ang / denom;
+    double tracking_factor = 1.0 / (1.0 + ratio * ratio);
+    if (!std::isfinite(tracking_factor)) tracking_factor = 0.0;
+    tracking_factor = std::clamp(tracking_factor, 0.0, 1.0);
+
+    // --- final hit chance ---
+    const double base = std::clamp(cfg_.beam_base_hit_chance, 0.0, 1.0);
+    const double min_hit = std::clamp(cfg_.beam_min_hit_chance, 0.0, 1.0);
+    double hit = base * range_factor * tracking_factor;
+    if (!std::isfinite(hit)) hit = 0.0;
+    hit = std::clamp(hit, min_hit, 1.0);
+    return hit;
   };
 
 
@@ -837,7 +911,14 @@ void Simulation::tick_combat(double dt_days) {
     }
 
     if (chosen != kInvalidId) {
-      incoming_damage[chosen] += ad->weapon_damage * dt_days;
+      const auto* tgt = find_ptr(state_.ships, chosen);
+      const ShipDesign* td = tgt ? find_design(tgt->design_id) : nullptr;
+      const double sensor_mkm_raw = sim_sensors::sensor_range_mkm_with_mode(*this, attacker, *ad);
+      const double hit = tgt ? beam_hit_chance(attacker.system_id, attacker.position_mkm, attacker.velocity_mkm_per_day,
+                                               sensor_mkm_raw, cfg_.beam_tracking_ref_ang_per_day,
+                                               ad->weapon_range_mkm, *tgt, td, chosen_dist)
+                             : 1.0;
+      incoming_damage[chosen] += ad->weapon_damage * dt_days * hit;
       attackers_for_target[chosen].push_back(aid);
     }
   }
@@ -871,7 +952,13 @@ void Simulation::tick_combat(double dt_days) {
     }
 
     if (chosen != kInvalidId) {
-      incoming_damage[chosen] += bat.weapon_damage * dt_days;
+      const auto* tgt = find_ptr(state_.ships, chosen);
+      const ShipDesign* td = tgt ? find_design(tgt->design_id) : nullptr;
+      const double hit = tgt ? beam_hit_chance(bat.system_id, bat.position_mkm, Vec2{0.0, 0.0},
+                                               bat.sensor_range_mkm, cfg_.colony_beam_tracking_ref_ang_per_day,
+                                               bat.weapon_range_mkm, *tgt, td, chosen_dist)
+                             : 1.0;
+      incoming_damage[chosen] += bat.weapon_damage * dt_days * hit;
       colony_attackers_for_target[chosen].push_back(bat.colony_id);
     }
   }

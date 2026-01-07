@@ -30,7 +30,7 @@ struct ContentDB {
 
 // A single save-game state.
 struct GameState {
-  int save_version{42};
+  int save_version{45};
   Date date;
 
   // Hour-of-day within the current Date (0..23).
@@ -46,6 +46,8 @@ struct GameState {
   std::uint64_t next_event_seq{1};
 
   std::unordered_map<Id, StarSystem> systems;
+  // Procedural galaxy regions/sectors (optional).
+  std::unordered_map<Id, Region> regions;
   std::unordered_map<Id, Body> bodies;
   std::unordered_map<Id, JumpPoint> jump_points;
   std::unordered_map<Id, Ship> ships;

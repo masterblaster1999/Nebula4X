@@ -1877,6 +1877,222 @@ void Simulation::tick_ai() {
       }
 
 
+
+
+
+
+
+
+      if (fl.mission.type == FleetMissionType::PatrolRegion) {
+        // Region-wide patrol: cycle through discovered systems in a region and
+        // visit key waypoints (friendly colonies, then jump points, then major bodies).
+        // Responds to detected hostiles anywhere in the region (requires sensor coverage).
+
+        Id rid = fl.mission.patrol_region_id;
+        if (rid == kInvalidId) {
+          if (const auto* lsys = find_ptr(state_.systems, leader->system_id)) {
+            rid = lsys->region_id;
+            if (rid != kInvalidId) fl.mission.patrol_region_id = rid;
+          }
+        }
+        if (rid == kInvalidId) continue;
+        if (!find_ptr(state_.regions, rid)) continue;
+
+        // Build deterministic list of discovered systems in this region.
+        std::vector<Id> region_systems;
+        region_systems.reserve(16);
+        for (Id sid : sorted_keys(state_.systems)) {
+          const auto* rsys = find_ptr(state_.systems, sid);
+          if (!rsys) continue;
+          if (rsys->region_id != rid) continue;
+          if (!is_system_discovered_by_faction(fl.faction_id, sid)) continue;
+          region_systems.push_back(sid);
+        }
+        if (region_systems.empty()) continue;
+
+        const double fleet_speed = fleet_min_speed_km_s(fl, leader->speed_km_s);
+
+        // Engage detected hostiles anywhere in the region.
+        {
+          Id best = kInvalidId;
+          int best_prio = 999;
+          double best_eta = std::numeric_limits<double>::infinity();
+
+          for (Id sid : region_systems) {
+            const auto hostiles = detected_hostile_ships_in_system(fl.faction_id, sid);
+            for (Id tid : hostiles) {
+              const Ship* tgt = find_ptr(state_.ships, tid);
+              if (!tgt) continue;
+              const ShipDesign* td = find_design(tgt->design_id);
+              const ShipRole tr = td ? td->role : ShipRole::Unknown;
+              const int prio = combat_target_priority(tr);
+              const double eta = estimate_eta_days_to_pos(leader->system_id, leader->position_mkm,
+                                                         fl.faction_id, fleet_speed,
+                                                         tgt->system_id, tgt->position_mkm);
+              if (!std::isfinite(eta)) continue;
+
+              if (best == kInvalidId || prio < best_prio ||
+                  (prio == best_prio && (eta < best_eta - 1e-9 ||
+                                         (std::abs(eta - best_eta) <= 1e-9 && tid < best)))) {
+                best = tid;
+                best_prio = prio;
+                best_eta = eta;
+              }
+            }
+          }
+
+          if (best != kInvalidId && fleet_orders_overrideable(fl)) {
+            (void)clear_fleet_orders(fid);
+            (void)issue_fleet_attack_ship(fid, best, /*restrict_to_discovered=*/true);
+            fl.mission.last_target_ship_id = best;
+            continue;
+          }
+        }
+
+        // If we're not in the region yet, route to the nearest discovered system in it.
+        const StarSystem* cur_sys = find_ptr(state_.systems, leader->system_id);
+        const bool in_region = cur_sys && cur_sys->region_id == rid;
+        if (!in_region) {
+          if (fleet_orders_overrideable(fl)) {
+            Id best_sys = kInvalidId;
+            double best_eta = std::numeric_limits<double>::infinity();
+            int best_idx = 0;
+
+            for (int i = 0; i < static_cast<int>(region_systems.size()); ++i) {
+              const Id sid = region_systems[i];
+              const double eta = estimate_eta_days_to_system(leader->system_id, leader->position_mkm,
+                                                            fl.faction_id, fleet_speed, sid);
+              if (!std::isfinite(eta)) continue;
+              if (best_sys == kInvalidId || eta < best_eta - 1e-9 ||
+                  (std::abs(eta - best_eta) <= 1e-9 && sid < best_sys)) {
+                best_sys = sid;
+                best_eta = eta;
+                best_idx = i;
+              }
+            }
+
+            if (best_sys != kInvalidId) {
+              (void)clear_fleet_orders(fid);
+              (void)issue_fleet_travel_to_system(fid, best_sys, /*restrict_to_discovered=*/true);
+              fl.mission.patrol_region_system_index = best_idx;
+              fl.mission.patrol_region_waypoint_index = 0;
+            }
+          }
+          continue;
+        }
+
+        // Continue patrol only when idle.
+        if (!fleet_all_orders_empty(fl)) continue;
+
+        // Determine the current target system in the region.
+        const int raw_sys_idx = (fl.mission.patrol_region_system_index < 0) ? 0 : fl.mission.patrol_region_system_index;
+        const int sys_idx = raw_sys_idx % static_cast<int>(region_systems.size());
+        Id target_sys = region_systems[sys_idx];
+
+        // If we're not in the target system yet, go there.
+        if (leader->system_id != target_sys) {
+          if (fleet_orders_overrideable(fl)) {
+            (void)clear_fleet_orders(fid);
+            (void)issue_fleet_travel_to_system(fid, target_sys, /*restrict_to_discovered=*/true);
+            fl.mission.patrol_region_waypoint_index = 0;
+          }
+          continue;
+        }
+
+        const StarSystem* psys = find_ptr(state_.systems, target_sys);
+        if (!psys) continue;
+
+        // Build deterministic waypoint list: friendly colonies first, then jump points, then major bodies.
+        struct PatrolWaypoint {
+          bool is_body{false};
+          Id body_id{kInvalidId};
+          Vec2 point{0.0, 0.0};
+        };
+
+        std::vector<PatrolWaypoint> waypoints;
+        waypoints.reserve(psys->bodies.size() + psys->jump_points.size());
+
+        std::unordered_set<Id> seen_bodies;
+        seen_bodies.reserve(psys->bodies.size() * 2);
+
+        for (Id cid : sorted_keys(state_.colonies)) {
+          const Colony* c = find_ptr(state_.colonies, cid);
+          if (!c) continue;
+          if (!are_factions_mutual_friendly(fl.faction_id, c->faction_id)) continue;
+          const Body* b = find_ptr(state_.bodies, c->body_id);
+          if (!b) continue;
+          if (b->system_id != target_sys) continue;
+          if (seen_bodies.insert(b->id).second) {
+            PatrolWaypoint w;
+            w.is_body = true;
+            w.body_id = b->id;
+            waypoints.push_back(w);
+          }
+        }
+
+        std::vector<Id> jps = psys->jump_points;
+        std::sort(jps.begin(), jps.end());
+        for (Id jid : jps) {
+          const JumpPoint* jp = find_ptr(state_.jump_points, jid);
+          if (!jp) continue;
+          PatrolWaypoint w;
+          w.is_body = false;
+          w.point = jp->position_mkm;
+          waypoints.push_back(w);
+        }
+
+        std::vector<Id> bodies = psys->bodies;
+        std::sort(bodies.begin(), bodies.end());
+        for (Id bid : bodies) {
+          const Body* b = find_ptr(state_.bodies, bid);
+          if (!b) continue;
+          if (b->type == BodyType::Asteroid) continue;
+          if (seen_bodies.insert(b->id).second) {
+            PatrolWaypoint w;
+            w.is_body = true;
+            w.body_id = b->id;
+            waypoints.push_back(w);
+          }
+        }
+
+        if (waypoints.empty()) {
+          (void)issue_fleet_wait_days(fid, std::max(1, fl.mission.patrol_region_dwell_days));
+          continue;
+        }
+
+        // Advance to next system after completing a full waypoint loop.
+        int idx = (fl.mission.patrol_region_waypoint_index < 0) ? 0 : fl.mission.patrol_region_waypoint_index;
+        int widx = idx % static_cast<int>(waypoints.size());
+        const bool wrapped = (idx > 0 && widx == 0);
+        if (wrapped) {
+          fl.mission.patrol_region_system_index = raw_sys_idx + 1;
+          fl.mission.patrol_region_waypoint_index = 0;
+          const int nidx = ((fl.mission.patrol_region_system_index < 0) ? 0 : fl.mission.patrol_region_system_index) %
+                           static_cast<int>(region_systems.size());
+          const Id next_sys = region_systems[nidx];
+          if (next_sys != target_sys && fleet_orders_overrideable(fl)) {
+            (void)clear_fleet_orders(fid);
+            (void)issue_fleet_travel_to_system(fid, next_sys, /*restrict_to_discovered=*/true);
+            continue;
+          }
+          idx = 0;
+          widx = 0;
+        }
+
+        fl.mission.patrol_region_waypoint_index = widx + 1;
+
+        const int dwell = std::max(1, fl.mission.patrol_region_dwell_days);
+        const PatrolWaypoint& w = waypoints[widx];
+        if (w.is_body && w.body_id != kInvalidId) {
+          (void)issue_fleet_move_to_body(fid, w.body_id);
+          (void)issue_fleet_orbit_body(fid, w.body_id, /*duration_days=*/dwell);
+        } else {
+          (void)issue_fleet_move_to_point(fid, w.point);
+          (void)issue_fleet_wait_days(fid, dwell);
+        }
+
+        continue;
+      }
       if (fl.mission.type == FleetMissionType::Explore) {
         // Only retask when we're idle or parked (avoid fighting movement).
         if (!fleet_is_idle_or_parked(fl)) continue;

@@ -469,6 +469,7 @@ void draw_main_menu(Simulation& sim, UIState& ui, char* save_path, char* load_pa
       ImGui::MenuItem("Production (Shipyard/Construction Planner)", nullptr, &ui.show_production_window);
       ImGui::MenuItem("Economy (Industry/Mining/Tech Tree)", nullptr, &ui.show_economy_window);
       ImGui::MenuItem("Planner (Forecast Dashboard)", nullptr, &ui.show_planner_window);
+      ImGui::MenuItem("Regions (Sectors Overview)", "Ctrl+Shift+R", &ui.show_regions_window);
       ImGui::MenuItem("Freight Planner (Auto-freight Preview)", nullptr, &ui.show_freight_window);
       ImGui::MenuItem("Fuel Planner (Auto-tanker Preview)", nullptr, &ui.show_fuel_window);
       ImGui::MenuItem("Advisor (Issues)", "Ctrl+Shift+A", &ui.show_advisor_window);
@@ -516,6 +517,9 @@ void draw_main_menu(Simulation& sim, UIState& ui, char* save_path, char* load_pa
       }
       if (ImGui::MenuItem("Open Planner")) {
         ui.show_planner_window = true;
+      }
+      if (ImGui::MenuItem("Open Regions (Sectors Overview)", "Ctrl+Shift+R")) {
+        ui.show_regions_window = true;
       }
       if (ImGui::MenuItem("Open Freight Planner")) {
         ui.show_freight_window = true;
@@ -3014,7 +3018,7 @@ const bool can_up = (i > 0);
 
         Fleet* fleet_mut = find_ptr(s.fleets, selected_fleet->id);
         if (fleet_mut) {
-          static const char* kMissionNames[] = {"None", "Defend colony", "Patrol system", "Hunt hostiles", "Escort freighters", "Explore systems"};
+          static const char* kMissionNames[] = {"None", "Defend colony", "Patrol system", "Hunt hostiles", "Escort freighters", "Explore systems", "Patrol region"};
           int mission_idx = static_cast<int>(fleet_mut->mission.type);
           if (mission_idx < 0 || mission_idx >= static_cast<int>(IM_ARRAYSIZE(kMissionNames))) mission_idx = 0;
           if (ImGui::Combo("Type##fleet_mission_type", &mission_idx, kMissionNames, IM_ARRAYSIZE(kMissionNames))) {
@@ -3038,6 +3042,34 @@ const bool can_up = (i > 0);
             if (fleet_mut->mission.type == FleetMissionType::PatrolSystem && fleet_mut->mission.patrol_system_id == kInvalidId) {
               if (s.selected_system != kInvalidId) fleet_mut->mission.patrol_system_id = s.selected_system;
             }
+            if (fleet_mut->mission.type == FleetMissionType::PatrolRegion) {
+              fleet_mut->mission.patrol_region_system_index = 0;
+              fleet_mut->mission.patrol_region_waypoint_index = 0;
+
+              // Best-effort default: region of the currently selected system (or the fleet leader).
+              if (fleet_mut->mission.patrol_region_id == kInvalidId) {
+                Id rid = kInvalidId;
+                if (s.selected_system != kInvalidId) {
+                  if (const auto* sys = find_ptr(s.systems, s.selected_system)) rid = sys->region_id;
+                }
+                if (rid == kInvalidId) {
+                  if (const auto* lead = find_ptr(s.ships, selected_fleet->leader_ship_id)) {
+                    if (const auto* sys = find_ptr(s.systems, lead->system_id)) rid = sys->region_id;
+                  }
+                }
+                if (rid == kInvalidId) {
+                  for (Id sid : sorted_keys(s.systems)) {
+                    const auto* sys = find_ptr(s.systems, sid);
+                    if (!sys) continue;
+                    if (!sim.is_system_discovered_by_faction(fleet_mut->faction_id, sid)) continue;
+                    rid = sys->region_id;
+                    if (rid != kInvalidId) break;
+                  }
+                }
+                fleet_mut->mission.patrol_region_id = rid;
+              }
+            }
+
             if (fleet_mut->mission.type == FleetMissionType::Explore) {
               fleet_mut->mission.explore_survey_first = true;
               fleet_mut->mission.explore_allow_transit = true;
@@ -3112,6 +3144,50 @@ const bool can_up = (i > 0);
                 fleet_mut->mission.patrol_dwell_days = std::max(1, dwell);
               }
               ImGui::TextDisabled("Patrol waypoints: jump points first, then major bodies.");
+            }
+
+            if (fleet_mut->mission.type == FleetMissionType::PatrolRegion) {
+              ImGui::Spacing();
+              ImGui::Text("Patrol region");
+
+              const Region* selreg = (fleet_mut->mission.patrol_region_id != kInvalidId)
+                                       ? find_ptr(s.regions, fleet_mut->mission.patrol_region_id)
+                                       : nullptr;
+              const char* reg_label = selreg ? selreg->name.c_str() : "(select region)";
+              if (ImGui::BeginCombo("Region##fleet_mission_patrol_region", reg_label)) {
+                for (Id rid : sorted_keys(s.regions)) {
+                  const auto* reg = find_ptr(s.regions, rid);
+                  if (!reg) continue;
+
+                  // Only show regions with at least one discovered system for this faction.
+                  bool has_visible_system = false;
+                  for (Id sid : sorted_keys(s.systems)) {
+                    const auto* sys = find_ptr(s.systems, sid);
+                    if (!sys) continue;
+                    if (sys->region_id != rid) continue;
+                    if (!sim.is_system_discovered_by_faction(fleet_mut->faction_id, sid)) continue;
+                    has_visible_system = true;
+                    break;
+                  }
+                  if (!has_visible_system) continue;
+
+                  const bool sel = (fleet_mut->mission.patrol_region_id == rid);
+                  const std::string key = reg->name + "##pat_reg_" + std::to_string(static_cast<unsigned long long>(rid));
+                  if (ImGui::Selectable(key.c_str(), sel)) {
+                    fleet_mut->mission.patrol_region_id = rid;
+                    fleet_mut->mission.patrol_region_system_index = 0;
+                    fleet_mut->mission.patrol_region_waypoint_index = 0;
+                  }
+                }
+                ImGui::EndCombo();
+              }
+
+              int dwell = std::max(1, fleet_mut->mission.patrol_region_dwell_days);
+              if (ImGui::InputInt("Dwell days##fleet_mission_patrol_region_dwell", &dwell)) {
+                fleet_mut->mission.patrol_region_dwell_days = std::max(1, dwell);
+              }
+
+              ImGui::TextDisabled("Patrols all discovered systems in the region, visiting friendly colonies, then jump points, then major bodies.\nEngages detected hostiles anywhere in-region (requires sensor coverage).\nTip: Use sensors / listening posts across the region for rapid response.");
             }
 
             if (fleet_mut->mission.type == FleetMissionType::HuntHostiles) {

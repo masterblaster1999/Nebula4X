@@ -159,6 +159,7 @@ if(NEBULA4X_BUILD_UI)
     src/ui/panels.cpp
     src/ui/economy_window.cpp
     src/ui/planner_window.cpp
+    src/ui/regions_window.cpp
     src/ui/freight_window.cpp
     src/ui/fuel_window.cpp
     src/ui/advisor_window.cpp

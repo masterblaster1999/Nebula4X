@@ -1,6 +1,8 @@
 #include "ui/system_map.h"
 
 #include "ui/map_render.h"
+#include "ui/minimap.h"
+#include "ui/ruler.h"
 
 #include "core/simulation_sensors.h"
 
@@ -13,8 +15,10 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdint>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <optional>
 #include <string>
 #include <type_traits>
@@ -89,6 +93,72 @@ Vec2 to_world(const ImVec2& screen_px, const ImVec2& center_px, double scale_px_
   const double x = (screen_px.x - center_px.x) / (scale_px_per_mkm * zoom) - pan_mkm.x;
   const double y = (screen_px.y - center_px.y) / (scale_px_per_mkm * zoom) - pan_mkm.y;
   return Vec2{x, y};
+}
+
+// When measuring distances with the map ruler we want the endpoints to "snap" to
+// nearby entities so players can easily measure ship-to-planet, jump-to-planet, etc.
+// This helper returns the snapped world position (in mkm) when a visible entity is
+// within a small pixel radius of the mouse, otherwise it returns the raw cursor world.
+Vec2 snap_ruler_point(const Simulation& sim,
+                      const UIState& ui,
+                      const StarSystem& sys,
+                      Id viewer_faction_id,
+                      const std::vector<Id>& detected_hostiles,
+                      const ImVec2& mouse_px,
+                      const ImVec2& center_px,
+                      double scale_px_per_mkm,
+                      double zoom,
+                      const Vec2& pan_mkm) {
+  constexpr float kSnapRadiusPx = 14.0f;
+  const float snap_d2 = kSnapRadiusPx * kSnapRadiusPx;
+
+  float best_d2 = snap_d2;
+  Vec2 best = to_world(mouse_px, center_px, scale_px_per_mkm, zoom, pan_mkm);
+  bool found = false;
+
+  auto consider = [&](const Vec2& w) {
+    const ImVec2 p = to_screen(w, center_px, scale_px_per_mkm, zoom, pan_mkm);
+    const float dx = mouse_px.x - p.x;
+    const float dy = mouse_px.y - p.y;
+    const float d2 = dx * dx + dy * dy;
+    if (d2 <= best_d2) {
+      best_d2 = d2;
+      best = w;
+      found = true;
+    }
+  };
+
+  // Jump points.
+  for (Id jid : sys.jump_points) {
+    const auto* jp = find_ptr(sim.state().jump_points, jid);
+    if (!jp) continue;
+    consider(jp->position_mkm);
+  }
+
+  // Bodies.
+  for (Id bid : sys.bodies) {
+    const auto* b = find_ptr(sim.state().bodies, bid);
+    if (!b) continue;
+    const bool is_minor = (b->type == BodyType::Asteroid || b->type == BodyType::Comet);
+    if (is_minor && !ui.show_minor_bodies) continue;
+    consider(b->position_mkm);
+  }
+
+  // Ships (respect fog-of-war: snap only to friendly + detected hostiles).
+  for (Id sid : sys.ships) {
+    const auto* sh = find_ptr(sim.state().ships, sid);
+    if (!sh) continue;
+    if (ui.fog_of_war && viewer_faction_id != kInvalidId) {
+      if (sh->faction_id != viewer_faction_id) {
+        if (std::find(detected_hostiles.begin(), detected_hostiles.end(), sid) == detected_hostiles.end()) {
+          continue;
+        }
+      }
+    }
+    consider(sh->position_mkm);
+  }
+
+  return found ? best : to_world(mouse_px, center_px, scale_px_per_mkm, zoom, pan_mkm);
 }
 
 } // namespace
@@ -179,6 +249,14 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
   const bool mouse_in_rect =
       (mouse.x >= origin.x && mouse.x <= origin.x + avail.x && mouse.y >= origin.y && mouse.y <= origin.y + avail.y);
 
+  // Minimap rectangle (bottom-right overlay).
+  const float mm_margin = 10.0f;
+  const float mm_w = std::clamp(avail.x * 0.28f, 150.0f, 300.0f);
+  const float mm_h = std::clamp(avail.y * 0.23f, 105.0f, 240.0f);
+  const ImVec2 mm_p1(origin.x + avail.x - mm_margin, origin.y + avail.y - mm_margin);
+  const ImVec2 mm_p0(mm_p1.x - mm_w, mm_p1.y - mm_h);
+  bool minimap_enabled = ui.system_map_show_minimap;
+
   // Keyboard shortcuts (only when the map window is hovered and the user isn't typing).
   if (hovered && !ImGui::GetIO().WantTextInput) {
     if (ImGui::IsKeyPressed(ImGuiKey_R)) {
@@ -189,10 +267,24 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
     if (ImGui::IsKeyPressed(ImGuiKey_F)) {
       ui.system_map_follow_selected = !ui.system_map_follow_selected;
     }
+    if (ImGui::IsKeyPressed(ImGuiKey_M)) {
+      ui.system_map_show_minimap = !ui.system_map_show_minimap;
+      minimap_enabled = ui.system_map_show_minimap;
+    }
+  }
+
+  const bool over_minimap = minimap_enabled && mouse_in_rect && point_in_rect(mouse, mm_p0, mm_p1);
+
+  MinimapTransform mm;
+  if (minimap_enabled) {
+    // System map uses absolute in-system coords centered at (0,0).
+    const Vec2 wmin{-max_r, -max_r};
+    const Vec2 wmax{+max_r, +max_r};
+    mm = make_minimap_transform(mm_p0, mm_p1, wmin, wmax);
   }
 
   // Zoom via wheel (zoom to cursor).
-  if (hovered && mouse_in_rect) {
+  if (hovered && mouse_in_rect && !over_minimap) {
     const float wheel = ImGui::GetIO().MouseWheel;
     if (wheel != 0.0f) {
       const Vec2 before = to_world(mouse, center, scale, zoom, pan);
@@ -213,6 +305,13 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
       pan.x += d.x / (scale * zoom);
       pan.y += d.y / (scale * zoom);
     }
+  }
+
+  // Minimap pan/teleport: click+drag to set the view center.
+  if (hovered && mouse_in_rect && over_minimap && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+    const Vec2 target = minimap_px_to_world(mm, mouse);
+    pan = Vec2{-target.x, -target.y};
+    ui.system_map_follow_selected = false;
   }
 
   // External request: one-shot center (used by Intel window, etc.).
@@ -241,6 +340,54 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
       const double t = 0.18; // smoothing
       pan.x = pan.x + (target.x - pan.x) * t;
       pan.y = pan.y + (target.y - pan.y) * t;
+    }
+  }
+
+  // --- Map ruler (hold D) ---
+  // This is intentionally a temporary "mode" activated by holding a key so it doesn't
+  // interfere with the normal left-click order workflow.
+  static RulerState ruler;
+  static std::uint64_t ruler_state_gen = 0;
+  static Id ruler_system_id = kInvalidId;
+  if (ruler_state_gen != sim.state_generation() || ruler_system_id != sys->id) {
+    clear_ruler(ruler);
+    ruler_state_gen = sim.state_generation();
+    ruler_system_id = sys->id;
+  }
+
+  bool ruler_consumed_left = false;
+  bool ruler_consumed_right = false;
+  {
+    const ImGuiIO& io = ImGui::GetIO();
+    const bool ruler_key = hovered && mouse_in_rect && !over_minimap && !io.WantTextInput &&
+                           ImGui::IsKeyDown(ImGuiKey_D) && !io.KeyCtrl && !io.KeyShift && !io.KeyAlt;
+
+    if (ruler_key) {
+      // D + Right click clears the ruler.
+      if (ImGui::IsMouseClicked(ImGuiMouseButton_Right) && !ImGui::IsAnyItemHovered()) {
+        clear_ruler(ruler);
+        ruler_consumed_right = true;
+      }
+
+      // D + Left click starts a new measurement, and D + drag updates it.
+      if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGui::IsAnyItemHovered()) {
+        const Vec2 p = snap_ruler_point(sim, ui, *sys, viewer_faction_id, detected_hostiles, mouse, center, scale,
+                                        zoom, pan);
+        begin_ruler(ruler, p);
+        ruler_consumed_left = true;
+      }
+
+      if (ruler.dragging && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        const Vec2 p = snap_ruler_point(sim, ui, *sys, viewer_faction_id, detected_hostiles, mouse, center, scale,
+                                        zoom, pan);
+        update_ruler(ruler, p);
+      }
+
+      if (ruler.dragging && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+        const Vec2 p = snap_ruler_point(sim, ui, *sys, viewer_faction_id, detected_hostiles, mouse, center, scale,
+                                        zoom, pan);
+        end_ruler(ruler, p);
+      }
     }
   }
 
@@ -277,6 +424,15 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
     sb.desired_px = 120.0f;
     sb.alpha = 0.85f;
     draw_scale_bar(draw, origin, avail, 1.0 / (scale * zoom), IM_COL32(220, 220, 220, 255), sb, "mkm");
+
+    // Environmental overlay: system-level nebula density (affects sensors).
+    if (sys && sys->nebula_density > 0.01) {
+      const double neb = std::clamp(sys->nebula_density, 0.0, 1.0);
+      const double env = std::clamp(1.0 - 0.65 * neb, 0.25, 1.0);
+      char buf[96];
+      std::snprintf(buf, sizeof(buf), "Nebula %.0f%%  (Sensors x%.2f)", neb * 100.0, env);
+      draw->AddText(ImVec2(origin.x + 8.0f, origin.y + 8.0f), IM_COL32(170, 200, 255, 210), buf);
+    }
   }
 
   // Axes (when grid is disabled).
@@ -908,7 +1064,8 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
   // Holding Shift will *queue* the order; otherwise it replaces the current queue.
   const bool fleet_mode = ImGui::GetIO().KeyCtrl && selected_fleet != nullptr;
   const bool can_issue_orders = fleet_mode || (selected_ship != kInvalidId);
-  if (hovered && can_issue_orders && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+  if (hovered && !over_minimap && !ruler_consumed_left && can_issue_orders &&
+      ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
     // Don't issue orders when clicking UI controls (legend, etc.).
     if (!ImGui::IsAnyItemHovered()) {
       const ImVec2 mp = ImGui::GetIO().MousePos;
@@ -1001,7 +1158,7 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
   }
 
   // Right click selection (no orders). Prefer ships, then bodies.
-  if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+  if (hovered && !over_minimap && !ruler_consumed_right && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
     if (!ImGui::IsAnyItemHovered()) {
       const ImVec2 mp = ImGui::GetIO().MousePos;
       if (mp.x >= origin.x && mp.x <= origin.x + avail.x && mp.y >= origin.y && mp.y <= origin.y + avail.y) {
@@ -1099,7 +1256,8 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
   }
 
   // Hover tooltip (clickable links).
-  if (hovered && mouse_in_rect && !ImGui::IsAnyItemHovered() && !ImGui::IsMouseDown(ImGuiMouseButton_Middle)) {
+  if (hovered && mouse_in_rect && !over_minimap && !ImGui::IsAnyItemHovered() &&
+      !ImGui::IsMouseDown(ImGuiMouseButton_Middle)) {
     const ImVec2 mp = mouse;
     constexpr float kHoverRadiusPx = 18.0f;
     const float hover_d2 = kHoverRadiusPx * kHoverRadiusPx;
@@ -1223,6 +1381,15 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
             ImGui::TextDisabled("Faction: %s", f->name.c_str());
           }
           ImGui::TextDisabled("Design: %s", sh->design_id.c_str());
+
+          // Movement feedback: show last-tick velocity vector.
+          {
+            const double v_mkm_day = sh->velocity_mkm_per_day.length();
+            const double sec_per_day = std::max(1e-9, sim.cfg().seconds_per_day);
+            const double v_km_s = (v_mkm_day * 1e6) / sec_per_day;
+            ImGui::TextDisabled("Velocity: (%.2f, %.2f) mkm/day (%.1f km/s)",
+                                sh->velocity_mkm_per_day.x, sh->velocity_mkm_per_day.y, v_km_s);
+          }
 
           if (auto it = s.ship_orders.find(hovered_id); it != s.ship_orders.end()) {
             ImGui::TextDisabled("Orders: %d", static_cast<int>(it->second.queue.size()));
@@ -1364,6 +1531,17 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
                                 sim.is_jump_point_surveyed_by_faction(viewer_faction_id, jp->id);
           ImGui::TextDisabled("Surveyed: %s", surveyed ? "Yes" : "No");
 
+          // If we're running time-based surveys, show current progress.
+          if (!surveyed && ui.fog_of_war && sim.cfg().jump_survey_points_required > 1e-9) {
+            if (const auto* fac = find_ptr(s.factions, viewer_faction_id)) {
+              auto itp = fac->jump_survey_progress.find(jp->id);
+              if (itp != fac->jump_survey_progress.end() && std::isfinite(itp->second) && itp->second > 1e-9) {
+                const double frac = std::clamp(itp->second / sim.cfg().jump_survey_points_required, 0.0, 1.0);
+                ImGui::TextDisabled("Survey progress: %.0f%%", frac * 100.0);
+              }
+            }
+          }
+
           if (!surveyed) {
             ImGui::TextDisabled("To: (unknown)");
           } else if (const auto* other = find_ptr(s.jump_points, jp->linked_jump_id)) {
@@ -1395,12 +1573,150 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
     }
   }
 
+  // Ruler overlay (hold D + drag).
+  if (ruler.active()) {
+    const ImVec2 a = to_screen(ruler.start, center, scale, zoom, pan);
+    const ImVec2 b = to_screen(ruler.end, center, scale, zoom, pan);
+
+    const ImU32 col = IM_COL32(80, 220, 255, 235);
+    draw_ruler_line(draw, a, b, col);
+
+    // Summary label.
+    const double dist_mkm = (ruler.end - ruler.start).length();
+    const double au = dist_mkm / 149597.8707; // 1 AU in million km.
+
+    // Speed basis: selected ship if present, otherwise fleet (slowest member).
+    double speed_km_s = 0.0;
+    if (selected_ship != kInvalidId) {
+      if (const auto* sh = find_ptr(s.ships, selected_ship)) speed_km_s = sh->speed_km_s;
+    } else if (selected_fleet && !selected_fleet->ship_ids.empty()) {
+      double slowest = std::numeric_limits<double>::infinity();
+      for (Id sid : selected_fleet->ship_ids) {
+        if (const auto* sh = find_ptr(s.ships, sid)) slowest = std::min(slowest, sh->speed_km_s);
+      }
+      if (std::isfinite(slowest)) speed_km_s = slowest;
+    }
+
+    const double mkm_per_day = speed_km_s * sim.cfg().seconds_per_day / 1e6;
+    char buf[192];
+    if (mkm_per_day > 1e-9) {
+      const double eta_days = dist_mkm / mkm_per_day;
+      const std::string eta = format_duration_days(eta_days);
+      std::snprintf(buf, sizeof(buf), "Δ %.1f mkm (%.3f AU)  @ %.0f km/s → %s", dist_mkm, au, speed_km_s,
+                    eta.c_str());
+    } else {
+      std::snprintf(buf, sizeof(buf), "Δ %.1f mkm (%.3f AU)", dist_mkm, au);
+    }
+
+    const ImVec2 mid{(a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f};
+    draw_ruler_label(draw, ImVec2(mid.x + 8.0f, mid.y + 8.0f), buf);
+  }
+
+  // Minimap overlay (bottom-right).
+  if (minimap_enabled) {
+    const ImU32 mm_bg = IM_COL32(8, 8, 10, 200);
+    const ImU32 mm_border = over_minimap ? IM_COL32(235, 235, 235, 220) : IM_COL32(90, 90, 95, 220);
+    draw->AddRectFilled(mm_p0, mm_p1, mm_bg, 4.0f);
+    draw->AddRect(mm_p0, mm_p1, mm_border, 4.0f);
+
+    // Center star marker.
+    {
+      ImVec2 p0 = world_to_minimap_px(mm, Vec2{0.0, 0.0});
+      p0 = clamp_to_rect(p0, mm_p0, mm_p1);
+      draw->AddCircleFilled(p0, 3.0f, IM_COL32(255, 230, 180, 220), 0);
+    }
+
+    // Bodies.
+    for (Id bid : sys->bodies) {
+      const auto* b = find_ptr(s.bodies, bid);
+      if (!b) continue;
+      const bool is_minor = (b->type == BodyType::Asteroid || b->type == BodyType::Comet);
+      if (!ui.show_minor_bodies && is_minor && selected_body != bid) continue;
+
+      ImVec2 p = world_to_minimap_px(mm, b->position_mkm);
+      p = clamp_to_rect(p, mm_p0, mm_p1);
+
+      float r = 2.0f;
+      ImU32 col = IM_COL32(190, 190, 200, 190);
+      if (b->type == BodyType::GasGiant) col = IM_COL32(150, 210, 255, 200);
+      if (b->type == BodyType::Asteroid || b->type == BodyType::Comet) {
+        r = 1.4f;
+        col = IM_COL32(160, 160, 170, 160);
+      }
+      if (bid == selected_body) {
+        r = 3.2f;
+        col = IM_COL32(245, 245, 245, 255);
+      }
+      draw->AddCircleFilled(p, r, col, 0);
+    }
+
+    // Jump points.
+    for (Id jid : sys->jump_points) {
+      const auto* jp = find_ptr(s.jump_points, jid);
+      if (!jp) continue;
+      ImVec2 p = world_to_minimap_px(mm, jp->position_mkm);
+      p = clamp_to_rect(p, mm_p0, mm_p1);
+      draw->AddCircle(p, 3.5f, IM_COL32(160, 110, 255, 210), 0, 1.25f);
+    }
+
+    // Ships (friendly + detected hostiles under FoW).
+    for (Id sid : sys->ships) {
+      const auto* sh = find_ptr(s.ships, sid);
+      if (!sh) continue;
+
+      if (ui.fog_of_war && viewer_faction_id != kInvalidId) {
+        if (sh->faction_id != viewer_faction_id) {
+          if (std::find(detected_hostiles.begin(), detected_hostiles.end(), sid) == detected_hostiles.end()) {
+            continue;
+          }
+        }
+      }
+
+      ImVec2 p = world_to_minimap_px(mm, sh->position_mkm);
+      p = clamp_to_rect(p, mm_p0, mm_p1);
+      const float r = (sid == selected_ship) ? 3.0f : 1.8f;
+      ImU32 col = modulate_alpha(color_faction(sh->faction_id), 0.85f);
+      if (sid == selected_ship) col = IM_COL32(245, 245, 245, 255);
+      draw->AddCircleFilled(p, r, col, 0);
+    }
+
+    // Recent-contact markers (optional).
+    if (ui.fog_of_war && ui.show_contact_markers && !recent_contacts.empty() && viewer_faction_id != kInvalidId) {
+      for (const auto& c : recent_contacts) {
+        if (c.ship_id == kInvalidId) continue;
+        if (sim.is_ship_detected_by_faction(viewer_faction_id, c.ship_id)) continue;
+        ImVec2 p = world_to_minimap_px(mm, c.last_seen_position_mkm);
+        p = clamp_to_rect(p, mm_p0, mm_p1);
+        const ImU32 col = IM_COL32(255, 180, 0, 170);
+        draw->AddLine(ImVec2(p.x - 3, p.y - 3), ImVec2(p.x + 3, p.y + 3), col, 1.5f);
+        draw->AddLine(ImVec2(p.x - 3, p.y + 3), ImVec2(p.x + 3, p.y - 3), col, 1.5f);
+      }
+    }
+
+    // Viewport rectangle.
+    const Vec2 view_tl = to_world(origin, center, scale, zoom, pan);
+    const Vec2 view_br = to_world(ImVec2(origin.x + avail.x, origin.y + avail.y), center, scale, zoom, pan);
+    const ImVec2 pv0 = world_to_minimap_px(mm, view_tl);
+    const ImVec2 pv1 = world_to_minimap_px(mm, view_br);
+    ImVec2 a(std::min(pv0.x, pv1.x), std::min(pv0.y, pv1.y));
+    ImVec2 b(std::max(pv0.x, pv1.x), std::max(pv0.y, pv1.y));
+    a = clamp_to_rect(a, mm_p0, mm_p1);
+    b = clamp_to_rect(b, mm_p0, mm_p1);
+    draw->AddRectFilled(a, b, IM_COL32(255, 255, 255, 22));
+    draw->AddRect(a, b, IM_COL32(255, 255, 255, 170), 0.0f, 0, 1.5f);
+
+    // Label.
+    draw->AddText(ImVec2(mm_p0.x + 6.0f, mm_p0.y + 4.0f), IM_COL32(210, 210, 210, 200), "Minimap (M)");
+  }
+
   // Legend / help
   ImGui::SetCursorScreenPos(ImVec2(origin.x + 10, origin.y + 10));
   ImGui::BeginChild("legend", ImVec2(320, 480), true);
   ImGui::Text("Controls");
   ImGui::BulletText("Mouse wheel: zoom (to cursor)");
   ImGui::BulletText("Middle drag: pan");
+  ImGui::BulletText("Minimap (M): click/drag to pan");
+  ImGui::BulletText("Hold D + drag: ruler (distance + ETA)");
   ImGui::BulletText("R: reset view, F: follow selected");
   ImGui::BulletText("Left click: issue order to ship (Shift queues)");
   ImGui::BulletText("Right click: select ship/body (no orders)");
@@ -1414,6 +1730,7 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
   ImGui::Checkbox("Starfield", &ui.system_map_starfield);
   ImGui::SameLine();
   ImGui::Checkbox("Grid", &ui.system_map_grid);
+  ImGui::Checkbox("Minimap (M)", &ui.system_map_show_minimap);
   ImGui::Checkbox("Order paths", &ui.system_map_order_paths);
   ImGui::SameLine();
   ImGui::Checkbox("Missiles", &ui.system_map_missile_salvos);
@@ -1430,6 +1747,39 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
     const Vec2 w = to_world(mouse, center, scale, zoom, pan);
     ImGui::TextDisabled("Cursor: %.1f, %.1f mkm", w.x, w.y);
     ImGui::TextDisabled("Zoom: %.2fx", zoom);
+  }
+
+  ImGui::SeparatorText("Ruler (hold D)");
+  ImGui::TextDisabled("Snaps to visible bodies/ships/jumps. D + Right click clears.");
+  if (ruler.active()) {
+    const double dist_mkm = (ruler.end - ruler.start).length();
+    const double au = dist_mkm / 149597.8707;
+
+    double speed_km_s = 0.0;
+    if (selected_ship != kInvalidId) {
+      if (const auto* sh = find_ptr(s.ships, selected_ship)) speed_km_s = sh->speed_km_s;
+    } else if (selected_fleet && !selected_fleet->ship_ids.empty()) {
+      double slowest = std::numeric_limits<double>::infinity();
+      for (Id sid : selected_fleet->ship_ids) {
+        if (const auto* sh = find_ptr(s.ships, sid)) slowest = std::min(slowest, sh->speed_km_s);
+      }
+      if (std::isfinite(slowest)) speed_km_s = slowest;
+    }
+    const double mkm_per_day = speed_km_s * sim.cfg().seconds_per_day / 1e6;
+
+    ImGui::Text("Δ %.1f mkm  (%.3f AU)", dist_mkm, au);
+    if (mkm_per_day > 1e-9) {
+      const double eta_days = dist_mkm / mkm_per_day;
+      ImGui::TextDisabled("@ %.0f km/s → %s", speed_km_s, format_duration_days(eta_days).c_str());
+    } else {
+      ImGui::TextDisabled("(Select a ship/fleet for ETA)");
+    }
+
+    if (ImGui::SmallButton("Clear ruler")) {
+      clear_ruler(ruler);
+    }
+  } else {
+    ImGui::TextDisabled("No measurement");
   }
 
   ImGui::Separator();

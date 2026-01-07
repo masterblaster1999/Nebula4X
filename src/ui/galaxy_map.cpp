@@ -1,6 +1,8 @@
 #include "ui/galaxy_map.h"
 
 #include "ui/map_render.h"
+#include "ui/minimap.h"
+#include "ui/ruler.h"
 
 #include <imgui.h>
 
@@ -8,6 +10,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cmath>
+#include <limits>
 #include <optional>
 #include <string>
 #include <type_traits>
@@ -16,6 +19,7 @@
 #include <vector>
 
 #include "nebula4x/util/log.h"
+#include "nebula4x/util/time.h"
 
 namespace nebula4x::ui {
 namespace {
@@ -50,6 +54,59 @@ bool can_show_system(Id viewer_faction_id, bool fog_of_war, const Simulation& si
   if (!fog_of_war) return true;
   if (viewer_faction_id == kInvalidId) return false;
   return sim.is_system_discovered_by_faction(viewer_faction_id, system_id);
+}
+
+ImU32 region_col(Id rid, float alpha) {
+  if (rid == kInvalidId) return 0;
+  const float h = std::fmod(static_cast<float>((static_cast<std::uint32_t>(rid) * 0.61803398875f)), 1.0f);
+  const ImVec4 c = ImColor::HSV(h, 0.55f, 0.95f, alpha);
+  return ImGui::ColorConvertFloat4ToU32(c);
+}
+
+double cross(const Vec2& o, const Vec2& a, const Vec2& b) {
+  return (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+}
+
+// Convex hull (monotonic chain). Returns points in CCW order.
+std::vector<Vec2> convex_hull(std::vector<Vec2> pts) {
+  if (pts.size() <= 2) return pts;
+
+  // Sort by x then y.
+  std::sort(pts.begin(), pts.end(), [](const Vec2& a, const Vec2& b) {
+    if (a.x < b.x) return true;
+    if (a.x > b.x) return false;
+    return a.y < b.y;
+  });
+
+  // Deduplicate exact duplicates.
+  pts.erase(std::unique(pts.begin(), pts.end(), [](const Vec2& a, const Vec2& b) {
+    return a.x == b.x && a.y == b.y;
+  }), pts.end());
+  if (pts.size() <= 2) return pts;
+
+  std::vector<Vec2> h;
+  h.reserve(pts.size() * 2);
+
+  // Lower hull.
+  for (const Vec2& p : pts) {
+    while (h.size() >= 2 && cross(h[h.size() - 2], h[h.size() - 1], p) <= 0.0) {
+      h.pop_back();
+    }
+    h.push_back(p);
+  }
+
+  // Upper hull.
+  const std::size_t lower_size = h.size();
+  for (std::size_t i = pts.size(); i-- > 0;) {
+    const Vec2& p = pts[i];
+    while (h.size() > lower_size && cross(h[h.size() - 2], h[h.size() - 1], p) <= 0.0) {
+      h.pop_back();
+    }
+    h.push_back(p);
+  }
+
+  if (!h.empty()) h.pop_back();
+  return h;
 }
 
 } // namespace
@@ -137,10 +194,38 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   const double fit = std::min(avail.x, avail.y) * 0.45;
   const double scale = fit / std::max(1.0, max_half_span);
 
+  // One-frame request (from other windows) to center/fit the galaxy map.
+  if (ui.request_galaxy_map_center) {
+    const Vec2 abs{ui.request_galaxy_map_center_x, ui.request_galaxy_map_center_y};
+    const Vec2 rel = abs - world_center;
+    pan = Vec2{-rel.x, -rel.y};
+
+    if (ui.request_galaxy_map_center_zoom > 0.0) {
+      zoom = std::clamp(ui.request_galaxy_map_center_zoom, 0.2, 50.0);
+    } else if (ui.request_galaxy_map_fit_half_span > 1e-9) {
+      const double target_half = std::max(1e-9, ui.request_galaxy_map_fit_half_span);
+      // zoom=1 fits max_half_span; scale accordingly to fit a smaller half-span.
+      const double z = (max_half_span / target_half) * 0.85; // a little padding
+      zoom = std::clamp(z, 0.2, 50.0);
+    }
+
+    ui.request_galaxy_map_center = false;
+    ui.request_galaxy_map_center_zoom = 0.0;
+    ui.request_galaxy_map_fit_half_span = 0.0;
+  }
+
   const bool hovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
   const ImVec2 mouse = ImGui::GetIO().MousePos;
   const bool mouse_in_rect =
       (mouse.x >= origin.x && mouse.x <= origin.x + avail.x && mouse.y >= origin.y && mouse.y <= origin.y + avail.y);
+
+  // Minimap rectangle (bottom-right overlay).
+  const float mm_margin = 10.0f;
+  const float mm_w = std::clamp(avail.x * 0.28f, 150.0f, 300.0f);
+  const float mm_h = std::clamp(avail.y * 0.23f, 105.0f, 240.0f);
+  const ImVec2 mm_p1(origin.x + avail.x - mm_margin, origin.y + avail.y - mm_margin);
+  const ImVec2 mm_p0(mm_p1.x - mm_w, mm_p1.y - mm_h);
+  bool minimap_enabled = ui.galaxy_map_show_minimap;
 
   // Keyboard shortcuts.
   if (hovered && !ImGui::GetIO().WantTextInput) {
@@ -148,9 +233,22 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
       zoom = 1.0;
       pan = Vec2{0.0, 0.0};
     }
+    if (ImGui::IsKeyPressed(ImGuiKey_M)) {
+      ui.galaxy_map_show_minimap = !ui.galaxy_map_show_minimap;
+      minimap_enabled = ui.galaxy_map_show_minimap;
+    }
   }
 
-  if (hovered && mouse_in_rect) {
+  const bool over_minimap = minimap_enabled && mouse_in_rect && point_in_rect(mouse, mm_p0, mm_p1);
+
+  MinimapTransform mm;
+  if (minimap_enabled) {
+    const Vec2 rel_min{min_x - world_center.x, min_y - world_center.y};
+    const Vec2 rel_max{max_x - world_center.x, max_y - world_center.y};
+    mm = make_minimap_transform(mm_p0, mm_p1, rel_min, rel_max);
+  }
+
+  if (hovered && mouse_in_rect && !over_minimap) {
     // Zoom to cursor.
     const float wheel = ImGui::GetIO().MouseWheel;
     if (wheel != 0.0f) {
@@ -169,6 +267,29 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
       pan.y += d.y / (scale * zoom);
     }
   }
+
+  // Minimap pan/teleport: click+drag to set the view center.
+  if (hovered && mouse_in_rect && over_minimap && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+    const Vec2 target = minimap_px_to_world(mm, mouse);
+    pan = Vec2{-target.x, -target.y};
+  }
+
+  // --- Route ruler (hold D) ---
+  // A lightweight planning helper to measure a jump-route between two systems.
+  // State is cached UI-only state and is cleared on new game / state reload.
+  struct RouteRulerState {
+    Id a{kInvalidId};
+    Id b{kInvalidId};
+  };
+  static RouteRulerState route_ruler;
+  static std::uint64_t route_ruler_state_gen = 0;
+  if (route_ruler_state_gen != sim.state_generation()) {
+    route_ruler = RouteRulerState{};
+    route_ruler_state_gen = sim.state_generation();
+  }
+
+  bool ruler_consumed_left = false;
+  bool ruler_consumed_right = false;
 
   auto* draw = ImGui::GetWindowDrawList();
   const ImU32 bg = ImGui::ColorConvertFloat4ToU32(
@@ -197,6 +318,67 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
     gs.axis_alpha = 0.25f * ui.map_grid_opacity;
     gs.label_alpha = 0.70f * ui.map_grid_opacity;
     draw_grid(draw, origin, avail, center_px, scale, zoom, pan, IM_COL32(220, 220, 220, 255), gs, "u");
+
+    // Region boundaries (procedural sector overlays).
+    // Draw behind jump links / nodes but above the grid so the map stays readable.
+    if (ui.show_galaxy_region_boundaries) {
+      std::unordered_map<Id, std::vector<Vec2>> reg_pts;
+      reg_pts.reserve(s.regions.size() * 2);
+      for (const auto& v : visible) {
+        const Id rid = v.sys ? v.sys->region_id : kInvalidId;
+        if (rid == kInvalidId) continue;
+        reg_pts[rid].push_back(v.sys->galaxy_pos - world_center);
+      }
+
+      for (auto& kv : reg_pts) {
+        const Id rid = kv.first;
+        std::vector<Vec2> hull = convex_hull(std::move(kv.second));
+        if (hull.empty()) continue;
+
+        // Colors/alpha (highlight selected region and optionally dim others).
+        float fill_a = 0.05f;
+        float line_a = 0.25f;
+        if (ui.selected_region_id != kInvalidId) {
+          if (rid == ui.selected_region_id) {
+            fill_a = 0.09f;
+            line_a = 0.55f;
+          } else if (ui.galaxy_region_dim_nonselected) {
+            fill_a *= 0.25f;
+            line_a *= 0.35f;
+          }
+        }
+
+        const ImU32 fill = region_col(rid, fill_a);
+        const ImU32 line = region_col(rid, line_a);
+
+        if (hull.size() == 1) {
+          const ImVec2 p = to_screen(hull[0], center_px, scale, zoom, pan);
+          draw->AddCircleFilled(p, 18.0f, fill);
+          draw->AddCircle(p, 18.0f, line, 0, 2.0f);
+          continue;
+        }
+
+        if (hull.size() == 2) {
+          const ImVec2 p0 = to_screen(hull[0], center_px, scale, zoom, pan);
+          const ImVec2 p1 = to_screen(hull[1], center_px, scale, zoom, pan);
+          draw->AddLine(p0, p1, fill, 12.0f);
+          draw->AddLine(p0, p1, line, 2.0f);
+          draw->AddCircleFilled(p0, 6.0f, fill);
+          draw->AddCircleFilled(p1, 6.0f, fill);
+          draw->AddCircle(p0, 6.0f, line, 0, 2.0f);
+          draw->AddCircle(p1, 6.0f, line, 0, 2.0f);
+          continue;
+        }
+
+        std::vector<ImVec2> poly;
+        poly.reserve(hull.size());
+        for (const Vec2& p : hull) {
+          poly.push_back(to_screen(p, center_px, scale, zoom, pan));
+        }
+        draw->AddConvexPolyFilled(poly.data(), static_cast<int>(poly.size()), fill);
+        draw->AddPolyline(poly.data(), static_cast<int>(poly.size()), line, true, 2.0f);
+      }
+    }
 
     ScaleBarStyle sb;
     sb.enabled = true;
@@ -233,6 +415,95 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
         }
       }
       unknown_exits[v.id] = u;
+    }
+  }
+
+  // Chokepoint (articulation) systems in the *visible* jump graph.
+  //
+  // This is a "data lens" for reading the strategic shape of the map. Under
+  // fog-of-war, we only use surveyed links + discovered destinations to avoid
+  // leaking info.
+  std::unordered_set<Id> chokepoints;
+  if (ui.show_galaxy_chokepoints) {
+    std::vector<Id> vids;
+    vids.reserve(visible.size());
+    for (const auto& v : visible) vids.push_back(v.id);
+
+    std::unordered_map<Id, int> vidx;
+    vidx.reserve(vids.size() * 2);
+    for (int i = 0; i < static_cast<int>(vids.size()); ++i) vidx[vids[static_cast<std::size_t>(i)]] = i;
+
+    std::vector<std::vector<int>> adj(vids.size());
+    std::unordered_set<std::uint64_t> ekeys;
+    ekeys.reserve(s.jump_points.size());
+
+    auto add_edge = [&](Id a_id, Id b_id) {
+      const auto ita = vidx.find(a_id);
+      const auto itb = vidx.find(b_id);
+      if (ita == vidx.end() || itb == vidx.end()) return;
+      const int a = ita->second;
+      const int b = itb->second;
+      if (a == b) return;
+      const auto lo = static_cast<std::uint32_t>(std::min(a, b));
+      const auto hi = static_cast<std::uint32_t>(std::max(a, b));
+      const std::uint64_t k = (static_cast<std::uint64_t>(lo) << 32) | static_cast<std::uint64_t>(hi);
+      if (!ekeys.insert(k).second) return;
+      adj[static_cast<std::size_t>(a)].push_back(b);
+      adj[static_cast<std::size_t>(b)].push_back(a);
+    };
+
+    for (const auto& v : visible) {
+      if (!v.sys) continue;
+      for (Id jid : v.sys->jump_points) {
+        const auto* jp = find_ptr(s.jump_points, jid);
+        if (!jp) continue;
+        const auto* other = find_ptr(s.jump_points, jp->linked_jump_id);
+        if (!other) continue;
+        const Id dest_sys_id = other->system_id;
+        if (dest_sys_id == kInvalidId) continue;
+
+        if (ui.fog_of_war && viewer_faction_id != kInvalidId) {
+          if (!sim.is_jump_point_surveyed_by_faction(viewer_faction_id, jid)) continue;
+          if (!sim.is_system_discovered_by_faction(viewer_faction_id, dest_sys_id)) continue;
+        }
+
+        add_edge(v.id, dest_sys_id);
+      }
+    }
+
+    const int n = static_cast<int>(vids.size());
+    std::vector<int> disc(static_cast<std::size_t>(n), -1);
+    std::vector<int> low(static_cast<std::size_t>(n), -1);
+    std::vector<int> parent(static_cast<std::size_t>(n), -1);
+    std::vector<char> ap(static_cast<std::size_t>(n), 0);
+    int t = 0;
+
+    auto dfs = [&](auto&& self, int u) -> void {
+      disc[static_cast<std::size_t>(u)] = low[static_cast<std::size_t>(u)] = t++;
+      int children = 0;
+      for (int v : adj[static_cast<std::size_t>(u)]) {
+        if (disc[static_cast<std::size_t>(v)] == -1) {
+          parent[static_cast<std::size_t>(v)] = u;
+          ++children;
+          self(self, v);
+          low[static_cast<std::size_t>(u)] = std::min(low[static_cast<std::size_t>(u)], low[static_cast<std::size_t>(v)]);
+
+          if (parent[static_cast<std::size_t>(u)] == -1 && children > 1) ap[static_cast<std::size_t>(u)] = 1;
+          if (parent[static_cast<std::size_t>(u)] != -1 && low[static_cast<std::size_t>(v)] >= disc[static_cast<std::size_t>(u)]) {
+            ap[static_cast<std::size_t>(u)] = 1;
+          }
+        } else if (v != parent[static_cast<std::size_t>(u)]) {
+          low[static_cast<std::size_t>(u)] = std::min(low[static_cast<std::size_t>(u)], disc[static_cast<std::size_t>(v)]);
+        }
+      }
+    };
+
+    for (int i = 0; i < n; ++i) {
+      if (disc[static_cast<std::size_t>(i)] == -1) dfs(dfs, i);
+    }
+
+    for (int i = 0; i < n; ++i) {
+      if (ap[static_cast<std::size_t>(i)]) chokepoints.insert(vids[static_cast<std::size_t>(i)]);
     }
   }
 
@@ -342,6 +613,144 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
     }
   }
 
+  // Route ruler overlay (hold D and click two systems).
+  //
+  // Unlike the selected-ship route overlay (which shows the current order queue),
+  // the route ruler is a planning utility that lets the player compare routes
+  // without disturbing selection.
+  std::optional<JumpRoutePlan> ruler_route;
+  double ruler_speed_km_s = 0.0;
+  const char* ruler_speed_basis = nullptr;
+  if (route_ruler.a != kInvalidId && route_ruler.b != kInvalidId && route_ruler.a != route_ruler.b) {
+    Vec2 start_pos_mkm{0.0, 0.0};
+
+    // Prefer selected ship speed, otherwise use fleet slowest speed (ETA only).
+    if (const auto* sh = (selected_ship != kInvalidId) ? find_ptr(s.ships, selected_ship) : nullptr) {
+      ruler_speed_km_s = sh->speed_km_s;
+      ruler_speed_basis = "Ship";
+      if (sh->system_id == route_ruler.a) start_pos_mkm = sh->position_mkm;
+    } else if (selected_fleet && !selected_fleet->ship_ids.empty()) {
+      double slowest = std::numeric_limits<double>::infinity();
+      for (Id sid : selected_fleet->ship_ids) {
+        if (const auto* mem = find_ptr(s.ships, sid)) slowest = std::min(slowest, mem->speed_km_s);
+      }
+      if (std::isfinite(slowest)) {
+        ruler_speed_km_s = slowest;
+        ruler_speed_basis = "Fleet";
+      }
+      if (const auto* lead = (selected_fleet->leader_ship_id != kInvalidId)
+                                 ? find_ptr(s.ships, selected_fleet->leader_ship_id)
+                                 : nullptr) {
+        if (lead->system_id == route_ruler.a) start_pos_mkm = lead->position_mkm;
+      }
+    }
+
+    const bool restrict = ui.fog_of_war;
+    ruler_route = sim.plan_jump_route_from_pos(route_ruler.a, start_pos_mkm, viewer_faction_id, ruler_speed_km_s,
+                                               route_ruler.b, restrict);
+  }
+
+  if (route_ruler.a != kInvalidId) {
+    const auto* a_sys = find_ptr(s.systems, route_ruler.a);
+    if (a_sys) {
+      const Vec2 a = a_sys->galaxy_pos - world_center;
+      const ImVec2 pa = to_screen(a, center_px, scale, zoom, pan);
+      const float alpha = std::clamp(ui.map_route_opacity, 0.0f, 1.0f);
+      const ImU32 col = modulate_alpha(IM_COL32(80, 220, 255, 255), 0.85f * alpha);
+      const ImU32 shadow = modulate_alpha(IM_COL32(0, 0, 0, 200), 0.75f * alpha);
+      const float t = static_cast<float>(ImGui::GetTime());
+      const float pulse = 0.55f + 0.45f * std::sin(t * 3.2f);
+      draw->AddCircle(pa, 12.0f + 3.0f * pulse, shadow, 0, 3.0f);
+      draw->AddCircle(pa, 12.0f + 3.0f * pulse, col, 0, 1.75f);
+    }
+  }
+
+  if (route_ruler.b != kInvalidId) {
+    const auto* b_sys = find_ptr(s.systems, route_ruler.b);
+    if (b_sys) {
+      const Vec2 b = b_sys->galaxy_pos - world_center;
+      const ImVec2 pb = to_screen(b, center_px, scale, zoom, pan);
+      const float alpha = std::clamp(ui.map_route_opacity, 0.0f, 1.0f);
+      const ImU32 col = modulate_alpha(IM_COL32(80, 220, 255, 255), 0.85f * alpha);
+      const ImU32 shadow = modulate_alpha(IM_COL32(0, 0, 0, 200), 0.75f * alpha);
+      const float t = static_cast<float>(ImGui::GetTime());
+      const float pulse = 0.55f + 0.45f * std::sin(t * 3.2f + 1.2f);
+      draw->AddCircle(pb, 12.0f + 3.0f * pulse, shadow, 0, 3.0f);
+      draw->AddCircle(pb, 12.0f + 3.0f * pulse, col, 0, 1.75f);
+    }
+  }
+
+  if (route_ruler.a != kInvalidId && route_ruler.b != kInvalidId) {
+    const auto* a_sys = find_ptr(s.systems, route_ruler.a);
+    const auto* b_sys = find_ptr(s.systems, route_ruler.b);
+    if (a_sys && b_sys) {
+      const float alpha = std::clamp(ui.map_route_opacity, 0.0f, 1.0f);
+      const ImU32 col = modulate_alpha(IM_COL32(80, 220, 255, 255), alpha);
+      const ImU32 shadow = modulate_alpha(IM_COL32(0, 0, 0, 200), 0.8f * alpha);
+
+      bool drew_path = false;
+      if (ruler_route && ruler_route->systems.size() >= 2) {
+        for (std::size_t i = 0; i + 1 < ruler_route->systems.size(); ++i) {
+          const auto* a_hop = find_ptr(s.systems, ruler_route->systems[i]);
+          const auto* b_hop = find_ptr(s.systems, ruler_route->systems[i + 1]);
+          if (!a_hop || !b_hop) continue;
+
+          // Under FoW, avoid drawing any hop that includes an undiscovered system.
+          if (ui.fog_of_war && viewer_faction_id != kInvalidId) {
+            if (!sim.is_system_discovered_by_faction(viewer_faction_id, a_hop->id)) continue;
+            if (!sim.is_system_discovered_by_faction(viewer_faction_id, b_hop->id)) continue;
+          }
+
+          const Vec2 a = a_hop->galaxy_pos - world_center;
+          const Vec2 b = b_hop->galaxy_pos - world_center;
+          const ImVec2 pa = to_screen(a, center_px, scale, zoom, pan);
+          const ImVec2 pb = to_screen(b, center_px, scale, zoom, pan);
+
+          draw->AddLine(pa, pb, shadow, 4.0f);
+          draw->AddLine(pa, pb, col, 2.25f);
+          draw->AddCircleFilled(pb, 4.0f, shadow, 0);
+          draw->AddCircleFilled(pb, 3.0f, col, 0);
+
+          // Hop index label.
+          char hopbuf[16];
+          std::snprintf(hopbuf, sizeof(hopbuf), "%zu", i + 1);
+          const ImVec2 mid{(pa.x + pb.x) * 0.5f, (pa.y + pb.y) * 0.5f};
+          draw->AddText(ImVec2(mid.x + 6.0f, mid.y + 4.0f), col, hopbuf);
+        }
+        drew_path = true;
+      }
+
+      if (!drew_path) {
+        const Vec2 a = a_sys->galaxy_pos - world_center;
+        const Vec2 b = b_sys->galaxy_pos - world_center;
+        const ImVec2 pa = to_screen(a, center_px, scale, zoom, pan);
+        const ImVec2 pb = to_screen(b, center_px, scale, zoom, pan);
+        draw_ruler_line(draw, pa, pb, modulate_alpha(IM_COL32(80, 220, 255, 255), 0.7f * alpha));
+      }
+
+      // Compact on-map label near the midpoint (keeps the big details in the legend).
+      const Vec2 ra = a_sys->galaxy_pos - world_center;
+      const Vec2 rb = b_sys->galaxy_pos - world_center;
+      const ImVec2 pa = to_screen(ra, center_px, scale, zoom, pan);
+      const ImVec2 pb = to_screen(rb, center_px, scale, zoom, pan);
+      const ImVec2 mid{(pa.x + pb.x) * 0.5f, (pa.y + pb.y) * 0.5f};
+
+      char lbl[192];
+      if (ruler_route && ruler_route->systems.size() >= 2) {
+        const int jumps = static_cast<int>(ruler_route->systems.size() - 1);
+        if (std::isfinite(ruler_route->eta_days) && ruler_speed_km_s > 1e-9) {
+          std::snprintf(lbl, sizeof(lbl), "Route ruler: %d jumps  ETA %s", jumps,
+                        format_duration_days(ruler_route->eta_days).c_str());
+        } else {
+          std::snprintf(lbl, sizeof(lbl), "Route ruler: %d jumps", jumps);
+        }
+      } else {
+        std::snprintf(lbl, sizeof(lbl), "Route ruler: no known route");
+      }
+      draw_ruler_label(draw, ImVec2(mid.x + 8.0f, mid.y + 8.0f), lbl);
+    }
+  }
+
   // Nodes (systems) + hover selection.
   const float base_r = 7.0f;
   Id hovered_system = kInvalidId;
@@ -364,15 +773,21 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
     nodes.push_back(NodeDrawInfo{v.id, v.sys, p});
     pos_px[v.id] = p;
 
-    // Hover detection.
-    const float dx = mouse.x - p.x;
-    const float dy = mouse.y - p.y;
-    const float d2 = dx * dx + dy * dy;
-    if (d2 < (base_r + 6.0f) * (base_r + 6.0f) && d2 < hovered_d2) {
-      hovered_d2 = d2;
-      hovered_system = v.id;
+    // Hover detection (disabled when the mouse is over the minimap overlay).
+    if (!over_minimap) {
+      const float dx = mouse.x - p.x;
+      const float dy = mouse.y - p.y;
+      const float d2 = dx * dx + dy * dy;
+      if (d2 < (base_r + 6.0f) * (base_r + 6.0f) && d2 < hovered_d2) {
+        hovered_d2 = d2;
+        hovered_system = v.id;
+      }
     }
   }
+
+  const ImGuiIO& io = ImGui::GetIO();
+  const bool route_ruler_mode = hovered && mouse_in_rect && !over_minimap && !io.WantTextInput &&
+                               ImGui::IsKeyDown(ImGuiKey_D) && !io.KeyCtrl && !io.KeyShift && !io.KeyAlt;
 
   // --- Route preview (hover target) ---
   // Planning routes can be expensive, especially when called every frame while hovering.
@@ -407,7 +822,7 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   std::optional<JumpRoutePlan> preview_route;
   bool preview_is_fleet = false;
   bool preview_from_queue = false;
-  if (hovered && hovered_system != kInvalidId) {
+  if (hovered && hovered_system != kInvalidId && !route_ruler_mode) {
     const bool restrict = ui.fog_of_war;
     const bool from_queue = ImGui::GetIO().KeyShift;
     const bool fleet_mode = (ImGui::GetIO().KeyCtrl && selected_fleet != nullptr);
@@ -453,6 +868,21 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
     }
   }
 
+  // Region label anchors (computed in screen space from visible systems).
+  std::unordered_map<Id, ImVec2> reg_label_sum;
+  std::unordered_map<Id, int> reg_label_count;
+  if (ui.show_galaxy_regions && ui.show_galaxy_region_labels && zoom >= 0.55f) {
+    reg_label_sum.reserve(s.regions.size() * 2);
+    reg_label_count.reserve(s.regions.size() * 2);
+    for (const auto& n : nodes) {
+      if (!n.sys) continue;
+      if (n.sys->region_id == kInvalidId) continue;
+      reg_label_sum[n.sys->region_id].x += n.p.x;
+      reg_label_sum[n.sys->region_id].y += n.p.y;
+      ++reg_label_count[n.sys->region_id];
+    }
+  }
+
   // Draw nodes.
   for (const auto& n : nodes) {
     const bool is_selected = (s.selected_system == n.id);
@@ -461,6 +891,31 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
 
     const ImU32 fill = is_selected ? IM_COL32(0, 220, 140, 255) : IM_COL32(240, 240, 240, 255);
     const ImU32 outline = IM_COL32(20, 20, 20, 255);
+
+    // Nebula haze (system-level environmental effect).
+    if (n.sys) {
+      // Region halo (optional overlay).
+      if (ui.show_galaxy_regions && n.sys->region_id != kInvalidId) {
+        float a = 0.10f;
+        float r = base_r + 14.0f;
+        if (ui.selected_region_id != kInvalidId) {
+          if (n.sys->region_id == ui.selected_region_id) {
+            a = 0.16f;
+            r = base_r + 16.0f;
+          } else if (ui.galaxy_region_dim_nonselected) {
+            a *= 0.35f;
+          }
+        }
+        draw->AddCircleFilled(n.p, r, region_col(n.sys->region_id, a), 0);
+      }
+
+      const float neb = (float)std::clamp(n.sys->nebula_density, 0.0, 1.0);
+      if (neb > 0.01f) {
+        const float r = base_r + 10.0f + neb * 14.0f;
+        const float a = 0.06f + 0.22f * neb;
+        draw->AddCircleFilled(n.p, r, modulate_alpha(IM_COL32(120, 170, 255, 255), a), 0);
+      }
+    }
 
     // Drop shadow + subtle glow for higher visual contrast.
     draw->AddCircleFilled(ImVec2(n.p.x + 1.5f, n.p.y + 1.5f), base_r + 0.5f, IM_COL32(0, 0, 0, 110), 0);
@@ -485,6 +940,13 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
       auto it = unknown_exits.find(n.id);
       if (it != unknown_exits.end() && it->second > 0) {
         draw->AddCircle(n.p, base_r + 4.0f, IM_COL32(255, 180, 0, 200), 0, 2.0f);
+      }
+    }
+
+    // Chokepoint ring (articulation point in the visible jump graph).
+    if (ui.show_galaxy_chokepoints && !chokepoints.empty() && zoom >= 0.45) {
+      if (chokepoints.find(n.id) != chokepoints.end()) {
+        draw->AddCircle(n.p, base_r + 10.0f, IM_COL32(190, 120, 255, 200), 0, 2.0f);
       }
     }
 
@@ -515,7 +977,27 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   // - Left click selects a system.
   // - Right click routes selected ship to the target system (Shift queues).
   // - Ctrl + right click routes selected fleet to the target system (Shift queues).
-  if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+  // Route ruler: hold D and click two systems to keep a persistent planning overlay.
+  // This consumes the click so we don't disturb normal selection (especially selected_ship).
+  if (route_ruler_mode) {
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Right) && !ImGui::IsAnyItemHovered()) {
+      route_ruler = RouteRulerState{};
+      ruler_consumed_right = true;
+    }
+
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && hovered_system != kInvalidId && !ImGui::IsAnyItemHovered()) {
+      if (route_ruler.a == kInvalidId || route_ruler.b != kInvalidId) {
+        route_ruler.a = hovered_system;
+        route_ruler.b = kInvalidId;
+      } else {
+        route_ruler.b = hovered_system;
+        if (route_ruler.b == route_ruler.a) route_ruler.b = kInvalidId;
+      }
+      ruler_consumed_left = true;
+    }
+  }
+
+  if (hovered && !over_minimap && !ruler_consumed_left && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
     if (mouse.x >= origin.x && mouse.x <= origin.x + avail.x && mouse.y >= origin.y && mouse.y <= origin.y + avail.y) {
       if (hovered_system != kInvalidId) {
         s.selected_system = hovered_system;
@@ -529,7 +1011,7 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
     }
   }
 
-  if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+  if (hovered && !over_minimap && !ruler_consumed_right && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
     if (mouse.x >= origin.x && mouse.x <= origin.x + avail.x && mouse.y >= origin.y && mouse.y <= origin.y + avail.y) {
       if (hovered_system != kInvalidId) {
         // Ctrl + right click: route selected fleet.
@@ -562,6 +1044,27 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
     }
   }
 
+  // Region labels.
+  if (ui.show_galaxy_regions && ui.show_galaxy_region_labels && zoom >= 0.55f && !reg_label_sum.empty()) {
+    for (const auto& [rid, sum] : reg_label_sum) {
+      if (ui.selected_region_id != kInvalidId && ui.galaxy_region_dim_nonselected && rid != ui.selected_region_id) {
+        continue;
+      }
+      const int cnt = reg_label_count[rid];
+      if (cnt < 2) continue;
+      const auto* reg = find_ptr(s.regions, rid);
+      if (!reg) continue;
+
+      ImVec2 p{sum.x / (float)cnt, sum.y / (float)cnt};
+      const ImVec2 ts = ImGui::CalcTextSize(reg->name.c_str());
+      p.x -= ts.x * 0.5f;
+      p.y -= ts.y * 0.5f;
+
+      const float a = (ui.selected_region_id != kInvalidId && rid == ui.selected_region_id) ? 0.80f : 0.55f;
+      draw->AddText(p, region_col(rid, a), reg->name.c_str());
+    }
+  }
+
   // Tooltip for hovered system.
   if (hovered_system != kInvalidId && hovered) {
     const auto* sys = find_ptr(s.systems, hovered_system);
@@ -587,6 +1090,22 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
       ImGui::BeginTooltip();
       ImGui::Text("%s", sys->name.c_str());
       ImGui::Separator();
+      const double neb = std::clamp(sys->nebula_density, 0.0, 1.0);
+      if (neb > 0.01) {
+        const double env = std::clamp(1.0 - 0.65 * neb, 0.25, 1.0);
+        ImGui::Text("Nebula density: %.0f%%", neb * 100.0);
+        ImGui::TextDisabled("Sensor env: x%.2f", env);
+      } else {
+        ImGui::TextDisabled("Nebula density: none");
+      }
+
+      if (sys->region_id != kInvalidId) {
+        if (const auto* reg = find_ptr(s.regions, sys->region_id)) {
+          ImGui::TextDisabled("Region: %s", reg->name.c_str());
+          if (!reg->theme.empty()) ImGui::TextDisabled("Theme: %s", reg->theme.c_str());
+        }
+      }
+
       if (ImGui::SmallButton("Select")) {
         s.selected_system = hovered_system;
       }
@@ -651,12 +1170,51 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
     }
   }
 
+  // Minimap overlay (bottom-right).
+  if (minimap_enabled) {
+    const ImU32 mm_bg = IM_COL32(8, 8, 10, 200);
+    const ImU32 mm_border = over_minimap ? IM_COL32(235, 235, 235, 220) : IM_COL32(90, 90, 95, 220);
+    draw->AddRectFilled(mm_p0, mm_p1, mm_bg, 4.0f);
+    draw->AddRect(mm_p0, mm_p1, mm_border, 4.0f);
+
+    // Systems.
+    for (const auto& v : visible) {
+      const Vec2 rel = v.sys->galaxy_pos - world_center;
+      ImVec2 p = world_to_minimap_px(mm, rel);
+      p = clamp_to_rect(p, mm_p0, mm_p1);
+      const bool is_selected = (s.selected_system == v.id);
+      const bool is_fleet = (selected_fleet_system != kInvalidId && v.id == selected_fleet_system);
+      const float r = is_selected ? 3.3f : (is_fleet ? 2.8f : 2.0f);
+      ImU32 col = IM_COL32(200, 200, 210, 200);
+      if (is_fleet) col = IM_COL32(0, 160, 255, 220);
+      if (is_selected) col = IM_COL32(245, 245, 245, 255);
+      draw->AddCircleFilled(p, r, col, 0);
+    }
+
+    // Viewport rectangle.
+    const Vec2 view_tl = to_world(origin, center_px, scale, zoom, pan);
+    const Vec2 view_br = to_world(ImVec2(origin.x + avail.x, origin.y + avail.y), center_px, scale, zoom, pan);
+    const ImVec2 pv0 = world_to_minimap_px(mm, view_tl);
+    const ImVec2 pv1 = world_to_minimap_px(mm, view_br);
+    ImVec2 a(std::min(pv0.x, pv1.x), std::min(pv0.y, pv1.y));
+    ImVec2 b(std::max(pv0.x, pv1.x), std::max(pv0.y, pv1.y));
+    a = clamp_to_rect(a, mm_p0, mm_p1);
+    b = clamp_to_rect(b, mm_p0, mm_p1);
+    draw->AddRectFilled(a, b, IM_COL32(255, 255, 255, 22));
+    draw->AddRect(a, b, IM_COL32(255, 255, 255, 170), 0.0f, 0, 1.5f);
+
+    // Label.
+    draw->AddText(ImVec2(mm_p0.x + 6.0f, mm_p0.y + 4.0f), IM_COL32(210, 210, 210, 200), "Minimap (M)");
+  }
+
   // Legend / help
   ImGui::SetCursorScreenPos(ImVec2(origin.x + 10, origin.y + 10));
   ImGui::BeginChild("galaxy_legend", ImVec2(350, 320), true);
   ImGui::Text("Galaxy map");
   ImGui::BulletText("Wheel: zoom (to cursor)");
   ImGui::BulletText("Middle drag: pan");
+  ImGui::BulletText("Minimap (M): click/drag to pan");
+  ImGui::BulletText("Hold D + click: route ruler (plan A\xe2\x86\x92B)");
   ImGui::BulletText("R: reset view");
   ImGui::BulletText("Left click: select system");
   ImGui::BulletText("Right click: route selected ship (Shift queues)");
@@ -666,12 +1224,95 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   ImGui::Checkbox("Starfield", &ui.galaxy_map_starfield);
   ImGui::SameLine();
   ImGui::Checkbox("Grid", &ui.galaxy_map_grid);
+  ImGui::Checkbox("Minimap (M)", &ui.galaxy_map_show_minimap);
   ImGui::Checkbox("Selected travel route", &ui.galaxy_map_selected_route);
   ImGui::Checkbox("Fog of war", &ui.fog_of_war);
   ImGui::Checkbox("Labels", &ui.show_galaxy_labels);
   ImGui::Checkbox("Jump links", &ui.show_galaxy_jump_lines);
+  ImGui::Checkbox("Chokepoints (articulation)", &ui.show_galaxy_chokepoints);
   ImGui::Checkbox("Unknown exits hint (unsurveyed / undiscovered)", &ui.show_galaxy_unknown_exits);
   ImGui::Checkbox("Intel alerts", &ui.show_galaxy_intel_alerts);
+
+  ImGui::SeparatorText("Route ruler (hold D)");
+  ImGui::TextDisabled("Hold D and left click two systems. D+right click clears.");
+  {
+    const auto* a_sys = (route_ruler.a != kInvalidId) ? find_ptr(s.systems, route_ruler.a) : nullptr;
+    const auto* b_sys = (route_ruler.b != kInvalidId) ? find_ptr(s.systems, route_ruler.b) : nullptr;
+
+    if (a_sys) {
+      ImGui::Text("A: %s", a_sys->name.c_str());
+    } else {
+      ImGui::TextDisabled("A: (not set)");
+    }
+    if (b_sys) {
+      ImGui::Text("B: %s", b_sys->name.c_str());
+    } else {
+      ImGui::TextDisabled("B: (not set)");
+    }
+
+    if (a_sys && b_sys) {
+      const double dist_u = (b_sys->galaxy_pos - a_sys->galaxy_pos).length();
+      ImGui::TextDisabled("Direct: %.2f u", dist_u);
+
+      if (ruler_route && ruler_route->systems.size() >= 2) {
+        const int jumps = static_cast<int>(ruler_route->systems.size() - 1);
+        ImGui::Text("Route: %d jumps", jumps);
+        ImGui::TextDisabled("Route distance: %.0f mkm", ruler_route->distance_mkm);
+
+        if (std::isfinite(ruler_route->eta_days) && ruler_speed_km_s > 1e-9) {
+          ImGui::Text("ETA: %s", format_duration_days(ruler_route->eta_days).c_str());
+          ImGui::SameLine();
+          ImGui::TextDisabled("(%s @ %.0f km/s)", ruler_speed_basis ? ruler_speed_basis : "Speed", ruler_speed_km_s);
+        } else {
+          ImGui::TextDisabled("ETA: (select a ship/fleet for speed)");
+        }
+      } else {
+        ImGui::TextDisabled("No known route (respecting fog of war).\nSurvey more jump points.");
+      }
+
+      if (ImGui::Button("Swap A<->B")) {
+        std::swap(route_ruler.a, route_ruler.b);
+        // Force recompute of the cached route next frame.
+        ruler_route.reset();
+      }
+      ImGui::SameLine();
+      if (ImGui::Button("Clear ruler")) {
+        route_ruler = RouteRulerState{};
+        ruler_route.reset();
+      }
+    } else {
+      if (route_ruler.a != kInvalidId || route_ruler.b != kInvalidId) {
+        if (ImGui::Button("Clear ruler")) {
+          route_ruler = RouteRulerState{};
+        }
+      }
+    }
+  }
+
+  ImGui::Checkbox("Region halos", &ui.show_galaxy_regions);
+  ImGui::SameLine();
+  ImGui::Checkbox("Boundaries", &ui.show_galaxy_region_boundaries);
+  ImGui::BeginDisabled(!ui.show_galaxy_regions);
+  ImGui::SameLine();
+  ImGui::Checkbox("Labels", &ui.show_galaxy_region_labels);
+  ImGui::EndDisabled();
+  ImGui::BeginDisabled(!(ui.show_galaxy_regions || ui.show_galaxy_region_boundaries) || ui.selected_region_id == kInvalidId);
+  ImGui::SameLine();
+  ImGui::Checkbox("Dim others", &ui.galaxy_region_dim_nonselected);
+  ImGui::EndDisabled();
+
+  if (ui.selected_region_id != kInvalidId) {
+    const auto* reg = find_ptr(s.regions, ui.selected_region_id);
+    if (reg) {
+      ImGui::TextDisabled("Selected region: %s", reg->name.c_str());
+    } else {
+      ImGui::TextDisabled("Selected region: %llu", (unsigned long long)ui.selected_region_id);
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Clear##selected_region")) {
+      ui.selected_region_id = kInvalidId;
+    }
+  }
 
   if (ImGui::Button("Reset view (R)")) {
     zoom = 1.0;

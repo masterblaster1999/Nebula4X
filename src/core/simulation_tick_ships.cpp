@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <cstring>
 #include <iomanip>
+#include <limits>
 #include <optional>
 #include <sstream>
 #include <unordered_map>
@@ -44,6 +45,22 @@ void Simulation::tick_ships(double dt_days) {
   const double dock_range = std::max(arrive_eps, cfg_.docking_range_mkm);
 
   const auto ship_ids = sorted_keys(state_.ships);
+
+  // Capture pre-move positions so we can compute per-ship velocities after all
+  // movement/order processing completes.
+  //
+  // We do this as a single prepass so we don't have to carefully update velocity
+  // in every early-continue branch of the (large) ship order state machine.
+  std::unordered_map<Id, Vec2> pre_pos_mkm;
+  std::unordered_map<Id, Id> pre_sys;
+  pre_pos_mkm.reserve(ship_ids.size() * 2);
+  pre_sys.reserve(ship_ids.size() * 2);
+  for (Id sid : ship_ids) {
+    const auto* sh = find_ptr(state_.ships, sid);
+    if (!sh) continue;
+    pre_pos_mkm.emplace(sid, sh->position_mkm);
+    pre_sys.emplace(sid, sh->system_id);
+  }
 
   auto can_refill_from_repeat = [](const ShipOrders& so) {
     return so.repeat && !so.repeat_template.empty() && so.repeat_count_remaining != 0;
@@ -1103,6 +1120,28 @@ void Simulation::tick_ships(double dt_days) {
       double remaining_request = (cargo_tons > 0.0) ? cargo_tons : 1e300;
       remaining_request = std::min(remaining_request, dest_capacity_free);
 
+      // Throughput limit per tick (prevents instant transfers at 1h ticks).
+      if (dt_days > 0.0) {
+        double cap_for_rate = 0.0;
+        if (cargo_mode == 2) {
+          const auto* src_d = find_design(ship.design_id);
+          const auto* tgt = find_ptr(state_.ships, cargo_target_ship_id);
+          const auto* tgt_d = tgt ? find_design(tgt->design_id) : nullptr;
+          const double src_cap = src_d ? std::max(0.0, src_d->cargo_tons) : 0.0;
+          const double tgt_cap = tgt_d ? std::max(0.0, tgt_d->cargo_tons) : 0.0;
+          cap_for_rate = std::min(src_cap, tgt_cap);
+        } else {
+          const auto* src_d = find_design(ship.design_id);
+          cap_for_rate = src_d ? std::max(0.0, src_d->cargo_tons) : 0.0;
+        }
+
+        const double per_ton = std::max(0.0, cfg_.cargo_transfer_tons_per_day_per_cargo_ton);
+        const double min_rate = std::max(0.0, cfg_.cargo_transfer_tons_per_day_min);
+        const double rate_per_day = std::max(min_rate, cap_for_rate * per_ton);
+        remaining_request = std::min(remaining_request, rate_per_day * dt_days);
+      }
+
+
       auto transfer_one = [&](const std::string& min_type, double amount_limit) {
         if (amount_limit <= 1e-9) return 0.0;
         auto it_src = source_minerals->find(min_type);
@@ -1140,9 +1179,12 @@ void Simulation::tick_ships(double dt_days) {
     };
 
     auto cargo_order_complete = [&](double moved_this_tick) {
-      if (cargo_tons <= 0.0) return true; // "As much as possible" -> done after one attempt? No, standard logic usually implies until full/empty.
-                                          // But for simplicity, we'll stick to: if we requested unlimited, we try until we can't move anymore.
-      
+      if (cargo_tons <= 0.0) {
+        // "As much as possible": keep the order until we can't move anything
+        // (blocked by full cargo holds / empty source / etc.).
+        return moved_this_tick <= 1e-9;
+      }
+
       // Update remaining tons in the order struct
       if (cargo_mode == 0 && load_ord) {
         load_ord->tons = std::max(0.0, load_ord->tons - moved_this_tick);
@@ -1178,6 +1220,17 @@ void Simulation::tick_ships(double dt_days) {
 
       double remaining_request = (salvage_tons > 0.0) ? salvage_tons : 1e300;
       remaining_request = std::min(remaining_request, free);
+
+      // Salvage throughput limit (tons/day).
+      if (dt_days > 0.0) {
+        const double per_ton = std::max(0.0, cfg_.salvage_tons_per_day_per_cargo_ton);
+        const double min_rate = std::max(0.0, cfg_.salvage_tons_per_day_min);
+        const double rate_per_day = std::max(min_rate, cap * per_ton);
+        remaining_request = std::min(remaining_request, rate_per_day * dt_days);
+      }
+
+      if (remaining_request <= 1e-9) return 0.0;
+
 
       double moved_total = 0.0;
 
@@ -1220,7 +1273,11 @@ void Simulation::tick_ships(double dt_days) {
     };
 
     auto salvage_order_complete = [&](double moved_this_tick) {
-      if (salvage_tons <= 0.0) return true; // as much as possible in one attempt
+      if (salvage_tons <= 0.0) {
+        // "As much as possible": keep salvaging until blocked or the wreck is gone.
+        if (!find_ptr(state_.wrecks, salvage_wreck_id)) return true;
+        return moved_this_tick <= 1e-9;
+      }
 
       if (salvage_ord) {
         salvage_ord->tons = std::max(0.0, salvage_ord->tons - moved_this_tick);
@@ -1382,6 +1439,18 @@ void Simulation::tick_ships(double dt_days) {
       double remaining_request = (fuel_tons > 0.0) ? fuel_tons : 1e300;
       remaining_request = std::min(remaining_request, free);
 
+      // Throughput limit per tick (prevents instant ship-to-ship refueling at 1h ticks).
+      if (dt_days > 0.0) {
+        const double cap_for_rate = std::min(src_cap, tgt_cap);
+        const double per_ton = std::max(0.0, cfg_.fuel_transfer_tons_per_day_per_fuel_ton);
+        const double min_rate = std::max(0.0, cfg_.fuel_transfer_tons_per_day_min);
+        const double rate_per_day = std::max(min_rate, cap_for_rate * per_ton);
+        remaining_request = std::min(remaining_request, rate_per_day * dt_days);
+      }
+
+      if (remaining_request <= 1e-9) return 0.0;
+
+
       const double have = std::max(0.0, ship.fuel_tons);
       const double give = std::min(have, remaining_request);
       if (give <= 1e-9) return 0.0;
@@ -1392,7 +1461,11 @@ void Simulation::tick_ships(double dt_days) {
     };
 
     auto fuel_order_complete = [&](double moved_this_tick) {
-      if (fuel_tons <= 0.0) return true; // as much as possible in one attempt
+      if (fuel_tons <= 0.0) {
+        // "As much as possible": keep the order until we can't move anything
+        // (source empty / target full / etc.).
+        return moved_this_tick <= 1e-9;
+      }
 
       if (fuel_transfer_ord) {
         fuel_transfer_ord->tons = std::max(0.0, fuel_transfer_ord->tons - moved_this_tick);
@@ -1430,6 +1503,18 @@ void Simulation::tick_ships(double dt_days) {
       double remaining_request = (troop_transfer_strength > 0.0) ? troop_transfer_strength : 1e300;
       remaining_request = std::min(remaining_request, free);
 
+      // Throughput limit per tick (prevents instant ship-to-ship troop transfers at 1h ticks).
+      if (dt_days > 0.0) {
+        const double cap_for_rate = std::min(src_cap, tgt_cap);
+        const double per_cap = std::max(0.0, cfg_.troop_transfer_strength_per_day_per_troop_cap);
+        const double min_rate = std::max(0.0, cfg_.troop_transfer_strength_per_day_min);
+        const double rate_per_day = std::max(min_rate, cap_for_rate * per_cap);
+        remaining_request = std::min(remaining_request, rate_per_day * dt_days);
+      }
+
+      if (remaining_request <= 1e-9) return 0.0;
+
+
       const double have = std::max(0.0, ship.troops);
       const double give = std::min(have, remaining_request);
       if (give <= 1e-9) return 0.0;
@@ -1440,7 +1525,11 @@ void Simulation::tick_ships(double dt_days) {
     };
 
     auto troop_transfer_order_complete = [&](double moved_this_tick) {
-      if (troop_transfer_strength <= 0.0) return true; // as much as possible in one attempt
+      if (troop_transfer_strength <= 0.0) {
+        // "As much as possible": keep the order until we can't move anything
+        // (source empty / target full / etc.).
+        return moved_this_tick <= 1e-9;
+      }
 
       if (troop_transfer_ord) {
         troop_transfer_ord->strength = std::max(0.0, troop_transfer_ord->strength - moved_this_tick);
@@ -2104,7 +2193,18 @@ void Simulation::tick_ships(double dt_days) {
   }
 
   // Jump-point surveys: ships record nearby jump points for fog-of-war routing.
-  // (Surveyors can do this from farther away using their sensor range.)
+  //
+  // Surveys are modeled as an incremental process: ships contribute "survey points"
+  // over time while within range of a jump point. When progress reaches
+  // cfg_.jump_survey_points_required, the jump point becomes surveyed for the
+  // faction (and is shared with mutual-friendly factions).
+  //
+  // Setting cfg_.jump_survey_points_required <= 0 keeps the legacy instant behavior.
+  const double required_points = cfg_.jump_survey_points_required;
+  const double ref_range = std::max(1e-9, cfg_.jump_survey_reference_sensor_range_mkm);
+  const double range_frac = std::max(0.0, cfg_.jump_survey_range_sensor_fraction);
+  const double cap_points_per_day = std::max(0.0, cfg_.jump_survey_points_per_day_cap);
+
   for (Id ship_id : ship_ids) {
     const auto* sh = find_ptr(state_.ships, ship_id);
     if (!sh) continue;
@@ -2112,27 +2212,120 @@ void Simulation::tick_ships(double dt_days) {
     if (sh->faction_id == kInvalidId) continue;
     if (sh->system_id == kInvalidId) continue;
 
+    auto* fac = find_ptr(state_.factions, sh->faction_id);
+    if (!fac) continue;
+
     const auto* sys = find_ptr(state_.systems, sh->system_id);
     if (!sys) continue;
 
     const auto* sd = find_design(sh->design_id);
+    if (!sd) continue;
+
+    // Environmental sensor attenuation (match simulation_sensors).
+    const double nebula = std::clamp(sys->nebula_density, 0.0, 1.0);
+    const double env_mult = std::clamp(1.0 - 0.65 * nebula, 0.25, 1.0);
+
+    // Need online sensors to contribute.
+    double sensor_mkm = sim_sensors::sensor_range_mkm_with_mode(*this, *sh, *sd);
+    sensor_mkm *= env_mult;
+    if (sensor_mkm <= 1e-9) continue;
+
+    // Range check: non-surveyors must be at docking range; surveyors can contribute
+    // at longer range (a fraction of their effective sensor range).
     double range_mkm = std::max(0.0, cfg_.docking_range_mkm);
-    if (sd && sd->role == ShipRole::Surveyor) {
-      range_mkm = std::max(range_mkm, sim_sensors::sensor_range_mkm_with_mode(*this, *sh, *sd));
+    if (sd->role == ShipRole::Surveyor) {
+      range_mkm = std::max(range_mkm, sensor_mkm * range_frac);
     }
     if (range_mkm <= 0.0) continue;
 
+    // Legacy: instant surveying.
+    if (required_points <= 1e-9) {
+      for (Id jid : sys->jump_points) {
+        if (jid == kInvalidId) continue;
+        if (is_jump_point_surveyed_by_faction(sh->faction_id, jid)) continue;
+        const auto* jp = find_ptr(state_.jump_points, jid);
+        if (!jp) continue;
+        const double dist = (sh->position_mkm - jp->position_mkm).length();
+        if (dist <= range_mkm + 1e-9) {
+          survey_jump_point_for_faction(sh->faction_id, jid);
+        }
+      }
+      continue;
+    }
+
+    // Survey rate for this ship.
+    const double role_mult = (sd->role == ShipRole::Surveyor) ? cfg_.jump_survey_strength_multiplier_surveyor
+                                                             : cfg_.jump_survey_strength_multiplier_other;
+    double points_per_day = (sensor_mkm / ref_range) * std::max(0.0, role_mult);
+    if (cap_points_per_day > 0.0) {
+      points_per_day = std::clamp(points_per_day, 0.0, cap_points_per_day);
+    }
+    const double delta_points = points_per_day * dt_days;
+    if (delta_points <= 1e-12) continue;
+
+    // Pick the nearest unsurveyed jump point in range and apply progress to it.
+    Id best_jid = kInvalidId;
+    double best_dist = std::numeric_limits<double>::infinity();
     for (Id jid : sys->jump_points) {
       if (jid == kInvalidId) continue;
       if (is_jump_point_surveyed_by_faction(sh->faction_id, jid)) continue;
       const auto* jp = find_ptr(state_.jump_points, jid);
       if (!jp) continue;
       const double dist = (sh->position_mkm - jp->position_mkm).length();
-      if (dist <= range_mkm + 1e-9) {
-        survey_jump_point_for_faction(sh->faction_id, jid);
+      if (dist <= range_mkm + 1e-9 && dist < best_dist) {
+        best_dist = dist;
+        best_jid = jid;
       }
     }
+    if (best_jid == kInvalidId) continue;
+
+    double& prog = fac->jump_survey_progress[best_jid];
+    if (!std::isfinite(prog) || prog < 0.0) prog = 0.0;
+    prog += delta_points;
+
+    if (prog >= required_points - 1e-9) {
+      // Keep progress maps tidy; survey_jump_point_for_faction() will also clear.
+      fac->jump_survey_progress.erase(best_jid);
+      survey_jump_point_for_faction(sh->faction_id, best_jid);
+    }
   }
+
+  // --- velocity tracking ---
+  //
+  // Compute in-system velocity vectors for the next combat tick based on
+  // position deltas over this dt.
+  //
+  // Ships that changed systems (jump transit) are assigned zero velocity to
+  // avoid nonsensical values.
+  if (dt_days > 1e-12) {
+    const double inv_dt = 1.0 / dt_days;
+    for (Id sid : ship_ids) {
+      auto* sh = find_ptr(state_.ships, sid);
+      if (!sh) continue;
+      const auto itp = pre_pos_mkm.find(sid);
+      const auto its = pre_sys.find(sid);
+      if (itp == pre_pos_mkm.end() || its == pre_sys.end()) {
+        sh->velocity_mkm_per_day = Vec2{0.0, 0.0};
+        continue;
+      }
+      if (its->second != sh->system_id) {
+        sh->velocity_mkm_per_day = Vec2{0.0, 0.0};
+        continue;
+      }
+      const Vec2 delta = sh->position_mkm - itp->second;
+      sh->velocity_mkm_per_day = delta * inv_dt;
+      if (!std::isfinite(sh->velocity_mkm_per_day.x) || !std::isfinite(sh->velocity_mkm_per_day.y)) {
+        sh->velocity_mkm_per_day = Vec2{0.0, 0.0};
+      }
+    }
+  } else {
+    for (Id sid : ship_ids) {
+      auto* sh = find_ptr(state_.ships, sid);
+      if (!sh) continue;
+      sh->velocity_mkm_per_day = Vec2{0.0, 0.0};
+    }
+  }
+
 }
 
 

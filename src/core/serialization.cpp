@@ -16,7 +16,7 @@ using json::Array;
 using json::Object;
 using json::Value;
 
-constexpr int kCurrentSaveVersion = 42;
+constexpr int kCurrentSaveVersion = 45;
 
 Object ship_power_policy_to_json(const ShipPowerPolicy& p) {
   Object o;
@@ -197,6 +197,7 @@ const char* fleet_mission_type_to_string(FleetMissionType t) {
     case FleetMissionType::HuntHostiles: return "hunt_hostiles";
     case FleetMissionType::EscortFreighters: return "escort_freighters";
     case FleetMissionType::Explore: return "explore";
+    case FleetMissionType::PatrolRegion: return "patrol_region";
   }
   return "none";
 }
@@ -207,6 +208,7 @@ FleetMissionType fleet_mission_type_from_string(const std::string& s) {
   if (s == "hunt_hostiles" || s == "hunt") return FleetMissionType::HuntHostiles;
   if (s == "escort_freighters" || s == "escort_freighter" || s == "escort") return FleetMissionType::EscortFreighters;
   if (s == "explore" || s == "explore_systems" || s == "exploration") return FleetMissionType::Explore;
+  if (s == "patrol_region" || s == "patrolreg" || s == "region_patrol") return FleetMissionType::PatrolRegion;
   return FleetMissionType::None;
 }
 
@@ -650,6 +652,7 @@ std::string serialize_game_to_json(const GameState& s) {
   root["next_event_seq"] = static_cast<double>(s.next_event_seq);
   root["selected_system"] = static_cast<double>(s.selected_system);
 
+
   // Systems
   Array systems;
   systems.reserve(s.systems.size());
@@ -659,6 +662,8 @@ std::string serialize_game_to_json(const GameState& s) {
     o["id"] = static_cast<double>(id);
     o["name"] = sys.name;
     o["galaxy_pos"] = vec2_to_json(sys.galaxy_pos);
+    if (sys.region_id != kInvalidId) o["region_id"] = static_cast<double>(sys.region_id);
+    if (sys.nebula_density != 0.0) o["nebula_density"] = sys.nebula_density;
 
     Array bodies;
     {
@@ -687,6 +692,29 @@ std::string serialize_game_to_json(const GameState& s) {
     systems.push_back(o);
   }
   root["systems"] = systems;
+
+
+  // Regions (optional)
+  if (!s.regions.empty()) {
+    Array regions;
+    regions.reserve(s.regions.size());
+    for (Id id : sorted_keys(s.regions)) {
+      const auto& r = s.regions.at(id);
+      Object o;
+      o["id"] = static_cast<double>(id);
+      o["name"] = r.name;
+      o["center"] = vec2_to_json(r.center);
+      if (!r.theme.empty()) o["theme"] = r.theme;
+      if (r.mineral_richness_mult != 1.0) o["mineral_richness_mult"] = r.mineral_richness_mult;
+      if (r.volatile_richness_mult != 1.0) o["volatile_richness_mult"] = r.volatile_richness_mult;
+      if (r.salvage_richness_mult != 1.0) o["salvage_richness_mult"] = r.salvage_richness_mult;
+      if (r.nebula_bias != 0.0) o["nebula_bias"] = r.nebula_bias;
+      if (r.pirate_risk != 0.0) o["pirate_risk"] = r.pirate_risk;
+      if (r.ruins_density != 0.0) o["ruins_density"] = r.ruins_density;
+      regions.push_back(o);
+    }
+    root["regions"] = regions;
+  }
 
   // Bodies
   Array bodies;
@@ -772,6 +800,7 @@ std::string serialize_game_to_json(const GameState& s) {
     o["power_policy"] = ship_power_policy_to_json(sh.power_policy);
     if (sh.sensor_mode != SensorMode::Normal) o["sensor_mode"] = sensor_mode_to_string(sh.sensor_mode);
     o["speed_km_s"] = sh.speed_km_s;
+    o["velocity_mkm_per_day"] = vec2_to_json(sh.velocity_mkm_per_day);
     o["hp"] = sh.hp;
     o["missile_cooldown_days"] = sh.missile_cooldown_days;
     if (sh.boarding_cooldown_days > 0.0) o["boarding_cooldown_days"] = sh.boarding_cooldown_days;
@@ -948,6 +977,22 @@ std::string serialize_game_to_json(const GameState& s) {
     for (Id jid : sjp) surveyed_jump_points.push_back(static_cast<double>(jid));
     o["surveyed_jump_points"] = surveyed_jump_points;
 
+    // Incremental jump-point survey progress (optional).
+    if (!f.jump_survey_progress.empty()) {
+      Array prog;
+      prog.reserve(f.jump_survey_progress.size());
+      for (Id jid : sorted_keys(f.jump_survey_progress)) {
+        const auto itp = f.jump_survey_progress.find(jid);
+        const double p = (itp == f.jump_survey_progress.end()) ? 0.0 : itp->second;
+        if (!std::isfinite(p) || p <= 1e-9) continue;
+        Object po;
+        po["jump_point_id"] = static_cast<double>(jid);
+        po["progress"] = p;
+        prog.push_back(po);
+      }
+      if (!prog.empty()) o["jump_survey_progress"] = prog;
+    }
+
     Array contacts;
     contacts.reserve(f.ship_contacts.size());
     for (Id sid : sorted_keys(f.ship_contacts)) {
@@ -996,6 +1041,11 @@ std::string serialize_game_to_json(const GameState& s) {
       m["patrol_system_id"] = static_cast<double>(f.mission.patrol_system_id);
       m["patrol_dwell_days"] = static_cast<double>(f.mission.patrol_dwell_days);
       m["patrol_leg_index"] = static_cast<double>(f.mission.patrol_leg_index);
+
+      m["patrol_region_id"] = static_cast<double>(f.mission.patrol_region_id);
+      m["patrol_region_dwell_days"] = static_cast<double>(f.mission.patrol_region_dwell_days);
+      m["patrol_region_system_index"] = static_cast<double>(f.mission.patrol_region_system_index);
+      m["patrol_region_waypoint_index"] = static_cast<double>(f.mission.patrol_region_waypoint_index);
 
       m["hunt_max_contact_age_days"] = static_cast<double>(f.mission.hunt_max_contact_age_days);
 
@@ -1194,6 +1244,28 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     s.selected_system = static_cast<Id>(itsel->second.int_value(kInvalidId));
   }
 
+  // Regions (optional)
+  if (auto it = root.find("regions"); it != root.end()) {
+    for (const auto& rv : it->second.array()) {
+      const auto& o = rv.object();
+      Region r;
+      r.id = static_cast<Id>(o.at("id").int_value());
+      r.name = o.at("name").string_value();
+      if (auto ic = o.find("center"); ic != o.end()) r.center = vec2_from_json(ic->second);
+      if (auto itheme = o.find("theme"); itheme != o.end()) r.theme = itheme->second.string_value();
+
+      if (auto im = o.find("mineral_richness_mult"); im != o.end()) r.mineral_richness_mult = im->second.number_value(1.0);
+      if (auto iv = o.find("volatile_richness_mult"); iv != o.end()) r.volatile_richness_mult = iv->second.number_value(1.0);
+      if (auto isv = o.find("salvage_richness_mult"); isv != o.end()) r.salvage_richness_mult = isv->second.number_value(1.0);
+
+      if (auto inb = o.find("nebula_bias"); inb != o.end()) r.nebula_bias = std::clamp(inb->second.number_value(0.0), -1.0, 1.0);
+      if (auto ip = o.find("pirate_risk"); ip != o.end()) r.pirate_risk = std::clamp(ip->second.number_value(0.0), 0.0, 1.0);
+      if (auto ir = o.find("ruins_density"); ir != o.end()) r.ruins_density = std::clamp(ir->second.number_value(0.0), 0.0, 1.0);
+
+      if (r.id != kInvalidId) s.regions[r.id] = r;
+    }
+  }
+
   // Systems
   for (const auto& sv : root.at("systems").array()) {
     const auto& o = sv.object();
@@ -1201,6 +1273,10 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     sys.id = static_cast<Id>(o.at("id").int_value());
     sys.name = o.at("name").string_value();
     sys.galaxy_pos = vec2_from_json(o.at("galaxy_pos"));
+    if (auto ir = o.find("region_id"); ir != o.end()) sys.region_id = static_cast<Id>(ir->second.int_value(kInvalidId));
+    if (auto it = o.find("nebula_density"); it != o.end()) {
+      sys.nebula_density = std::clamp(it->second.number_value(0.0), 0.0, 1.0);
+    }
 
     for (const auto& bid : o.at("bodies").array()) sys.bodies.push_back(static_cast<Id>(bid.int_value()));
     for (const auto& sid : o.at("ships").array()) sys.ships.push_back(static_cast<Id>(sid.int_value()));
@@ -1214,6 +1290,15 @@ GameState deserialize_game_from_json(const std::string& json_text) {
 
   if (s.selected_system != kInvalidId && s.systems.find(s.selected_system) == s.systems.end()) {
     s.selected_system = kInvalidId;
+  }
+
+  // Validate region ids.
+  if (!s.regions.empty()) {
+    for (auto& [sid, sys] : s.systems) {
+      if (sys.region_id != kInvalidId && s.regions.find(sys.region_id) == s.regions.end()) {
+        sys.region_id = kInvalidId;
+      }
+    }
   }
 
   // Bodies
@@ -1314,6 +1399,9 @@ GameState deserialize_game_from_json(const std::string& json_text) {
       sh.sensor_mode = sensor_mode_from_string(it->second.string_value("normal"));
     }
     sh.speed_km_s = o.at("speed_km_s").number_value(0.0);
+    if (auto it = o.find("velocity_mkm_per_day"); it != o.end()) {
+      sh.velocity_mkm_per_day = vec2_from_json(it->second);
+    }
     sh.hp = o.at("hp").number_value(0.0);
     if (auto it = o.find("missile_cooldown_days"); it != o.end()) {
       sh.missile_cooldown_days = it->second.number_value(0.0);
@@ -1569,6 +1657,45 @@ GameState deserialize_game_from_json(const std::string& json_text) {
       }
     }
 
+    // Incremental jump-point survey progress (optional).
+    // Stored as either an array-of-objects:
+    //   [{"jump_point_id": 123, "progress": 0.5}, ...]
+    // or an object-map:
+    //   {"123": 0.5, ...}
+    if (auto it = o.find("jump_survey_progress"); it != o.end()) {
+      auto is_surveyed = [&](Id jid) -> bool {
+        return std::find(f.surveyed_jump_points.begin(), f.surveyed_jump_points.end(), jid) !=
+               f.surveyed_jump_points.end();
+      };
+
+      if (it->second.is_array()) {
+        for (const auto& pv : it->second.array()) {
+          if (!pv.is_object()) continue;
+          const auto& po = pv.object();
+          const Id jid = static_cast<Id>(po.at("jump_point_id").int_value(kInvalidId));
+          if (jid == kInvalidId) continue;
+          if (is_surveyed(jid)) continue;
+          const double prog = (po.find("progress") != po.end()) ? po.at("progress").number_value(0.0) : 0.0;
+          if (!std::isfinite(prog) || prog <= 1e-9) continue;
+          f.jump_survey_progress[jid] = prog;
+        }
+      } else if (it->second.is_object()) {
+        for (const auto& [k, v] : it->second.object()) {
+          Id jid = kInvalidId;
+          try {
+            jid = static_cast<Id>(std::stoull(k));
+          } catch (...) {
+            continue;
+          }
+          if (jid == kInvalidId) continue;
+          if (is_surveyed(jid)) continue;
+          const double prog = v.number_value(0.0);
+          if (!std::isfinite(prog) || prog <= 1e-9) continue;
+          f.jump_survey_progress[jid] = prog;
+        }
+      }
+    }
+
     if (auto it = o.find("ship_contacts"); it != o.end()) {
       for (const auto& cv : it->second.array()) {
         const auto& co = cv.object();
@@ -1642,6 +1769,18 @@ GameState deserialize_game_from_json(const std::string& json_text) {
           }
           if (auto itl = m.find("patrol_leg_index"); itl != m.end()) {
             fl.mission.patrol_leg_index = std::max(0, static_cast<int>(itl->second.int_value(fl.mission.patrol_leg_index)));
+          }
+          if (auto itrgn = m.find("patrol_region_id"); itrgn != m.end()) {
+            fl.mission.patrol_region_id = static_cast<Id>(itrgn->second.int_value(kInvalidId));
+          }
+          if (auto itrdw = m.find("patrol_region_dwell_days"); itrdw != m.end()) {
+            fl.mission.patrol_region_dwell_days = std::max(1, static_cast<int>(itrdw->second.int_value(fl.mission.patrol_region_dwell_days)));
+          }
+          if (auto itrs = m.find("patrol_region_system_index"); itrs != m.end()) {
+            fl.mission.patrol_region_system_index = std::max(0, static_cast<int>(itrs->second.int_value(fl.mission.patrol_region_system_index)));
+          }
+          if (auto itrw = m.find("patrol_region_waypoint_index"); itrw != m.end()) {
+            fl.mission.patrol_region_waypoint_index = std::max(0, static_cast<int>(itrw->second.int_value(fl.mission.patrol_region_waypoint_index)));
           }
           if (auto ith = m.find("hunt_max_contact_age_days"); ith != m.end()) {
             fl.mission.hunt_max_contact_age_days = std::max(0, static_cast<int>(ith->second.int_value(fl.mission.hunt_max_contact_age_days)));

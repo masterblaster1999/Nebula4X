@@ -88,6 +88,10 @@ std::vector<SensorSource> gather_sensor_sources(const Simulation& sim, Id factio
   const auto* sys = find_ptr(s.systems, system_id);
   if (!sys) return out;
 
+  // Environmental sensor attenuation (e.g., nebula dust).
+  const double nebula = std::clamp(sys->nebula_density, 0.0, 1.0);
+  const double env_mult = std::clamp(1.0 - 0.65 * nebula, 0.25, 1.0);
+
   // Mutual-friendly factions share sensor coverage.
   std::vector<Id> sensor_factions;
   sensor_factions.reserve(s.factions.size());
@@ -112,7 +116,7 @@ std::vector<SensorSource> gather_sensor_sources(const Simulation& sim, Id factio
     const auto* d = sim.find_design(sh->design_id);
     if (!d) continue;
 
-    const double range_mkm = sensor_range_mkm_with_mode(sim, *sh, *d);
+    const double range_mkm = sensor_range_mkm_with_mode(sim, *sh, *d) * env_mult;
     if (range_mkm <= 0.0) continue;
 
     out.push_back(SensorSource{sh->position_mkm, range_mkm});
@@ -137,6 +141,7 @@ std::vector<SensorSource> gather_sensor_sources(const Simulation& sim, Id factio
       best_mkm = std::max(best_mkm, std::max(0.0, it->second.sensor_range_mkm));
     }
 
+    best_mkm *= env_mult;
     if (best_mkm <= 0.0) continue;
     out.push_back(SensorSource{body->position_mkm, best_mkm});
   }

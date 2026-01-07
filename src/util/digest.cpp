@@ -376,6 +376,8 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
     d.add_u64(sid);
     d.add_string(sys.name);
     hash_vec2(d, sys.galaxy_pos);
+    d.add_u64(sys.region_id);
+    d.add_double(sys.nebula_density);
 
     auto bodies = sys.bodies;
     bodies = sorted_unique_copy(std::move(bodies));
@@ -391,6 +393,22 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
     jumps = sorted_unique_copy(std::move(jumps));
     d.add_size(jumps.size());
     for (Id jid : jumps) d.add_u64(jid);
+  }
+
+  // Regions
+  d.add_size(s.regions.size());
+  for (Id rid : sorted_keys(s.regions)) {
+    const auto& r = s.regions.at(rid);
+    d.add_u64(rid);
+    d.add_string(r.name);
+    hash_vec2(d, r.center);
+    d.add_string(r.theme);
+    d.add_double(r.mineral_richness_mult);
+    d.add_double(r.volatile_richness_mult);
+    d.add_double(r.salvage_richness_mult);
+    d.add_double(r.nebula_bias);
+    d.add_double(r.pirate_risk);
+    d.add_double(r.ruins_density);
   }
 
   // Bodies
@@ -442,6 +460,7 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
     hash_vec2(d, sh.position_mkm);
     d.add_string(sh.design_id);
     d.add_double(sh.speed_km_s);
+    hash_vec2(d, sh.velocity_mkm_per_day);
     hash_string_double_map(d, sh.cargo);
     d.add_bool(sh.auto_explore);
     d.add_bool(sh.auto_freight);
@@ -590,6 +609,14 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
     auto sjp = sorted_unique_copy(f.surveyed_jump_points);
     d.add_size(sjp.size());
     for (Id jid : sjp) d.add_u64(jid);
+
+    // Incremental jump-point survey progress (time-based surveying).
+    d.add_size(f.jump_survey_progress.size());
+    for (Id jid : sorted_keys(f.jump_survey_progress)) {
+      d.add_u64(jid);
+      auto it = f.jump_survey_progress.find(jid);
+      d.add_double(it == f.jump_survey_progress.end() ? 0.0 : it->second);
+    }
 
     d.add_size(f.ship_contacts.size());
     for (Id sid : sorted_keys(f.ship_contacts)) {

@@ -161,6 +161,10 @@ struct UIState {
   // This is UI-only and not persisted.
   Id selected_contact_ship_id{kInvalidId};
 
+  // Currently selected region/sector (UI convenience).
+  // This is UI-only and not persisted.
+  Id selected_region_id{kInvalidId};
+
   bool fog_of_war{false};
   bool show_selected_sensor_range{true};
   // Show combined sensor coverage rings for the viewer faction (includes mutual-friendly sensor sharing).
@@ -185,6 +189,16 @@ struct UIState {
   bool show_galaxy_unknown_exits{true};
   bool show_galaxy_intel_alerts{true};
 
+  // Highlight jump-network articulation points ("chokepoint" systems).
+  bool show_galaxy_chokepoints{false};
+
+  // Procedural region overlay.
+  bool show_galaxy_regions{false};
+  bool show_galaxy_region_labels{false};
+  bool show_galaxy_region_boundaries{false};
+  // When a region is selected, optionally dim non-selected regions on the galaxy map.
+  bool galaxy_region_dim_nonselected{false};
+
   // Max age (in days) for showing contact markers on the map.
   int contact_max_age_days{30};
 
@@ -202,6 +216,7 @@ struct UIState {
   bool show_production_window{false};
   bool show_economy_window{false};
   bool show_planner_window{false};
+  bool show_regions_window{false};
   bool show_freight_window{false};
   bool show_fuel_window{false};
   bool show_advisor_window{false};
@@ -344,6 +359,17 @@ struct UIState {
   // If > 0, the system map may also adopt this zoom level.
   double request_system_map_center_zoom{0.0};
 
+  // Optional: request that the galaxy map recenters on a specific galaxy position.
+  // Consumed by the galaxy map on the next frame.
+  bool request_galaxy_map_center{false};
+  double request_galaxy_map_center_x{0.0};
+  double request_galaxy_map_center_y{0.0};
+  // If > 0, the galaxy map may also adopt this zoom level.
+  double request_galaxy_map_center_zoom{0.0};
+  // If > 0, the galaxy map may compute a zoom that "fits" a target half-span.
+  // This is expressed in galaxy units (same space as StarSystem::galaxy_pos).
+  double request_galaxy_map_fit_half_span{0.0};
+
   // Optional detail focus helpers (consumed by the next frame).
   // These are UI-only and not persisted.
   std::string request_focus_design_id;
@@ -445,10 +471,12 @@ struct UIState {
   bool system_map_fleet_formation_preview{true};
   bool system_map_missile_salvos{false};
   bool system_map_follow_selected{false};
+  bool system_map_show_minimap{true};
 
   bool galaxy_map_starfield{true};
   bool galaxy_map_grid{false};
   bool galaxy_map_selected_route{true};
+  bool galaxy_map_show_minimap{true};
 
   // Shared tuning knobs.
   float map_starfield_density{1.0f};
@@ -489,6 +517,17 @@ struct UIState {
   int new_game_scenario{0}; // 0 = Sol, 1 = Random
   std::uint32_t new_game_random_seed{12345u};
   int new_game_random_num_systems{12};
+  int new_game_random_galaxy_shape{0}; // see RandomGalaxyShape
+  int new_game_random_placement_style{0}; // see RandomPlacementStyle
+  int new_game_random_placement_quality{24};
+  int new_game_random_jump_network_style{0}; // see RandomJumpNetworkStyle
+  float new_game_random_jump_density{1.0f};
+
+  bool new_game_random_enable_regions{true};
+  int new_game_random_num_regions{-1}; // -1 = auto
+  int new_game_random_ai_empires{-1}; // -1 = auto
+  bool new_game_random_enable_pirates{true};
+  float new_game_random_pirate_strength{1.0f};
 };
 
 } // namespace nebula4x::ui

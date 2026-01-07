@@ -147,6 +147,7 @@ enum class PaletteAction {
   ToggleDirectory,
   ToggleProduction,
   ToggleEconomy,
+  ToggleRegions,
   ToggleAdvisor,
   ToggleColonyProfiles,
   ToggleTimeline,
@@ -218,6 +219,9 @@ void activate_palette_item(PaletteItem& item, Simulation& sim, UIState& ui, Id& 
           break;
         case PaletteAction::ToggleEconomy:
           ui.show_economy_window = !ui.show_economy_window;
+          break;
+        case PaletteAction::ToggleRegions:
+          ui.show_regions_window = !ui.show_regions_window;
           break;
         case PaletteAction::ToggleAdvisor:
           ui.show_advisor_window = !ui.show_advisor_window;
@@ -801,6 +805,7 @@ void draw_command_palette(Simulation& sim, UIState& ui, HUDState& hud, Id& selec
   add_action("[Action] Toggle Directory window", PaletteAction::ToggleDirectory);
   add_action("[Action] Toggle Production window", PaletteAction::ToggleProduction);
   add_action("[Action] Toggle Economy window", PaletteAction::ToggleEconomy);
+  add_action("[Action] Toggle Regions (Sectors Overview)", PaletteAction::ToggleRegions);
   add_action("[Action] Toggle Advisor (Issues)", PaletteAction::ToggleAdvisor);
   add_action("[Action] Toggle Colony Profiles (Automation Presets)", PaletteAction::ToggleColonyProfiles);
   add_action("[Action] Toggle Timeline window", PaletteAction::ToggleTimeline);

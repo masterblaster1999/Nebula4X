@@ -74,6 +74,27 @@ struct SimConfig {
   //
   // If you set this too low, slower ships may endlessly chase a planet's updated
   // position and never reach an exact point for cargo transfers.
+  // --- Docking / logistics transfer rates ---
+  //
+  // Cargo/fuel/troop transfers and wreck salvage are modeled with throughput limits
+  // (per simulated day) and are scaled by dt_days each tick.
+  //
+  // This keeps gameplay consistent across different time-step sizes (1h/6h/24h),
+  // preventing "instant" transfers when running high-resolution ticks.
+  //
+  // Cargo transfers are intentionally fast by default, while salvage is slower.
+  double cargo_transfer_tons_per_day_per_cargo_ton{10.0};
+  double cargo_transfer_tons_per_day_min{50.0};
+
+  double fuel_transfer_tons_per_day_per_fuel_ton{5.0};
+  double fuel_transfer_tons_per_day_min{50.0};
+
+  double troop_transfer_strength_per_day_per_troop_cap{5.0};
+  double troop_transfer_strength_per_day_min{10.0};
+
+  double salvage_tons_per_day_per_cargo_ton{0.2};
+  double salvage_tons_per_day_min{10.0};
+
   double docking_range_mkm{3.0};
 
   // Generic "arrived" epsilon used for fixed targets (move-to-point).
@@ -129,6 +150,41 @@ struct SimConfig {
   double sensor_mode_passive_signature_multiplier{0.8};
   double sensor_mode_active_signature_multiplier{1.5};
 
+
+  // --- Jump point surveying ---
+  //
+  // Under fog-of-war, factions must "survey" jump points before the jump network
+  // can be used for route planning. Previously this was effectively instant once
+  // a ship was in range.
+  //
+  // This models surveying as an incremental process that takes time, inspired by
+  // classic space-4X workflows where specialized survey ships accumulate "survey
+  // points" over time.
+  //
+  // Units are arbitrary "survey points". When a faction's accumulated progress for
+  // a given jump point reaches jump_survey_points_required, the jump point becomes
+  // surveyed for that faction.
+  //
+  // Set jump_survey_points_required <= 0 to revert to instant surveying.
+  double jump_survey_points_required{1.0};
+
+  // Normalization factor for sensor strength when accumulating survey points.
+  // A ship with effective sensor range ~= jump_survey_reference_sensor_range_mkm in
+  // Normal EMCON will contribute ~1.0 point/day (before role multipliers).
+  double jump_survey_reference_sensor_range_mkm{400.0};
+
+  // How close a ship must be to a jump point to contribute survey progress.
+  // Non-surveyors always use docking_range_mkm. Surveyors can contribute at longer
+  // range (scaled from their effective sensor range).
+  double jump_survey_range_sensor_fraction{0.15};
+
+  // Role multipliers to bias dedicated survey ships.
+  double jump_survey_strength_multiplier_surveyor{1.0};
+  double jump_survey_strength_multiplier_other{0.25};
+
+  // Cap per-ship survey rate to avoid extreme values from modded sensor ranges.
+  double jump_survey_points_per_day_cap{5.0};
+
   // --- Intel / contact prediction ---
   //
   // When a contact is lost (fog-of-war), the simulation may extrapolate
@@ -144,6 +200,46 @@ struct SimConfig {
   // When disabled, tick_combat() is skipped. Ships will still move and can still
   // carry out non-combat orders; ground combat/invasions are unaffected.
   bool enable_combat{true};
+
+  // --- Beam weapon accuracy / tracking ---
+  //
+  // When enabled, beam weapons (and planetary beam batteries) apply an accuracy
+  // multiplier based on:
+  //  - range (reduced accuracy near max range), and
+  //  - relative angular velocity between attacker and target ("tracking"), and
+  //  - the target's effective signature multiplier (stealth/EMCON makes tracking harder).
+  //
+  // This introduces maneuver + EMCON tradeoffs and makes sensor choices matter
+  // in combat without adding per-weapon RNG (damage is scaled by expected hit chance).
+  bool enable_beam_hit_chance{true};
+
+  // Baseline hit chance at close range against a stationary, normal-signature target.
+  double beam_base_hit_chance{0.95};
+
+  // Minimum hit chance floor (applied after range + tracking multipliers).
+  double beam_min_hit_chance{0.05};
+
+  // Range penalty at maximum weapon range.
+  // 0.0 => no range penalty, 0.5 => 50% accuracy at max range.
+  double beam_range_penalty_at_max{0.40};
+
+  // Reference angular velocity (radians/day) that a ship with reference sensors can
+  // track with ~50% effectiveness (before signature scaling).
+  double beam_tracking_ref_ang_per_day{0.60};
+
+  // Reference sensor range (mkm) used to scale tracking with sensor quality.
+  double beam_tracking_reference_sensor_range_mkm{400.0};
+
+  // Minimum sensor range (mkm) used for tracking even if the attacker's sensors are offline.
+  double beam_tracking_min_sensor_range_mkm{50.0};
+
+  // Exponent applied to target signature multiplier when influencing tracking.
+  // 0.5 means sqrt(sig): stealth helps, but does not dominate.
+  double beam_signature_exponent{0.5};
+
+  // Reference angular velocity for colony beam batteries (radians/day).
+  // Colonies are assumed to have slightly better fire control than ships at equal sensor level.
+  double colony_beam_tracking_ref_ang_per_day{0.80};
 
   // --- Boarding / capture (space combat) ---
   //
