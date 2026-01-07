@@ -26,6 +26,13 @@ struct ContentDB {
   std::unordered_map<std::string, ShipDesign> designs;
   std::unordered_map<std::string, InstallationDef> installations;
   std::unordered_map<std::string, TechDef> techs;
+
+  // Root JSON files used to load this content bundle (for tooling / hot reload).
+  //
+  // These are *not* part of save games; they are runtime metadata that lets the
+  // UI/CLI re-load the same bundle without needing external configuration.
+  std::vector<std::string> content_source_paths;
+  std::vector<std::string> tech_source_paths;
 };
 
 // A single save-game state.

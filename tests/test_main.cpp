@@ -22,6 +22,7 @@ int test_content_validation();
 int test_resource_catalog();
 int test_materials_processing();
 int test_content_overlays();
+int test_content_hot_reload();
 int test_spatial_index();
 int test_random_scenario();
 int test_file_io();
@@ -96,6 +97,7 @@ int main() {
   fails += test_resource_catalog();
   fails += test_materials_processing();
   fails += test_content_overlays();
+  fails += test_content_hot_reload();
   fails += test_spatial_index();
   fails += test_random_scenario();
   fails += test_ai_economy();

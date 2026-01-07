@@ -487,6 +487,24 @@ struct AdvanceUntilEventResult {
   SimEvent event;
 };
 
+// Result returned by Simulation::reload_content_db.
+
+struct ReloadContentResult {
+  bool ok{false};
+
+  // Errors returned when loading/validating the new content bundle.
+  // When non-empty, ok is false and the Simulation's existing content remains unchanged.
+  std::vector<std::string> errors;
+
+  // Non-fatal issues encountered while re-deriving cached/derived state after applying the new bundle.
+  std::vector<std::string> warnings;
+
+  int ships_updated{0};
+  int factions_rebuilt{0};
+  int custom_designs_updated{0};
+  int custom_designs_failed{0};
+};
+
 // A query-only path plan through the jump network.
 //
 // This is primarily used by the UI to preview routes and estimated travel time
@@ -588,6 +606,10 @@ class Simulation {
   // (new_game/load_game). UI code can use this to clear stale selections / caches.
   std::uint64_t state_generation() const { return state_generation_; }
 
+  // Monotonic counter that increments whenever the simulation's ContentDB is replaced
+  // (reload_content_db). UI code can use this to clear caches of content-derived lists.
+  std::uint64_t content_generation() const { return content_generation_; }
+
   void new_game();
 
   // Create a new procedurally-generated scenario.
@@ -596,6 +618,17 @@ class Simulation {
   void new_game_random(std::uint32_t seed, int num_systems = 12);
 
   void load_game(GameState loaded);
+
+  // Hot reload the simulation's content bundle (blueprints + tech tree).
+  //
+  // The caller is responsible for loading new_content (typically via
+  // load_content_db_from_files + load_tech_db_from_files).
+  //
+  // On success, the simulation updates cached ship stats, rebuilds faction unlock lists,
+  // and refreshes contacts/sensor coverage.
+  //
+  // Save schema is unchanged.
+  ReloadContentResult reload_content_db(ContentDB new_content, bool validate_state = true);
 
   // Advance simulation by N days.
   void advance_days(int days);
@@ -1187,6 +1220,10 @@ mutable std::uint64_t jump_route_cache_misses_{0};
 
   // Incremented when state_ is replaced (new_game/load_game).
   std::uint64_t state_generation_{0};
+
+
+  // Incremented when content_ is replaced (reload_content_db).
+  std::uint64_t content_generation_{0};
 };
 
 } // namespace nebula4x

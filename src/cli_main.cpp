@@ -1157,6 +1157,8 @@ int main(int argc, char** argv) {
 
       auto content_verify = nebula4x::load_content_db_from_files(cfg.content_paths);
       content_verify.techs = nebula4x::load_tech_db_from_files(cfg.tech_paths);
+      content_verify.tech_source_paths = cfg.tech_paths;
+      if (content_verify.content_source_paths.empty()) content_verify.content_source_paths = cfg.content_paths;
       nebula4x::Simulation sim_verify(std::move(content_verify), nebula4x::SimConfig{});
 
       if (!cfg.load_path.empty()) {
@@ -1245,6 +1247,8 @@ int main(int argc, char** argv) {
 
       auto content_make = nebula4x::load_content_db_from_files(content_paths);
       content_make.techs = nebula4x::load_tech_db_from_files(tech_paths);
+      content_make.tech_source_paths = tech_paths;
+      if (content_make.content_source_paths.empty()) content_make.content_source_paths = content_paths;
       nebula4x::Simulation sim_make(std::move(content_make), nebula4x::SimConfig{});
 
       if (!load_path.empty()) {
@@ -1291,6 +1295,8 @@ int main(int argc, char** argv) {
 
     auto content = nebula4x::load_content_db_from_files(content_paths);
     content.techs = nebula4x::load_tech_db_from_files(tech_paths);
+    content.tech_source_paths = tech_paths;
+    if (content.content_source_paths.empty()) content.content_source_paths = content_paths;
 
     if (validate_content) {
       const auto errors = nebula4x::validate_content_db(content);

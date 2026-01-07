@@ -17,6 +17,8 @@
 
 #include "nebula4x/core/scenario.h"
 #include "nebula4x/core/ai_economy.h"
+#include "nebula4x/core/content_validation.h"
+#include "nebula4x/core/state_validation.h"
 #include "nebula4x/util/log.h"
 #include "nebula4x/util/spatial_index.h"
 
@@ -529,6 +531,107 @@ void Simulation::load_game(GameState loaded) {
   recompute_body_positions();
   tick_contacts(false);
   invalidate_jump_route_cache();
+}
+
+
+ReloadContentResult Simulation::reload_content_db(ContentDB new_content, bool validate_state) {
+  ReloadContentResult result;
+
+  // Preserve source paths if the caller didn't set them.
+  if (new_content.content_source_paths.empty()) new_content.content_source_paths = content_.content_source_paths;
+  if (new_content.tech_source_paths.empty()) new_content.tech_source_paths = content_.tech_source_paths;
+
+  const auto errors = nebula4x::validate_content_db(new_content);
+  if (!errors.empty()) {
+    result.ok = false;
+    result.errors = errors;
+
+    nebula4x::log::error("Content hot reload failed: content validation errors (" + std::to_string(errors.size()) + ")");
+    for (const auto& e : errors) nebula4x::log::error("  - " + e);
+
+    push_event(EventLevel::Error, EventCategory::General,
+               "Hot Reload: content validation failed (" + std::to_string(errors.size()) + " errors)");
+    return result;
+  }
+
+  // Apply new content.
+  content_ = std::move(new_content);
+  ++content_generation_;
+
+  // Re-derive custom designs against the updated component database.
+  if (!state_.custom_designs.empty()) {
+    std::vector<ShipDesign> designs;
+    designs.reserve(state_.custom_designs.size());
+    for (const auto& [_, d] : state_.custom_designs) designs.push_back(d);
+
+    state_.custom_designs.clear();
+
+    for (auto& d : designs) {
+      std::string err;
+      if (!upsert_custom_design(d, &err)) {
+        // Preserve the (possibly stale) derived stats embedded in the save.
+        // This mirrors load_game() behaviour and avoids deleting user designs.
+        result.custom_designs_failed += 1;
+        const std::string msg = std::string("Custom design '") + d.id + "' could not be re-derived: " + err;
+        result.warnings.push_back(msg);
+        nebula4x::log::warn(msg);
+        state_.custom_designs[d.id] = d;
+      } else {
+        result.custom_designs_updated += 1;
+      }
+    }
+  }
+
+  // Refresh cached ship stats (speed, etc.).
+  for (auto& [_, ship] : state_.ships) {
+    apply_design_stats_to_ship(ship);
+    result.ships_updated += 1;
+  }
+
+  // Rebuild faction unlock lists (prune stale/unknown ids).
+  for (auto& [_, fac] : state_.factions) {
+    fac.unlocked_components.clear();
+    fac.unlocked_installations.clear();
+    initialize_unlocks_for_faction(fac);
+    result.factions_rebuilt += 1;
+  }
+
+  // Sensors / contacts depend on design sensor ranges and installation defs.
+  tick_contacts(false);
+
+  if (validate_state) {
+    const auto s_errors = nebula4x::validate_game_state(state_, &content_);
+    if (!s_errors.empty()) {
+      // Don't fail the reload; surface as warnings so modders can iterate.
+      constexpr std::size_t kCap = 25;
+      for (std::size_t i = 0; i < s_errors.size() && i < kCap; ++i) {
+        result.warnings.push_back(std::string("State validation: ") + s_errors[i]);
+      }
+      if (s_errors.size() > kCap) {
+        result.warnings.push_back("State validation: ... (" + std::to_string(s_errors.size() - kCap) + " more)");
+      }
+
+      nebula4x::log::warn("Content hot reload applied, but game state validation reported " +
+                        std::to_string(s_errors.size()) + " issue(s)");
+    }
+  }
+
+  result.ok = true;
+
+  std::string cd_part = std::to_string(result.custom_designs_updated) + " ok";
+  if (result.custom_designs_failed) {
+    cd_part += ", " + std::to_string(result.custom_designs_failed) + " failed";
+  }
+
+  const std::string summary =
+      "Hot Reload: applied content bundle (ships=" + std::to_string(result.ships_updated) +
+      ", factions=" + std::to_string(result.factions_rebuilt) +
+      ", custom designs=" + cd_part +
+      ", warnings=" + std::to_string(result.warnings.size()) + ")";
+
+  push_event(result.warnings.empty() ? EventLevel::Info : EventLevel::Warn, EventCategory::General, summary);
+
+  return result;
 }
 
 void Simulation::advance_days(int days) {

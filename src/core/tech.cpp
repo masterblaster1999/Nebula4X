@@ -812,6 +812,9 @@ ContentDB load_content_db_from_files(const std::vector<std::string>& paths) {
   ContentDB db;
   if (paths.empty()) return db;
 
+  // Preserve the root paths for tooling/hot-reload.
+  db.content_source_paths = paths;
+
   const auto files = expand_roots_with_includes(paths);
 
   RawBlueprintAggregate agg;

@@ -92,6 +92,9 @@ int main(int /*argc*/, char** /*argv*/) {
 
     auto content = nebula4x::load_content_db_from_files(content_paths);
     content.techs = nebula4x::load_tech_db_from_files(tech_paths);
+    content.tech_source_paths = tech_paths;
+    // load_content_db_from_files() records content_source_paths, but keep this for safety.
+    if (content.content_source_paths.empty()) content.content_source_paths = content_paths;
 
     nebula4x::Simulation sim(std::move(content), nebula4x::SimConfig{});
     nebula4x::ui::App app(std::move(sim));

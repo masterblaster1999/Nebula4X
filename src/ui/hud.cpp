@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "nebula4x/core/date.h"
+#include "nebula4x/core/tech.h"
 #include "nebula4x/core/serialization.h"
 #include "nebula4x/util/file_io.h"
 #include "nebula4x/util/log.h"
@@ -182,6 +183,7 @@ enum class PaletteAction {
   NewGameDialog,
   NewGameSol,
   NewGameRandom,
+  ReloadContent,
   Save,
   Load,
 };
@@ -404,6 +406,30 @@ void activate_palette_item(PaletteItem& item, Simulation& sim, UIState& ui, Id& 
         case PaletteAction::NewGameRandom:
           sim.new_game_random(ui.new_game_random_seed, ui.new_game_random_num_systems);
           ui.request_map_tab = MapTab::Galaxy;
+          break;
+        case PaletteAction::ReloadContent:
+          try {
+            std::vector<std::string> content_paths = sim.content().content_source_paths;
+            if (content_paths.empty()) content_paths.push_back("data/blueprints/starting_blueprints.json");
+            std::vector<std::string> tech_paths = sim.content().tech_source_paths;
+            if (tech_paths.empty()) tech_paths.push_back("data/tech/tech_tree.json");
+
+            auto new_content = nebula4x::load_content_db_from_files(content_paths);
+            new_content.techs = nebula4x::load_tech_db_from_files(tech_paths);
+            new_content.tech_source_paths = tech_paths;
+            if (new_content.content_source_paths.empty()) new_content.content_source_paths = content_paths;
+
+            auto res = sim.reload_content_db(std::move(new_content), true);
+            if (!res.ok) {
+              nebula4x::log::error("Hot Reload: failed (" + std::to_string(res.errors.size()) + " errors)");
+            } else if (!res.warnings.empty()) {
+              nebula4x::log::warn("Hot Reload: applied with " + std::to_string(res.warnings.size()) + " warning(s)");
+            } else {
+              nebula4x::log::info("Hot Reload: applied");
+            }
+          } catch (const std::exception& e) {
+            nebula4x::log::error(std::string("Hot Reload failed: ") + e.what());
+          }
           break;
         case PaletteAction::Save:
           try {
@@ -840,6 +866,7 @@ void draw_command_palette(Simulation& sim, UIState& ui, HUDState& hud, Id& selec
   add_action("[Action] New Game...", PaletteAction::NewGameDialog);
   add_action("[Action] New Game (Sol)", PaletteAction::NewGameSol);
   add_action("[Action] New Game (Random)", PaletteAction::NewGameRandom);
+  add_action("[Action] Reload Content Bundle", PaletteAction::ReloadContent);
   add_action("[Action] Save game", PaletteAction::Save);
   add_action("[Action] Load game", PaletteAction::Load);
 

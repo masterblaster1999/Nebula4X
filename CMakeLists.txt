@@ -259,6 +259,7 @@ if(NEBULA4X_BUILD_TESTS)
     tests/test_resource_catalog.cpp
     tests/test_materials_processing.cpp
     tests/test_content_overlays.cpp
+    tests/test_content_hot_reload.cpp
     tests/test_spatial_index.cpp
     tests/test_random_scenario.cpp
     tests/test_autosave.cpp
