@@ -365,6 +365,16 @@ const ShipDesign* Simulation::find_design(const std::string& design_id) const {
   return nullptr;
 }
 
+double Simulation::reverse_engineering_points_required_for_component(const std::string& component_id) const {
+  const auto it = content_.components.find(component_id);
+  if (it == content_.components.end()) return 0.0;
+
+  const double mass_tons = std::max(0.0, it->second.mass_tons);
+  const double per_ton = std::max(0.0, cfg_.reverse_engineering_points_required_per_component_ton);
+  // Ensure non-zero thresholds so tiny/zero-mass components don't unlock instantly.
+  return std::max(1.0, mass_tons * per_ton);
+}
+
 
 bool Simulation::is_ship_docked_at_colony(Id ship_id, Id colony_id) const {
   const auto* ship = find_ptr(state_.ships, ship_id);

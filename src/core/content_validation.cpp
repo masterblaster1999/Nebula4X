@@ -42,6 +42,11 @@ std::vector<std::string> validate_content_db(const ContentDB& db) {
       push(errors, join("Resource key/id mismatch: key '", key, "' != id '", r.id, "'"));
     if (r.name.empty()) push(errors, join("Resource '", key, "' has an empty name"));
     if (r.category.empty()) push(errors, join("Resource '", key, "' has an empty category"));
+
+    if (!is_non_negative(r.salvage_research_rp_per_ton)) {
+      push(errors, join("Resource '", key, "' has invalid salvage_research_rp_per_ton: ",
+                        r.salvage_research_rp_per_ton));
+    }
   }
 
   // --- Components ---

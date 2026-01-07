@@ -403,6 +403,19 @@ ResourceDef parse_resource_def(const std::string& rid, const json::Object& rj) {
   }
   if (r.category.empty()) r.category = "mineral";
   r.mineable = bool_key(rj, "mineable", true);
+
+  // Optional salvage research value (RP/ton).
+  //
+  // This is intentionally separate from mining/industry outputs; it is only
+  // used when transferring minerals out of Wreck::minerals.
+  if (const auto* v = find_key(rj, "salvage_research_rp_per_ton")) {
+    r.salvage_research_rp_per_ton = v->number_value(0.0);
+  } else if (const auto* v2 = find_key(rj, "salvage_rp_per_ton")) {
+    // Short alias for mods.
+    r.salvage_research_rp_per_ton = v2->number_value(0.0);
+  }
+
+  if (r.salvage_research_rp_per_ton < 0.0) r.salvage_research_rp_per_ton = 0.0;
   return r;
 }
 

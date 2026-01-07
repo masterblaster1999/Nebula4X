@@ -1,3 +1,18 @@
+## r77: Salvage research + reverse engineering
+
+This round makes **wreck salvage** a more meaningful strategic lever:
+
+- **Salvage research:** salvaging minerals can now award research points (RP) based on the resource's `salvage_research_rp_per_ton`.
+- **Reverse engineering:** salvaging *foreign* ship wrecks accumulates reverse-engineering progress on unknown components from the wreck's source design; once progress reaches the component threshold, that component becomes **unlocked** for your faction.
+
+UI additions:
+
+- **Research tab:** a new **Reverse engineering** section shows active progress toward salvaged component unlocks.
+- **Wreck directory:** new columns show remaining salvage RP value and (for the viewer faction) how many components in the source design are still unknown.
+
+Tuning knobs live in `SimConfig` (`enable_salvage_research`, `salvage_research_rp_multiplier`, `enable_reverse_engineering`, etc.).
+
+
 ## r76: Fleet "Explore systems" mission
 
 Adds a new fleet automation mission aimed at reducing exploration micro for groups of survey ships:

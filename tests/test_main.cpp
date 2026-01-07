@@ -47,6 +47,7 @@ int test_population_transport();
 int test_colonization();
 int test_auto_colonize();
 int test_auto_salvage();
+int test_reverse_engineering();
 int test_auto_tanker();
 int test_ship_repairs();
 int test_fleets();
@@ -134,6 +135,7 @@ int main() {
   fails += test_colonization();
   fails += test_auto_colonize();
   fails += test_auto_salvage();
+  fails += test_reverse_engineering();
   fails += test_auto_tanker();
   fails += test_combat_events();
   fails += test_shields();

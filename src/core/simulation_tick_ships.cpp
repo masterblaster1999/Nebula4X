@@ -1231,8 +1231,86 @@ void Simulation::tick_ships(double dt_days) {
 
       if (remaining_request <= 1e-9) return 0.0;
 
-
       double moved_total = 0.0;
+      double salvage_rp_gain = 0.0;
+      double reverse_engineering_points = 0.0;
+
+      const bool salvage_research_enabled = cfg_.enable_salvage_research && cfg_.salvage_research_rp_multiplier > 0.0;
+      const bool reverse_engineering_enabled = cfg_.enable_reverse_engineering && cfg_.reverse_engineering_points_per_salvaged_ton > 0.0;
+      const bool can_reverse_engineer_this_wreck = reverse_engineering_enabled && !w->source_design_id.empty() && w->source_faction_id != ship.faction_id;
+
+      auto apply_reverse_engineering = [&](const Wreck& wreck, double points) {
+        if (!cfg_.enable_reverse_engineering) return;
+        if (points <= 1e-9) return;
+        if (wreck.source_design_id.empty()) return;
+        if (wreck.source_faction_id == ship.faction_id) return;
+
+        auto* fac = find_ptr(state_.factions, ship.faction_id);
+        if (!fac) return;
+
+        const ShipDesign* src_design = find_design(wreck.source_design_id);
+        if (!src_design) return;
+
+        std::vector<std::string> candidates;
+        candidates.reserve(src_design->components.size());
+        for (const auto& cid : src_design->components) {
+          if (cid.empty()) continue;
+          if (std::find(fac->unlocked_components.begin(), fac->unlocked_components.end(), cid) != fac->unlocked_components.end()) continue;
+          candidates.push_back(cid);
+        }
+        if (candidates.empty()) return;
+        std::sort(candidates.begin(), candidates.end());
+        candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
+
+        const double per = points / static_cast<double>(candidates.size());
+        for (const auto& cid : candidates) {
+          if (per <= 0.0) break;
+          fac->reverse_engineering_progress[cid] += per;
+        }
+
+        // Unlock any components that crossed the threshold.
+        int unlock_count = 0;
+        std::vector<std::string> unlocked;
+        for (const auto& cid : candidates) {
+          const auto itp = fac->reverse_engineering_progress.find(cid);
+          if (itp == fac->reverse_engineering_progress.end()) continue;
+          const double req = reverse_engineering_points_required_for_component(cid);
+          if (req <= 0.0) continue;
+          if (itp->second + 1e-9 < req) continue;
+
+          // Unlock and drop progress.
+          fac->unlocked_components.push_back(cid);
+          fac->reverse_engineering_progress.erase(itp);
+          unlocked.push_back(cid);
+          ++unlock_count;
+
+          const int cap = cfg_.reverse_engineering_unlock_cap_per_tick;
+          if (cap > 0 && unlock_count >= cap) break;
+        }
+
+        if (!unlocked.empty()) {
+          std::sort(fac->unlocked_components.begin(), fac->unlocked_components.end());
+          fac->unlocked_components.erase(std::unique(fac->unlocked_components.begin(), fac->unlocked_components.end()),
+                                         fac->unlocked_components.end());
+
+          std::ostringstream ss;
+          ss << "Reverse engineering complete: ";
+          for (std::size_t i = 0; i < unlocked.size(); ++i) {
+            const std::string& cid = unlocked[i];
+            const auto itc = content_.components.find(cid);
+            const std::string cname = (itc != content_.components.end() && !itc->second.name.empty()) ? itc->second.name : cid;
+            if (i) ss << ", ";
+            ss << cname;
+          }
+          if (!wreck.name.empty()) ss << " (from " << wreck.name << ")";
+
+          EventContext ctx;
+          ctx.system_id = ship.system_id;
+          ctx.ship_id = ship_id;
+          ctx.faction_id = ship.faction_id;
+          push_event(EventLevel::Info, EventCategory::Research, ss.str(), ctx);
+        }
+      };
 
       auto transfer_one = [&](const std::string& min_type, double amount_limit) {
         if (amount_limit <= 1e-9) return 0.0;
@@ -1244,6 +1322,17 @@ void Simulation::tick_ships(double dt_days) {
           it_src->second = std::max(0.0, it_src->second - take);
           if (it_src->second <= 1e-9) w->minerals.erase(it_src);
           moved_total += take;
+
+          if (salvage_research_enabled) {
+            const auto it_r = content_.resources.find(min_type);
+            if (it_r != content_.resources.end() && it_r->second.salvage_research_rp_per_ton > 0.0) {
+              salvage_rp_gain += take * it_r->second.salvage_research_rp_per_ton;
+            }
+          }
+
+          if (can_reverse_engineer_this_wreck) {
+            reverse_engineering_points += take * cfg_.reverse_engineering_points_per_salvaged_ton;
+          }
         }
         return take;
       };
@@ -1264,9 +1353,30 @@ void Simulation::tick_ships(double dt_days) {
         }
       }
 
-      // If emptied, remove the wreck from the game state.
+      // Apply salvage research + reverse engineering rewards.
+      if (salvage_research_enabled && salvage_rp_gain > 1e-9) {
+        salvage_rp_gain *= std::max(0.0, cfg_.salvage_research_rp_multiplier);
+        if (auto* fac = find_ptr(state_.factions, ship.faction_id)) {
+          fac->research_points += salvage_rp_gain;
+        }
+      }
+
+      if (can_reverse_engineer_this_wreck && reverse_engineering_points > 1e-9) {
+        apply_reverse_engineering(*w, reverse_engineering_points);
+      }
+
+      // If emptied, remove the wreck from the game state and emit a completion event.
       if (w->minerals.empty()) {
+        const Wreck w_copy = *w;
         state_.wrecks.erase(salvage_wreck_id);
+
+        EventContext ctx;
+        ctx.system_id = ship.system_id;
+        ctx.ship_id = ship_id;
+        ctx.faction_id = ship.faction_id;
+        const std::string nm = w_copy.name.empty() ? std::string("(unknown wreck)") : w_copy.name;
+        const std::string msg = "Salvage complete: " + nm;
+        push_event(EventLevel::Info, EventCategory::Exploration, msg, ctx);
       }
 
       return moved_total;

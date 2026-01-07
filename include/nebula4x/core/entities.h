@@ -277,6 +277,14 @@ struct ResourceDef {
 
   // If true, this resource can appear in Body::mineral_deposits and be mined.
   bool mineable{true};
+
+  // Optional research value (RP) gained per ton when salvaging this resource
+  // from a wreck.
+  //
+  // This intentionally does *not* apply to mining or colony industry; it is
+  // only used by the wreck-salvage mechanic to reward exploration and combat
+  // recovery operations.
+  double salvage_research_rp_per_ton{0.0};
 };
 
 struct InstallationDef {
@@ -807,6 +815,13 @@ struct Faction {
   // Unlock lists (primarily for UI filtering / validation).
   std::vector<std::string> unlocked_components;
   std::vector<std::string> unlocked_installations;
+
+  // Reverse engineering progress accumulated from salvaging wrecks.
+  //
+  // Map: component_id -> accumulated reverse-engineering points.
+  // When progress reaches the required threshold (see SimConfig), the component
+  // is added to unlocked_components and the progress entry is removed.
+  std::unordered_map<std::string, double> reverse_engineering_progress;
 
   // Automation: desired counts of ship designs to maintain.
   //

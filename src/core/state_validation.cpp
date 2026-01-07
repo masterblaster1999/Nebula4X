@@ -2095,6 +2095,30 @@ FixReport fix_game_state(GameState& s, const ContentDB* content) {
       prune_string_list(f.known_techs, "known tech", [&](const std::string& x) { return tech_exists(*content, x); });
       prune_string_list(f.unlocked_components, "component", [&](const std::string& x) { return component_exists(*content, x); });
       prune_string_list(f.unlocked_installations, "installation", [&](const std::string& x) { return installation_exists(*content, x); });
+
+      // Reverse engineering progress: drop unknown components, non-finite values,
+      // and entries that are already unlocked.
+      for (auto it = f.reverse_engineering_progress.begin(); it != f.reverse_engineering_progress.end();) {
+        const std::string& cid = it->first;
+        const double pts = it->second;
+
+        if (cid.empty() || !component_exists(*content, cid)) {
+          note(join("Fix: Faction ", id_u64(fid), " removed reverse engineering progress for unknown component '", cid, "'"));
+          it = f.reverse_engineering_progress.erase(it);
+          continue;
+        }
+        if (!std::isfinite(pts) || pts <= 0.0) {
+          note(join("Fix: Faction ", id_u64(fid), " removed invalid reverse engineering progress for '", cid, "': ", pts));
+          it = f.reverse_engineering_progress.erase(it);
+          continue;
+        }
+        if (std::find(f.unlocked_components.begin(), f.unlocked_components.end(), cid) != f.unlocked_components.end()) {
+          note(join("Fix: Faction ", id_u64(fid), " dropped reverse engineering progress for already-unlocked component '", cid, "'"));
+          it = f.reverse_engineering_progress.erase(it);
+          continue;
+        }
+        ++it;
+      }
     }
   }
 

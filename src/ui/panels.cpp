@@ -5192,6 +5192,66 @@ if (colony->shipyard_queue.empty()) {
             }
           }
         }
+        // --- Reverse engineering ---
+        {
+          ImGui::Separator();
+          ImGui::Text("Reverse engineering");
+
+          if (selected_faction->reverse_engineering_progress.empty()) {
+            ImGui::TextDisabled("(no active salvage reverse engineering)");
+          } else {
+            ImGui::TextDisabled(
+                "Progress is earned automatically when salvaging foreign ship wrecks.\n"
+                "Once a component reaches 100%, it is added to your unlocked component list.");
+
+            std::vector<std::string> cids;
+            cids.reserve(selected_faction->reverse_engineering_progress.size());
+            for (const auto& [cid, _] : selected_faction->reverse_engineering_progress) {
+              if (!cid.empty()) cids.push_back(cid);
+            }
+            std::sort(cids.begin(), cids.end());
+            cids.erase(std::unique(cids.begin(), cids.end()), cids.end());
+
+            const ImGuiTableFlags tf = ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingStretchProp;
+            if (ImGui::BeginTable("##reverse_engineering", 3, tf)) {
+              ImGui::TableSetupColumn("Component", ImGuiTableColumnFlags_WidthStretch, 0.55f);
+              ImGui::TableSetupColumn("Progress", ImGuiTableColumnFlags_WidthStretch, 0.30f);
+              ImGui::TableSetupColumn("Points", ImGuiTableColumnFlags_WidthStretch, 0.15f);
+              ImGui::TableHeadersRow();
+
+              for (const auto& cid : cids) {
+                const auto it = selected_faction->reverse_engineering_progress.find(cid);
+                if (it == selected_faction->reverse_engineering_progress.end()) continue;
+                const double pts = it->second;
+                const double req = sim.reverse_engineering_points_required_for_component(cid);
+                const float frac = (req > 0.0) ? static_cast<float>(std::clamp(pts / req, 0.0, 1.0)) : 0.0f;
+
+                const auto itc = sim.content().components.find(cid);
+                const std::string name = (itc == sim.content().components.end()) ? cid : itc->second.name;
+
+                ImGui::TableNextRow();
+
+                ImGui::TableSetColumnIndex(0);
+                ImGui::Text("%s", name.c_str());
+                if (ImGui::IsItemHovered()) {
+                  ImGui::SetTooltip("%s", cid.c_str());
+                }
+
+                ImGui::TableSetColumnIndex(1);
+                ImGui::ProgressBar(frac, ImVec2(-1, 0));
+
+                ImGui::TableSetColumnIndex(2);
+                if (req > 0.0) {
+                  ImGui::Text("%.1f/%.1f", pts, req);
+                } else {
+                  ImGui::TextDisabled("%.1f/?", pts);
+                }
+              }
+
+              ImGui::EndTable();
+            }
+          }
+        }
 
         ImGui::Separator();
         ImGui::Text("Tech browser");
@@ -7042,13 +7102,19 @@ void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_colony, Id
       std::string system;
       std::string source;
       double total{0.0};
+      double salvage_rp{0.0};
       std::int64_t age_days{0};
+      int unknown_components{0};
     };
 
     std::vector<WreckRow> rows;
     rows.reserve(s.wrecks.size());
 
     const std::int64_t cur_day = s.date.days_since_epoch();
+
+    const Faction* viewer_fac = (ui.viewer_faction_id != kInvalidId) ? find_ptr(s.factions, ui.viewer_faction_id) : nullptr;
+
+    const Faction* viewer_fac = (ui.viewer_faction_id != kInvalidId) ? find_ptr(s.factions, ui.viewer_faction_id) : nullptr;
 
     for (const auto& [wid, w] : s.wrecks) {
       if (system_filter != kInvalidId && w.system_id != system_filter) continue;
@@ -7068,6 +7134,35 @@ void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_colony, Id
       double total = 0.0;
       for (const auto& [_, v] : w.minerals) total += std::max(0.0, v);
 
+      double salvage_rp = 0.0;
+      for (const auto& [mid, v] : w.minerals) {
+        const double amt = std::max(0.0, v);
+        if (amt <= 1e-9) continue;
+        const auto it_r = sim.content().resources.find(mid);
+        if (it_r == sim.content().resources.end()) continue;
+        const double rppt = std::max(0.0, it_r->second.salvage_research_rp_per_ton);
+        if (rppt <= 0.0) continue;
+        salvage_rp += amt * rppt;
+      }
+
+      int unknown_components = 0;
+      if (viewer_fac && !w.source_design_id.empty()) {
+        const ShipDesign* sd = sim.find_design(w.source_design_id);
+        if (sd) {
+          std::unordered_set<std::string> uniq;
+          uniq.reserve(sd->components.size() * 2);
+          for (const auto& cid : sd->components) {
+            if (!cid.empty()) uniq.insert(cid);
+          }
+          for (const auto& cid : uniq) {
+            if (std::find(viewer_fac->unlocked_components.begin(), viewer_fac->unlocked_components.end(), cid) ==
+                viewer_fac->unlocked_components.end()) {
+              ++unknown_components;
+            }
+          }
+        }
+      }
+
       WreckRow r;
       r.id = wid;
       r.system_id = w.system_id;
@@ -7075,7 +7170,9 @@ void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_colony, Id
       r.name = w.name.empty() ? (std::string("Wreck ") + std::to_string((int)wid)) : w.name;
       r.system = sys ? sys->name : "?";
       r.total = total;
+      r.salvage_rp = salvage_rp;
       r.age_days = (w.created_day == 0) ? 0 : std::max<std::int64_t>(0, cur_day - w.created_day);
+      r.unknown_components = unknown_components;
 
       // Compact source label.
       if (!w.source_design_id.empty()) {
@@ -7096,14 +7193,16 @@ void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_colony, Id
                                  ImGuiTableFlags_ScrollY;
 
     const ImVec2 avail = ImGui::GetContentRegionAvail();
-    if (ImGui::BeginTable("wreck_directory", 6, flags, ImVec2(avail.x, avail.y))) {
+    if (ImGui::BeginTable("wreck_directory", 8, flags, ImVec2(avail.x, avail.y))) {
       ImGui::TableSetupScrollFreeze(0, 1);
       ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_DefaultSort, 0.0f, 0);
       ImGui::TableSetupColumn("System", 0, 0.0f, 1);
       ImGui::TableSetupColumn("Total (t)", ImGuiTableColumnFlags_PreferSortDescending, 0.0f, 2);
-      ImGui::TableSetupColumn("Age (d)", ImGuiTableColumnFlags_PreferSortDescending, 0.0f, 3);
-      ImGui::TableSetupColumn("Source", 0, 0.0f, 4);
-      ImGui::TableSetupColumn("Center", ImGuiTableColumnFlags_NoSort, 0.0f, 5);
+      ImGui::TableSetupColumn("RP", ImGuiTableColumnFlags_PreferSortDescending, 0.0f, 3);
+      ImGui::TableSetupColumn("Age (d)", ImGuiTableColumnFlags_PreferSortDescending, 0.0f, 4);
+      ImGui::TableSetupColumn("Source", 0, 0.0f, 5);
+      ImGui::TableSetupColumn("Unknown", ImGuiTableColumnFlags_PreferSortDescending, 0.0f, 6);
+      ImGui::TableSetupColumn("Center", ImGuiTableColumnFlags_NoSort, 0.0f, 7);
       ImGui::TableHeadersRow();
 
       if (ImGuiTableSortSpecs* sort = ImGui::TableGetSortSpecs()) {
@@ -7116,8 +7215,10 @@ void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_colony, Id
               case 0: return lt(a.name, b.name);
               case 1: return lt(a.system, b.system);
               case 2: return lt(a.total, b.total);
-              case 3: return lt(a.age_days, b.age_days);
-              case 4: return lt(a.source, b.source);
+              case 3: return lt(a.salvage_rp, b.salvage_rp);
+              case 4: return lt(a.age_days, b.age_days);
+              case 5: return lt(a.source, b.source);
+              case 6: return lt(a.unknown_components, b.unknown_components);
               default: return lt(a.name, b.name);
             }
           };
@@ -7156,10 +7257,20 @@ void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_colony, Id
           ImGui::TableSetColumnIndex(2);
           ImGui::Text("%.1f", r.total);
           ImGui::TableSetColumnIndex(3);
-          ImGui::Text("%lld", static_cast<long long>(r.age_days));
+          if (r.salvage_rp > 0.0) ImGui::Text("%.1f", r.salvage_rp);
+          else ImGui::TextDisabled("-");
           ImGui::TableSetColumnIndex(4);
-          ImGui::TextUnformatted(r.source.c_str());
+          ImGui::Text("%lld", static_cast<long long>(r.age_days));
           ImGui::TableSetColumnIndex(5);
+          ImGui::TextUnformatted(r.source.c_str());
+          ImGui::TableSetColumnIndex(6);
+          if (viewer_fac) {
+            if (r.unknown_components > 0) ImGui::Text("%d", r.unknown_components);
+            else ImGui::TextDisabled("0");
+          } else {
+            ImGui::TextDisabled("-");
+          }
+          ImGui::TableSetColumnIndex(7);
           std::string b = "Go##wreck_go_" + std::to_string((int)r.id);
           if (ImGui::SmallButton(b.c_str())) {
             if (r.system_id != kInvalidId) {

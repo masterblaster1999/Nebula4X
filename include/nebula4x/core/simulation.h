@@ -95,6 +95,35 @@ struct SimConfig {
   double salvage_tons_per_day_per_cargo_ton{0.2};
   double salvage_tons_per_day_min{10.0};
 
+  // --- Salvage research / reverse engineering ---
+  //
+  // Salvaging wrecks can optionally award research points and/or reverse
+  // engineer components from foreign designs. This is intended to make
+  // exploration, battlefield recovery, and piracy more strategically
+  // interesting.
+  //
+  // Salvage research is driven by ResourceDef::salvage_research_rp_per_ton.
+  bool enable_salvage_research{true};
+  double salvage_research_rp_multiplier{1.0};
+
+  // Reverse engineering applies only to wrecks with a valid source_design_id
+  // (typically ship wrecks), and is skipped when salvaging your own faction's
+  // wrecks.
+  bool enable_reverse_engineering{true};
+
+  // Points gained per ton of salvage transferred from a wreck into cargo.
+  // The points are distributed evenly across the source design's components
+  // that are not yet unlocked by the salvaging faction.
+  double reverse_engineering_points_per_salvaged_ton{0.05};
+
+  // Required points per ton of a component's mass to unlock that component.
+  // Required(component) = max(1, mass_tons * reverse_engineering_points_required_per_component_ton).
+  double reverse_engineering_points_required_per_component_ton{1.0};
+
+  // Optional cap on number of components that can be unlocked in a single tick.
+  // 0 or negative => unlimited.
+  int reverse_engineering_unlock_cap_per_tick{2};
+
   double docking_range_mkm{3.0};
 
   // Generic "arrived" epsilon used for fixed targets (move-to-point).
@@ -595,6 +624,10 @@ class Simulation {
   const ContentDB& content() const { return content_; }
 
   const SimConfig& cfg() const { return cfg_; }
+
+  // Reverse engineering threshold (required points) for a component.
+  // Returns 0 if the component is unknown to the content database.
+  double reverse_engineering_points_required_for_component(const std::string& component_id) const;
 
   bool subday_economy_enabled() const { return cfg_.enable_subday_economy; }
   void set_subday_economy_enabled(bool enabled) { cfg_.enable_subday_economy = enabled; }

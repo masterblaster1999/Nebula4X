@@ -927,6 +927,17 @@ std::string serialize_game_to_json(const GameState& s) {
     o["known_techs"] = string_vector_to_json(sorted_unique_copy(f.known_techs));
     o["unlocked_components"] = string_vector_to_json(sorted_unique_copy(f.unlocked_components));
     o["unlocked_installations"] = string_vector_to_json(sorted_unique_copy(f.unlocked_installations));
+
+    // Reverse engineering progress (optional).
+    if (!f.reverse_engineering_progress.empty()) {
+      Object re;
+      for (const auto& [cid, pts] : f.reverse_engineering_progress) {
+        if (cid.empty()) continue;
+        if (!std::isfinite(pts) || pts <= 0.0) continue;
+        re[cid] = pts;
+      }
+      if (!re.empty()) o["reverse_engineering_progress"] = re;
+    }
     if (!f.ship_design_targets.empty()) {
       o["ship_design_targets"] = map_string_int_to_json(f.ship_design_targets);
     }
@@ -1576,6 +1587,18 @@ GameState deserialize_game_from_json(const std::string& json_text) {
 
     if (auto it = o.find("unlocked_components"); it != o.end()) f.unlocked_components = string_vector_from_json(it->second);
     if (auto it = o.find("unlocked_installations"); it != o.end()) f.unlocked_installations = string_vector_from_json(it->second);
+
+    // Reverse engineering progress (optional).
+    if (auto it = o.find("reverse_engineering_progress"); it != o.end()) {
+      if (it->second.is_object()) {
+        for (const auto& [cid, pv] : it->second.object()) {
+          if (cid.empty()) continue;
+          const double pts = pv.number_value(0.0);
+          if (!std::isfinite(pts) || pts <= 0.0) continue;
+          f.reverse_engineering_progress[cid] = pts;
+        }
+      }
+    }
     if (auto it = o.find("ship_design_targets"); it != o.end()) {
       f.ship_design_targets = map_string_int_from_json(it->second);
     }
