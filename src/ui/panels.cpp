@@ -557,6 +557,12 @@ void draw_main_menu(Simulation& sim, UIState& ui, char* save_path, char* load_pa
       if (ImGui::MenuItem("Open JSON Explorer")) {
         ui.show_json_explorer_window = true;
       }
+      if (ImGui::MenuItem("Open Content Validation", "Ctrl+Shift+V")) {
+        ui.show_content_validation_window = true;
+      }
+      if (ImGui::MenuItem("Open State Doctor", "Ctrl+Shift+K")) {
+        ui.show_state_doctor_window = true;
+      }
       if (ImGui::MenuItem("Open Watchboard (JSON Pins)")) {
         ui.show_watchboard_window = true;
       }
@@ -1264,6 +1270,94 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
           } else {
             ImGui::TextDisabled("Point defense: (none)");
           }
+
+          // --- Combat doctrine (AttackShip positioning) ---
+          {
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::TextDisabled("Combat doctrine");
+
+            const double beam_range = std::max(0.0, d->weapon_range_mkm);
+            const double missile_range = std::max(0.0, d->missile_range_mkm);
+
+            int mode_i = static_cast<int>(sh->combat_doctrine.range_mode);
+            const char* mode_labels[] = {"Auto", "Beam", "Missile", "Max", "Min", "Custom"};
+            if (ImGui::Combo("Range mode##eng_range_mode", &mode_i, mode_labels, IM_ARRAYSIZE(mode_labels))) {
+              mode_i = std::clamp(mode_i, 0, 5);
+              sh->combat_doctrine.range_mode = static_cast<EngagementRangeMode>(mode_i);
+            }
+
+            if (sh->combat_doctrine.range_mode == EngagementRangeMode::Custom) {
+              double cr = sh->combat_doctrine.custom_range_mkm;
+              if (ImGui::InputDouble("Custom range (mkm)##eng_custom", &cr, 1.0, 10.0, "%.1f")) {
+                sh->combat_doctrine.custom_range_mkm = std::max(0.0, cr);
+              }
+            }
+
+            float frac = static_cast<float>(sh->combat_doctrine.range_fraction);
+            if (ImGui::SliderFloat("Range fraction##eng_frac", &frac, 0.05f, 1.0f, "%.2f")) {
+              sh->combat_doctrine.range_fraction = std::clamp(static_cast<double>(frac), 0.0, 1.0);
+            }
+
+            double min_r = sh->combat_doctrine.min_range_mkm;
+            if (ImGui::InputDouble("Min range (mkm)##eng_min", &min_r, 0.05, 0.5, "%.2f")) {
+              sh->combat_doctrine.min_range_mkm = std::max(0.0, min_r);
+            }
+
+            ImGui::Checkbox("Kite if too close##eng_kite", &sh->combat_doctrine.kite_if_too_close);
+            if (sh->combat_doctrine.kite_if_too_close) {
+              float db = static_cast<float>(sh->combat_doctrine.kite_deadband_fraction);
+              if (ImGui::SliderFloat("Kite deadband##eng_db", &db, 0.0f, 0.50f, "%.2f")) {
+                sh->combat_doctrine.kite_deadband_fraction = std::clamp(static_cast<double>(db), 0.0, 0.90);
+              }
+            }
+
+            // Preview the effective standoff range (ignoring boarding adjustments).
+            auto select_range = [&](EngagementRangeMode mode) -> double {
+              switch (mode) {
+                case EngagementRangeMode::Beam: return beam_range;
+                case EngagementRangeMode::Missile: return missile_range;
+                case EngagementRangeMode::Max: return std::max(beam_range, missile_range);
+                case EngagementRangeMode::Min: {
+                  double r = 0.0;
+                  if (beam_range > 1e-9) r = beam_range;
+                  if (missile_range > 1e-9) r = (r > 1e-9) ? std::min(r, missile_range) : missile_range;
+                  return r;
+                }
+                case EngagementRangeMode::Custom: return std::max(0.0, sh->combat_doctrine.custom_range_mkm);
+                case EngagementRangeMode::Auto:
+                default:
+                  return (beam_range > 1e-9) ? beam_range : ((missile_range > 1e-9) ? missile_range : 0.0);
+              }
+            };
+
+            const double base = select_range(sh->combat_doctrine.range_mode);
+            const double frac_cl = std::clamp(sh->combat_doctrine.range_fraction, 0.0, 1.0);
+            const double min_cl = std::max(0.0, sh->combat_doctrine.min_range_mkm);
+            double desired = base * frac_cl;
+            if (base <= 1e-9) desired = min_cl;
+            desired = std::max(desired, min_cl);
+            if (!std::isfinite(desired)) desired = min_cl;
+
+            ImGui::Text("Beam range: %.1f mkm | Missile range: %.1f mkm", beam_range, missile_range);
+            ImGui::Text("Desired standoff: %.1f mkm", desired);
+
+            if (ImGui::SmallButton("Reset##eng_reset")) {
+              sh->combat_doctrine = ShipCombatDoctrine{};
+            }
+
+            const Id fleet_id = sim.fleet_for_ship(sh->id);
+            if (fleet_id != kInvalidId) {
+              ImGui::SameLine();
+              if (ImGui::SmallButton("Apply to Fleet##eng_apply_fleet")) {
+                if (auto* fl = find_ptr(s.fleets, fleet_id)) {
+                  for (Id sid : fl->ship_ids) {
+                    if (auto* other = find_ptr(s.ships, sid)) other->combat_doctrine = sh->combat_doctrine;
+                  }
+                }
+              }
+            }
+          }
         } else {
           ImGui::TextDisabled("Design definition missing: %s", sh->design_id.c_str());
         }
@@ -1354,6 +1448,7 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
             sh->auto_mine = false;
             sh->auto_colonize = false;
             sh->auto_tanker = false;
+            sh->auto_troop_transport = false;
           }
         }
         if (ImGui::IsItemHovered()) {
@@ -1371,6 +1466,7 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
             sh->auto_mine = false;
             sh->auto_colonize = false;
             sh->auto_tanker = false;
+            sh->auto_troop_transport = false;
           }
         }
         if (ImGui::IsItemHovered()) {
@@ -1384,6 +1480,35 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
           ImGui::TextDisabled("(requires a cargo hold)");
         }
 
+        const bool can_auto_troop = (d && d->troop_capacity > 0.0);
+        if (!can_auto_troop) ImGui::BeginDisabled();
+        if (ImGui::Checkbox("Auto-troop transport when idle", &sh->auto_troop_transport)) {
+          if (sh->auto_troop_transport) {
+            // Mutually exclusive with mission-style automation (explore/freight/salvage/mine/colonize/tanker).
+            sh->auto_explore = false;
+            sh->auto_freight = false;
+            sh->auto_salvage = false;
+            sh->auto_mine = false;
+            sh->auto_colonize = false;
+            sh->auto_tanker = false;
+          }
+        }
+        if (ImGui::IsItemHovered()) {
+          const auto& cfg = sim.cfg();
+          ImGui::SetTooltip(
+              "When enabled, this troop transport will automatically move ground troops between your colonies\n"
+              "to satisfy garrison targets and reinforce defensive ground battles (when idle).\n\n"
+              "Min transfer: %.1f strength\n"
+              "Max take fraction: %.0f%%",
+              cfg.auto_troop_min_transfer_strength,
+              cfg.auto_troop_max_take_fraction_of_surplus * 100.0);
+        }
+        if (!can_auto_troop) {
+          ImGui::EndDisabled();
+          ImGui::SameLine();
+          ImGui::TextDisabled("(requires troop transport capacity)");
+        }
+
         const bool can_auto_salvage = (d && d->cargo_tons > 0.0);
         if (!can_auto_salvage) ImGui::BeginDisabled();
         if (ImGui::Checkbox("Auto-salvage wrecks when idle", &sh->auto_salvage)) {
@@ -1393,6 +1518,7 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
             sh->auto_mine = false;
             sh->auto_colonize = false;
             sh->auto_tanker = false;
+            sh->auto_troop_transport = false;
           }
         }
         if (ImGui::IsItemHovered()) {
@@ -1415,6 +1541,7 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
             sh->auto_salvage = false;
             sh->auto_colonize = false;
             sh->auto_tanker = false;
+            sh->auto_troop_transport = false;
           }
         }
         if (ImGui::IsItemHovered()) {
@@ -1516,6 +1643,7 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
             sh->auto_salvage = false;
             sh->auto_mine = false;
             sh->auto_tanker = false;
+            sh->auto_troop_transport = false;
           }
         }
         if (ImGui::IsItemHovered()) {
@@ -1573,6 +1701,7 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
             sh->auto_salvage = false;
             sh->auto_mine = false;
             sh->auto_colonize = false;
+            sh->auto_troop_transport = false;
             sh->auto_tanker_reserve_fraction =
                 std::clamp(sh->auto_tanker_reserve_fraction, 0.0, 1.0);
           }

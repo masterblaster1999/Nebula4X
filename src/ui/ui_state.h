@@ -219,6 +219,7 @@ struct UIState {
   bool show_regions_window{false};
   bool show_freight_window{false};
   bool show_fuel_window{false};
+  bool show_troop_window{false};
   bool show_advisor_window{false};
   bool show_time_warp_window{false};
   bool show_timeline_window{false};
@@ -234,6 +235,8 @@ struct UIState {
   bool show_time_machine_window{false};
   bool show_omni_search_window{false};
   bool show_json_explorer_window{false};
+  bool show_content_validation_window{false};
+  bool show_state_doctor_window{false};
   bool show_entity_inspector_window{false};
   bool show_reference_graph_window{false};
   bool show_layout_profiles_window{false};

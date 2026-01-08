@@ -388,7 +388,8 @@ void print_usage(const char* exe) {
   std::cout << "  --load PATH      Load a save JSON before advancing\n";
   std::cout << "  --save PATH      Save state JSON after advancing\n";
   std::cout << "  --format-save    Load + re-save (canonicalize JSON) without advancing\n";
-  std::cout << "  --fix-save       Attempt to repair common save integrity issues (requires --load and --save or --dump)\n";
+  std::cout << "  --fix-save       Attempt to repair common save integrity issues (requires --load and --save or --dump or --fix-save-mergepatch-out)\n";
+  std::cout << "    --fix-save-mergepatch-out PATH  (optional) Write an RFC 7386 JSON Merge Patch describing the fix (PATH can be '-' for stdout)\n";
   std::cout << "  --diff-saves A B Compare two save JSON files and print a structural diff\n";
   std::cout << "  --diff-saves-json PATH  (optional) Also emit a JSON diff report (PATH can be '-' for stdout)\n";
   std::cout << "  --diff-saves-jsonpatch PATH  (optional) Also emit an RFC 6902 JSON Patch (PATH can be '-' for stdout)\n";
@@ -407,6 +408,8 @@ void print_usage(const char* exe) {
   std::cout << "    --tape-step-days N         Snapshot cadence for tape generation (default: 1)\n";
   std::cout << "  --verify-regression-tape PATH Verify a regression tape by re-running the simulation and comparing digests\n";
   std::cout << "    --verify-regression-tape-report PATH  (optional) Write a machine-readable JSON report (PATH can be '-' for stdout)\n";
+  std::cout << "    --verify-regression-tape-out PATH     (optional) Write the generated 'actual' tape JSON (PATH can be '-' for stdout)\n";
+  std::cout << "    --verify-regression-tape-full         (optional) Do not stop at first mismatch (slower; emits full actual tape)\n";
   std::cout << "  --validate-content  Validate content + tech files and exit\n";
   std::cout << "  --validate-save     Validate loaded/new game state and exit\n";
   std::cout << "  --digest         Print stable content/state digests (useful for bug reports)\n";
@@ -897,6 +900,7 @@ int main(int argc, char** argv) {
     if (tech_paths.empty()) tech_paths.push_back("data/tech/tech_tree.json");
     const std::string load_path = get_str_arg(argc, argv, "--load", "");
     const std::string save_path = get_str_arg(argc, argv, "--save", "");
+    const std::string fix_save_mergepatch_out_path = get_str_arg(argc, argv, "--fix-save-mergepatch-out", "");
     const std::string export_events_csv_path = get_str_arg(argc, argv, "--export-events-csv", "");
     const std::string export_events_json_path = get_str_arg(argc, argv, "--export-events-json", "");
     const std::string export_events_jsonl_path = get_str_arg(argc, argv, "--export-events-jsonl", "");
@@ -914,6 +918,9 @@ int main(int argc, char** argv) {
     const std::string verify_regression_tape_path = get_str_arg(argc, argv, "--verify-regression-tape", "");
     const std::string verify_regression_tape_report_path =
         get_str_arg(argc, argv, "--verify-regression-tape-report", "");
+    const std::string verify_regression_tape_out_path =
+        get_str_arg(argc, argv, "--verify-regression-tape-out", "");
+    const bool verify_regression_tape_full = has_flag(argc, argv, "--verify-regression-tape-full");
     const int tape_step_days = get_int_arg(argc, argv, "--tape-step-days", 1);
 
     if (!make_regression_tape_path.empty() && !verify_regression_tape_path.empty()) {
@@ -923,6 +930,16 @@ int main(int argc, char** argv) {
     }
     if (verify_regression_tape_path.empty() && !verify_regression_tape_report_path.empty()) {
       std::cerr << "--verify-regression-tape-report requires --verify-regression-tape\n\n";
+      print_usage(argv[0]);
+      return 2;
+    }
+    if (verify_regression_tape_path.empty() && !verify_regression_tape_out_path.empty()) {
+      std::cerr << "--verify-regression-tape-out requires --verify-regression-tape\n\n";
+      print_usage(argv[0]);
+      return 2;
+    }
+    if (verify_regression_tape_path.empty() && verify_regression_tape_full) {
+      std::cerr << "--verify-regression-tape-full requires --verify-regression-tape\n\n";
       print_usage(argv[0]);
       return 2;
     }
@@ -1085,7 +1102,9 @@ int main(int argc, char** argv) {
         (!duel_swiss_json_path.empty() && duel_swiss_json_path == "-") ||
         (!plan_research_json_path.empty() && plan_research_json_path == "-") ||
         (!make_regression_tape_path.empty() && make_regression_tape_path == "-") ||
-        (!verify_regression_tape_report_path.empty() && verify_regression_tape_report_path == "-");
+        (!verify_regression_tape_report_path.empty() && verify_regression_tape_report_path == "-") ||
+        (!verify_regression_tape_out_path.empty() && verify_regression_tape_out_path == "-") ||
+        (!fix_save_mergepatch_out_path.empty() && fix_save_mergepatch_out_path == "-");
 
     const bool list_factions = has_flag(argc, argv, "--list-factions");
     const bool list_systems = has_flag(argc, argv, "--list-systems");
@@ -1096,6 +1115,12 @@ int main(int argc, char** argv) {
 
     const bool format_save = has_flag(argc, argv, "--format-save");
     const bool fix_save = has_flag(argc, argv, "--fix-save");
+
+    if (!fix_save_mergepatch_out_path.empty() && !fix_save) {
+      std::cerr << "--fix-save-mergepatch-out requires --fix-save\n\n";
+      print_usage(argv[0]);
+      return 2;
+    }
     const bool validate_content = has_flag(argc, argv, "--validate-content");
     const bool validate_save = has_flag(argc, argv, "--validate-save");
 
@@ -1135,8 +1160,16 @@ int main(int argc, char** argv) {
     }
 
     if (fix_save) {
-      if (load_path.empty() || (save_path.empty() && !has_flag(argc, argv, "--dump"))) {
-        std::cerr << "--fix-save requires --load and either --save or --dump\n\n";
+      const bool dump_json = has_flag(argc, argv, "--dump");
+      const bool want_merge_patch = !fix_save_mergepatch_out_path.empty();
+      if (load_path.empty() || (save_path.empty() && !dump_json && !want_merge_patch)) {
+        std::cerr
+            << "--fix-save requires --load and at least one of --save, --dump, or --fix-save-mergepatch-out\n\n";
+        print_usage(argv[0]);
+        return 2;
+      }
+      if (dump_json && fix_save_mergepatch_out_path == "-") {
+        std::cerr << "--fix-save cannot write both --dump and --fix-save-mergepatch-out to stdout ('-')\n\n";
         print_usage(argv[0]);
         return 2;
       }
@@ -1178,9 +1211,18 @@ int main(int argc, char** argv) {
       }
 
       // Generate actual snapshots matching the expected tape's snapshot days.
+      //
+      // Bug hunting: by default we stop at the first mismatch to avoid wasting time
+      // simulating hundreds/thousands of days beyond the divergence point. Use
+      // --verify-regression-tape-full to force a full run (useful when also emitting
+      // the full 'actual' tape for diagnostics).
       nebula4x::RegressionTape actual;
       actual.config = cfg;
       actual.nebula4x_version = NEBULA4X_VERSION;
+
+      nebula4x::RegressionTapeVerifyReport rep;
+      rep.ok = true;
+      rep.message = "ok";
 
       const std::uint64_t content_digest = nebula4x::digest_content_db64(sim_verify.content());
       std::uint64_t prev_next_event_seq = sim_verify.state().next_event_seq;
@@ -1188,7 +1230,8 @@ int main(int argc, char** argv) {
 
       actual.snapshots.reserve(expected.snapshots.size());
       for (std::size_t i = 0; i < expected.snapshots.size(); ++i) {
-        const std::int64_t target_day = expected.snapshots[i].day;
+        const auto& e = expected.snapshots[i];
+        const std::int64_t target_day = e.day;
         const std::int64_t delta = target_day - cur_day;
         if (delta < 0) {
           std::cerr << "Regression tape snapshot days are behind the simulation start day\n";
@@ -1199,13 +1242,29 @@ int main(int argc, char** argv) {
           cur_day = target_day;
         }
 
-        actual.snapshots.push_back(
-            nebula4x::compute_timeline_snapshot(sim_verify.state(), sim_verify.content(), content_digest,
-                                                prev_next_event_seq, cfg.timeline_opt));
+        auto g = nebula4x::compute_timeline_snapshot(sim_verify.state(), sim_verify.content(), content_digest,
+                                                     prev_next_event_seq, cfg.timeline_opt);
         prev_next_event_seq = sim_verify.state().next_event_seq;
-      }
 
-      const auto rep = nebula4x::compare_regression_tapes(expected, actual, /*compare_metrics=*/true);
+        actual.snapshots.push_back(g);
+
+        if (rep.ok && !nebula4x::regression_snapshots_equal(e, g, /*compare_metrics=*/true)) {
+          rep.ok = false;
+          rep.message = "mismatch";
+          rep.first_mismatch.index = static_cast<int>(i);
+          rep.first_mismatch.day = e.day;
+          rep.first_mismatch.date = e.date;
+          rep.first_mismatch.expected_state_digest = nebula4x::digest64_to_hex(e.state_digest);
+          rep.first_mismatch.actual_state_digest = nebula4x::digest64_to_hex(g.state_digest);
+
+          std::string msg = "digest mismatch";
+          if (e.day != g.day) msg = "day mismatch";
+          else if (e.state_digest == g.state_digest) msg = "metrics mismatch";
+          rep.first_mismatch.message = msg;
+
+          if (!verify_regression_tape_full) break;
+        }
+      }
 
       if (!verify_regression_tape_report_path.empty()) {
         const std::string report_json = nebula4x::regression_verify_report_to_json(rep, 2);
@@ -1213,6 +1272,15 @@ int main(int argc, char** argv) {
           std::cout << report_json;
         } else {
           nebula4x::write_text_file(verify_regression_tape_report_path, report_json);
+        }
+      }
+
+      if (!verify_regression_tape_out_path.empty()) {
+        const std::string tape_out = nebula4x::regression_tape_to_json(actual, 2);
+        if (verify_regression_tape_out_path == "-") {
+          std::cout << tape_out;
+        } else {
+          nebula4x::write_text_file(verify_regression_tape_out_path, tape_out);
         }
       }
 
@@ -1521,10 +1589,18 @@ if (duel) {
 
     if (fix_save) {
       const bool dump_json = has_flag(argc, argv, "--dump");
+      const bool want_merge_patch = !fix_save_mergepatch_out_path.empty();
       std::ostream& info = dump_json ? std::cerr : (script_stdout ? std::cerr : std::cout);
+
+      std::string before_json;
+      if (want_merge_patch) {
+        // Canonicalize before/after so the merge patch is stable across runs.
+        before_json = nebula4x::serialize_game_to_json(sim.state());
+      }
 
       const auto report = nebula4x::fix_game_state(sim.state(), &sim.content());
       const auto errors = nebula4x::validate_game_state(sim.state(), &sim.content());
+      const std::string fixed_json = nebula4x::serialize_game_to_json(sim.state());
 
       if (!quiet) {
         info << "Applied state fixer: " << report.changes << " change(s)";
@@ -1555,15 +1631,27 @@ if (duel) {
         }
       }
 
+      if (want_merge_patch) {
+        const std::string merge_patch = nebula4x::diff_json_merge_patch(before_json, fixed_json, /*indent=*/2);
+        if (fix_save_mergepatch_out_path == "-") {
+          std::cout << merge_patch;
+        } else {
+          nebula4x::write_text_file(fix_save_mergepatch_out_path, merge_patch);
+          if (!quiet) {
+            info << "\nWrote fix merge patch to " << fix_save_mergepatch_out_path << "\n";
+          }
+        }
+      }
+
       if (!save_path.empty()) {
-        nebula4x::write_text_file(save_path, nebula4x::serialize_game_to_json(sim.state()));
+        nebula4x::write_text_file(save_path, fixed_json);
         if (!quiet) {
           info << "\nWrote fixed save to " << save_path << "\n";
         }
       }
 
       if (dump_json) {
-        std::cout << "\n--- JSON ---\n" << nebula4x::serialize_game_to_json(sim.state()) << "\n";
+        std::cout << "\n--- JSON ---\n" << fixed_json << "\n";
       }
 
       return errors.empty() ? 0 : 1;

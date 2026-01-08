@@ -475,7 +475,7 @@ void Simulation::new_game() {
   }
   for (auto& [_, f] : state_.factions) initialize_unlocks_for_faction(f);
   recompute_body_positions();
-  tick_contacts(false);
+  tick_contacts(0.0, false);
   invalidate_jump_route_cache();
 }
 
@@ -487,7 +487,7 @@ void Simulation::new_game_random(std::uint32_t seed, int num_systems) {
   }
   for (auto& [_, f] : state_.factions) initialize_unlocks_for_faction(f);
   recompute_body_positions();
-  tick_contacts(false);
+  tick_contacts(0.0, false);
   invalidate_jump_route_cache();
 }
 
@@ -529,7 +529,7 @@ void Simulation::load_game(GameState loaded) {
   prune_fleets();
 
   recompute_body_positions();
-  tick_contacts(false);
+  tick_contacts(0.0, false);
   invalidate_jump_route_cache();
 }
 
@@ -597,7 +597,7 @@ ReloadContentResult Simulation::reload_content_db(ContentDB new_content, bool va
   }
 
   // Sensors / contacts depend on design sensor ranges and installation defs.
-  tick_contacts(false);
+  tick_contacts(0.0, false);
 
   if (validate_state) {
     const auto s_errors = nebula4x::validate_game_state(state_, &content_);

@@ -36,6 +36,8 @@
 #include "ui/time_machine_window.h"
 #include "ui/omni_search_window.h"
 #include "ui/json_explorer_window.h"
+#include "ui/content_validation_window.h"
+#include "ui/state_doctor_window.h"
 #include "ui/entity_inspector_window.h"
 #include "ui/reference_graph_window.h"
 #include "ui/watchboard_window.h"
@@ -189,6 +191,8 @@ void App::frame() {
       if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_A)) ui_.show_advisor_window = !ui_.show_advisor_window;
       if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_B)) ui_.show_colony_profiles_window = !ui_.show_colony_profiles_window;
       if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_R)) ui_.show_regions_window = !ui_.show_regions_window;
+      if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_V)) ui_.show_content_validation_window = !ui_.show_content_validation_window;
+      if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_K)) ui_.show_state_doctor_window = !ui_.show_state_doctor_window;
       if (ImGui::IsKeyPressed(ImGuiKey_F1)) ui_.show_help_window = !ui_.show_help_window;
 
       // Quick window toggles.
@@ -357,6 +361,8 @@ void App::frame() {
   }
   if (ui_.show_omni_search_window) draw_omni_search_window(sim_, ui_);
   if (ui_.show_json_explorer_window) draw_json_explorer_window(sim_, ui_);
+  if (ui_.show_content_validation_window) draw_content_validation_window(sim_, ui_);
+  if (ui_.show_state_doctor_window) draw_state_doctor_window(sim_, ui_);
   if (ui_.show_watchboard_window) draw_watchboard_window(sim_, ui_);
   if (ui_.show_data_lenses_window) draw_data_lenses_window(sim_, ui_);
   if (ui_.show_dashboards_window) draw_dashboards_window(sim_, ui_);
@@ -928,6 +934,13 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       }
       if (auto it = obj->find("show_json_explorer_window"); it != obj->end()) {
         ui_.show_json_explorer_window = it->second.bool_value(ui_.show_json_explorer_window);
+      }
+    if (auto it = obj->find("show_content_validation_window"); it != obj->end()) {
+      ui_.show_content_validation_window = it->second.bool_value(ui_.show_content_validation_window);
+    }
+
+      if (auto it = obj->find("show_state_doctor_window"); it != obj->end()) {
+        ui_.show_state_doctor_window = it->second.bool_value(ui_.show_state_doctor_window);
       }
       if (auto it = obj->find("show_entity_inspector_window"); it != obj->end()) {
         ui_.show_entity_inspector_window = it->second.bool_value(ui_.show_entity_inspector_window);
@@ -1555,6 +1568,8 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     o["show_time_machine_window"] = ui_.show_time_machine_window;
     o["show_omni_search_window"] = ui_.show_omni_search_window;
     o["show_json_explorer_window"] = ui_.show_json_explorer_window;
+    o["show_content_validation_window"] = ui_.show_content_validation_window;
+    o["show_state_doctor_window"] = ui_.show_state_doctor_window;
     o["show_entity_inspector_window"] = ui_.show_entity_inspector_window;
     o["show_reference_graph_window"] = ui_.show_reference_graph_window;
     o["show_layout_profiles_window"] = ui_.show_layout_profiles_window;
@@ -1785,6 +1800,8 @@ void App::reset_window_layout_defaults() {
   ui_.show_time_machine_window = false;
   ui_.show_omni_search_window = false;
   ui_.show_json_explorer_window = false;
+  ui_.show_content_validation_window = false;
+  ui_.show_state_doctor_window = false;
   ui_.show_entity_inspector_window = false;
   ui_.show_reference_graph_window = false;
   ui_.show_layout_profiles_window = false;

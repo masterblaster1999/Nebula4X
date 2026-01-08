@@ -709,8 +709,35 @@ void Simulation::tick_ships(double dt_days) {
         ord.last_known_position_mkm = target;
         ord.has_last_known = true;
         const auto* d = find_design(ship.design_id);
-        const double w_range = d ? d->weapon_range_mkm : 0.0;
-        desired_range = (w_range > 0.0) ? (w_range * 0.9) : 0.1;
+        const double beam_range = d ? std::max(0.0, d->weapon_range_mkm) : 0.0;
+        const double missile_range = d ? std::max(0.0, d->missile_range_mkm) : 0.0;
+
+        auto select_range = [&](EngagementRangeMode mode) -> double {
+          switch (mode) {
+            case EngagementRangeMode::Beam: return beam_range;
+            case EngagementRangeMode::Missile: return missile_range;
+            case EngagementRangeMode::Max: return std::max(beam_range, missile_range);
+            case EngagementRangeMode::Min: {
+              double r = 0.0;
+              if (beam_range > 1e-9) r = beam_range;
+              if (missile_range > 1e-9) r = (r > 1e-9) ? std::min(r, missile_range) : missile_range;
+              return r;
+            }
+            case EngagementRangeMode::Custom: return std::max(0.0, ship.combat_doctrine.custom_range_mkm);
+            case EngagementRangeMode::Auto:
+            default:
+              return (beam_range > 1e-9) ? beam_range : ((missile_range > 1e-9) ? missile_range : 0.0);
+          }
+        };
+
+        const auto& doc = ship.combat_doctrine;
+        const double base_range = select_range(doc.range_mode);
+        const double frac = std::clamp(doc.range_fraction, 0.0, 1.0);
+        const double min_r = std::max(0.0, doc.min_range_mkm);
+        double dr = base_range * frac;
+        if (base_range <= 1e-9) dr = min_r;
+        desired_range = std::max(dr, min_r);
+        if (!std::isfinite(desired_range)) desired_range = 0.1;
         // If the target is disabled and we have troops, close to boarding range.
         if (cfg_.enable_boarding && ship.troops >= cfg_.boarding_min_attacker_troops) {
           const auto* td = find_design(tgt->design_id);
@@ -1048,8 +1075,8 @@ void Simulation::tick_ships(double dt_days) {
       }
     }
 
-    const Vec2 delta = target - ship.position_mkm;
-    const double dist = delta.length();
+    Vec2 delta = target - ship.position_mkm;
+    double dist = delta.length();
 
     const bool is_attack = std::holds_alternative<AttackShip>(q.front());
     const bool is_escort = is_escort_op;
@@ -1060,6 +1087,24 @@ void Simulation::tick_ships(double dt_days) {
     const bool is_orbit = std::holds_alternative<OrbitBody>(q.front());
     const bool is_bombard = std::holds_alternative<BombardColony>(q.front());
     const bool is_scrap = std::holds_alternative<ScrapShip>(q.front());
+
+    // Optional kiting behaviour for AttackShip: if we are inside our desired
+    // standoff range, back off instead of sitting at point-blank range.
+    if (is_attack && attack_has_contact && ship.combat_doctrine.kite_if_too_close && desired_range > 1e-9) {
+      const double dead = std::clamp(ship.combat_doctrine.kite_deadband_fraction, 0.0, 0.90);
+      const double threshold = desired_range * (1.0 - dead);
+      if (dist + 1e-9 < threshold) {
+        Vec2 away = (dist > 1e-9) ? (ship.position_mkm - target).normalized() : Vec2{1.0, 0.0};
+        const double need = std::max(0.0, desired_range - dist);
+        if (need > 1e-9 && (std::abs(away.x) > 1e-12 || std::abs(away.y) > 1e-12)) {
+          target = ship.position_mkm + away * need;
+          // Move to the backoff point exactly; don't treat it as an "approach to desired_range".
+          desired_range = 0.0;
+          delta = target - ship.position_mkm;
+          dist = delta.length();
+        }
+      }
+    }
 
     // Fleet jump coordination: if multiple ships in the same fleet are trying to
     // transit the same jump point in the same system, we can optionally hold the
@@ -1715,6 +1760,9 @@ void Simulation::tick_ships(double dt_days) {
         if (moved > 1e-9) {
           ship.troops += moved;
           col->ground_forces = std::max(0.0, col->ground_forces - moved);
+          if (auto itb = state_.ground_battles.find(col->id); itb != state_.ground_battles.end()) {
+            itb->second.defender_strength = col->ground_forces;
+          }
         }
       } else if (troop_mode == 1) {
         // Unload into colony garrison.
@@ -1723,6 +1771,9 @@ void Simulation::tick_ships(double dt_days) {
         if (moved > 1e-9) {
           ship.troops = std::max(0.0, ship.troops - moved);
           col->ground_forces += moved;
+          if (auto itb = state_.ground_battles.find(col->id); itb != state_.ground_battles.end()) {
+            itb->second.defender_strength = col->ground_forces;
+          }
         }
       } else if (troop_mode == 2) {
         // Invade (disembark all or requested troops into attacker strength).

@@ -1,10 +1,11 @@
 #include <cassert>
+#include <vector>
 
 #include "nebula4x/util/spatial_index.h"
 
-namespace nebula4x {
-
 int test_spatial_index() {
+  using namespace nebula4x;
+
   // Insertion order should not affect deterministic query results.
   {
     SpatialIndex2D idx(10.0);
@@ -42,5 +43,3 @@ int test_spatial_index() {
 
   return 0;
 }
-
-} // namespace nebula4x

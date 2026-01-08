@@ -465,6 +465,28 @@ struct SimConfig {
   // Minimum fuel transfer size (tons) for an auto-tanker dispatch.
   // Prevents tiny 0.001t transfers due to floating point noise.
   double auto_tanker_min_transfer_tons{1.0};
+
+  // --- Auto-troop transport (ground logistics) ---
+  //
+  // Ships with Ship::auto_troop_transport enabled will, when idle, automatically
+  // ferry ground troops between owned colonies to satisfy garrison targets and
+  // (optionally) reinforce ongoing defensive ground battles.
+
+  // Minimum troop strength moved in a single auto-troop task (avoids tiny transfers).
+  double auto_troop_min_transfer_strength{1.0};
+
+  // When pulling troops from a source colony, auto-troop will never take more than
+  // this fraction of that colony's computed surplus in a single task.
+  // (0.0 = take nothing, 1.0 = take full surplus).
+  double auto_troop_max_take_fraction_of_surplus{0.75};
+
+  // When reinforcing an active defensive ground battle, auto-troop computes a
+  // best-effort "hold the line" defender target using a square-law estimate and
+  // this margin factor (>= 1.0 means safer).
+  double auto_troop_defense_margin_factor{1.10};
+
+  // If true, auto-troop considers ongoing defensive ground battles as urgent troop needs.
+  bool auto_troop_consider_active_battles{true};
 };
 
 // Optional context passed when recording a persistent simulation event.
@@ -690,6 +712,11 @@ class Simulation {
   // step_hours controls the time-warp granularity (e.g. 1/6/12/24). The
   // implementation will not cross midnight within a single step.
   AdvanceUntilEventResult advance_until_event_hours(int max_hours, const EventStopCondition& stop, int step_hours = 1);
+
+  // --- Debug / test hooks ---
+  // Run AI planning (automation + mission planning) for the current state without advancing time.
+  // This is useful for deterministic unit tests and bug hunting.
+  void run_ai_planning();
 
   // --- Order helpers ---
   // Clear all queued orders for a ship.
@@ -1077,6 +1104,23 @@ bool move_construction_order(Id colony_id, int from_index, int to_index);
   // Self is always friendly.
   bool are_factions_mutual_friendly(Id a_faction_id, Id b_faction_id) const;
 
+  // Treaties / diplomacy agreements.
+  //
+  // Treaties are symmetric agreements between two factions and are layered on top
+  // of directed DiplomacyStatus stances.
+  //
+  // duration_days < 0 means "indefinite".
+  //
+  // Returns the treaty id (or kInvalidId on failure).
+  Id create_treaty(Id faction_a, Id faction_b, TreatyType type, int duration_days = -1,
+                   bool push_event = true, std::string* error = nullptr);
+
+  // Cancel / break an existing treaty. Returns false on failure.
+  bool cancel_treaty(Id treaty_id, bool push_event = true, std::string* error = nullptr);
+
+  // List currently active treaties between the two factions (order-insensitive).
+  std::vector<Treaty> treaties_between(Id faction_a, Id faction_b) const;
+
 
   // Set a diplomatic stance. If reciprocal is true, also sets the inverse (B->A).
   //
@@ -1150,9 +1194,10 @@ bool move_construction_order(Id colony_id, int from_index, int to_index);
   void tick_shipyards(double dt_days);
   void tick_construction(double dt_days);
   void tick_ai();
+  void tick_treaties();
   void tick_refuel();
   void tick_ships(double dt_days);
-  void tick_contacts(bool emit_contact_lost_events);
+  void tick_contacts(double dt_days, bool emit_contact_lost_events);
   void tick_shields(double dt_days);
   void tick_combat(double dt_days);
   void tick_ground_combat();

@@ -119,7 +119,7 @@ std::vector<SensorSource> gather_sensor_sources(const Simulation& sim, Id factio
     const double range_mkm = sensor_range_mkm_with_mode(sim, *sh, *d) * env_mult;
     if (range_mkm <= 0.0) continue;
 
-    out.push_back(SensorSource{sh->position_mkm, range_mkm});
+    out.push_back(SensorSource{sh->position_mkm, range_mkm, ship_id});
   }
 
   // --- colony-based sensors (installations) ---
@@ -143,7 +143,7 @@ std::vector<SensorSource> gather_sensor_sources(const Simulation& sim, Id factio
 
     best_mkm *= env_mult;
     if (best_mkm <= 0.0) continue;
-    out.push_back(SensorSource{body->position_mkm, best_mkm});
+    out.push_back(SensorSource{body->position_mkm, best_mkm, kInvalidId});
   }
 
   return out;

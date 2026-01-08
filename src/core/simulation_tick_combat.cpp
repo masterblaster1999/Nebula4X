@@ -800,7 +800,8 @@ void Simulation::tick_combat(double dt_days) {
 
           const double dist = (tgt->position_mkm - attacker.position_mkm).length();
           if (dist > ad->missile_range_mkm + 1e-9) continue;
-          if (dist < mtarget_dist) {
+          if (dist + 1e-9 < mtarget_dist ||
+              (std::abs(dist - mtarget_dist) <= 1e-9 && (mtarget == kInvalidId || bid < mtarget))) {
             mtarget = bid;
             mtarget_dist = dist;
           }
@@ -902,7 +903,8 @@ void Simulation::tick_combat(double dt_days) {
 
           const double dist = (target.position_mkm - attacker.position_mkm).length();
           if (dist > ad->weapon_range_mkm) continue;
-          if (dist < chosen_dist) {
+          if (dist + 1e-9 < chosen_dist ||
+              (std::abs(dist - chosen_dist) <= 1e-9 && (chosen == kInvalidId || bid < chosen))) {
             chosen = bid;
             chosen_dist = dist;
           }

@@ -69,6 +69,9 @@ struct GameState {
   std::unordered_map<Id, Colony> colonies;
   std::unordered_map<Id, Faction> factions;
 
+  // Active diplomacy treaties (symmetric agreements between two factions).
+  std::unordered_map<Id, Treaty> treaties;
+
   // Fleets are lightweight groupings of ships for convenience.
   std::unordered_map<Id, Fleet> fleets;
 

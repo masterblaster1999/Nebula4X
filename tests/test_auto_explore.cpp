@@ -120,7 +120,7 @@ int test_auto_explore() {
     N4X_ASSERT(sim.clear_orders(scout_id));
     sim.state().ships[scout_id].system_id = sol;
 
-    sim.tick_ai();
+    sim.run_ai_planning();
 
     const auto& q = sim.state().ship_orders.at(scout_id).queue;
     N4X_ASSERT(q.size() == 1);
@@ -134,7 +134,7 @@ int test_auto_explore() {
     N4X_ASSERT(sim.clear_orders(scout_id));
     sim.state().ships[scout_id].system_id = cen;
 
-    sim.tick_ai();
+    sim.run_ai_planning();
 
     const auto& q = sim.state().ship_orders.at(scout_id).queue;
     N4X_ASSERT(q.size() == 1);
@@ -156,7 +156,7 @@ int test_auto_explore() {
     N4X_ASSERT(sim.clear_orders(scout_id));
     sim.state().ships[scout_id].system_id = cen;
 
-    sim.tick_ai();
+    sim.run_ai_planning();
 
     const auto& q = sim.state().ship_orders.at(scout_id).queue;
     N4X_ASSERT(q.size() == 1);

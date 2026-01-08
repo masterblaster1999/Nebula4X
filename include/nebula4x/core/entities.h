@@ -62,6 +62,40 @@ enum class DiplomacyStatus : std::uint8_t {
 };
 
 
+// Symmetric diplomacy agreements (treaties) between two factions.
+//
+// Treaties are layered on top of directed DiplomacyStatus stances:
+//   - Alliance forces mutual friendliness.
+//   - Ceasefire / NonAggressionPact forces at least Neutral (prevents auto-engagement).
+//
+// Treaties are stored in GameState::treaties and may have a duration.
+// duration_days < 0 means "indefinite".
+//
+// NOTE: Treaties are intentionally lightweight; negotiation/AI acceptance can be
+// built on top of this primitive later.
+enum class TreatyType : std::uint8_t {
+  Ceasefire = 0,
+  NonAggressionPact = 1,
+  Alliance = 2,
+  TradeAgreement = 3,
+};
+
+struct Treaty {
+  Id id{kInvalidId};
+  // Always stored normalized as (min(faction_a, faction_b), max(...)) so treaties
+  // are inherently symmetric.
+  Id faction_a{kInvalidId};
+  Id faction_b{kInvalidId};
+  TreatyType type{TreatyType::Ceasefire};
+
+  // Simulation day (Date::days_since_epoch) when the treaty was signed/renewed.
+  std::int64_t start_day{0};
+
+  // Duration in days. <0 => indefinite.
+  int duration_days{-1};
+};
+
+
 
 // Sensor emissions control / operating mode.
 //
@@ -88,6 +122,64 @@ enum class RepairPriority : std::uint8_t {
   Low = 0,
   Normal = 1,
   High = 2,
+};
+
+// Ship tactical doctrine / engagement settings.
+//
+// This is a deliberately lightweight, deterministic knob-set that influences
+// how ships execute AttackShip orders (movement/positioning, not targeting).
+//
+// Motivation:
+// - Pure missile ships previously closed to point-blank range when attacking
+//   because only beam weapon range was considered by movement AI.
+// - Mixed-weapon ships benefit from explicit player control over whether to
+//   stand off at missile range, close for beams, or hold a custom standoff.
+//
+// Range selection mode used to choose the base weapon range for standoff.
+enum class EngagementRangeMode : std::uint8_t {
+  // Prefer beam range if available, else missile range, else a small minimum.
+  Auto = 0,
+
+  // Use beam weapon range (ShipDesign::weapon_range_mkm).
+  Beam = 1,
+
+  // Use missile range (ShipDesign::missile_range_mkm).
+  Missile = 2,
+
+  // Use max(beam_range, missile_range).
+  Max = 3,
+
+  // Use min positive among beam/missile.
+  Min = 4,
+
+  // Use custom_range_mkm.
+  Custom = 5,
+};
+
+struct ShipCombatDoctrine {
+  EngagementRangeMode range_mode{EngagementRangeMode::Auto};
+
+  // Fraction (0..1) of the selected base range to maintain as standoff.
+  //
+  // Example: 0.9 means "try to stay at 90% of range" so weapons are in range
+  // without constantly entering/leaving the boundary due to small movements.
+  double range_fraction{0.9};
+
+  // Minimum engagement range (mkm) for ships with no usable ranged weapons,
+  // or as a safety floor.
+  double min_range_mkm{0.1};
+
+  // Used when range_mode == Custom.
+  double custom_range_mkm{0.0};
+
+  // When enabled, ships will actively back off (kite) if the target closes
+  // inside their desired standoff range.
+  bool kite_if_too_close{false};
+
+  // Hysteresis for kiting decisions as a fraction of desired_range.
+  //
+  // Example: 0.10 => start backing off when distance < 90% of desired_range.
+  double kite_deadband_fraction{0.10};
 };
 
 
@@ -429,6 +521,11 @@ struct Ship {
   // Automation: when enabled, the simulation will generate freight (mineral hauling) orders
   // for this ship whenever it is idle (no queued orders).
   bool auto_freight{false};
+  // When enabled, this ship will, when idle, automatically transport ground troops
+  // between owned colonies to satisfy garrison targets and (optionally) reinforce
+  // ongoing defensive ground battles.
+  bool auto_troop_transport{false};
+
 
   // Automation: when enabled, the simulation will generate salvage orders for
   // this ship whenever it is idle (no queued orders).
@@ -526,6 +623,13 @@ struct Ship {
   // This setting modifies both this ship's sensor range (when acting as a sensor source)
   // and its detectability (signature multiplier) when targeted by others.
   SensorMode sensor_mode{SensorMode::Normal};
+
+  // Tactical doctrine for AttackShip positioning.
+  //
+  // This does *not* affect weapon targeting selection; it only influences how
+  // ships choose a desired standoff distance and whether they kite when
+  // engaged.
+  ShipCombatDoctrine combat_doctrine{};
 
 
   // Combat state.

@@ -464,6 +464,7 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
     hash_string_double_map(d, sh.cargo);
     d.add_bool(sh.auto_explore);
     d.add_bool(sh.auto_freight);
+    d.add_bool(sh.auto_troop_transport);
     d.add_bool(sh.auto_salvage);
     d.add_bool(sh.auto_mine);
     d.add_u64(sh.auto_mine_home_colony_id);
@@ -477,6 +478,14 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
     d.add_double(sh.auto_repair_threshold_fraction);
     d.add_u8(static_cast<std::uint8_t>(sh.repair_priority));
     d.add_u8(static_cast<std::uint8_t>(sh.sensor_mode));
+
+    // Combat doctrine influences movement (and thus combat outcomes); include it.
+    d.add_u8(static_cast<std::uint8_t>(sh.combat_doctrine.range_mode));
+    d.add_double(sh.combat_doctrine.range_fraction);
+    d.add_double(sh.combat_doctrine.min_range_mkm);
+    d.add_double(sh.combat_doctrine.custom_range_mkm);
+    d.add_bool(sh.combat_doctrine.kite_if_too_close);
+    d.add_double(sh.combat_doctrine.kite_deadband_fraction);
     // Ship power policy affects combat + detection; include it in the digest.
     d.add_bool(sh.power_policy.engines_enabled);
     d.add_bool(sh.power_policy.shields_enabled);
@@ -632,6 +641,18 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
       d.add_string(c.last_seen_design_id);
       d.add_u64(c.last_seen_faction_id);
     }
+  }
+
+  // Treaties
+  d.add_size(s.treaties.size());
+  for (Id tid : sorted_keys(s.treaties)) {
+    const auto& t = s.treaties.at(tid);
+    d.add_u64(tid);
+    d.add_u64(t.faction_a);
+    d.add_u64(t.faction_b);
+    d.add_enum(t.type);
+    d.add_i64(t.start_day);
+    d.add_i64(t.duration_days);
   }
 
   // Fleets

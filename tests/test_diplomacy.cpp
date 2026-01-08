@@ -132,5 +132,33 @@ int test_diplomacy() {
   N4X_ASSERT(it1->second.relations.at(f2.id) == DiplomacyStatus::Friendly, "friendly relation A->B preserved");
   N4X_ASSERT(it2->second.relations.at(f1.id) == DiplomacyStatus::Friendly, "friendly relation B->A preserved");
 
+  // Treaties override hostility and persist through serialization.
+  N4X_ASSERT(sim.set_diplomatic_status(f1.id, f2.id, DiplomacyStatus::Hostile, /*reciprocal=*/true, /*push_event=*/false),
+             "reset stance to hostile");
+
+  std::string treaty_err;
+  const Id tid = sim.create_treaty(f1.id, f2.id, TreatyType::Ceasefire, /*duration_days=*/3, /*push_event=*/false, &treaty_err);
+  N4X_ASSERT(tid != kInvalidId, std::string("create_treaty succeeds: ") + treaty_err);
+  N4X_ASSERT(sim.diplomatic_status(f1.id, f2.id) == DiplomacyStatus::Neutral, "ceasefire forces at least neutral");
+  N4X_ASSERT(!sim.are_factions_hostile(f1.id, f2.id), "ceasefire means not hostile (A->B)");
+  N4X_ASSERT(!sim.are_factions_hostile(f2.id, f1.id), "ceasefire means not hostile (B->A)");
+
+  const std::string json2 = serialize_game_to_json(sim.state());
+  const GameState loaded2 = deserialize_game_from_json(json2);
+  N4X_ASSERT(loaded2.treaties.size() == 1, "treaty serialized");
+  const auto it_t = loaded2.treaties.find(tid);
+  N4X_ASSERT(it_t != loaded2.treaties.end(), "treaty id preserved");
+  const Id lo = (f1.id < f2.id) ? f1.id : f2.id;
+  const Id hi = (f1.id < f2.id) ? f2.id : f1.id;
+  N4X_ASSERT(it_t->second.faction_a == lo, "treaty faction_a normalized");
+  N4X_ASSERT(it_t->second.faction_b == hi, "treaty faction_b normalized");
+  N4X_ASSERT(it_t->second.type == TreatyType::Ceasefire, "treaty type preserved");
+  N4X_ASSERT(it_t->second.duration_days == 3, "treaty duration preserved");
+
+  // Expiration (duration measured in whole days from creation).
+  sim.advance_days(3);
+  N4X_ASSERT(sim.treaties_between(f1.id, f2.id).empty(), "treaty expired and removed");
+  N4X_ASSERT(sim.diplomatic_status(f1.id, f2.id) == DiplomacyStatus::Hostile, "after expiry, default hostility returns");
+
   return 0;
 }

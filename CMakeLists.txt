@@ -6,12 +6,24 @@ option(NEBULA4X_BUILD_UI "Build the SDL2/ImGui UI" ON)
 option(NEBULA4X_BUILD_TESTS "Build tests" ON)
 option(NEBULA4X_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
 
+# FetchContent is convenient for first-time builds, but it makes offline/headless
+# builds brittle (CMake will fail at configure time if it cannot reach GitHub).
+option(NEBULA4X_FETCH_DEPS "Allow FetchContent to download third-party dependencies (SDL2/ImGui)" ON)
+
+option(NEBULA4X_ENABLE_ASAN "Enable AddressSanitizer (bug hunting)" OFF)
+option(NEBULA4X_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer (bug hunting)" OFF)
+option(NEBULA4X_ENABLE_TSAN "Enable ThreadSanitizer (bug hunting)" OFF)
+option(NEBULA4X_ENABLE_LSAN "Enable LeakSanitizer (bug hunting)" OFF)
+option(NEBULA4X_ENABLE_GLIBCXX_ASSERTIONS "Enable libstdc++ runtime assertions (_GLIBCXX_ASSERTIONS)" OFF)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(Warnings)
+
+include(Sanitizers)
 
 include(FetchContent)
 set(FETCHCONTENT_QUIET OFF)
@@ -31,6 +43,7 @@ target_sources(nebula4x_core
     src/core/order_planner.cpp
     src/core/freight_planner.cpp
     src/core/fuel_planner.cpp
+    src/core/troop_planner.cpp
     src/core/research_schedule.cpp
     src/core/colony_schedule.cpp
     src/core/colony_profiles.cpp
@@ -91,11 +104,13 @@ target_compile_definitions(nebula4x_core
 )
 
 nebula4x_set_project_warnings(nebula4x_core ${NEBULA4X_WARNINGS_AS_ERRORS})
+nebula4x_enable_sanitizers(nebula4x_core)
 
 # --- CLI executable ---
 add_executable(nebula4x_cli src/cli_main.cpp)
 target_link_libraries(nebula4x_cli PRIVATE nebula4x::core)
 nebula4x_set_project_warnings(nebula4x_cli ${NEBULA4X_WARNINGS_AS_ERRORS})
+nebula4x_enable_sanitizers(nebula4x_cli)
 
 # Copy data directory next to the CLI executable for convenience.
 add_custom_command(TARGET nebula4x_cli POST_BUILD
@@ -106,31 +121,51 @@ add_custom_command(TARGET nebula4x_cli POST_BUILD
 
 # --- UI executable ---
 if(NEBULA4X_BUILD_UI)
-  # SDL2: try system first, then FetchContent.
+  # UI deps are typically downloaded via FetchContent, but that may be
+  # undesired (or impossible) for offline/headless builds.
+  set(NEBULA4X_UI_ENABLED TRUE)
+
+  # SDL2: try system first, then (optionally) FetchContent.
   find_package(SDL2 QUIET)
   if(NOT SDL2_FOUND)
-    message(STATUS "SDL2 not found via find_package; fetching via FetchContent")
-    FetchContent_Declare(
-      SDL2
-      GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
-      GIT_TAG release-2.30.10
-    )
-    set(SDL_SHARED OFF CACHE BOOL "" FORCE)
-    set(SDL_STATIC ON CACHE BOOL "" FORCE)
-    FetchContent_MakeAvailable(SDL2)
-    # SDL2 CMake exports SDL2::SDL2-static
+    if(NEBULA4X_FETCH_DEPS)
+      message(STATUS "SDL2 not found via find_package; fetching via FetchContent")
+      FetchContent_Declare(
+        SDL2
+        GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
+        GIT_TAG release-2.30.10
+      )
+      set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+      set(SDL_STATIC ON CACHE BOOL "" FORCE)
+      FetchContent_MakeAvailable(SDL2)
+      # SDL2 CMake exports SDL2::SDL2-static
+    else()
+      message(WARNING "SDL2 not found and NEBULA4X_FETCH_DEPS=OFF; disabling UI target.\n"
+                      "  - To build headless: -DNEBULA4X_BUILD_UI=OFF\n"
+                      "  - To build UI: install SDL2 dev packages or set -DNEBULA4X_FETCH_DEPS=ON")
+      set(NEBULA4X_UI_ENABLED FALSE)
+    endif()
   endif()
 
-  FetchContent_Declare(
-    imgui
-    GIT_REPOSITORY https://github.com/ocornut/imgui.git
-    # Docking and viewport APIs live on the upstream 'docking' branch.
-    # Use the matching release tag to keep versioning stable.
-    GIT_TAG v1.91.4-docking
-  )
-  FetchContent_MakeAvailable(imgui)
+  if(NEBULA4X_UI_ENABLED)
+    if(NEBULA4X_FETCH_DEPS)
+      FetchContent_Declare(
+        imgui
+        GIT_REPOSITORY https://github.com/ocornut/imgui.git
+        # Docking and viewport APIs live on the upstream 'docking' branch.
+        # Use the matching release tag to keep versioning stable.
+        GIT_TAG v1.91.4-docking
+      )
+      FetchContent_MakeAvailable(imgui)
+    else()
+      message(WARNING "ImGui is fetched via FetchContent but NEBULA4X_FETCH_DEPS=OFF; disabling UI target.")
+      set(NEBULA4X_UI_ENABLED FALSE)
+    endif()
+  endif()
 
-  add_library(imgui_sdlrenderer2)
+  if(NEBULA4X_UI_ENABLED)
+
+    add_library(imgui_sdlrenderer2)
   target_sources(imgui_sdlrenderer2 PRIVATE
     ${imgui_SOURCE_DIR}/imgui.cpp
     ${imgui_SOURCE_DIR}/imgui_draw.cpp
@@ -150,7 +185,10 @@ if(NEBULA4X_BUILD_UI)
     target_link_libraries(imgui_sdlrenderer2 PUBLIC SDL2::SDL2-static)
   endif()
 
-  add_executable(nebula4x
+  nebula4x_set_project_warnings(imgui_sdlrenderer2 ${NEBULA4X_WARNINGS_AS_ERRORS})
+  nebula4x_enable_sanitizers(imgui_sdlrenderer2)
+
+    add_executable(nebula4x
     src/main.cpp
     src/ui/app.cpp
     src/ui/new_game_modal.cpp
@@ -162,6 +200,7 @@ if(NEBULA4X_BUILD_UI)
     src/ui/regions_window.cpp
     src/ui/freight_window.cpp
     src/ui/fuel_window.cpp
+    src/ui/troop_window.cpp
     src/ui/advisor_window.cpp
     src/ui/colony_profiles_window.cpp
     src/ui/time_warp_window.cpp
@@ -171,6 +210,8 @@ if(NEBULA4X_BUILD_UI)
   src/ui/game_entity_index.cpp
     src/ui/omni_search_window.cpp
     src/ui/json_explorer_window.cpp
+    src/ui/content_validation_window.cpp
+    src/ui/state_doctor_window.cpp
   src/ui/entity_inspector_window.cpp
   src/ui/reference_graph_window.cpp
     src/ui/watchboard_window.cpp
@@ -202,6 +243,7 @@ if(NEBULA4X_BUILD_UI)
   endif()
 
   nebula4x_set_project_warnings(nebula4x ${NEBULA4X_WARNINGS_AS_ERRORS})
+  nebula4x_enable_sanitizers(nebula4x)
 
   # Copy data directory next to executable for convenience.
   add_custom_command(TARGET nebula4x POST_BUILD
@@ -209,6 +251,7 @@ if(NEBULA4X_BUILD_UI)
       ${CMAKE_CURRENT_SOURCE_DIR}/data
       $<TARGET_FILE_DIR:nebula4x>/data
   )
+  endif() # NEBULA4X_UI_ENABLED
 endif()
 
 # --- tests ---
@@ -238,7 +281,9 @@ if(NEBULA4X_BUILD_TESTS)
     tests/test_duel_tournament.cpp
     tests/test_duel_swiss_tournament.cpp
     tests/test_attack_lead_pursuit.cpp
+    tests/test_combat_doctrine.cpp
     tests/test_sensor_coverage.cpp
+    tests/test_swept_contacts.cpp
     tests/test_freight_planner.cpp
     tests/test_fuel_planner.cpp
     tests/test_mineral_deposits.cpp
@@ -291,7 +336,9 @@ if(NEBULA4X_BUILD_TESTS)
     tests/test_advisor.cpp
   )
   target_link_libraries(nebula4x_tests PRIVATE nebula4x::core)
+  target_include_directories(nebula4x_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   nebula4x_set_project_warnings(nebula4x_tests ${NEBULA4X_WARNINGS_AS_ERRORS})
+  nebula4x_enable_sanitizers(nebula4x_tests)
 
   # Tests read data/... in a couple of places, so run from the repo root.
   add_test(NAME nebula4x_tests COMMAND nebula4x_tests)

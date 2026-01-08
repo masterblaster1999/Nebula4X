@@ -17,6 +17,13 @@ namespace sim_sensors {
 struct SensorSource {
   Vec2 pos_mkm{0.0, 0.0};
   double range_mkm{0.0};
+
+  // Optional: ship id that generated this sensor source.
+  //
+  // When set (non-kInvalidId), callers can recover the ship's velocity to
+  // perform swept detection across sub-day ticks. Colony-based sensor sources
+  // use kInvalidId.
+  Id ship_id{kInvalidId};
 };
 
 

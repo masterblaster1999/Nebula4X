@@ -181,20 +181,24 @@ void Simulation::tick_one_tick_hours(int hours) {
     tick_construction(dt_days);
 
     // Keep AI as a daily tick for now (avoid thrashing decisions every hour).
-    if (day_advanced) tick_ai();
+    if (day_advanced) {
+      tick_treaties();
+      tick_ai();
+    }
   } else if (day_advanced) {
     // Daily economy / planning ticks (midnight boundary).
     tick_colonies(1.0, /*emit_daily_events=*/true);
     tick_research(1.0);
     tick_shipyards(1.0);
     tick_construction(1.0);
+    tick_treaties();
     tick_ai();
     tick_refuel();
   }
 
   // Continuous (sub-day) ticks.
   tick_ships(dt_days);
-  tick_contacts(day_advanced);
+  tick_contacts(dt_days, day_advanced);
   tick_shields(dt_days);
   if (cfg_.enable_combat) tick_combat(dt_days);
 
@@ -244,6 +248,52 @@ void Simulation::tick_one_tick_hours(int hours) {
   }
 }
 
+void Simulation::tick_treaties() {
+  if (state_.treaties.empty()) return;
+
+  const std::int64_t now = state_.date.days_since_epoch();
+
+  auto type_title = [](TreatyType t) -> const char* {
+    switch (t) {
+      case TreatyType::Ceasefire: return "Ceasefire";
+      case TreatyType::NonAggressionPact: return "Non-Aggression Pact";
+      case TreatyType::Alliance: return "Alliance";
+      case TreatyType::TradeAgreement: return "Trade Agreement";
+    }
+    return "Treaty";
+  };
+
+  for (auto it = state_.treaties.begin(); it != state_.treaties.end();) {
+    const Treaty& t = it->second;
+    const int dur = t.duration_days;
+    if (dur > 0) {
+      const std::int64_t end_day = t.start_day + static_cast<std::int64_t>(dur);
+      if (now >= end_day) {
+        const auto* fa = find_ptr(state_.factions, t.faction_a);
+        const auto* fb = find_ptr(state_.factions, t.faction_b);
+
+        std::string msg = "Treaty expired: ";
+        msg += type_title(t.type);
+        msg += " between ";
+        msg += (fa ? fa->name : std::to_string(static_cast<unsigned long long>(t.faction_a)));
+        msg += " and ";
+        msg += (fb ? fb->name : std::to_string(static_cast<unsigned long long>(t.faction_b)));
+
+        this->push_event(EventLevel::Info, EventCategory::Diplomacy, msg,
+                         EventContext{.faction_id = t.faction_a,
+                                      .faction_id2 = t.faction_b,
+                                      .system_id = kInvalidId,
+                                      .ship_id = kInvalidId,
+                                      .colony_id = kInvalidId});
+
+        it = state_.treaties.erase(it);
+        continue;
+      }
+    }
+    ++it;
+  }
+}
+
 void Simulation::push_event(EventLevel level, std::string message) {
   push_event(level, EventCategory::General, std::move(message), {});
 }
@@ -274,8 +324,10 @@ void Simulation::push_event(EventLevel level, EventCategory category, std::strin
   }
 }
 
-void Simulation::tick_contacts(bool emit_contact_lost_events) {
+void Simulation::tick_contacts(double dt_days, bool emit_contact_lost_events) {
   NEBULA4X_TRACE_SCOPE("tick_contacts", "sim.sensors");
+  dt_days = std::clamp(dt_days, 0.0, 1.0);
+  const bool swept = (dt_days > 1e-9);
   const int now = static_cast<int>(state_.date.days_since_epoch());
   constexpr int kMaxContactAgeDays = 180;
 
@@ -322,16 +374,43 @@ void Simulation::tick_contacts(bool emit_contact_lost_events) {
 
   // Build a compact list of (ship, viewer faction) detections for today.
   //
-  // We later sort these pairs by (ship_id, faction_id) to preserve the exact
-  // deterministic ordering used by the original nested loop over
-  // sorted ship ids then sorted faction ids.
-  struct DetectionPair {
+  // With sub-day turn ticks, ships can move through sensor range between the
+  // start/end of the step. To avoid missing transient pass-bys (e.g. a fast
+  // ship crossing a sensor bubble within a 24h step), we perform a swept test
+  // using per-ship velocity vectors computed during tick_ships().
+  //
+  // We later sort by (ship_id, faction_id, t desc) to preserve deterministic
+  // ordering while also retaining the most recent in-step snapshot when
+  // multiple sources detect the same ship.
+  struct DetectionRecord {
     Id ship_id{kInvalidId};
     Id viewer_faction_id{kInvalidId};
+    // Fraction of the current tick in [0,1] at which the ship was "seen".
+    // 1.0 corresponds to the end-of-tick position.
+    double t{1.0};
   };
 
-  std::vector<DetectionPair> detections;
+  std::vector<DetectionRecord> detections;
   detections.reserve(std::min<std::size_t>(state_.ships.size() * 2, 4096));
+
+  auto min_dist_sq_and_t = [](const Vec2& src0, const Vec2& src1, const Vec2& tgt0, const Vec2& tgt1,
+                              double* out_t) -> double {
+    const Vec2 ds = src1 - src0;
+    const Vec2 dt = tgt1 - tgt0;
+    const Vec2 d0 = tgt0 - src0;
+    const Vec2 dv = dt - ds;
+    const double dv2 = dv.x * dv.x + dv.y * dv.y;
+
+    double t = 0.0;
+    if (dv2 > 1e-18) {
+      t = -(d0.x * dv.x + d0.y * dv.y) / dv2;
+      t = std::clamp(t, 0.0, 1.0);
+    }
+    if (out_t) *out_t = t;
+
+    const Vec2 d = d0 + dv * t;
+    return d.x * d.x + d.y * d.y;
+  };
 
   std::unordered_map<Id, SpatialIndex2D> system_index;
   system_index.reserve(state_.systems.size());
@@ -356,6 +435,23 @@ void Simulation::tick_contacts(bool emit_contact_lost_events) {
 
     auto& idx = index_for_system(sys_id);
 
+    // Conservative padding for the spatial query under swept detection.
+    // If a target comes within range at any time during the interval, its end
+    // position cannot be more than (range + |v_rel|*dt) away from the source's
+    // end position. We bound |v_rel| by 2 * max_ship_speed_in_system.
+    double max_speed_mkm_per_day = 0.0;
+    if (swept) {
+      for (Id sid : sys->ships) {
+        const auto* sh = find_ptr(state_.ships, sid);
+        if (!sh) continue;
+        const double vx = sh->velocity_mkm_per_day.x;
+        const double vy = sh->velocity_mkm_per_day.y;
+        const double sp = std::sqrt(vx * vx + vy * vy);
+        if (std::isfinite(sp)) max_speed_mkm_per_day = std::max(max_speed_mkm_per_day, sp);
+      }
+    }
+    const double sweep_pad = swept ? (2.0 * max_speed_mkm_per_day * dt_days) : 0.0;
+
     for (Id fid : faction_ids) {
       const auto& sources = sources_for(fid, sys_id);
       if (sources.empty()) continue;
@@ -363,7 +459,8 @@ void Simulation::tick_contacts(bool emit_contact_lost_events) {
       for (const auto& src : sources) {
         if (src.range_mkm <= 1e-9) continue;
 
-        const auto nearby = idx.query_radius(src.pos_mkm, src.range_mkm * max_sig, 1e-9);
+        const double query_r = src.range_mkm * max_sig + sweep_pad;
+        const auto nearby = idx.query_radius(src.pos_mkm, query_r, 1e-9);
         for (Id ship_id : nearby) {
           const auto* sh = find_ptr(state_.ships, ship_id);
           if (!sh) continue;
@@ -374,21 +471,52 @@ void Simulation::tick_contacts(bool emit_contact_lost_events) {
           const double sig = sim_sensors::effective_signature_multiplier(*this, *sh, d);
           const double eff = src.range_mkm * sig;
           if (eff <= 1e-9) continue;
-          const double dx = sh->position_mkm.x - src.pos_mkm.x;
-          const double dy = sh->position_mkm.y - src.pos_mkm.y;
-          if (dx * dx + dy * dy > eff * eff + 1e-9) continue;
 
-          detections.push_back(DetectionPair{ship_id, fid});
+          double t_seen = 1.0;
+
+          if (!swept) {
+            const double dx = sh->position_mkm.x - src.pos_mkm.x;
+            const double dy = sh->position_mkm.y - src.pos_mkm.y;
+            if (dx * dx + dy * dy > eff * eff + 1e-9) continue;
+          } else {
+            const Vec2 tgt1 = sh->position_mkm;
+            const Vec2 tgt0 = tgt1 - sh->velocity_mkm_per_day * dt_days;
+
+            Vec2 src1 = src.pos_mkm;
+            Vec2 src0 = src1;
+            if (src.ship_id != kInvalidId) {
+              const auto* src_sh = find_ptr(state_.ships, src.ship_id);
+              if (src_sh && src_sh->system_id == sys_id) {
+                src0 = src1 - src_sh->velocity_mkm_per_day * dt_days;
+              }
+            }
+
+            double t_closest = 0.0;
+            const double min_d2 = min_dist_sq_and_t(src0, src1, tgt0, tgt1, &t_closest);
+            const double eff2 = eff * eff;
+            if (min_d2 > eff2 + 1e-9) continue;
+
+            // Prefer a "last seen" snapshot closer to end-of-tick when the
+            // target remains within detection range at the end. Otherwise use
+            // the closest-approach time.
+            const double dx1 = tgt1.x - src1.x;
+            const double dy1 = tgt1.y - src1.y;
+            const double d2_end = dx1 * dx1 + dy1 * dy1;
+            t_seen = (d2_end <= eff2 + 1e-9) ? 1.0 : t_closest;
+          }
+
+          detections.push_back(DetectionRecord{ship_id, fid, t_seen});
         }
       }
     }
   }
 
-  std::sort(detections.begin(), detections.end(), [](const DetectionPair& a, const DetectionPair& b) {
+  std::sort(detections.begin(), detections.end(), [](const DetectionRecord& a, const DetectionRecord& b) {
     if (a.ship_id != b.ship_id) return a.ship_id < b.ship_id;
-    return a.viewer_faction_id < b.viewer_faction_id;
+    if (a.viewer_faction_id != b.viewer_faction_id) return a.viewer_faction_id < b.viewer_faction_id;
+    return a.t > b.t;
   });
-  detections.erase(std::unique(detections.begin(), detections.end(), [](const DetectionPair& a, const DetectionPair& b) {
+  detections.erase(std::unique(detections.begin(), detections.end(), [](const DetectionRecord& a, const DetectionRecord& b) {
     return a.ship_id == b.ship_id && a.viewer_faction_id == b.viewer_faction_id;
   }), detections.end());
 
@@ -435,7 +563,14 @@ void Simulation::tick_contacts(bool emit_contact_lost_events) {
     c.ship_id = det.ship_id;
     c.system_id = sh->system_id;
     c.last_seen_day = now;
-    c.last_seen_position_mkm = sh->position_mkm;
+
+    // For swept detections that occurred mid-step, store the interpolated
+    // "seen" position so pursuit/prediction has something close to reality.
+    const Vec2 end_pos = sh->position_mkm;
+    Vec2 start_pos = end_pos;
+    if (swept) start_pos = end_pos - sh->velocity_mkm_per_day * dt_days;
+    const double tt = std::clamp(det.t, 0.0, 1.0);
+    c.last_seen_position_mkm = start_pos + (end_pos - start_pos) * tt;
     c.last_seen_name = sh->name;
     c.last_seen_design_id = sh->design_id;
     c.last_seen_faction_id = sh->faction_id;

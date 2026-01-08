@@ -160,6 +160,8 @@ enum class PaletteAction {
   ToggleSaveTools,
   ToggleOmniSearch,
   ToggleJsonExplorer,
+  ToggleContentValidation,
+  ToggleStateDoctor,
   ToggleEntityInspector,
   ToggleReferenceGraph,
   ToggleTimeMachine,
@@ -257,6 +259,12 @@ void activate_palette_item(PaletteItem& item, Simulation& sim, UIState& ui, Id& 
           break;
         case PaletteAction::ToggleJsonExplorer:
           ui.show_json_explorer_window = !ui.show_json_explorer_window;
+          break;
+        case PaletteAction::ToggleContentValidation:
+          ui.show_content_validation_window = !ui.show_content_validation_window;
+          break;
+        case PaletteAction::ToggleStateDoctor:
+          ui.show_state_doctor_window = !ui.show_state_doctor_window;
           break;
         case PaletteAction::ToggleEntityInspector:
           ui.show_entity_inspector_window = !ui.show_entity_inspector_window;
@@ -730,6 +738,8 @@ void draw_help_window(UIState& ui) {
   ImGui::BulletText("Ctrl+Shift+D: Time Machine (state history + diffs)");
   ImGui::BulletText("Ctrl+Shift+A: Advisor (issues + quick fixes)");
   ImGui::BulletText("Ctrl+Shift+B: Colony Profiles (automation presets)");
+  ImGui::BulletText("Ctrl+Shift+V: Content Validation (validate content bundle errors/warnings)");
+  ImGui::BulletText("Ctrl+Shift+K: State Doctor (validate/fix save integrity; preview merge patch)");
   ImGui::BulletText("F1: Toggle this help window");
   ImGui::BulletText("Ctrl+S: Save (uses current save path)");
   ImGui::BulletText("Ctrl+O: Load (uses current load path)");
@@ -844,6 +854,8 @@ void draw_command_palette(Simulation& sim, UIState& ui, HUDState& hud, Id& selec
   add_action("[Action] Toggle Time Machine (State History)", PaletteAction::ToggleTimeMachine);
   add_action("[Action] Toggle OmniSearch (Game JSON)", PaletteAction::ToggleOmniSearch);
   add_action("[Action] Toggle JSON Explorer window", PaletteAction::ToggleJsonExplorer);
+  add_action("[Action] Toggle Content Validation window", PaletteAction::ToggleContentValidation);
+  add_action("[Action] Toggle State Doctor window", PaletteAction::ToggleStateDoctor);
   add_action("[Action] Toggle Entity Inspector (ID Resolver)", PaletteAction::ToggleEntityInspector);
   add_action("[Action] Toggle Reference Graph (Entity IDs)", PaletteAction::ToggleReferenceGraph);
   add_action("[Action] Toggle Watchboard (JSON Pins)", PaletteAction::ToggleWatchboard);

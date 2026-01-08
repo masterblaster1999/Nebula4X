@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <stdexcept>
 #include <type_traits>
+#include <utility>
 
 #include "nebula4x/util/json.h"
 #include "nebula4x/util/log.h"
@@ -140,6 +141,25 @@ DiplomacyStatus diplomacy_status_from_string(const std::string& s) {
 
 
 
+std::string treaty_type_to_string(TreatyType t) {
+  switch (t) {
+    case TreatyType::Ceasefire: return "ceasefire";
+    case TreatyType::NonAggressionPact: return "non_aggression";
+    case TreatyType::Alliance: return "alliance";
+    case TreatyType::TradeAgreement: return "trade";
+  }
+  return "ceasefire";
+}
+
+TreatyType treaty_type_from_string(const std::string& s) {
+  if (s == "ceasefire" || s == "cease" || s == "truce") return TreatyType::Ceasefire;
+  if (s == "non_aggression" || s == "nonaggression" || s == "nap" || s == "pact") return TreatyType::NonAggressionPact;
+  if (s == "alliance" || s == "ally" || s == "allied") return TreatyType::Alliance;
+  if (s == "trade" || s == "trade_agreement" || s == "commerce") return TreatyType::TradeAgreement;
+  return TreatyType::Ceasefire;
+}
+
+
 const char* sensor_mode_to_string(SensorMode m) {
   switch (m) {
     case SensorMode::Passive: return "passive";
@@ -168,6 +188,27 @@ RepairPriority repair_priority_from_string(const std::string& s) {
   if (s == "low" || s == "l") return RepairPriority::Low;
   if (s == "high" || s == "h" || s == "urgent") return RepairPriority::High;
   return RepairPriority::Normal;
+}
+
+const char* engagement_range_mode_to_string(EngagementRangeMode m) {
+  switch (m) {
+    case EngagementRangeMode::Auto: return "auto";
+    case EngagementRangeMode::Beam: return "beam";
+    case EngagementRangeMode::Missile: return "missile";
+    case EngagementRangeMode::Max: return "max";
+    case EngagementRangeMode::Min: return "min";
+    case EngagementRangeMode::Custom: return "custom";
+  }
+  return "auto";
+}
+
+EngagementRangeMode engagement_range_mode_from_string(const std::string& s) {
+  if (s == "beam" || s == "laser" || s == "gun") return EngagementRangeMode::Beam;
+  if (s == "missile" || s == "torpedo") return EngagementRangeMode::Missile;
+  if (s == "max" || s == "maximum") return EngagementRangeMode::Max;
+  if (s == "min" || s == "minimum") return EngagementRangeMode::Min;
+  if (s == "custom" || s == "fixed") return EngagementRangeMode::Custom;
+  return EngagementRangeMode::Auto;
 }
 
 const char* fleet_formation_to_string(FleetFormation f) {
@@ -777,6 +818,7 @@ std::string serialize_game_to_json(const GameState& s) {
     o["design_id"] = sh.design_id;
     o["auto_explore"] = sh.auto_explore;
     o["auto_freight"] = sh.auto_freight;
+    o["auto_troop_transport"] = sh.auto_troop_transport;
     o["auto_salvage"] = sh.auto_salvage;
     o["auto_mine"] = sh.auto_mine;
     if (sh.auto_mine_home_colony_id != kInvalidId) {
@@ -799,6 +841,38 @@ std::string serialize_game_to_json(const GameState& s) {
     }
     o["power_policy"] = ship_power_policy_to_json(sh.power_policy);
     if (sh.sensor_mode != SensorMode::Normal) o["sensor_mode"] = sensor_mode_to_string(sh.sensor_mode);
+
+    // Combat doctrine (optional)
+    {
+      const auto& doc = sh.combat_doctrine;
+      Object dco;
+      bool any = false;
+      if (doc.range_mode != EngagementRangeMode::Auto) {
+        dco["range_mode"] = engagement_range_mode_to_string(doc.range_mode);
+        any = true;
+      }
+      if (doc.range_fraction != 0.9) {
+        dco["range_fraction"] = doc.range_fraction;
+        any = true;
+      }
+      if (doc.min_range_mkm != 0.1) {
+        dco["min_range_mkm"] = doc.min_range_mkm;
+        any = true;
+      }
+      if (doc.custom_range_mkm != 0.0) {
+        dco["custom_range_mkm"] = doc.custom_range_mkm;
+        any = true;
+      }
+      if (doc.kite_if_too_close) {
+        dco["kite_if_too_close"] = true;
+        any = true;
+      }
+      if (doc.kite_deadband_fraction != 0.10) {
+        dco["kite_deadband_fraction"] = doc.kite_deadband_fraction;
+        any = true;
+      }
+      if (any) o["combat_doctrine"] = dco;
+    }
     o["speed_km_s"] = sh.speed_km_s;
     o["velocity_mkm_per_day"] = vec2_to_json(sh.velocity_mkm_per_day);
     o["hp"] = sh.hp;
@@ -1026,6 +1100,24 @@ std::string serialize_game_to_json(const GameState& s) {
     factions.push_back(o);
   }
   root["factions"] = factions;
+
+  // Treaties (optional; empty means none).
+  if (!s.treaties.empty()) {
+    Array treaties;
+    treaties.reserve(s.treaties.size());
+    for (Id id : sorted_keys(s.treaties)) {
+      const auto& t = s.treaties.at(id);
+      Object o;
+      o["id"] = static_cast<double>(id);
+      o["faction_a"] = static_cast<double>(t.faction_a);
+      o["faction_b"] = static_cast<double>(t.faction_b);
+      o["type"] = treaty_type_to_string(t.type);
+      o["start_day"] = static_cast<double>(t.start_day);
+      o["duration_days"] = static_cast<double>(t.duration_days);
+      treaties.push_back(o);
+    }
+    root["treaties"] = treaties;
+  }
 
   // Fleets
   Array fleets;
@@ -1383,6 +1475,7 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     sh.design_id = o.at("design_id").string_value();
     if (auto it = o.find("auto_explore"); it != o.end()) sh.auto_explore = it->second.bool_value(false);
     if (auto it = o.find("auto_freight"); it != o.end()) sh.auto_freight = it->second.bool_value(false);
+    if (auto it = o.find("auto_troop_transport"); it != o.end()) sh.auto_troop_transport = it->second.bool_value(false);
     if (auto it = o.find("auto_salvage"); it != o.end()) sh.auto_salvage = it->second.bool_value(false);
     if (auto it = o.find("auto_mine"); it != o.end()) sh.auto_mine = it->second.bool_value(false);
     if (auto it = o.find("auto_mine_home_colony_id"); it != o.end()) {
@@ -1408,6 +1501,29 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     if (auto it = o.find("power_policy"); it != o.end()) sh.power_policy = ship_power_policy_from_json(it->second);
     if (auto it = o.find("sensor_mode"); it != o.end()) {
       sh.sensor_mode = sensor_mode_from_string(it->second.string_value("normal"));
+    }
+
+    // Combat doctrine (optional)
+    if (auto it = o.find("combat_doctrine"); it != o.end() && it->second.is_object()) {
+      const auto& dco = it->second.object();
+      if (auto ir = dco.find("range_mode"); ir != dco.end()) {
+        sh.combat_doctrine.range_mode = engagement_range_mode_from_string(ir->second.string_value("auto"));
+      }
+      if (auto irf = dco.find("range_fraction"); irf != dco.end()) {
+        sh.combat_doctrine.range_fraction = std::clamp(irf->second.number_value(sh.combat_doctrine.range_fraction), 0.0, 1.0);
+      }
+      if (auto im = dco.find("min_range_mkm"); im != dco.end()) {
+        sh.combat_doctrine.min_range_mkm = std::max(0.0, im->second.number_value(sh.combat_doctrine.min_range_mkm));
+      }
+      if (auto ic = dco.find("custom_range_mkm"); ic != dco.end()) {
+        sh.combat_doctrine.custom_range_mkm = std::max(0.0, ic->second.number_value(sh.combat_doctrine.custom_range_mkm));
+      }
+      if (auto ik = dco.find("kite_if_too_close"); ik != dco.end()) {
+        sh.combat_doctrine.kite_if_too_close = ik->second.bool_value(sh.combat_doctrine.kite_if_too_close);
+      }
+      if (auto idb = dco.find("kite_deadband_fraction"); idb != dco.end()) {
+        sh.combat_doctrine.kite_deadband_fraction = std::clamp(idb->second.number_value(sh.combat_doctrine.kite_deadband_fraction), 0.0, 0.90);
+      }
     }
     sh.speed_km_s = o.at("speed_km_s").number_value(0.0);
     if (auto it = o.find("velocity_mkm_per_day"); it != o.end()) {
@@ -1737,6 +1853,46 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     }
 
     s.factions[f.id] = f;
+  }
+
+  // Treaties (optional).
+  if (auto it = root.find("treaties"); it != root.end()) {
+    if (!it->second.is_array()) {
+      log::warn("Save load: 'treaties' is not an array; ignoring");
+    } else {
+      for (const auto& tv : it->second.array()) {
+        if (!tv.is_object()) continue;
+        const auto& o = tv.object();
+
+        Treaty t;
+        t.id = static_cast<Id>(o.at("id").int_value(kInvalidId));
+        if (t.id == kInvalidId) continue;
+
+        t.faction_a = static_cast<Id>(o.at("faction_a").int_value(kInvalidId));
+        t.faction_b = static_cast<Id>(o.at("faction_b").int_value(kInvalidId));
+        if (t.faction_a == kInvalidId || t.faction_b == kInvalidId || t.faction_a == t.faction_b) continue;
+
+        // Normalize pair order to keep treaties symmetric.
+        if (t.faction_b < t.faction_a) {
+          std::swap(t.faction_a, t.faction_b);
+        }
+
+        if (auto itty = o.find("type"); itty != o.end()) {
+          t.type = treaty_type_from_string(itty->second.string_value("ceasefire"));
+        }
+        if (auto itsd = o.find("start_day"); itsd != o.end()) {
+          t.start_day = static_cast<std::int64_t>(itsd->second.int_value(0));
+        }
+        if (auto itd = o.find("duration_days"); itd != o.end()) {
+          t.duration_days = static_cast<int>(itd->second.int_value(-1));
+        }
+
+        // Validate referenced factions exist.
+        if (s.factions.find(t.faction_a) == s.factions.end() || s.factions.find(t.faction_b) == s.factions.end()) continue;
+
+        s.treaties[t.id] = t;
+      }
+    }
   }
 
   // Fleets (optional field; older saves may not include it).

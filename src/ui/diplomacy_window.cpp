@@ -77,6 +77,20 @@ const char* status_short(DiplomacyStatus st) {
   return "?";
 }
 
+const char* treaty_type_label(TreatyType t) {
+  switch (t) {
+    case TreatyType::Ceasefire:
+      return "Ceasefire";
+    case TreatyType::NonAggressionPact:
+      return "Non-Aggression Pact";
+    case TreatyType::Alliance:
+      return "Alliance";
+    case TreatyType::TradeAgreement:
+      return "Trade Agreement";
+  }
+  return "Treaty";
+}
+
 DiplomacyStatus cycle_status(DiplomacyStatus st) {
   // Cycle in a practical order for UI: Hostile -> Neutral -> Friendly -> Hostile.
   switch (st) {
@@ -194,6 +208,13 @@ struct GraphState {
   bool show_matrix{true};
   bool show_recent_events{true};
   bool reciprocal_edits{true};
+
+  // New treaty UI state (per-window).
+  int new_treaty_type_index{0};
+  int new_treaty_duration_days{30};
+  bool new_treaty_indefinite{false};
+  std::string new_treaty_error{};
+  std::string last_treaty_error;
 
   void ensure_defaults(const Simulation& sim) {
     const auto& s = sim.state();
@@ -1091,6 +1112,85 @@ void draw_diplomacy_window(Simulation& sim, UIState& ui, Id& /*selected_ship*/, 
               ImGui::SameLine();
               ImGui::TextDisabled("(current)");
             }
+          }
+
+          ImGui::Spacing();
+          ImGui::SeparatorText("Treaties");
+
+          const std::int64_t now_day = s.date.days_since_epoch();
+          auto treaties = sim.treaties_between(a->id, b->id);
+          if (treaties.empty()) {
+            ImGui::TextDisabled("No active treaties.");
+          } else {
+            const ImGuiTableFlags tflags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV;
+            if (ImGui::BeginTable("treaty_table", 3, tflags)) {
+              ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthStretch);
+              ImGui::TableSetupColumn("Remaining", ImGuiTableColumnFlags_WidthFixed, 110.0f);
+              ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 90.0f);
+              ImGui::TableHeadersRow();
+
+              for (const Treaty& t : treaties) {
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                ImGui::TextUnformatted(treaty_type_label(t.type));
+
+                ImGui::TableSetColumnIndex(1);
+                if (t.duration_days > 0) {
+                  const std::int64_t elapsed = now_day - t.start_day;
+                  const int rem = std::max(0, t.duration_days - (int)elapsed);
+                  ImGui::Text("%d d", rem);
+                } else {
+                  ImGui::TextUnformatted("∞");
+                }
+
+                ImGui::TableSetColumnIndex(2);
+                ImGui::PushID((void*)(uintptr_t)t.id);
+                if (ImGui::SmallButton("Break")) {
+                  std::string err;
+                  sim.cancel_treaty(t.id, /*push_event=*/true, &err);
+                  g.new_treaty_error = err;
+                }
+                ImGui::PopID();
+              }
+
+              ImGui::EndTable();
+            }
+          }
+
+          ImGui::Spacing();
+          ImGui::SeparatorText("Sign / renew treaty");
+
+          static const TreatyType kTreatyTypes[] = {TreatyType::Ceasefire, TreatyType::NonAggressionPact,
+                                                    TreatyType::Alliance, TreatyType::TradeAgreement};
+          static const char* kTreatyTypeLabels[] = {"Ceasefire", "Non-Aggression Pact", "Alliance",
+                                                    "Trade Agreement"};
+          static_assert(IM_ARRAYSIZE(kTreatyTypes) == IM_ARRAYSIZE(kTreatyTypeLabels));
+
+          g.new_treaty_type_index = std::clamp(g.new_treaty_type_index, 0, (int)IM_ARRAYSIZE(kTreatyTypes) - 1);
+          ImGui::SetNextItemWidth(-1);
+          ImGui::Combo("Type##new_treaty", &g.new_treaty_type_index, kTreatyTypeLabels,
+                      IM_ARRAYSIZE(kTreatyTypeLabels));
+
+          ImGui::Checkbox("Indefinite##new_treaty", &g.new_treaty_indefinite);
+          if (!g.new_treaty_indefinite) {
+            g.new_treaty_duration_days = std::clamp(g.new_treaty_duration_days, 1, 36500);
+            ImGui::InputInt("Duration (days)##new_treaty", &g.new_treaty_duration_days);
+            g.new_treaty_duration_days = std::clamp(g.new_treaty_duration_days, 1, 36500);
+          } else {
+            ImGui::TextDisabled("Duration: indefinite");
+          }
+
+          if (ImGui::Button("Sign treaty##new_treaty", ImVec2(-1, 0))) {
+            std::string err;
+            const TreatyType tt = kTreatyTypes[g.new_treaty_type_index];
+            const int dur = g.new_treaty_indefinite ? -1 : g.new_treaty_duration_days;
+            const Id tid = sim.create_treaty(a->id, b->id, tt, dur, /*push_event=*/true, &err);
+            g.new_treaty_error = err;
+            (void)tid;
+          }
+
+          if (!g.new_treaty_error.empty()) {
+            ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.55f, 1.0f), "%s", g.new_treaty_error.c_str());
           }
         }
       }

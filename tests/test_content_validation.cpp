@@ -25,6 +25,55 @@ int test_content_validation() {
       return 1;
     }
   }
+  // Detailed validator: errors + warnings (lint). validate_content_db() remains errors-only.
+  {
+    nebula4x::ContentDB db;
+
+    nebula4x::ComponentDef c1;
+    c1.id = "c1";
+    nebula4x::ComponentDef c2;
+    c2.id = "c2";
+    db.components[c1.id] = c1;
+    db.components[c2.id] = c2;
+
+    nebula4x::TechDef t;
+    t.id = "t1";
+    t.name = "Tech 1";
+    t.cost = 1;
+    t.effects.push_back({"unlock_component", "c1", 0.0});
+    db.techs[t.id] = t;
+
+    const auto issues = nebula4x::validate_content_db_detailed(db);
+    bool saw_warn_c2 = false;
+    bool saw_error = false;
+    for (const auto& is : issues) {
+      if (is.severity == nebula4x::ContentIssueSeverity::Warning && is.code == "lint.component_not_unlockable" &&
+          is.subject_id == "c2") {
+        saw_warn_c2 = true;
+      }
+      if (is.severity == nebula4x::ContentIssueSeverity::Error) {
+        saw_error = true;
+      }
+    }
+    N4X_ASSERT(!saw_error);
+    N4X_ASSERT(saw_warn_c2);
+    N4X_ASSERT(nebula4x::validate_content_db(db).empty());
+  }
+
+  // Sanity: faction_output_bonus tech effects should be recognized by the validator.
+  {
+    nebula4x::ContentDB db;
+
+    nebula4x::TechDef t;
+    t.id = "t_bonus";
+    t.name = "Mining Bonus";
+    t.cost = 1;
+    t.effects.push_back({"faction_output_bonus", "mining", 0.50});
+    db.techs[t.id] = t;
+
+    N4X_ASSERT(nebula4x::validate_content_db(db).empty());
+  }
+
 
   // Sanity: validation should catch obvious errors.
   {

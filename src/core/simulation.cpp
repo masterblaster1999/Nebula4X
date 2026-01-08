@@ -44,6 +44,24 @@ using sim_sensors::SensorSource;
 using sim_sensors::gather_sensor_sources;
 using sim_sensors::any_source_detects;
 
+inline void normalize_faction_pair(Id& a, Id& b) {
+  if (b < a) {
+    const Id tmp = a;
+    a = b;
+    b = tmp;
+  }
+}
+
+inline const char* treaty_type_title(TreatyType t) {
+  switch (t) {
+    case TreatyType::Ceasefire: return "Ceasefire";
+    case TreatyType::NonAggressionPact: return "Non-Aggression Pact";
+    case TreatyType::Alliance: return "Alliance";
+    case TreatyType::TradeAgreement: return "Trade Agreement";
+  }
+  return "Treaty";
+}
+
 struct JumpRouteNode {
   Id system_id{kInvalidId};
   Id entry_jump_id{kInvalidId}; // the jump point we are currently "at" in this system
@@ -973,9 +991,40 @@ DiplomacyStatus Simulation::diplomatic_status(Id from_faction_id, Id to_faction_
   const auto* from = find_ptr(state_.factions, from_faction_id);
   if (!from) return DiplomacyStatus::Hostile;
 
-  auto it = from->relations.find(to_faction_id);
-  if (it == from->relations.end()) return DiplomacyStatus::Hostile;
-  return it->second;
+  DiplomacyStatus base = DiplomacyStatus::Hostile;
+  if (auto it = from->relations.find(to_faction_id); it != from->relations.end()) {
+    base = it->second;
+  }
+
+  // Treaties are symmetric and stored with a normalized (min,max) faction pair.
+  if (!state_.treaties.empty()) {
+    Id a = from_faction_id;
+    Id b = to_faction_id;
+    normalize_faction_pair(a, b);
+
+    bool force_friendly = false;
+    bool at_least_neutral = false;
+    for (const auto& [tid, t] : state_.treaties) {
+      (void)tid;
+      if (t.faction_a != a || t.faction_b != b) continue;
+      switch (t.type) {
+        case TreatyType::Alliance:
+          force_friendly = true;
+          break;
+        case TreatyType::Ceasefire:
+        case TreatyType::NonAggressionPact:
+        case TreatyType::TradeAgreement:
+          at_least_neutral = true;
+          break;
+      }
+      if (force_friendly) break;
+    }
+
+    if (force_friendly) return DiplomacyStatus::Friendly;
+    if (at_least_neutral && base == DiplomacyStatus::Hostile) return DiplomacyStatus::Neutral;
+  }
+
+  return base;
 }
 
 bool Simulation::are_factions_hostile(Id from_faction_id, Id to_faction_id) const {
@@ -989,6 +1038,143 @@ bool Simulation::are_factions_mutual_friendly(Id a_faction_id, Id b_faction_id) 
          diplomatic_status(b_faction_id, a_faction_id) == DiplomacyStatus::Friendly;
 }
 
+Id Simulation::create_treaty(Id faction_a, Id faction_b, TreatyType type, int duration_days, bool push_event,
+                             std::string* error) {
+  if (error) error->clear();
+  if (faction_a == kInvalidId || faction_b == kInvalidId) {
+    if (error) *error = "invalid faction id";
+    return kInvalidId;
+  }
+  if (faction_a == faction_b) {
+    if (error) *error = "treaty requires two different factions";
+    return kInvalidId;
+  }
+
+  const auto* fa = find_ptr(state_.factions, faction_a);
+  const auto* fb = find_ptr(state_.factions, faction_b);
+  if (!fa || !fb) {
+    if (error) *error = "unknown faction";
+    return kInvalidId;
+  }
+
+  Id a = faction_a;
+  Id b = faction_b;
+  normalize_faction_pair(a, b);
+
+  // Normalize duration: 0 => indefinite, <0 => indefinite, >0 => clamped to at least 1 day.
+  if (duration_days == 0) duration_days = -1;
+  if (duration_days > 0) duration_days = std::max(1, duration_days);
+
+  const std::int64_t now = state_.date.days_since_epoch();
+
+  // Renew an existing treaty of the same type between the same factions.
+  for (auto& [tid, t] : state_.treaties) {
+    if (t.faction_a != a || t.faction_b != b) continue;
+    if (t.type != type) continue;
+    t.start_day = now;
+    t.duration_days = duration_days;
+
+    if (push_event) {
+      std::string msg = "Treaty renewed: ";
+      msg += treaty_type_title(type);
+      msg += " between ";
+      msg += state_.factions.at(a).name;
+      msg += " and ";
+      msg += state_.factions.at(b).name;
+      if (duration_days > 0) {
+        msg += " (";
+        msg += std::to_string(duration_days);
+        msg += " days)";
+      } else {
+        msg += " (indefinite)";
+      }
+      this->push_event(EventLevel::Info, EventCategory::Diplomacy, msg,
+                 EventContext{.faction_id = a, .faction_id2 = b, .system_id = kInvalidId, .ship_id = kInvalidId, .colony_id = kInvalidId});
+    }
+
+    return tid;
+  }
+
+  Treaty t;
+  t.id = allocate_id(state_);
+  t.faction_a = a;
+  t.faction_b = b;
+  t.type = type;
+  t.start_day = now;
+  t.duration_days = duration_days;
+
+  state_.treaties[t.id] = t;
+
+  if (push_event) {
+    std::string msg = "Treaty signed: ";
+    msg += treaty_type_title(type);
+    msg += " between ";
+    msg += state_.factions.at(a).name;
+    msg += " and ";
+    msg += state_.factions.at(b).name;
+    if (duration_days > 0) {
+      msg += " (";
+      msg += std::to_string(duration_days);
+      msg += " days)";
+    } else {
+      msg += " (indefinite)";
+    }
+    this->push_event(EventLevel::Info, EventCategory::Diplomacy, msg,
+               EventContext{.faction_id = a, .faction_id2 = b, .system_id = kInvalidId, .ship_id = kInvalidId, .colony_id = kInvalidId});
+  }
+
+  return t.id;
+}
+
+bool Simulation::cancel_treaty(Id treaty_id, bool push_event, std::string* error) {
+  if (error) error->clear();
+  if (treaty_id == kInvalidId) {
+    if (error) *error = "invalid treaty id";
+    return false;
+  }
+  auto it = state_.treaties.find(treaty_id);
+  if (it == state_.treaties.end()) {
+    if (error) *error = "treaty not found";
+    return false;
+  }
+
+  const Treaty t = it->second;
+  state_.treaties.erase(it);
+
+  if (push_event) {
+    std::string msg = "Treaty cancelled: ";
+    msg += treaty_type_title(t.type);
+    msg += " between ";
+    msg += state_.factions.at(t.faction_a).name;
+    msg += " and ";
+    msg += state_.factions.at(t.faction_b).name;
+    this->push_event(EventLevel::Info, EventCategory::Diplomacy, msg,
+               EventContext{.faction_id = t.faction_a, .faction_id2 = t.faction_b, .system_id = kInvalidId, .ship_id = kInvalidId, .colony_id = kInvalidId});
+  }
+
+  return true;
+}
+
+std::vector<Treaty> Simulation::treaties_between(Id faction_a, Id faction_b) const {
+  std::vector<Treaty> out;
+  if (faction_a == kInvalidId || faction_b == kInvalidId) return out;
+  if (faction_a == faction_b) return out;
+  if (state_.treaties.empty()) return out;
+
+  Id a = faction_a;
+  Id b = faction_b;
+  normalize_faction_pair(a, b);
+
+  for (const auto& [tid, t] : state_.treaties) {
+    (void)tid;
+    if (t.faction_a == a && t.faction_b == b) out.push_back(t);
+  }
+
+  std::sort(out.begin(), out.end(), [](const Treaty& x, const Treaty& y) { return x.id < y.id; });
+  return out;
+}
+
+
 bool Simulation::set_diplomatic_status(Id from_faction_id, Id to_faction_id, DiplomacyStatus status, bool reciprocal,
                                        bool push_event_on_change) {
   if (from_faction_id == kInvalidId || to_faction_id == kInvalidId) return false;
@@ -1001,6 +1187,21 @@ bool Simulation::set_diplomatic_status(Id from_faction_id, Id to_faction_id, Dip
   const auto prev_a = diplomatic_status(from_faction_id, to_faction_id);
   const auto prev_b = diplomatic_status(to_faction_id, from_faction_id);
   const bool was_mutual_friendly = (prev_a == DiplomacyStatus::Friendly && prev_b == DiplomacyStatus::Friendly);
+
+  // Escalating to Hostile breaks any active treaties between the two factions.
+  if (status == DiplomacyStatus::Hostile && !state_.treaties.empty()) {
+    Id ta = from_faction_id;
+    Id tb = to_faction_id;
+    normalize_faction_pair(ta, tb);
+    std::vector<Id> to_break;
+    to_break.reserve(state_.treaties.size());
+    for (const auto& [tid, t] : state_.treaties) {
+      if (t.faction_a == ta && t.faction_b == tb) to_break.push_back(tid);
+    }
+    for (Id tid : to_break) {
+      (void)cancel_treaty(tid, /*push_event=*/push_event_on_change, nullptr);
+    }
+  }
 
 
   auto set_one = [](Faction& f, Id other, DiplomacyStatus st) {
@@ -1116,7 +1317,7 @@ bool Simulation::set_diplomatic_status(Id from_faction_id, Id to_faction_id, Dip
       EventContext ctx;
       ctx.faction_id = from_faction_id;
       ctx.faction_id2 = to_faction_id;
-      push_event(EventLevel::Info, EventCategory::Diplomacy, msg, ctx);
+      this->push_event(EventLevel::Info, EventCategory::Diplomacy, msg, ctx);
     }
   }
 

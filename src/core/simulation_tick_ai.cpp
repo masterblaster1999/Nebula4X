@@ -18,6 +18,7 @@
 #include "nebula4x/core/scenario.h"
 #include "nebula4x/core/ai_economy.h"
 #include "nebula4x/core/fuel_planner.h"
+#include "nebula4x/core/troop_planner.h"
 #include "nebula4x/util/log.h"
 #include "nebula4x/util/trace_events.h"
 #include "nebula4x/util/spatial_index.h"
@@ -36,6 +37,8 @@ using sim_internal::FactionEconomyMultipliers;
 using sim_internal::compute_faction_economy_multipliers;
 using sim_internal::compute_power_allocation;
 } // namespace
+
+void Simulation::run_ai_planning() { tick_ai(); }
 
 void Simulation::tick_ai() {
   NEBULA4X_TRACE_SCOPE("tick_ai", "sim.ai");
@@ -656,6 +659,28 @@ void Simulation::tick_ai() {
       const auto plan = compute_fuel_plan(*this, fid, opt);
       if (!plan.ok || plan.assignments.empty()) continue;
       (void)apply_fuel_plan(*this, plan, /*clear_existing_orders=*/false);
+    }
+  }
+
+
+  // --- Ship-level automation: Auto-troop transport (garrison logistics) ---
+
+  // Implementation note:
+  // Use the shared Troop Planner so UI previews and automation remain consistent.
+  {
+    TroopPlannerOptions opt;
+    opt.require_auto_troop_transport_flag = true;
+    opt.require_idle = true;
+    opt.restrict_to_discovered = true;
+    opt.exclude_fleet_ships = true;
+
+    // Safety cap (large enough to not break typical automation in bigger saves).
+    opt.max_ships = 4096;
+
+    for (Id fid : faction_ids) {
+      const auto plan = compute_troop_plan(*this, fid, opt);
+      if (!plan.ok || plan.assignments.empty()) continue;
+      (void)apply_troop_plan(*this, plan, /*clear_existing_orders=*/false);
     }
   }
 
