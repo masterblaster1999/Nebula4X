@@ -10,6 +10,18 @@
         {
           "type": "unlock_installation",
           "value": "automated_mine"
+        },
+        {
+          "type": "unlock_installation",
+          "value": "fuel_refinery"
+        },
+        {
+          "type": "unlock_component",
+          "value": "engine_chem_mk1"
+        },
+        {
+          "type": "unlock_component",
+          "value": "fuel_tank_mk1"
         }
       ]
     },
@@ -28,6 +40,14 @@
         {
           "type": "unlock_installation",
           "value": "mineral_processor"
+        },
+        {
+          "type": "unlock_installation",
+          "value": "construction_factory"
+        },
+        {
+          "type": "unlock_component",
+          "value": "cargo_mk1"
         }
       ]
     },
@@ -107,6 +127,14 @@
         {
           "type": "unlock_component",
           "value": "sensor_mk2"
+        },
+        {
+          "type": "unlock_component",
+          "value": "sensor_mk1"
+        },
+        {
+          "type": "unlock_installation",
+          "value": "sensor_station"
         }
       ]
     },
@@ -121,6 +149,10 @@
         {
           "type": "unlock_component",
           "value": "armor_mk2"
+        },
+        {
+          "type": "unlock_component",
+          "value": "armor_mk1"
         }
       ]
     },
@@ -150,6 +182,18 @@
         {
           "type": "unlock_component",
           "value": "laser_mk2"
+        },
+        {
+          "type": "unlock_component",
+          "value": "laser_mk1"
+        },
+        {
+          "type": "unlock_component",
+          "value": "missile_rack_mk1"
+        },
+        {
+          "type": "unlock_component",
+          "value": "pd_laser_mk1"
         }
       ]
     },
@@ -290,6 +334,10 @@
           "type": "faction_output_bonus",
           "value": "construction",
           "amount": 0.1
+        },
+        {
+          "type": "unlock_installation",
+          "value": "shipyard"
         }
       ]
     },
@@ -305,6 +353,10 @@
           "type": "faction_output_bonus",
           "value": "research",
           "amount": 0.1
+        },
+        {
+          "type": "unlock_installation",
+          "value": "research_lab"
         }
       ]
     },
@@ -350,6 +402,337 @@
           "type": "faction_output_bonus",
           "value": "terraforming",
           "amount": 0.2
+        }
+      ]
+    },
+    {
+      "id": "mining_efficiency_2",
+      "name": "Mining Efficiency II",
+      "cost": 1200,
+      "prereqs": [
+        "mining_efficiency_1"
+      ],
+      "effects": [
+        {
+          "type": "faction_output_bonus",
+          "value": "mining",
+          "amount": 0.1
+        }
+      ]
+    },
+    {
+      "id": "mining_efficiency_3",
+      "name": "Mining Efficiency III",
+      "cost": 2200,
+      "prereqs": [
+        "mining_efficiency_2"
+      ],
+      "effects": [
+        {
+          "type": "faction_output_bonus",
+          "value": "mining",
+          "amount": 0.1
+        }
+      ]
+    },
+    {
+      "id": "mining_efficiency_4",
+      "name": "Mining Efficiency IV",
+      "cost": 3600,
+      "prereqs": [
+        "mining_efficiency_3"
+      ],
+      "effects": [
+        {
+          "type": "faction_output_bonus",
+          "value": "mining",
+          "amount": 0.1
+        }
+      ]
+    },
+    {
+      "id": "industrial_efficiency_2",
+      "name": "Industrial Efficiency II",
+      "cost": 1300,
+      "prereqs": [
+        "industrial_efficiency_1"
+      ],
+      "effects": [
+        {
+          "type": "faction_output_bonus",
+          "value": "industry",
+          "amount": 0.1
+        }
+      ]
+    },
+    {
+      "id": "industrial_efficiency_3",
+      "name": "Industrial Efficiency III",
+      "cost": 2400,
+      "prereqs": [
+        "industrial_efficiency_2"
+      ],
+      "effects": [
+        {
+          "type": "faction_output_bonus",
+          "value": "industry",
+          "amount": 0.1
+        }
+      ]
+    },
+    {
+      "id": "industrial_efficiency_4",
+      "name": "Industrial Efficiency IV",
+      "cost": 3800,
+      "prereqs": [
+        "industrial_efficiency_3"
+      ],
+      "effects": [
+        {
+          "type": "faction_output_bonus",
+          "value": "industry",
+          "amount": 0.1
+        }
+      ]
+    },
+    {
+      "id": "construction_methods_2",
+      "name": "Construction Methods II",
+      "cost": 1500,
+      "prereqs": [
+        "construction_methods_1"
+      ],
+      "effects": [
+        {
+          "type": "faction_output_bonus",
+          "value": "construction",
+          "amount": 0.1
+        }
+      ]
+    },
+    {
+      "id": "construction_methods_3",
+      "name": "Construction Methods III",
+      "cost": 2800,
+      "prereqs": [
+        "construction_methods_2"
+      ],
+      "effects": [
+        {
+          "type": "faction_output_bonus",
+          "value": "construction",
+          "amount": 0.1
+        }
+      ]
+    },
+    {
+      "id": "construction_methods_4",
+      "name": "Construction Methods IV",
+      "cost": 4200,
+      "prereqs": [
+        "construction_methods_3"
+      ],
+      "effects": [
+        {
+          "type": "faction_output_bonus",
+          "value": "construction",
+          "amount": 0.1
+        }
+      ]
+    },
+    {
+      "id": "research_methods_2",
+      "name": "Research Methodology II",
+      "cost": 1600,
+      "prereqs": [
+        "research_methods_1"
+      ],
+      "effects": [
+        {
+          "type": "faction_output_bonus",
+          "value": "research",
+          "amount": 0.1
+        }
+      ]
+    },
+    {
+      "id": "research_methods_3",
+      "name": "Research Methodology III",
+      "cost": 3000,
+      "prereqs": [
+        "research_methods_2"
+      ],
+      "effects": [
+        {
+          "type": "faction_output_bonus",
+          "value": "research",
+          "amount": 0.1
+        }
+      ]
+    },
+    {
+      "id": "research_methods_4",
+      "name": "Research Methodology IV",
+      "cost": 4600,
+      "prereqs": [
+        "research_methods_3"
+      ],
+      "effects": [
+        {
+          "type": "faction_output_bonus",
+          "value": "research",
+          "amount": 0.1
+        }
+      ]
+    },
+    {
+      "id": "shipyard_optimization_2",
+      "name": "Shipyard Optimization II",
+      "cost": 2000,
+      "prereqs": [
+        "shipyard_optimization_1"
+      ],
+      "effects": [
+        {
+          "type": "faction_output_bonus",
+          "value": "shipyard",
+          "amount": 0.1
+        }
+      ]
+    },
+    {
+      "id": "shipyard_optimization_3",
+      "name": "Shipyard Optimization III",
+      "cost": 3400,
+      "prereqs": [
+        "shipyard_optimization_2"
+      ],
+      "effects": [
+        {
+          "type": "faction_output_bonus",
+          "value": "shipyard",
+          "amount": 0.1
+        }
+      ]
+    },
+    {
+      "id": "shipyard_optimization_4",
+      "name": "Shipyard Optimization IV",
+      "cost": 5200,
+      "prereqs": [
+        "shipyard_optimization_3"
+      ],
+      "effects": [
+        {
+          "type": "faction_output_bonus",
+          "value": "shipyard",
+          "amount": 0.1
+        }
+      ]
+    },
+    {
+      "id": "training_doctrine_2",
+      "name": "Training Doctrine II",
+      "cost": 1700,
+      "prereqs": [
+        "training_doctrine_1"
+      ],
+      "effects": [
+        {
+          "type": "faction_output_bonus",
+          "value": "troop_training",
+          "amount": 0.15
+        }
+      ]
+    },
+    {
+      "id": "training_doctrine_3",
+      "name": "Training Doctrine III",
+      "cost": 3200,
+      "prereqs": [
+        "training_doctrine_2"
+      ],
+      "effects": [
+        {
+          "type": "faction_output_bonus",
+          "value": "troop_training",
+          "amount": 0.15
+        }
+      ]
+    },
+    {
+      "id": "terraforming_efficiency_2",
+      "name": "Terraforming Efficiency II",
+      "cost": 2600,
+      "prereqs": [
+        "terraforming_efficiency_1"
+      ],
+      "effects": [
+        {
+          "type": "faction_output_bonus",
+          "value": "terraforming",
+          "amount": 0.2
+        }
+      ]
+    },
+    {
+      "id": "terraforming_efficiency_3",
+      "name": "Terraforming Efficiency III",
+      "cost": 4400,
+      "prereqs": [
+        "terraforming_efficiency_2"
+      ],
+      "effects": [
+        {
+          "type": "faction_output_bonus",
+          "value": "terraforming",
+          "amount": 0.2
+        }
+      ]
+    },
+    {
+      "id": "automation_1",
+      "name": "Industrial Automation",
+      "cost": 2000,
+      "prereqs": [
+        "materials_processing_1",
+        "reactors_2"
+      ],
+      "effects": [
+        {
+          "type": "faction_output_bonus",
+          "value": "all",
+          "amount": 0.05
+        }
+      ]
+    },
+    {
+      "id": "automation_2",
+      "name": "Autonomous Supply Chains",
+      "cost": 3600,
+      "prereqs": [
+        "automation_1"
+      ],
+      "effects": [
+        {
+          "type": "faction_output_bonus",
+          "value": "all",
+          "amount": 0.05
+        }
+      ]
+    },
+    {
+      "id": "automation_3",
+      "name": "Fully Automated Industry",
+      "cost": 5500,
+      "prereqs": [
+        "automation_2"
+      ],
+      "effects": [
+        {
+          "type": "faction_output_bonus",
+          "value": "all",
+          "amount": 0.05
         }
       ]
     }

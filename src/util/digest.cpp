@@ -176,6 +176,11 @@ static void hash_order(Digest64& d, const Order& ord) {
           d.add_u64(o.wreck_id);
           d.add_string(o.mineral);
           d.add_double(o.tons);
+        } else if constexpr (std::is_same_v<T, InvestigateAnomaly>) {
+          d.add_u64(23);
+          d.add_u64(o.anomaly_id);
+          d.add_i64(o.duration_days);
+          d.add_double(o.progress_days);
         } else if constexpr (std::is_same_v<T, TransferCargoToShip>) {
           d.add_u64(10);
           d.add_u64(o.target_ship_id);
@@ -518,6 +523,23 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
     d.add_i64(w.created_day);
   }
 
+  // Anomalies
+  d.add_size(s.anomalies.size());
+  for (Id aid : sorted_keys(s.anomalies)) {
+    const auto& a = s.anomalies.at(aid);
+    d.add_u64(aid);
+    d.add_string(a.name);
+    d.add_string(a.kind);
+    d.add_u64(a.system_id);
+    hash_vec2(d, a.position_mkm);
+    d.add_i64(a.investigation_days);
+    d.add_double(a.research_reward);
+    d.add_string(a.unlock_component_id);
+    d.add_bool(a.resolved);
+    d.add_u64(a.resolved_by_faction_id);
+    d.add_i64(a.resolved_day);
+  }
+
   // Missile salvos
   d.add_size(s.missile_salvos.size());
   for (Id mid : sorted_keys(s.missile_salvos)) {
@@ -710,6 +732,7 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
     d.add_u64(b.defender_faction_id);
     d.add_double(b.attacker_strength);
     d.add_double(b.defender_strength);
+    d.add_double(b.fortification_damage_points);
     d.add_i64(b.days_fought);
   }
 

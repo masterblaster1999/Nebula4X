@@ -506,6 +506,33 @@ ComponentDef parse_component_def(const std::string& cid, const json::Object& cj)
     }
   }
 
+  // Missile weapons (prototype: discrete salvos with time-of-flight).
+  if (const auto* v_md = find_key(cj, "missile_damage")) c.missile_damage = v_md->number_value(0.0);
+  if (const auto* v_mr = find_key(cj, "missile_range_mkm")) c.missile_range_mkm = v_mr->number_value(0.0);
+  if (const auto* v_mr2 = find_key(cj, "missile_range")) {
+    if (c.missile_range_mkm <= 0.0) c.missile_range_mkm = v_mr2->number_value(0.0);
+  }
+  if (const auto* v_ms = find_key(cj, "missile_speed_mkm_per_day")) {
+    c.missile_speed_mkm_per_day = v_ms->number_value(0.0);
+  }
+  if (const auto* v_ms2 = find_key(cj, "missile_speed_km_s")) {
+    if (c.missile_speed_mkm_per_day <= 0.0) {
+      const double km_s = v_ms2->number_value(0.0);
+      c.missile_speed_mkm_per_day = km_s * 86400.0 / 1e6;  // km/s -> million-km/day
+    }
+  }
+  if (const auto* v_rl = find_key(cj, "missile_reload_days")) c.missile_reload_days = v_rl->number_value(0.0);
+
+  // Point defense (anti-missile interception).
+  if (const auto* v_pd = find_key(cj, "point_defense_damage")) c.point_defense_damage = v_pd->number_value(0.0);
+  if (const auto* v_pr = find_key(cj, "point_defense_range_mkm")) c.point_defense_range_mkm = v_pr->number_value(0.0);
+  if (const auto* v_pd2 = find_key(cj, "pd_damage")) {
+    if (c.point_defense_damage <= 0.0) c.point_defense_damage = v_pd2->number_value(0.0);
+  }
+  if (const auto* v_pr2 = find_key(cj, "pd_range_mkm")) {
+    if (c.point_defense_range_mkm <= 0.0) c.point_defense_range_mkm = v_pr2->number_value(0.0);
+  }
+
   if (const auto* v_hp = find_key(cj, "hp_bonus")) c.hp_bonus = v_hp->number_value(0.0);
 
   // Optional: shields.
@@ -702,6 +729,18 @@ ShipDesign parse_design_def(const json::Object& o,
 
   double weapon_damage = 0.0;
   double weapon_range = 0.0;
+
+  // Missile weapons (discrete salvos).
+  double missile_damage = 0.0;
+  double missile_range = 0.0;
+  double missile_speed = 0.0;
+  double missile_reload = 0.0;
+  bool missile_reload_set = false;
+
+  // Point defense (anti-missile).
+  double point_defense_damage = 0.0;
+  double point_defense_range = 0.0;
+
   double hp_bonus = 0.0;
   double max_shields = 0.0;
   double shield_regen = 0.0;
@@ -738,6 +777,23 @@ ShipDesign parse_design_def(const json::Object& o,
     if (c.type == ComponentType::Weapon) {
       weapon_damage += c.weapon_damage;
       weapon_range = std::max(weapon_range, c.weapon_range_mkm);
+
+      // Missile launcher stats (optional).
+      if (c.missile_damage > 0.0) {
+        missile_damage += c.missile_damage;
+        missile_range = std::max(missile_range, c.missile_range_mkm);
+        missile_speed = std::max(missile_speed, c.missile_speed_mkm_per_day);
+        if (c.missile_reload_days > 0.0) {
+          missile_reload = missile_reload_set ? std::min(missile_reload, c.missile_reload_days) : c.missile_reload_days;
+          missile_reload_set = true;
+        }
+      }
+
+      // Point defense stats (optional).
+      if (c.point_defense_damage > 0.0) {
+        point_defense_damage += c.point_defense_damage;
+        point_defense_range = std::max(point_defense_range, c.point_defense_range_mkm);
+      }
     }
 
     if (c.type == ComponentType::Reactor) {
@@ -777,6 +833,14 @@ ShipDesign parse_design_def(const json::Object& o,
   d.power_use_shields = power_use_shields;
   d.weapon_damage = weapon_damage;
   d.weapon_range_mkm = weapon_range;
+
+  d.missile_damage = missile_damage;
+  d.missile_range_mkm = missile_range;
+  d.missile_speed_mkm_per_day = missile_speed;
+  d.missile_reload_days = missile_reload_set ? missile_reload : 0.0;
+
+  d.point_defense_damage = point_defense_damage;
+  d.point_defense_range_mkm = point_defense_range;
 
   d.max_shields = max_shields;
   d.shield_regen_per_day = shield_regen;

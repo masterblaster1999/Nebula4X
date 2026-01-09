@@ -687,6 +687,37 @@ struct Wreck {
 };
 
 
+
+
+// Exploration anomalies.
+//
+// An anomaly is a persistent point of interest in a star system that can be
+// investigated by ships for rewards (research points, optional unlocks, etc).
+//
+// This is intentionally lightweight and content/mod-friendly:
+// - kind is an arbitrary tag ("signal", "ruins", "phenomenon", ...).
+// - investigation_days is the time required on-station to resolve the anomaly.
+// - research_reward is an amount of research points to award on completion.
+// - unlock_component_id is an optional component id to unlock for the faction.
+//
+// Resolution metadata is stored to support event logs / analytics.
+struct Anomaly {
+  Id id{kInvalidId};
+  std::string name;
+  std::string kind;
+
+  Id system_id{kInvalidId};
+  Vec2 position_mkm{0.0, 0.0};
+
+  int investigation_days{1};
+  double research_reward{0.0};
+  std::string unlock_component_id;
+
+  bool resolved{false};
+  Id resolved_by_faction_id{kInvalidId};
+  std::int64_t resolved_day{0};
+};
+
 // Missile salvos (prototype).
 //
 // A salvo is created when a ship launches missiles at a target ship. It travels for
@@ -861,6 +892,15 @@ struct GroundBattle {
 
   double attacker_strength{0.0};
   double defender_strength{0.0};
+
+  // Accumulated damage to the defender's fortifications (in fortification points).
+  //
+  // During an active ground battle, attackers can progressively degrade the
+  // effective fortification points of the colony. This reduces the defender's
+  // combat bonuses while the battle continues. When the battle resolves, the
+  // accumulated damage is applied by destroying fortification installations
+  // on the colony.
+  double fortification_damage_points{0.0};
 
   int days_fought{0};
 };

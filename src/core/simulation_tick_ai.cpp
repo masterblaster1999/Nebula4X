@@ -36,6 +36,22 @@ using sim_internal::faction_has_tech;
 using sim_internal::FactionEconomyMultipliers;
 using sim_internal::compute_faction_economy_multipliers;
 using sim_internal::compute_power_allocation;
+
+// Small, deterministic RNG helpers (platform-stable) for simulation-side
+// procedural events.
+static std::uint64_t splitmix64(std::uint64_t x) {
+  // https://prng.di.unimi.it/splitmix64.c
+  x += 0x9e3779b97f4a7c15ULL;
+  x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+  x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+  return x ^ (x >> 31);
+}
+
+static double u01(std::uint64_t& s) {
+  s = splitmix64(s);
+  // Use the top 53 bits for an IEEE-754 double in [0,1).
+  return (s >> 11) * (1.0 / 9007199254740992.0);
+}
 } // namespace
 
 void Simulation::run_ai_planning() { tick_ai(); }
@@ -611,6 +627,29 @@ void Simulation::tick_ai() {
     if (best_frontier != kInvalidId) {
       reserved_frontiers.insert(best_frontier);
       return issue_travel_to_system(ship_id, best_frontier, /*restrict_to_discovered=*/true);
+    }
+
+    // (D) Fully explored: investigate unresolved anomalies in the current system.
+    {
+      Id best_anom = kInvalidId;
+      double best_d2 = std::numeric_limits<double>::infinity();
+
+      for (const auto& [aid, a] : state_.anomalies) {
+        if (aid == kInvalidId) continue;
+        if (a.system_id != ship->system_id) continue;
+        if (a.resolved) continue;
+
+        const double d2 = (ship->position_mkm - a.position_mkm).length_squared();
+        if (best_anom == kInvalidId || d2 + 1e-9 < best_d2 ||
+            (std::abs(d2 - best_d2) <= 1e-9 && aid < best_anom)) {
+          best_anom = aid;
+          best_d2 = d2;
+        }
+      }
+
+      if (best_anom != kInvalidId) {
+        return issue_investigate_anomaly(ship_id, best_anom, /*restrict_to_discovered=*/true);
+      }
     }
 
     return false;
@@ -2660,6 +2699,377 @@ void Simulation::tick_ai() {
         }
       }
       continue;
+    }
+  }
+
+  // Spawn dynamic pirate raids after AI planning, so raids don't get immediately
+  // re-tasked by the same tick's AI logic.
+  tick_pirate_raids();
+}
+
+void Simulation::tick_pirate_raids() {
+  if (!cfg_.enable_pirate_raids) return;
+
+  const int now_day = static_cast<int>(state_.date.days_since_epoch());
+
+  const auto faction_ids = sorted_keys(state_.factions);
+  std::vector<Id> pirate_factions;
+  std::vector<Id> player_factions;
+  pirate_factions.reserve(4);
+  player_factions.reserve(2);
+  for (Id fid : faction_ids) {
+    const auto* fac = find_ptr(state_.factions, fid);
+    if (!fac) continue;
+    if (fac->control == FactionControl::AI_Pirate) pirate_factions.push_back(fid);
+    if (fac->control == FactionControl::Player) player_factions.push_back(fid);
+  }
+  if (pirate_factions.empty()) return;
+
+  auto target_ship_value = [&](ShipRole r) -> double {
+    switch (r) {
+      case ShipRole::Freighter: return 6.0;
+      case ShipRole::Surveyor: return 3.0;
+      case ShipRole::Combatant: return 1.0;
+      default: return 1.0;
+    }
+  };
+
+  auto target_ship_priority = [&](ShipRole r) -> int {
+    // Pirates prefer easy prey first.
+    switch (r) {
+      case ShipRole::Freighter: return 0;
+      case ShipRole::Surveyor: return 1;
+      case ShipRole::Combatant: return 2;
+      default: return 3;
+    }
+  };
+
+  auto piracy_risk_for_system = [&](Id system_id) -> double {
+    const auto* sys = find_ptr(state_.systems, system_id);
+    if (!sys) return 0.0;
+
+    double risk = std::clamp(cfg_.pirate_raid_default_system_risk, 0.0, 1.0);
+    if (sys->region_id != kInvalidId) {
+      if (const auto* reg = find_ptr(state_.regions, sys->region_id)) {
+        risk = std::clamp(reg->pirate_risk, 0.0, 1.0);
+      }
+    }
+    return std::clamp(risk, 0.0, 1.0);
+  };
+
+  struct SysAcc {
+    double score{0.0};
+    int pirate_ships{0};
+  };
+
+  for (Id pirate_fid : pirate_factions) {
+    auto* pirate_fac = find_ptr(state_.factions, pirate_fid);
+    if (!pirate_fac) continue;
+
+    // Hard cap per pirate faction to keep raids from exploding in long games.
+    const int max_total = std::max(0, cfg_.pirate_raid_max_total_ships_per_faction);
+    int pirate_ship_count = 0;
+
+    std::unordered_map<Id, SysAcc> acc;
+    acc.reserve(state_.systems.size() * 2 + 8);
+
+    // Aggregate ship-based target value and current pirate presence per system.
+    for (const auto& [sid, sh] : state_.ships) {
+      if (sh.hp <= 0.0) continue;
+      if (sh.system_id == kInvalidId) continue;
+
+      SysAcc& a = acc[sh.system_id];
+
+      if (sh.faction_id == pirate_fid) {
+        ++a.pirate_ships;
+        ++pirate_ship_count;
+        continue;
+      }
+
+      if (!are_factions_hostile(pirate_fid, sh.faction_id)) continue;
+      const auto* d = find_design(sh.design_id);
+      const ShipRole r = d ? d->role : ShipRole::Unknown;
+      a.score += target_ship_value(r);
+    }
+
+    // Aggregate colony value per system (pirates love raiding settled worlds).
+    for (const auto& [cid, col] : state_.colonies) {
+      if (!are_factions_hostile(pirate_fid, col.faction_id)) continue;
+      const auto* body = find_ptr(state_.bodies, col.body_id);
+      if (!body) continue;
+      if (body->system_id == kInvalidId) continue;
+
+      SysAcc& a = acc[body->system_id];
+
+      // Lightly scale with population so "big" colonies draw more attention.
+      const double pop = std::max(0.0, col.population_millions);
+      a.score += 8.0 + std::sqrt(pop) * 0.25;
+    }
+
+    if (max_total > 0 && pirate_ship_count >= max_total) continue;
+
+    // Build candidate target systems.
+    std::vector<Id> sys_ids;
+    sys_ids.reserve(acc.size());
+    for (const auto& [sys_id, _] : acc) sys_ids.push_back(sys_id);
+    std::sort(sys_ids.begin(), sys_ids.end());
+
+    struct Candidate {
+      Id system_id{kInvalidId};
+      double weight{0.0};
+      double risk{0.0};
+      double score{0.0};
+    };
+
+    std::vector<Candidate> candidates;
+    candidates.reserve(sys_ids.size());
+
+    double total_weight = 0.0;
+    double max_risk = 0.0;
+
+    const int max_pirates_in_sys = std::max(0, cfg_.pirate_raid_max_existing_pirate_ships_in_target_system);
+    const double risk_exp = std::max(0.1, cfg_.pirate_raid_risk_exponent);
+
+    for (Id sys_id : sys_ids) {
+      const auto it = acc.find(sys_id);
+      if (it == acc.end()) continue;
+      const SysAcc& a = it->second;
+
+      if (a.score <= 1e-9) continue;
+      if (a.pirate_ships > max_pirates_in_sys) continue;
+
+      const double risk = piracy_risk_for_system(sys_id);
+      if (risk <= 1e-6) continue;
+
+      const double weight = std::pow(risk, risk_exp) * a.score;
+      if (weight <= 1e-12) continue;
+
+      Candidate c;
+      c.system_id = sys_id;
+      c.weight = weight;
+      c.risk = risk;
+      c.score = a.score;
+      candidates.push_back(c);
+
+      total_weight += weight;
+      max_risk = std::max(max_risk, risk);
+    }
+
+    if (candidates.empty() || total_weight <= 1e-12) continue;
+
+    // Deterministic per-day roll.
+    std::uint64_t rng = 0xD1B54A32D192ED03ULL;
+    rng ^= static_cast<std::uint64_t>(now_day) * 0x9e3779b97f4a7c15ULL;
+    rng ^= static_cast<std::uint64_t>(pirate_fid) * 0xbf58476d1ce4e5b9ULL;
+
+    const double base = std::clamp(cfg_.pirate_raid_base_chance_per_day, 0.0, 1.0);
+    if (base <= 1e-9) continue;
+
+    // Scale chance by:
+    //  - "headroom" under the per-faction ship cap,
+    //  - the best piracy risk available today,
+    //  - and a saturation curve for total_weight (target availability).
+    double cap_headroom = 1.0;
+    if (max_total > 0) {
+      cap_headroom = std::clamp(1.0 - (static_cast<double>(pirate_ship_count) / static_cast<double>(max_total)), 0.0,
+                                1.0);
+    }
+
+    const double saturation = total_weight / (total_weight + 60.0);
+    double p = base * cap_headroom * (0.30 + 0.70 * max_risk) * (0.50 + 0.50 * saturation);
+    p = std::clamp(p, 0.0, 1.0);
+
+    if (u01(rng) >= p) continue;
+
+    // Pick a target system by weight.
+    const double pick = u01(rng) * total_weight;
+    double running = 0.0;
+    Candidate chosen;
+    for (const auto& c : candidates) {
+      running += c.weight;
+      if (running + 1e-12 >= pick) {
+        chosen = c;
+        break;
+      }
+    }
+    if (chosen.system_id == kInvalidId) chosen = candidates.back();
+
+    StarSystem* sys = find_ptr(state_.systems, chosen.system_id);
+    if (!sys) continue;
+
+    // Choose a concrete target inside the system: prefer ships (esp. freighters), otherwise colonies.
+    std::vector<Id> best_ships;
+    int best_prio = 999;
+
+    for (const auto& [sid, sh] : state_.ships) {
+      if (sh.hp <= 0.0) continue;
+      if (sh.system_id != chosen.system_id) continue;
+      if (!are_factions_hostile(pirate_fid, sh.faction_id)) continue;
+      if (sh.faction_id == pirate_fid) continue;
+
+      const auto* d = find_design(sh.design_id);
+      const ShipRole r = d ? d->role : ShipRole::Unknown;
+      const int prio = target_ship_priority(r);
+
+      if (prio < best_prio) {
+        best_prio = prio;
+        best_ships.clear();
+        best_ships.push_back(sid);
+      } else if (prio == best_prio) {
+        best_ships.push_back(sid);
+      }
+    }
+
+    Id target_ship_id = kInvalidId;
+    Vec2 target_pos{0.0, 0.0};
+    if (!best_ships.empty()) {
+      std::sort(best_ships.begin(), best_ships.end());
+      const std::size_t idx = static_cast<std::size_t>(u01(rng) * best_ships.size()) % best_ships.size();
+      target_ship_id = best_ships[idx];
+      if (const auto* tgt = find_ptr(state_.ships, target_ship_id)) {
+        target_pos = tgt->position_mkm;
+      }
+    }
+
+    Id target_colony_id = kInvalidId;
+    if (target_ship_id == kInvalidId) {
+      double best_pop = -1.0;
+      for (const auto& [cid, col] : state_.colonies) {
+        if (!are_factions_hostile(pirate_fid, col.faction_id)) continue;
+        const auto* body = find_ptr(state_.bodies, col.body_id);
+        if (!body) continue;
+        if (body->system_id != chosen.system_id) continue;
+
+        const double pop = std::max(0.0, col.population_millions);
+        if (pop > best_pop + 1e-9 || (std::abs(pop - best_pop) <= 1e-9 && cid < target_colony_id)) {
+          best_pop = pop;
+          target_colony_id = cid;
+          target_pos = body->position_mkm;
+        }
+      }
+    }
+
+    if (target_ship_id == kInvalidId && target_colony_id == kInvalidId) continue;
+
+    // Spawn near the closest jump point (ambush vibe); if none exist, spawn near target.
+    Vec2 anchor = target_pos;
+    double best_jp_dist = 1e100;
+    for (Id jp_id : sys->jump_points) {
+      const auto* jp = find_ptr(state_.jump_points, jp_id);
+      if (!jp) continue;
+      const double d = (jp->position_mkm - target_pos).length();
+      if (d < best_jp_dist) {
+        best_jp_dist = d;
+        anchor = jp->position_mkm;
+      }
+    }
+
+    // Determine raid size within remaining cap.
+    const int remaining = (max_total > 0) ? (max_total - pirate_ship_count) : cfg_.pirate_raid_max_spawn_ships;
+    if (remaining <= 0) continue;
+
+    int min_spawn = std::max(1, cfg_.pirate_raid_min_spawn_ships);
+    int max_spawn = std::max(min_spawn, cfg_.pirate_raid_max_spawn_ships);
+    max_spawn = std::min(max_spawn, remaining);
+    min_spawn = std::min(min_spawn, max_spawn);
+
+    int desired = 1;
+    if (chosen.risk >= 0.65) ++desired;
+    if (chosen.score >= 14.0) ++desired;
+    desired = std::clamp(desired, min_spawn, max_spawn);
+    if (desired < max_spawn && u01(rng) < 0.25) ++desired;
+    desired = std::min(desired, max_spawn);
+
+    // Raider design pool (scales up slowly over time).
+    std::vector<std::string> design_pool;
+    const int tier = (now_day >= 365 * 8) ? 2 : (now_day >= 365 * 3 ? 1 : 0);
+    if (tier >= 2) {
+      design_pool = {"pirate_raider_mk2", "pirate_raider_ion", "pirate_raider"};
+    } else if (tier == 1) {
+      design_pool = {"pirate_raider_ion", "pirate_raider"};
+    } else {
+      design_pool = {"pirate_raider"};
+    }
+
+    auto choose_design_id = [&](std::uint64_t& r) -> std::string {
+      // Try a random start index, then fall back through the pool.
+      const std::size_t n = design_pool.size();
+      if (n == 0) return std::string();
+      const std::size_t start = static_cast<std::size_t>(u01(r) * n) % n;
+      for (std::size_t i = 0; i < n; ++i) {
+        const std::string& id = design_pool[(start + i) % n];
+        if (find_design(id)) return id;
+      }
+      return std::string();
+    };
+
+    // Optional log event, gated behind player discovery to avoid spoilers.
+    if (cfg_.pirate_raid_log_event && !player_factions.empty()) {
+      bool visible = false;
+      for (Id pf : player_factions) {
+        if (is_system_discovered_by_faction(pf, chosen.system_id)) {
+          visible = true;
+          break;
+        }
+      }
+
+      if (visible) {
+        EventContext ctx;
+        ctx.faction_id = pirate_fid;
+        ctx.system_id = chosen.system_id;
+        if (target_ship_id != kInvalidId) ctx.ship_id = target_ship_id;
+        if (target_colony_id != kInvalidId) ctx.colony_id = target_colony_id;
+
+        std::string msg = "Pirate raid activity detected in ";
+        msg += sys->name.empty() ? std::string("(unknown system)") : sys->name;
+        push_event(EventLevel::Info, EventCategory::General, std::move(msg), ctx);
+      }
+    }
+
+    // Spawn the ships.
+    for (int i = 0; i < desired; ++i) {
+      const std::string design_id = choose_design_id(rng);
+      if (design_id.empty()) break;
+
+      Ship ship;
+      ship.id = allocate_id(state_);
+      ship.faction_id = pirate_fid;
+      ship.system_id = chosen.system_id;
+      ship.design_id = design_id;
+      ship.name = "Pirate Raider " + std::to_string(ship.id);
+      ship.sensor_mode = SensorMode::Active;
+
+      // Spawn a small random offset from the anchor.
+      const double ang = u01(rng) * kTwoPi;
+      const double rad = 0.5 + u01(rng) * 2.0;
+      ship.position_mkm = anchor + Vec2{std::cos(ang), std::sin(ang)} * rad;
+
+      state_.ships.emplace(ship.id, ship);
+      state_.ship_orders.emplace(ship.id, ShipOrders{});
+
+      // Add to system ship list for sensors/combat.
+      sys->ships.push_back(ship.id);
+
+      // Initialize derived stats for freshly spawned ships.
+      if (auto* sh = find_ptr(state_.ships, ship.id)) {
+        apply_design_stats_to_ship(*sh);
+      }
+
+      // Queue raid orders.
+      auto& orders = state_.ship_orders[ship.id];
+      if (target_ship_id != kInvalidId) {
+        AttackShip ord;
+        ord.target_ship_id = target_ship_id;
+        ord.has_last_known = true;
+        ord.last_known_position_mkm = target_pos;
+        orders.queue.push_back(ord);
+      } else if (target_colony_id != kInvalidId) {
+        BombardColony ord;
+        ord.colony_id = target_colony_id;
+        // Short, punchy raids rather than endless bombardments.
+        ord.duration_days = 4 + static_cast<int>(u01(rng) * 6.0);
+        orders.queue.push_back(ord);
+      }
     }
   }
 }

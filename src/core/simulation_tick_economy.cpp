@@ -33,6 +33,7 @@ using sim_internal::sorted_keys;
 using sim_internal::faction_has_tech;
 using sim_internal::FactionEconomyMultipliers;
 using sim_internal::compute_faction_economy_multipliers;
+using sim_internal::trade_agreement_output_multiplier;
 using sim_internal::compute_power_allocation;
 } // namespace
 
@@ -44,7 +45,13 @@ void Simulation::tick_colonies(double dt_days, bool emit_daily_events) {
   std::unordered_map<Id, FactionEconomyMultipliers> fac_mult;
   fac_mult.reserve(state_.factions.size());
   for (Id fid : sorted_keys(state_.factions)) {
-    fac_mult.emplace(fid, compute_faction_economy_multipliers(content_, state_.factions.at(fid)));
+    auto m = compute_faction_economy_multipliers(content_, state_.factions.at(fid));
+    const double trade = trade_agreement_output_multiplier(state_, fid);
+    m.industry *= trade;
+    m.research *= trade;
+    m.construction *= trade;
+    m.shipyard *= trade;
+    fac_mult.emplace(fid, m);
   }
 
   const FactionEconomyMultipliers default_mult;
@@ -364,7 +371,13 @@ void Simulation::tick_research(double dt_days) {
   std::unordered_map<Id, FactionEconomyMultipliers> fac_mult;
   fac_mult.reserve(state_.factions.size());
   for (Id fid : sorted_keys(state_.factions)) {
-    fac_mult.emplace(fid, compute_faction_economy_multipliers(content_, state_.factions.at(fid)));
+    auto m = compute_faction_economy_multipliers(content_, state_.factions.at(fid));
+    const double trade = trade_agreement_output_multiplier(state_, fid);
+    m.industry *= trade;
+    m.research *= trade;
+    m.construction *= trade;
+    m.shipyard *= trade;
+    fac_mult.emplace(fid, m);
   }
 
   const FactionEconomyMultipliers default_mult;
@@ -522,7 +535,13 @@ void Simulation::tick_shipyards(double dt_days) {
   std::unordered_map<Id, FactionEconomyMultipliers> fac_mult;
   fac_mult.reserve(state_.factions.size());
   for (Id fid : sorted_keys(state_.factions)) {
-    fac_mult.emplace(fid, compute_faction_economy_multipliers(content_, state_.factions.at(fid)));
+    auto m = compute_faction_economy_multipliers(content_, state_.factions.at(fid));
+    const double trade = trade_agreement_output_multiplier(state_, fid);
+    m.industry *= trade;
+    m.research *= trade;
+    m.construction *= trade;
+    m.shipyard *= trade;
+    fac_mult.emplace(fid, m);
   }
 
   const FactionEconomyMultipliers default_mult;
@@ -729,34 +748,38 @@ void Simulation::tick_shipyards(double dt_days) {
   for (Id cid : sorted_keys(state_.colonies)) {
     auto& colony = state_.colonies.at(cid);
     const auto it_yard = colony.installations.find("shipyard");
-    const int yards = (it_yard != colony.installations.end()) ? it_yard->second : 0;
+    const int yards = (it_yard != colony.installations.end()) ? std::max(0, it_yard->second) : 0;
     if (yards <= 0) continue;
+    if (colony.shipyard_queue.empty()) continue;
 
     const double shipyard_mult = std::max(0.0, mult_for(colony.faction_id).shipyard);
-    double capacity_tons = base_rate * static_cast<double>(yards) * shipyard_mult * dt_days;
+    const double per_team_capacity_tons = base_rate * shipyard_mult * dt_days;
+    if (per_team_capacity_tons <= 1e-9) continue;
 
-    while (capacity_tons > 1e-9 && !colony.shipyard_queue.empty()) {
-      auto& bo = colony.shipyard_queue.front();
+    // Pre-clean invalid orders so they don't permanently stall shipyard progress.
+    //
+    // This is especially important now that shipyards can process multiple
+    // orders per tick: one bad refit order should not block all other work.
+    for (int i = static_cast<int>(colony.shipyard_queue.size()) - 1; i >= 0; --i) {
+      const auto& bo = colony.shipyard_queue[static_cast<size_t>(i)];
       const bool is_refit = bo.is_refit();
 
-      const auto* body = find_ptr(state_.bodies, colony.body_id);
+      if (bo.design_id.empty() || !find_design(bo.design_id)) {
+        const std::string msg =
+            std::string("Dropping shipyard order with unknown design: ") +
+            (bo.design_id.empty() ? "<empty>" : bo.design_id) + " at " + colony.name;
+        nebula4x::log::warn(msg);
+        EventContext ctx;
+        ctx.faction_id = colony.faction_id;
+        ctx.colony_id = colony.id;
+        if (is_refit) ctx.ship_id = bo.refit_ship_id;
+        push_event(EventLevel::Warn, EventCategory::Shipyard, msg, ctx);
+        colony.shipyard_queue.erase(colony.shipyard_queue.begin() + i);
+        continue;
+      }
 
-      // If this is a refit order, ensure the target ship exists and is docked.
-      // Refit orders are front-of-queue and will stall the shipyard until the ship arrives.
-      Ship* refit_ship = nullptr;
       if (is_refit) {
-        if (!body) {
-          const std::string msg = "Shipyard refit stalled (missing colony body): " + colony.name;
-          nebula4x::log::error(msg);
-          EventContext ctx;
-          ctx.faction_id = colony.faction_id;
-          ctx.colony_id = colony.id;
-          push_event(EventLevel::Error, EventCategory::Shipyard, msg, ctx);
-          colony.shipyard_queue.erase(colony.shipyard_queue.begin());
-          continue;
-        }
-
-        refit_ship = find_ptr(state_.ships, bo.refit_ship_id);
+        Ship* refit_ship = find_ptr(state_.ships, bo.refit_ship_id);
         if (!refit_ship) {
           const std::string msg = "Shipyard refit target ship not found; dropping order at " + colony.name;
           nebula4x::log::warn(msg);
@@ -764,7 +787,7 @@ void Simulation::tick_shipyards(double dt_days) {
           ctx.faction_id = colony.faction_id;
           ctx.colony_id = colony.id;
           push_event(EventLevel::Warn, EventCategory::Shipyard, msg, ctx);
-          colony.shipyard_queue.erase(colony.shipyard_queue.begin());
+          colony.shipyard_queue.erase(colony.shipyard_queue.begin() + i);
           continue;
         }
 
@@ -776,14 +799,70 @@ void Simulation::tick_shipyards(double dt_days) {
           ctx.colony_id = colony.id;
           ctx.ship_id = refit_ship->id;
           push_event(EventLevel::Warn, EventCategory::Shipyard, msg, ctx);
-          colony.shipyard_queue.erase(colony.shipyard_queue.begin());
+          colony.shipyard_queue.erase(colony.shipyard_queue.begin() + i);
           continue;
         }
+      }
+    }
 
-        if (!is_ship_docked_at_colony(refit_ship->id, colony.id)) {
-          // Stall until the ship arrives. (No event spam.)
-          break;
-        }
+    if (colony.shipyard_queue.empty()) continue;
+
+    const auto* body = find_ptr(state_.bodies, colony.body_id);
+
+    // --- Shipyard "team" allocation ---
+    //
+    // Old behavior: all shipyard capacity pooled onto the front order.
+    // New behavior: shipyards can work on multiple orders per tick.
+    //
+    // Model:
+    // - Each shipyard installation provides one build "team".
+    // - Teams are assigned in queue order to workable orders (skipping stalled refits).
+    // - Any remaining teams are pooled onto the first workable order (preserves the
+    //   ability to focus capacity when the queue is short).
+    std::vector<int> teams_for_order(colony.shipyard_queue.size(), 0);
+    int teams_assigned = 0;
+    int first_workable = -1;
+
+    auto order_workable = [&](const BuildOrder& bo) -> bool {
+      if (bo.tons_remaining <= 1e-9) return false;
+      if (!bo.is_refit()) return true;
+
+      if (!body) return false;
+      Ship* refit_ship = find_ptr(state_.ships, bo.refit_ship_id);
+      if (!refit_ship) return false;
+      if (refit_ship->faction_id != colony.faction_id) return false;
+      return is_ship_docked_at_colony(refit_ship->id, colony.id);
+    };
+
+    for (size_t i = 0; i < colony.shipyard_queue.size() && teams_assigned < yards; ++i) {
+      if (!order_workable(colony.shipyard_queue[i])) continue;
+      teams_for_order[i] = 1;
+      if (first_workable < 0) first_workable = static_cast<int>(i);
+      teams_assigned += 1;
+    }
+
+    if (first_workable >= 0 && teams_assigned < yards) {
+      teams_for_order[static_cast<size_t>(first_workable)] += (yards - teams_assigned);
+    }
+
+    // --- Apply build progress (possibly to multiple orders) ---
+    for (size_t i = 0; i < colony.shipyard_queue.size(); ++i) {
+      const int teams_here = teams_for_order[i];
+      if (teams_here <= 0) continue;
+
+      auto& bo = colony.shipyard_queue[i];
+      if (bo.tons_remaining <= 1e-9) continue;
+
+      const double capacity_tons = per_team_capacity_tons * static_cast<double>(teams_here);
+      if (capacity_tons <= 1e-9) continue;
+
+      Ship* refit_ship = nullptr;
+      if (bo.is_refit()) {
+        if (!body) continue;
+        refit_ship = find_ptr(state_.ships, bo.refit_ship_id);
+        if (!refit_ship) continue;
+        if (refit_ship->faction_id != colony.faction_id) continue;
+        if (!is_ship_docked_at_colony(refit_ship->id, colony.id)) continue;
 
         // Prototype drydock behavior: refitting ships are pinned to the colony body and cannot
         // execute other queued orders while their refit is being processed.
@@ -799,68 +878,121 @@ void Simulation::tick_shipyards(double dt_days) {
         build_tons = max_build_by_minerals(colony, build_tons);
       }
 
-      if (build_tons <= 1e-9) break;
+      if (build_tons <= 1e-9) continue;
 
       if (!costs_per_ton.empty()) consume_minerals(colony, build_tons);
       bo.tons_remaining -= build_tons;
-      capacity_tons -= build_tons;
+    }
 
-      if (bo.tons_remaining > 1e-9) break;
+    // --- Completion pass ---
+    //
+    // Multiple orders may complete in a single tick now (e.g. multiple shipyards / time warp),
+    // so we resolve all finished orders rather than only checking the front.
+    for (size_t i = 0; i < colony.shipyard_queue.size(); /*increment inside*/) {
+      auto& bo = colony.shipyard_queue[i];
+      if (bo.tons_remaining > 1e-9) {
+        ++i;
+        continue;
+      }
 
-      // --- Completion ---
+      const bool is_refit = bo.is_refit();
+
       if (is_refit) {
-        const auto* target = find_design(bo.design_id);
-        if (!target || !refit_ship) {
-          const std::string msg = std::string("Shipyard refit failed (unknown design or missing ship): ") + bo.design_id;
+        if (!body) {
+          const std::string msg = "Shipyard refit failed (missing colony body): " + colony.name;
+          nebula4x::log::error(msg);
+          EventContext ctx;
+          ctx.faction_id = colony.faction_id;
+          ctx.colony_id = colony.id;
+          push_event(EventLevel::Error, EventCategory::Shipyard, msg, ctx);
+          colony.shipyard_queue.erase(colony.shipyard_queue.begin() + i);
+          continue;
+        }
+
+        Ship* refit_ship = find_ptr(state_.ships, bo.refit_ship_id);
+        if (!refit_ship) {
+          const std::string msg = "Shipyard refit target ship not found; dropping order at " + colony.name;
           nebula4x::log::warn(msg);
           EventContext ctx;
           ctx.faction_id = colony.faction_id;
           ctx.colony_id = colony.id;
-          if (refit_ship) ctx.ship_id = refit_ship->id;
           push_event(EventLevel::Warn, EventCategory::Shipyard, msg, ctx);
-        } else {
-          // Apply the new design. Treat a completed refit as a full overhaul (fully repaired).
-          refit_ship->design_id = bo.design_id;
-          refit_ship->hp = std::max(1.0, target->max_hp);
-          apply_design_stats_to_ship(*refit_ship);
-
-          if (body) refit_ship->position_mkm = body->position_mkm;
-
-          // If the refit reduces cargo capacity, move excess cargo back into colony stockpiles.
-          const double cap = std::max(0.0, target->cargo_tons);
-          double used = 0.0;
-          for (const auto& [_, tons] : refit_ship->cargo) used += std::max(0.0, tons);
-
-          if (used > cap + 1e-9) {
-            double excess = used - cap;
-            for (const auto& mineral : sorted_keys(refit_ship->cargo)) {
-              if (excess <= 1e-9) break;
-              auto it = refit_ship->cargo.find(mineral);
-              if (it == refit_ship->cargo.end()) continue;
-              const double have = std::max(0.0, it->second);
-              if (have <= 1e-9) continue;
-
-              const double move = std::min(have, excess);
-              it->second -= move;
-              colony.minerals[mineral] += move;
-              excess -= move;
-
-              if (it->second <= 1e-9) refit_ship->cargo.erase(it);
-            }
-          }
-
-          const std::string msg =
-              "Refit ship " + refit_ship->name + " -> " + target->name + " (" + refit_ship->design_id + ") at " + colony.name;
-          nebula4x::log::info(msg);
-          EventContext ctx;
-          ctx.faction_id = colony.faction_id;
-          ctx.system_id = refit_ship->system_id;
-          ctx.ship_id = refit_ship->id;
-          ctx.colony_id = colony.id;
-          push_event(EventLevel::Info, EventCategory::Shipyard, msg, ctx);
+          colony.shipyard_queue.erase(colony.shipyard_queue.begin() + i);
+          continue;
         }
 
-        colony.shipyard_queue.erase(colony.shipyard_queue.begin());
+        if (refit_ship->faction_id != colony.faction_id) {
+          const std::string msg = "Shipyard refit target ship faction mismatch; dropping order at " + colony.name;
+          nebula4x::log::warn(msg);
+          EventContext ctx;
+          ctx.faction_id = colony.faction_id;
+          ctx.colony_id = colony.id;
+          ctx.ship_id = refit_ship->id;
+          push_event(EventLevel::Warn, EventCategory::Shipyard, msg, ctx);
+          colony.shipyard_queue.erase(colony.shipyard_queue.begin() + i);
+          continue;
+        }
+
+        // If the ship isn't docked, keep the order (it will resume once docked).
+        if (!is_ship_docked_at_colony(refit_ship->id, colony.id)) {
+          ++i;
+          continue;
+        }
+
+        const auto* target = find_design(bo.design_id);
+        if (!target) {
+          const std::string msg = std::string("Shipyard refit failed (unknown design): ") + bo.design_id;
+          nebula4x::log::warn(msg);
+          EventContext ctx;
+          ctx.faction_id = colony.faction_id;
+          ctx.colony_id = colony.id;
+          ctx.ship_id = refit_ship->id;
+          push_event(EventLevel::Warn, EventCategory::Shipyard, msg, ctx);
+          colony.shipyard_queue.erase(colony.shipyard_queue.begin() + i);
+          continue;
+        }
+
+        // Apply the new design. Treat a completed refit as a full overhaul (fully repaired).
+        refit_ship->design_id = bo.design_id;
+        refit_ship->hp = std::max(1.0, target->max_hp);
+        apply_design_stats_to_ship(*refit_ship);
+
+        refit_ship->position_mkm = body->position_mkm;
+
+        // If the refit reduces cargo capacity, move excess cargo back into colony stockpiles.
+        const double cap = std::max(0.0, target->cargo_tons);
+        double used = 0.0;
+        for (const auto& [_, tons] : refit_ship->cargo) used += std::max(0.0, tons);
+
+        if (used > cap + 1e-9) {
+          double excess = used - cap;
+          for (const auto& mineral : sorted_keys(refit_ship->cargo)) {
+            if (excess <= 1e-9) break;
+            auto it = refit_ship->cargo.find(mineral);
+            if (it == refit_ship->cargo.end()) continue;
+            const double have = std::max(0.0, it->second);
+            if (have <= 1e-9) continue;
+
+            const double move = std::min(have, excess);
+            it->second -= move;
+            colony.minerals[mineral] += move;
+            excess -= move;
+
+            if (it->second <= 1e-9) refit_ship->cargo.erase(it);
+          }
+        }
+
+        const std::string msg =
+            "Refit ship " + refit_ship->name + " -> " + target->name + " (" + refit_ship->design_id + ") at " + colony.name;
+        nebula4x::log::info(msg);
+        EventContext ctx;
+        ctx.faction_id = colony.faction_id;
+        ctx.system_id = refit_ship->system_id;
+        ctx.ship_id = refit_ship->id;
+        ctx.colony_id = colony.id;
+        push_event(EventLevel::Info, EventCategory::Shipyard, msg, ctx);
+
+        colony.shipyard_queue.erase(colony.shipyard_queue.begin() + i);
         continue;
       }
 
@@ -873,47 +1005,58 @@ void Simulation::tick_shipyards(double dt_days) {
         ctx.faction_id = colony.faction_id;
         ctx.colony_id = colony.id;
         push_event(EventLevel::Warn, EventCategory::Shipyard, msg, ctx);
-      } else if (!body) {
+        colony.shipyard_queue.erase(colony.shipyard_queue.begin() + i);
+        continue;
+      }
+
+      if (!body) {
         const std::string msg = "Shipyard build failed (missing colony body): " + colony.name;
         nebula4x::log::error(msg);
         EventContext ctx;
         ctx.faction_id = colony.faction_id;
         ctx.colony_id = colony.id;
         push_event(EventLevel::Error, EventCategory::Shipyard, msg, ctx);
-      } else if (auto* sys = find_ptr(state_.systems, body->system_id); !sys) {
+        colony.shipyard_queue.erase(colony.shipyard_queue.begin() + i);
+        continue;
+      }
+
+      if (auto* sys = find_ptr(state_.systems, body->system_id); !sys) {
         const std::string msg = "Shipyard build failed (missing system): colony=" + colony.name;
         nebula4x::log::error(msg);
         EventContext ctx;
         ctx.faction_id = colony.faction_id;
         ctx.colony_id = colony.id;
         push_event(EventLevel::Error, EventCategory::Shipyard, msg, ctx);
-      } else {
-        Ship sh;
-        sh.id = allocate_id(state_);
-        sh.faction_id = colony.faction_id;
-        sh.system_id = body->system_id;
-        sh.design_id = bo.design_id;
-        sh.position_mkm = body->position_mkm;
-        sh.fuel_tons = 0.0;
-        apply_design_stats_to_ship(sh);
-        sh.name = design->name + " #" + std::to_string(sh.id);
-        state_.ships[sh.id] = sh;
-        state_.ship_orders[sh.id] = ShipOrders{};
-        state_.systems[sh.system_id].ships.push_back(sh.id);
-
-        const std::string msg = "Built ship " + sh.name + " (" + sh.design_id + ") at " + colony.name;
-        nebula4x::log::info(msg);
-        EventContext ctx;
-        ctx.faction_id = colony.faction_id;
-        ctx.system_id = sh.system_id;
-        ctx.ship_id = sh.id;
-        ctx.colony_id = colony.id;
-        push_event(EventLevel::Info, EventCategory::Shipyard, msg, ctx);
+        colony.shipyard_queue.erase(colony.shipyard_queue.begin() + i);
+        continue;
       }
 
-      colony.shipyard_queue.erase(colony.shipyard_queue.begin());
+      Ship sh;
+      sh.id = allocate_id(state_);
+      sh.faction_id = colony.faction_id;
+      sh.system_id = body->system_id;
+      sh.design_id = bo.design_id;
+      sh.position_mkm = body->position_mkm;
+      sh.fuel_tons = 0.0;
+      apply_design_stats_to_ship(sh);
+      sh.name = design->name + " #" + std::to_string(sh.id);
+      state_.ships[sh.id] = sh;
+      state_.ship_orders[sh.id] = ShipOrders{};
+      state_.systems[sh.system_id].ships.push_back(sh.id);
+
+      const std::string msg = "Built ship " + sh.name + " (" + sh.design_id + ") at " + colony.name;
+      nebula4x::log::info(msg);
+      EventContext ctx;
+      ctx.faction_id = colony.faction_id;
+      ctx.system_id = sh.system_id;
+      ctx.ship_id = sh.id;
+      ctx.colony_id = colony.id;
+      push_event(EventLevel::Info, EventCategory::Shipyard, msg, ctx);
+
+      colony.shipyard_queue.erase(colony.shipyard_queue.begin() + i);
     }
   }
+
 }
 
 void Simulation::tick_construction(double dt_days) {

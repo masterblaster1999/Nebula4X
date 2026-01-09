@@ -192,6 +192,23 @@ struct SalvageWreck {
   double tons{0.0};
 };
 
+// Investigate an anomaly (point of interest) in a system.
+//
+// The ship will move to the anomaly position and (once implemented) remain on
+// station for duration_days to resolve it.
+//
+// duration_days:
+//  0 => use anomaly default (filled by issue helper)
+// >0 => explicit duration for this investigation
+//
+// progress_days accumulates fractional days under sub-day ticks.
+struct InvestigateAnomaly {
+  Id anomaly_id{kInvalidId};
+
+  int duration_days{0};
+  double progress_days{0.0};
+};
+
 // Transfer minerals from this ship's cargo into another friendly ship.
 // If mineral is empty, transfer all minerals (until capacity or requested tons).
 // If tons <= 0, transfer as much as possible.
@@ -238,6 +255,7 @@ using Order = std::variant<MoveToPoint,
                            InvadeColony,
                            BombardColony,
                            SalvageWreck,
+                           InvestigateAnomaly,
                            TransferCargoToShip,
                            TransferFuelToShip,
                            TransferTroopsToShip,

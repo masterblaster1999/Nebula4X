@@ -377,7 +377,20 @@ PlannerEventsResult compute_planner_events(const Simulation& sim, Id faction_id,
       ev.title = you_attacker ? ("Invasion: " + colony_name) : ("Defense: " + colony_name);
 
       const double forts = sim.fortification_points(*col);
-      const GroundBattleForecast fc = forecast_ground_battle(sim.cfg(), b->attacker_strength, b->defender_strength, forts);
+      // Defender artillery (installation weapons).
+      double defender_arty_weapon = 0.0;
+      for (const auto& [inst_id, count] : col->installations) {
+        if (count <= 0) continue;
+        const auto it = sim.content().installations.find(inst_id);
+        if (it == sim.content().installations.end()) continue;
+        const double wd = it->second.weapon_damage;
+        if (wd <= 0.0) continue;
+        defender_arty_weapon += wd * static_cast<double>(count);
+      }
+      defender_arty_weapon = std::max(0.0, defender_arty_weapon);
+
+      const GroundBattleForecast fc = forecast_ground_battle(sim.cfg(), b->attacker_strength, b->defender_strength, forts,
+                                                             defender_arty_weapon);
 
       if (!fc.ok) {
         ev.level = EventLevel::Warn;

@@ -71,7 +71,7 @@ int test_reverse_engineering() {
   // Minimal state: one system, two factions, one salvager ship, one enemy wreck.
   GameState st;
   st.save_version = GameState{}.save_version;
-  st.date = Date::from_days_since_epoch(0);
+  st.date = Date(0);
 
   const Id sys_id = 1;
   {

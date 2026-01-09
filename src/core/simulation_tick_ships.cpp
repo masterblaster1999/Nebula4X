@@ -30,6 +30,7 @@ using sim_internal::mkm_per_day_from_speed;
 using sim_internal::push_unique;
 using sim_internal::sorted_keys;
 using sim_internal::compute_power_allocation;
+using sim_internal::strongest_active_treaty_between;
 } // namespace
 
 void Simulation::tick_ships(double dt_days) {
@@ -600,6 +601,11 @@ void Simulation::tick_ships(double dt_days) {
     std::string salvage_mineral;
     double salvage_tons = 0.0;
 
+    // Anomaly investigation ops (anomaly -> research reward / component unlock).
+    bool is_investigate_anomaly_op = false;
+    InvestigateAnomaly* investigate_anom_ord = nullptr;
+    Id investigate_anom_id = kInvalidId;
+
     // Mobile mining ops (body -> ship cargo)
     bool is_mining_op = false;
     MineBody* mine_ord = nullptr;
@@ -692,6 +698,23 @@ void Simulation::tick_ships(double dt_days) {
 
       if (tgt->faction_id == ship.faction_id) {
         // Target changed hands (captured) or is otherwise no longer hostile.
+        q.erase(q.begin());
+        continue;
+      }
+
+      // Do not allow offensive action while an active treaty exists between the factions.
+      // This prevents ceasefires/non-aggression pacts/alliances/trade agreements from being
+      // instantly broken by queued AttackShip orders.
+      TreatyType tt = TreatyType::Ceasefire;
+      if (strongest_active_treaty_between(state_, ship.faction_id, tgt->faction_id, &tt)) {
+        std::ostringstream oss;
+        oss << "Attack order cancelled due to active treaty between factions.";
+        EventContext ctx;
+        ctx.faction_id = ship.faction_id;
+        ctx.faction_id2 = tgt->faction_id;
+        ctx.ship_id = ship_id;
+        ctx.system_id = ship.system_id;
+        this->push_event(EventLevel::Warn, EventCategory::Diplomacy, oss.str(), ctx);
         q.erase(q.begin());
         continue;
       }
@@ -963,6 +986,23 @@ void Simulation::tick_ships(double dt_days) {
       const auto* body = find_ptr(state_.bodies, colony->body_id);
       if (!body || body->system_id != ship.system_id) { q.erase(q.begin()); continue; }
 
+      // An explicit invasion is an act of hostility, but an active treaty requires an explicit
+      // diplomatic break (cancel treaty / declare war) first.
+      TreatyType tt = TreatyType::Ceasefire;
+      if (strongest_active_treaty_between(state_, ship.faction_id, colony->faction_id, &tt)) {
+        std::ostringstream oss;
+        oss << "Invasion order cancelled due to active treaty between factions.";
+        EventContext ctx;
+        ctx.faction_id = ship.faction_id;
+        ctx.faction_id2 = colony->faction_id;
+        ctx.ship_id = ship_id;
+        ctx.colony_id = troop_colony_id;
+        ctx.system_id = ship.system_id;
+        this->push_event(EventLevel::Warn, EventCategory::Diplomacy, oss.str(), ctx);
+        q.erase(q.begin());
+        continue;
+      }
+
       // An explicit invasion is an act of hostility.
       if (!are_factions_hostile(ship.faction_id, colony->faction_id)) {
         set_diplomatic_status(ship.faction_id, colony->faction_id, DiplomacyStatus::Hostile, /*reciprocal=*/true,
@@ -979,6 +1019,23 @@ void Simulation::tick_ships(double dt_days) {
 
       const auto* d = find_design(ship.design_id);
       if (!d || d->weapon_damage <= 0.0 || d->weapon_range_mkm <= 0.0) { q.erase(q.begin()); continue; }
+
+      // Bombardment is an explicit act of hostility, but an active treaty requires an explicit
+      // diplomatic break (cancel treaty / declare war) first.
+      TreatyType tt = TreatyType::Ceasefire;
+      if (strongest_active_treaty_between(state_, ship.faction_id, colony->faction_id, &tt)) {
+        std::ostringstream oss;
+        oss << "Bombardment order cancelled due to active treaty between factions.";
+        EventContext ctx;
+        ctx.faction_id = ship.faction_id;
+        ctx.faction_id2 = colony->faction_id;
+        ctx.ship_id = ship_id;
+        ctx.colony_id = ord.colony_id;
+        ctx.system_id = ship.system_id;
+        this->push_event(EventLevel::Warn, EventCategory::Diplomacy, oss.str(), ctx);
+        q.erase(q.begin());
+        continue;
+      }
 
       // Bombardment is an explicit act of hostility.
       if (!are_factions_hostile(ship.faction_id, colony->faction_id)) {
@@ -1000,6 +1057,21 @@ void Simulation::tick_ships(double dt_days) {
       const auto* w = find_ptr(state_.wrecks, salvage_wreck_id);
       if (!w || w->system_id != ship.system_id) { q.erase(q.begin()); continue; }
       target = w->position_mkm;
+    } else if (std::holds_alternative<InvestigateAnomaly>(q.front())) {
+      auto& ord = std::get<InvestigateAnomaly>(q.front());
+      is_investigate_anomaly_op = true;
+      investigate_anom_ord = &ord;
+      investigate_anom_id = ord.anomaly_id;
+
+      const auto* an = find_ptr(state_.anomalies, investigate_anom_id);
+      if (!an || an->system_id != ship.system_id || an->resolved) { q.erase(q.begin()); continue; }
+
+      // Placeholder gating: require some sensor capability to perform an investigation.
+      const auto* d = find_design(ship.design_id);
+      const double sensor_range = d ? std::max(0.0, d->sensor_range_mkm) : 0.0;
+      if (sensor_range <= 1e-9) { q.erase(q.begin()); continue; }
+
+      target = an->position_mkm;
     } else if (std::holds_alternative<TransferCargoToShip>(q.front())) {
       auto& ord = std::get<TransferCargoToShip>(q.front());
       is_cargo_op = true;
@@ -1726,6 +1798,86 @@ void Simulation::tick_ships(double dt_days) {
       continue;
     }
 
+    if (is_investigate_anomaly_op && dist <= dock_range) {
+      ship.position_mkm = target;
+
+      auto* anom = find_ptr(state_.anomalies, investigate_anom_id);
+      if (!anom || anom->system_id != ship.system_id || anom->resolved) {
+        q.erase(q.begin());
+        continue;
+      }
+
+      if (investigate_anom_ord) {
+        if (investigate_anom_ord->duration_days > 0) {
+          investigate_anom_ord->progress_days = std::max(0.0, investigate_anom_ord->progress_days) + dt_days;
+          while (investigate_anom_ord->duration_days > 0 && investigate_anom_ord->progress_days >= 1.0 - 1e-12) {
+            investigate_anom_ord->duration_days -= 1;
+            investigate_anom_ord->progress_days -= 1.0;
+          }
+        }
+
+        if (investigate_anom_ord->duration_days <= 0) {
+          // Resolve + award.
+          anom->resolved = true;
+          anom->resolved_by_faction_id = ship.faction_id;
+          anom->resolved_day = state_.date.days_since_epoch();
+
+          const double rp = std::max(0.0, anom->research_reward);
+          bool unlocked_component = false;
+          std::string unlocked_component_id;
+
+          if (auto* fac = find_ptr(state_.factions, ship.faction_id)) {
+            if (rp > 1e-9) fac->research_points += rp;
+
+            if (!anom->unlock_component_id.empty()) {
+              // Only unlock known content components (prevents invalid saves).
+              if (content_.components.find(anom->unlock_component_id) != content_.components.end()) {
+                const bool already = std::find(fac->unlocked_components.begin(), fac->unlocked_components.end(),
+                                               anom->unlock_component_id) != fac->unlocked_components.end();
+                if (!already) {
+                  fac->unlocked_components.push_back(anom->unlock_component_id);
+                  unlocked_component = true;
+                  unlocked_component_id = anom->unlock_component_id;
+                }
+              }
+            }
+          }
+
+          // Event.
+          {
+            const std::string nm = anom->name.empty()
+                                       ? (std::string("Anomaly ") + std::to_string(static_cast<int>(anom->id)))
+                                       : anom->name;
+
+            std::ostringstream ss;
+            ss.setf(std::ios::fixed);
+            ss.precision(1);
+            ss << "Anomaly investigated: " << nm;
+            if (rp > 1e-9) ss << " (+" << rp << " RP)";
+            if (unlocked_component && !unlocked_component_id.empty()) {
+              const auto itc = content_.components.find(unlocked_component_id);
+              const std::string cname = (itc != content_.components.end() && !itc->second.name.empty()) ? itc->second.name
+                                                                                                         : unlocked_component_id;
+              ss << "; unlocked " << cname;
+            }
+
+            EventContext ctx;
+            ctx.system_id = ship.system_id;
+            ctx.ship_id = ship_id;
+            ctx.faction_id = ship.faction_id;
+            push_event(EventLevel::Info, EventCategory::Exploration, ss.str(), ctx);
+          }
+
+          q.erase(q.begin());
+        }
+      } else {
+        // Malformed order variant; drop it.
+        q.erase(q.begin());
+      }
+
+      continue;
+    }
+
     if (is_mining_op && dist <= dock_range) {
       ship.position_mkm = target;
       const double mined = do_body_mining();
@@ -1792,6 +1944,7 @@ void Simulation::tick_ships(double dt_days) {
           b.defender_faction_id = col->faction_id;
           b.attacker_strength = 0.0;
           b.defender_strength = std::max(0.0, col->ground_forces);
+          b.fortification_damage_points = 0.0;
           b.days_fought = 0;
         }
         // Reinforcement: if attacker changes, treat as a new battle by replacing.
@@ -1800,6 +1953,7 @@ void Simulation::tick_ships(double dt_days) {
           b.defender_faction_id = col->faction_id;
           b.attacker_strength = 0.0;
           b.defender_strength = std::max(0.0, col->ground_forces);
+          b.fortification_damage_points = 0.0;
           b.days_fought = 0;
         }
         b.attacker_strength += moved;
@@ -2162,8 +2316,9 @@ void Simulation::tick_ships(double dt_days) {
       continue;
     }
 
-    if (!is_attack && !is_escort && !is_bombard && !is_jump && !is_cargo_op && !is_salvage_op && !is_fuel_transfer_op &&
-        !is_troop_transfer_op && !is_troop_op && !is_colonist_op && !is_mining_op && !is_body && !is_orbit && !is_scrap && dist <= arrive_eps) {
+    if (!is_attack && !is_escort && !is_bombard && !is_jump && !is_cargo_op && !is_salvage_op && !is_investigate_anomaly_op &&
+        !is_fuel_transfer_op && !is_troop_transfer_op && !is_troop_op && !is_colonist_op && !is_mining_op && !is_body &&
+        !is_orbit && !is_scrap && dist <= arrive_eps) {
       q.erase(q.begin());
       continue;
     }

@@ -331,6 +331,8 @@ if(NEBULA4X_BUILD_TESTS)
     tests/test_auto_colonize.cpp
     tests/test_auto_salvage.cpp
     tests/test_reverse_engineering.cpp
+    tests/test_anomalies.cpp
+    tests/test_missile_components.cpp
     tests/test_auto_tanker.cpp
     tests/test_ship_repairs.cpp
     tests/test_advisor.cpp

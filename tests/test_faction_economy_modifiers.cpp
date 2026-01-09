@@ -164,5 +164,73 @@ int test_faction_economy_modifiers() {
     N4X_ASSERT(ev.message.find("Mineral deposit depleted") != std::string::npos);
   }
 
+  // --- Trade agreement economy bonus ---
+  //
+  // A trade agreement should provide a small, deterministic bonus to
+  // economic output (research/industry/shipyard/construction). This ensures
+  // diplomacy has tangible economic consequences.
+  {
+    ContentDB content_trade;
+    InstallationDef lab;
+    lab.id = "research_lab";
+    lab.name = "Research Lab";
+    lab.research_points_per_day = 10.0;
+    content_trade.installations[lab.id] = lab;
+
+    Simulation sim_trade(content_trade, SimConfig{});
+    GameState st;
+    st.save_version = GameState{}.save_version;
+
+    Faction fa;
+    fa.id = 1;
+    fa.name = "A";
+    fa.control = FactionControl::Player;
+    st.factions[fa.id] = fa;
+
+    Faction fb;
+    fb.id = 2;
+    fb.name = "B";
+    fb.control = FactionControl::AI_Passive;
+    st.factions[fb.id] = fb;
+
+    StarSystem sys;
+    sys.id = 1;
+    sys.name = "Sys";
+    st.systems[sys.id] = sys;
+
+    Body body;
+    body.id = 1;
+    body.name = "Planet";
+    body.type = BodyType::Planet;
+    body.system_id = sys.id;
+    body.orbit_radius_mkm = 0.0;
+    body.orbit_period_days = 1.0;
+    body.orbit_phase_radians = 0.0;
+    st.bodies[body.id] = body;
+    st.systems[sys.id].bodies.push_back(body.id);
+
+    Colony col;
+    col.id = 1;
+    col.name = "Col";
+    col.faction_id = fa.id;
+    col.body_id = body.id;
+    col.installations = {{"research_lab", 1}};
+    st.colonies[col.id] = col;
+
+    st.next_id = 100;
+
+    sim_trade.load_game(std::move(st));
+
+    std::string err;
+    const Id tid = sim_trade.create_treaty(fa.id, fb.id, TreatyType::TradeAgreement, /*duration_days=*/-1,
+                                           /*push_event=*/false, &err);
+    N4X_ASSERT(tid != kInvalidId);
+
+    sim_trade.advance_days(1);
+    const auto& fac_out = sim_trade.state().factions.at(fa.id);
+    // 10 RP/day * (1 + 0.05 per trade partner) = 10.5
+    N4X_ASSERT(std::abs(fac_out.research_points - 10.5) < 1e-9);
+  }
+
   return 0;
 }

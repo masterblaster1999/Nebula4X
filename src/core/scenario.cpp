@@ -384,6 +384,35 @@ GameState make_sol_scenario() {
   (void)add_ship(pirates, centauri, pirate_pos, "Raider I", "pirate_raider");
   (void)add_ship(pirates, centauri, pirate_pos + Vec2{0.7, -0.3}, "Raider II", "pirate_raider");
 
+  // --- Anomalies (investigation targets) ---
+  {
+    auto add_anomaly = [&](Id system_id, const std::string& name, const std::string& kind, const Vec2& pos_mkm,
+                           int investigation_days, double research_reward, const std::string& unlock_component_id) {
+      const Id id = allocate_id(s);
+      Anomaly a;
+      a.id = id;
+      a.name = name;
+      a.kind = kind;
+      a.system_id = system_id;
+      a.position_mkm = pos_mkm;
+      a.investigation_days = std::max(1, investigation_days);
+      a.research_reward = research_reward;
+      a.unlock_component_id = unlock_component_id;
+      s.anomalies[id] = std::move(a);
+      return id;
+    };
+
+    // A small early-game target in the home system.
+    (void)add_anomaly(sol, "Strange Lunar Echo", "signal", earth_pos + Vec2{4.2, 0.6}, 6, 150.0, "sensor_mk2");
+
+    // A more ambitious site in pirate space.
+    (void)add_anomaly(centauri, "Derelict Xeno Beacon", "artifact", pirate_pos + Vec2{6.0, -2.0}, 10, 240.0,
+                      "stealth_coating_mk1");
+
+    // A quick curiosity to encourage scouting.
+    (void)add_anomaly(barnard, "Micrometeorite Halo", "phenomenon", Vec2{55.0, 30.0}, 4, 90.0, "");
+  }
+
   return s;
 }
 
@@ -3062,6 +3091,188 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
       }
     }
 
+  }
+
+  // --- Anomalies (procedural investigation targets) ---
+  // Placed as stationary points of interest that can be investigated by ships.
+  {
+    std::mt19937 arng(seed ^ 0xA11E0B7Bu);
+
+    auto add_anomaly = [&](Id system_id, const std::string& name, const std::string& kind, const Vec2& pos_mkm,
+                           int investigation_days, double research_reward, const std::string& unlock_component_id) -> Id {
+      const Id aid = allocate_id(s);
+      Anomaly a;
+      a.id = aid;
+      a.name = name;
+      a.kind = kind;
+      a.system_id = system_id;
+      a.position_mkm = pos_mkm;
+      a.investigation_days = std::max(1, investigation_days);
+      a.research_reward = research_reward;
+      a.unlock_component_id = unlock_component_id;
+      s.anomalies[aid] = std::move(a);
+      return aid;
+    };
+
+    auto random_offset = [&](double r_lo, double r_hi) {
+      const double r = rand_real(arng, r_lo, r_hi);
+      const double a = rand_real(arng, 0.0, kTwoPi);
+      return Vec2{r * std::cos(a), r * std::sin(a)};
+    };
+
+    // Compute a global ruins average to scale how many anomalies are spawned.
+    double ruins_sum = 0.0;
+    int ruins_n = 0;
+    for (const auto& si : systems) {
+      const Region* reg = find_ptr(s.regions, si.region_id);
+      ruins_sum += reg ? clamp01(reg->ruins_density) : 0.0;
+      ruins_n += 1;
+    }
+    const double ruins_avg = (ruins_n > 0) ? (ruins_sum / static_cast<double>(ruins_n)) : 0.0;
+
+    int target_total = static_cast<int>(std::llround(static_cast<double>(num_systems) * (0.09 + 0.11 * ruins_avg)));
+    target_total = std::clamp(target_total, 1, 20);
+
+    // Always place a small, low-risk anomaly in the home system so the mechanic
+    // is discoverable in any random start.
+    {
+      const auto* hs = find_ptr(s.systems, home_system);
+      double ext = 140.0;
+      if (hs) {
+        for (Id bid : hs->bodies) {
+          const auto* b = find_ptr(s.bodies, bid);
+          if (!b) continue;
+          ext = std::max(ext, b->position_mkm.length());
+        }
+      }
+      const Vec2 pos = random_offset(45.0, std::max(95.0, ext * 0.35));
+      add_anomaly(home_system, "Distorted Signal", "signal", pos, 5, 90.0, "");
+    }
+
+    // Candidates across the galaxy, weighted by ruins density and distance.
+    struct Cand {
+      const SysInfo* sys{nullptr};
+      double ruins{0.0};
+      double neb{0.0};
+      double dist_norm{0.0};
+      double w{0.0};
+    };
+
+    std::vector<Cand> cands;
+    cands.reserve(systems.size());
+    const Vec2 home_pos = systems.front().galaxy_pos;
+
+    double max_dist = 1e-6;
+    for (const auto& si : systems) {
+      const double d = (si.galaxy_pos - home_pos).length();
+      if (d > max_dist) max_dist = d;
+    }
+
+    for (const auto& si : systems) {
+      if (si.id == kInvalidId) continue;
+      if (si.id == home_system) continue;
+
+      const Region* reg = find_ptr(s.regions, si.region_id);
+      const double ruins = reg ? clamp01(reg->ruins_density) : 0.0;
+      const double neb = clamp01(si.nebula_density);
+      const double dn = std::clamp((si.galaxy_pos - home_pos).length() / max_dist, 0.0, 1.0);
+
+      double w = (0.20 + 2.30 * ruins) * (0.55 + 0.85 * dn) * (0.90 + 0.40 * neb);
+      if (w <= 0.0) continue;
+
+      cands.push_back({&si, ruins, neb, dn, w});
+    }
+
+    // Small, safe component unlock pool (optional).
+    std::vector<std::string> unlock_pool = {
+        "sensor_mk2",
+        "laser_mk2",
+        "armor_mk2",
+        "shield_mk1",
+        "reactor_mk2",
+        "engine_ion_mk1",
+        "stealth_coating_mk1",
+    };
+
+    static const std::array<const char*, 8> kKinds = {
+        "signal",
+        "artifact",
+        "ruins",
+        "phenomenon",
+        "anomaly",
+        "distortion",
+        "echo",
+        "cache",
+    };
+
+    static const std::array<const char*, 10> kNames = {
+        "Strange Beacon",
+        "Ancient Probe",
+        "Temporal Echo",
+        "Gravitic Lens",
+        "Subspace Ripple",
+        "Encrypted Burst",
+        "Dark Matter Knot",
+        "Xeno Artifact",
+        "Forgotten Array",
+        "Silent Relay",
+    };
+
+    // Already placed 1 in home.
+    int remaining = std::max(0, target_total - 1);
+    for (int i = 0; i < remaining && !cands.empty(); ++i) {
+      double total = 0.0;
+      for (const auto& c : cands) total += c.w;
+      if (total <= 0.0) break;
+
+      double t = rand_real(arng, 0.0, total);
+      std::size_t sel = 0;
+      for (std::size_t j = 0; j < cands.size(); ++j) {
+        t -= cands[j].w;
+        if (t <= 0.0) {
+          sel = j;
+          break;
+        }
+      }
+
+      const SysInfo* si = cands[sel].sys;
+      const double ruins = cands[sel].ruins;
+      const double neb = cands[sel].neb;
+      const double dn = cands[sel].dist_norm;
+
+      // Prefer placing anomalies near jump points for discoverability.
+      Vec2 pos = random_offset(70.0, std::max(180.0, si ? (si->max_orbit_extent_mkm + 90.0) : 180.0));
+      if (si) {
+        if (const auto* ss = find_ptr(s.systems, si->id); ss && !ss->jump_points.empty() && rand_unit(arng) < 0.55) {
+          const Id jpid = ss->jump_points[static_cast<std::size_t>(rand_int(arng, 0, (int)ss->jump_points.size() - 1))];
+          if (const auto* jp = find_ptr(s.jump_points, jpid)) {
+            pos = jp->position_mkm + random_offset(10.0, 36.0);
+          }
+        }
+      }
+
+      const char* kind = kKinds[static_cast<std::size_t>(rand_int(arng, 0, (int)kKinds.size() - 1))];
+      const char* base = kNames[static_cast<std::size_t>(rand_int(arng, 0, (int)kNames.size() - 1))];
+      const std::string sys_name = si ? si->name : std::string("Unknown");
+      const std::string nm = std::string(base) + " (" + sys_name + ")";
+
+      // Investigation time and rewards scale with ruins density and distance.
+      const int days = std::clamp(4 + static_cast<int>(std::llround(6.0 * ruins + 4.0 * dn + rand_real(arng, 0.0, 4.0))), 3,
+                                  18);
+
+      const double rp = std::max(0.0, rand_real(arng, 60.0, 140.0) * (0.75 + 0.55 * dn) + 260.0 * ruins + 60.0 * neb);
+
+      std::string unlock;
+      if (!unlock_pool.empty() && rand_unit(arng) < 0.22) {
+        unlock = unlock_pool[static_cast<std::size_t>(rand_int(arng, 0, (int)unlock_pool.size() - 1))];
+      }
+
+      if (si) {
+        add_anomaly(si->id, nm, kind, pos, days, rp, unlock);
+      }
+
+      cands.erase(cands.begin() + static_cast<std::vector<Cand>::difference_type>(sel));
+    }
   }
 
   // --- Colonies ---

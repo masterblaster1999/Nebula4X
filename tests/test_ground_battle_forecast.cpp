@@ -83,7 +83,7 @@ int test_ground_battle_forecast() {
     b.defender_strength = 10.0;
     sim.state().ground_battles[colony_id] = b;
 
-    const GroundBattleForecast fc = forecast_ground_battle(sim.cfg(), b.attacker_strength, b.defender_strength, forts);
+    const GroundBattleForecast fc = forecast_ground_battle(sim.cfg(), b.attacker_strength, b.defender_strength, forts, 0.0);
     N4X_ASSERT(fc.ok);
     N4X_ASSERT(!fc.truncated);
     N4X_ASSERT(fc.days_to_resolve == 1);
@@ -126,8 +126,9 @@ int test_ground_battle_forecast() {
     N4X_ASSERT(std::abs(forts - 100.0) < 1e-9);
 
     const double bonus = 1.0 + forts * cfg.fortification_defense_scale;
-    const double expected_req = std::sqrt(bonus) * col.ground_forces;
-    const double req = square_law_required_attacker_strength(sim.cfg(), col.ground_forces, forts);
+    const double off = 1.0 + forts * cfg.fortification_attack_scale;
+    const double expected_req = std::sqrt(bonus * off) * col.ground_forces;
+    const double req = square_law_required_attacker_strength(sim.cfg(), col.ground_forces, forts, 0.0);
     N4X_ASSERT(std::abs(req - expected_req) < 1e-6);
 
     GroundBattle b;
@@ -137,7 +138,7 @@ int test_ground_battle_forecast() {
     b.defender_strength = 100.0;
     sim.state().ground_battles[colony_id] = b;
 
-    const GroundBattleForecast fc = forecast_ground_battle(sim.cfg(), b.attacker_strength, b.defender_strength, forts);
+    const GroundBattleForecast fc = forecast_ground_battle(sim.cfg(), b.attacker_strength, b.defender_strength, forts, 0.0);
     N4X_ASSERT(fc.ok);
     N4X_ASSERT(!fc.truncated);
     N4X_ASSERT(fc.days_to_resolve > 0);

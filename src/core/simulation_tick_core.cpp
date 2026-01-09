@@ -10,6 +10,7 @@
 #include <cstring>
 #include <iomanip>
 #include <limits>
+#include <map>
 #include <optional>
 #include <queue>
 #include <sstream>
@@ -35,6 +36,7 @@ using sim_internal::sorted_keys;
 using sim_internal::faction_has_tech;
 using sim_internal::FactionEconomyMultipliers;
 using sim_internal::compute_faction_economy_multipliers;
+using sim_internal::sync_intel_between_factions;
 using sim_internal::compute_power_allocation;
 
 using sim_sensors::SensorSource;
@@ -291,6 +293,52 @@ void Simulation::tick_treaties() {
       }
     }
     ++it;
+  }
+
+  // Ongoing intel sharing for treaties that imply chart exchange. We do this
+  // once per day (here) rather than per sub-tick, and without events to avoid
+  // spamming the log.
+  //
+  // Notes:
+  // - Alliances share contacts in addition to maps.
+  // - Trade Agreements exchange maps (discovered systems + surveyed jump points)
+  //   but do not share contacts.
+  // - Multiple treaties can exist between the same pair; pick the strongest
+  //   sharing policy for the pair.
+  std::map<std::pair<Id, Id>, bool> share_contacts_by_pair;
+  for (Id tid : sorted_keys(state_.treaties)) {
+    const Treaty& t = state_.treaties.at(tid);
+    bool share_map = false;
+    bool share_contacts = false;
+    if (t.type == TreatyType::Alliance) {
+      share_map = true;
+      share_contacts = true;
+    } else if (t.type == TreatyType::TradeAgreement) {
+      share_map = true;
+      share_contacts = false;
+    }
+    if (!share_map) continue;
+
+    Id a = t.faction_a;
+    Id b = t.faction_b;
+    if (b < a) std::swap(a, b);
+    const auto key = std::make_pair(a, b);
+    auto it = share_contacts_by_pair.find(key);
+    if (it == share_contacts_by_pair.end()) {
+      share_contacts_by_pair.emplace(key, share_contacts);
+    } else if (share_contacts) {
+      // Upgrade (Trade -> Alliance).
+      it->second = true;
+    }
+  }
+
+  bool route_cache_dirty = false;
+  for (const auto& [key, share_contacts] : share_contacts_by_pair) {
+    const auto d = sync_intel_between_factions(state_, key.first, key.second, share_contacts);
+    route_cache_dirty = route_cache_dirty || d.route_cache_dirty;
+  }
+  if (route_cache_dirty) {
+    invalidate_jump_route_cache();
   }
 }
 

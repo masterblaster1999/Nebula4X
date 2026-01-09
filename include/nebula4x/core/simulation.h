@@ -385,6 +385,35 @@ struct SimConfig {
   // Defender losses are divided by (1 + forts * fortification_defense_scale).
   double fortification_defense_scale{0.01};
 
+  // Fortification offensive effectiveness scale.
+  //
+  // Attacker losses are multiplied by (1 + forts * fortification_attack_scale).
+  //
+  // This models the defender's prepared positions (trenches, bunkers, minefields)
+  // translating into higher attacker attrition.
+  double fortification_attack_scale{0.005};
+
+  // Defender ground fire support from weapon installations.
+  //
+  // Installations with weapon_damage contribute additional attacker casualties
+  // during ground combat:
+  //   artillery_loss = weapon_damage_total * ground_combat_defender_artillery_strength_per_weapon_damage
+  //
+  // Set to 0 to disable the effect.
+  double ground_combat_defender_artillery_strength_per_weapon_damage{0.15};
+
+  // Fortification degradation during ground combat.
+  //
+  // Each day, attackers accumulate fortification damage:
+  //   fortification_damage += attacker_strength * ground_combat_fortification_damage_per_attacker_strength_day
+  //
+  // Effective fortification points are reduced by this accumulated damage. At
+  // battle resolution, the damage is applied by destroying fortification
+  // installations on the colony.
+  //
+  // Set to 0 to disable fortification degradation.
+  double ground_combat_fortification_damage_per_attacker_strength_day{0.005};
+
   // --- Terraforming ---
   // Temperature change (Kelvin) per terraforming point per day.
   double terraforming_temp_k_per_point_day{0.1};
@@ -487,6 +516,45 @@ struct SimConfig {
 
   // If true, auto-troop considers ongoing defensive ground battles as urgent troop needs.
   bool auto_troop_consider_active_battles{true};
+
+  // --- Dynamic piracy / raids ---
+  //
+  // When enabled, AI pirate factions can spawn occasional "raid" groups in
+  // systems with high piracy risk and valuable civilian activity (freighters,
+  // colonies). This keeps the mid/late game from becoming permanently "safe"
+  // after the initial pirate forces are defeated.
+  bool enable_pirate_raids{true};
+
+  // Baseline daily probability (per pirate faction) to attempt spawning a raid.
+  // The final chance is scaled by target value, piracy risk, and a per-faction
+  // cap on total pirate ships.
+  double pirate_raid_base_chance_per_day{0.02};
+
+  // Default piracy risk (0..1) used for systems that are not assigned to a
+  // procedural Region (e.g. the handcrafted Sol scenario).
+  double pirate_raid_default_system_risk{0.25};
+
+  // Risk exponent used when weighting candidate raid target systems.
+  // Higher values concentrate raids more heavily in the highest-risk areas.
+  double pirate_raid_risk_exponent{1.5};
+
+  // Hard cap on the number of ships a single pirate faction is allowed to have
+  // before raid spawning pauses.
+  int pirate_raid_max_total_ships_per_faction{18};
+
+  // Don't spawn new raids into a system that already has more than this many
+  // pirate ships present (helps prevent stacking multiple raids in one place).
+  int pirate_raid_max_existing_pirate_ships_in_target_system{2};
+
+  // Min/max ships spawned for a single raid (clamped by remaining capacity
+  // under pirate_raid_max_total_ships_per_faction).
+  int pirate_raid_min_spawn_ships{1};
+  int pirate_raid_max_spawn_ships{3};
+
+  // If true, log a General event when a raid is spawned in a system discovered
+  // by a player faction. (Contacts are still revealed via the existing
+  // detection/intel event system.)
+  bool pirate_raid_log_event{false};
 };
 
 // Optional context passed when recording a persistent simulation event.
@@ -865,6 +933,7 @@ class Simulation {
                                   bool restrict_to_discovered = false);
   bool issue_fleet_salvage_wreck(Id fleet_id, Id wreck_id, const std::string& mineral, double tons = 0.0,
                                  bool restrict_to_discovered = false);
+  bool issue_fleet_investigate_anomaly(Id fleet_id, Id anomaly_id, bool restrict_to_discovered = false);
   bool issue_fleet_transfer_cargo_to_ship(Id fleet_id, Id target_ship_id, const std::string& mineral, double tons = 0.0,
                                           bool restrict_to_discovered = false);
   bool issue_fleet_scrap_ship(Id fleet_id, Id colony_id, bool restrict_to_discovered = false);
@@ -952,6 +1021,13 @@ class Simulation {
   // enqueue TravelViaJump steps before the salvage order.
   bool issue_salvage_wreck(Id ship_id, Id wreck_id, const std::string& mineral, double tons = 0.0,
                            bool restrict_to_discovered = false);
+
+  // Exploration anomalies.
+  // Move to an anomaly and (once implemented) investigate it for rewards.
+  //
+  // If the anomaly is in another system, the simulation will automatically
+  // enqueue TravelViaJump steps before the investigation order.
+  bool issue_investigate_anomaly(Id ship_id, Id anomaly_id, bool restrict_to_discovered = false);
 
     // Mobile mining.
   // Mine minerals directly from a body's deposits into the ship's cargo hold.
@@ -1194,6 +1270,7 @@ bool move_construction_order(Id colony_id, int from_index, int to_index);
   void tick_shipyards(double dt_days);
   void tick_construction(double dt_days);
   void tick_ai();
+  void tick_pirate_raids();
   void tick_treaties();
   void tick_refuel();
   void tick_ships(double dt_days);

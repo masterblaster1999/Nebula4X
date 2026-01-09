@@ -48,6 +48,7 @@ GroundBattleForecast forecast_ground_battle(const SimConfig& cfg,
                                             double attacker_strength,
                                             double defender_strength,
                                             double fort_points,
+                                            double defender_artillery_weapon_damage_per_day,
                                             const GroundBattleForecastOptions& opt = {});
 
 // Quick analytic estimator based on the (continuous) Lanchester square law.
@@ -59,6 +60,7 @@ GroundBattleForecast forecast_ground_battle(const SimConfig& cfg,
 double square_law_required_attacker_strength(const SimConfig& cfg,
                                             double defender_strength,
                                             double fort_points,
+                                            double defender_artillery_weapon_damage_per_day,
                                             double margin_factor = 1.0);
 
 const char* ground_battle_winner_label(GroundBattleWinner w);

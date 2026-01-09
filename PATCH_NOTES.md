@@ -1,3 +1,55 @@
+## r81: Ground combat overhaul (artillery, breaches, persistent fort damage)
+
+This round deepens ground warfare so that invasions are no longer just a raw troop-count race:
+
+- **Fortifications now increase attacker losses** (defenders fight from prepared positions).
+  - New tuning knob: `SimConfig::fortification_attack_scale`.
+- **Defender artillery support from installation weapons:** installations with `weapon_damage` now contribute additional daily attacker casualties during ground combat.
+  - New tuning knob: `SimConfig::ground_combat_defender_artillery_strength_per_weapon_damage`.
+- **Fortifications can be breached over time:** while a ground battle is active, attackers progressively degrade the colony’s *effective* fortification points.
+  - New tuning knob: `SimConfig::ground_combat_fortification_damage_per_attacker_strength_day`.
+  - The accumulated damage is **persistent**: when the battle resolves, the simulation applies the damage by destroying fortification installations on the colony.
+- **Forecast + UI/Planner updates:**
+  - `forecast_ground_battle(...)` and `square_law_required_attacker_strength(...)` now take an additional input: defender artillery weapon damage per day.
+  - The invasion advisor shows defender artillery and the ground-battle forecast reflects breaches + artillery.
+- **State tracking:** `GroundBattle` now tracks `fortification_damage_points` (serialized and included in state digest).
+
+
+## r80: Treaties now block hostile orders (ceasefires finally mean ceasefire)
+
+Diplomatic treaties now have teeth:
+
+- **Hostile orders are blocked under treaty:** `AttackShip`, `BombardColony`, and `InvadeColony` will not be issued while *any active treaty* exists between the two factions.
+- **Queued hostile orders won’t auto-break treaties:** if a ceasefire/non-aggression pact/etc. becomes active while hostile orders are already queued, those orders are **cancelled** instead of immediately forcing a return to Hostile status.
+- **Tests updated:** diplomacy tests now verify that ceasefires prevent hostile orders during their duration and expire correctly.
+- **Bugfix:** random scenario anomaly placement no longer references a non-existent `StarSystem::max_orbit_extent_mkm`; orbit extent is estimated from existing body positions.
+
+
+
+## r79: Treaty-driven intel exchange + trade agreement economic bonus
+
+Diplomacy is now more than a stance override:
+
+- **Immediate intel exchange on treaty signing/renewal:**
+  - **Alliance:** exchanges star charts (discovered systems), jump-point survey data, and contact intelligence.
+  - **Trade agreement:** exchanges star charts and jump-point survey data (but **does not** exchange contacts).
+- **Ongoing daily intel sync:** alliances and trade agreements keep shared charts/surveys synchronized each day (quietly, without spamming the event log).
+- **Trade agreement economy bonus:** each active trade partner provides a small, deterministic boost to **research / industry / construction / shipyard output** (currently **+5% per partner**, capped at **+25%**).
+
+This makes treaty choices immediately impactful for exploration/logistics and gives trade agreements real strategic value.
+
+
+## r78: Dynamic pirate raids (region pirate risk matters)
+
+This round makes piracy an **ongoing strategic pressure** instead of a one-time scenario setup:
+
+- **Dynamic pirate raids:** AI pirate factions can now spawn occasional raider groups each day.
+- **Risk-driven targeting:** target systems are weighted by **region `pirate_risk`** (or a default risk for scenarios without regions) and the presence of valuable prey (freighters, colonies).
+- **Ambush flavor:** raiders spawn near the closest jump point to their target (when available), run **Active sensors**, and immediately pursue their victim.
+
+Tuning knobs live in `SimConfig` (`enable_pirate_raids`, `pirate_raid_base_chance_per_day`, `pirate_raid_max_total_ships_per_faction`, etc.).
+
+
 ## r77: Salvage research + reverse engineering
 
 This round makes **wreck salvage** a more meaningful strategic lever:
@@ -395,8 +447,8 @@ Apply by copying the files over the repo (drag/drop into GitHub's "Upload files"
 ### r56: Ground battle forecast + invasion advisor + planner integration
 
 - Core: add `ground_battle_forecast`:
-  - `forecast_ground_battle(cfg, attacker, defender, forts)` mirrors the daily loss model in `tick_ground_combat`.
-  - `square_law_required_attacker_strength(cfg, defender, forts, margin)` gives a quick baseline for “how many troops do I need?”.
+  - `forecast_ground_battle(cfg, attacker, defender, forts, defender_artillery_weapon_damage_per_day)` mirrors the daily loss model in `tick_ground_combat`.
+  - `square_law_required_attacker_strength(cfg, defender, forts, defender_artillery_weapon_damage_per_day, margin)` gives a quick baseline for “how many troops do I need?”.
   - Utility `ground_battle_winner_label()` for lightweight UI string output.
 
 - Planner: optional inclusion of **ground battle resolution forecasts** (category: Combat).

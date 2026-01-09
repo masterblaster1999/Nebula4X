@@ -155,10 +155,195 @@ int test_diplomacy() {
   N4X_ASSERT(it_t->second.type == TreatyType::Ceasefire, "treaty type preserved");
   N4X_ASSERT(it_t->second.duration_days == 3, "treaty duration preserved");
 
+  // While a treaty is active, hostile orders should be blocked.
+  N4X_ASSERT(!sim.issue_attack_ship(s1.id, s2.id, /*fog_of_war=*/false), "issue_attack_ship blocked by ceasefire");
+
+  // Advancing time should not break the treaty due to pre-existing queued hostile orders.
+  sim.advance_days(1);
+  N4X_ASSERT(!sim.treaties_between(f1.id, f2.id).empty(), "treaty still active after 1 day");
+  N4X_ASSERT(sim.diplomatic_status(f1.id, f2.id) != DiplomacyStatus::Hostile, "still not hostile under ceasefire");
+
+  // The previously queued AttackShip order should have been cancelled by the ceasefire.
+  {
+    const auto it_so = sim.state().ship_orders.find(s1.id);
+    N4X_ASSERT(it_so != sim.state().ship_orders.end(), "ship orders exist for s1");
+    N4X_ASSERT(it_so->second.queue.empty(), "queued hostile orders cleared under ceasefire");
+  }
+
   // Expiration (duration measured in whole days from creation).
-  sim.advance_days(3);
+  sim.advance_days(2);
   N4X_ASSERT(sim.treaties_between(f1.id, f2.id).empty(), "treaty expired and removed");
   N4X_ASSERT(sim.diplomatic_status(f1.id, f2.id) == DiplomacyStatus::Hostile, "after expiry, default hostility returns");
+
+  // --- Treaty intel sharing (Alliance vs Trade Agreement) ---
+  // Alliances should immediately exchange star charts *and* contact intel.
+  // Trade agreements should exchange star charts but not share contacts.
+  {
+    ContentDB c2;
+    Simulation sim2(c2, SimConfig{});
+
+    GameState st2;
+    st2.save_version = GameState{}.save_version;
+
+    Faction a;
+    a.id = 1;
+    a.name = "Alpha";
+    st2.factions[a.id] = a;
+
+    Faction b;
+    b.id = 2;
+    b.name = "Beta";
+    st2.factions[b.id] = b;
+
+    // Two systems; Alpha has a ship in Sys-2 so only Alpha knows it initially.
+    StarSystem sys1;
+    sys1.id = 1;
+    sys1.name = "Sys-1";
+    st2.systems[sys1.id] = sys1;
+
+    StarSystem sys2;
+    sys2.id = 2;
+    sys2.name = "Sys-2";
+    st2.systems[sys2.id] = sys2;
+
+    // A jump point in Sys-2 so survey sharing can be tested.
+    JumpPoint jp;
+    jp.id = 500;
+    jp.name = "JP";
+    jp.system_id = sys2.id;
+    st2.jump_points[jp.id] = jp;
+    st2.systems[sys2.id].jump_points.push_back(jp.id);
+
+    // Alpha's ship in Sys-2.
+    Ship sa;
+    sa.id = 10;
+    sa.name = "A";
+    sa.faction_id = a.id;
+    sa.system_id = sys2.id;
+    st2.ships[sa.id] = sa;
+    st2.systems[sys2.id].ships.push_back(sa.id);
+
+    // A third-party ship to serve as a contact that can be shared.
+    Ship sx;
+    sx.id = 300;
+    sx.name = "X";
+    sx.faction_id = 3;
+    sx.system_id = sys2.id;
+    st2.ships[sx.id] = sx;
+    st2.systems[sys2.id].ships.push_back(sx.id);
+
+    // Alpha has an intel contact for the third-party ship.
+    Contact cx;
+    cx.ship_id = sx.id;
+    cx.system_id = sys2.id;
+    cx.last_seen_day = 0;
+    cx.last_seen_faction_id = sx.faction_id;
+    cx.last_seen_position_mkm = Vec2{0.0, 0.0};
+    st2.factions[a.id].ship_contacts[cx.ship_id] = cx;
+
+    sim2.load_game(st2);
+
+    // Precondition: Beta does not know Sys-2 and has no contact.
+    {
+      const auto& db = sim2.state().factions.at(b.id).discovered_systems;
+      N4X_ASSERT(std::find(db.begin(), db.end(), sys2.id) == db.end(), "pre: trade target system is unknown to Beta");
+    }
+    N4X_ASSERT(sim2.state().factions.at(b.id).ship_contacts.find(sx.id) == sim2.state().factions.at(b.id).ship_contacts.end(),
+               "pre: contact not present for Beta");
+
+    std::string err;
+    const Id t_alliance = sim2.create_treaty(a.id, b.id, TreatyType::Alliance, /*duration_days=*/-1, /*push_event=*/false, &err);
+    N4X_ASSERT(t_alliance != kInvalidId, std::string("create_treaty(alliance) succeeds: ") + err);
+
+    // Alliance should exchange charts and contacts immediately.
+    {
+      const auto& db = sim2.state().factions.at(b.id).discovered_systems;
+      N4X_ASSERT(std::find(db.begin(), db.end(), sys2.id) != db.end(), "alliance shares discovered systems");
+    }
+    {
+      const auto& sj = sim2.state().factions.at(b.id).surveyed_jump_points;
+      N4X_ASSERT(std::find(sj.begin(), sj.end(), jp.id) != sj.end(), "alliance shares jump surveys");
+    }
+    N4X_ASSERT(sim2.state().factions.at(b.id).ship_contacts.find(sx.id) != sim2.state().factions.at(b.id).ship_contacts.end(),
+               "alliance shares contacts");
+  }
+
+  {
+    ContentDB c3;
+    Simulation sim3(c3, SimConfig{});
+
+    GameState st3;
+    st3.save_version = GameState{}.save_version;
+
+    Faction a;
+    a.id = 1;
+    a.name = "Alpha";
+    st3.factions[a.id] = a;
+
+    Faction b;
+    b.id = 2;
+    b.name = "Beta";
+    st3.factions[b.id] = b;
+
+    StarSystem sys1;
+    sys1.id = 1;
+    sys1.name = "Sys-1";
+    st3.systems[sys1.id] = sys1;
+
+    StarSystem sys2;
+    sys2.id = 2;
+    sys2.name = "Sys-2";
+    st3.systems[sys2.id] = sys2;
+
+    JumpPoint jp;
+    jp.id = 500;
+    jp.name = "JP";
+    jp.system_id = sys2.id;
+    st3.jump_points[jp.id] = jp;
+    st3.systems[sys2.id].jump_points.push_back(jp.id);
+
+    Ship sa;
+    sa.id = 10;
+    sa.name = "A";
+    sa.faction_id = a.id;
+    sa.system_id = sys2.id;
+    st3.ships[sa.id] = sa;
+    st3.systems[sys2.id].ships.push_back(sa.id);
+
+    Ship sx;
+    sx.id = 300;
+    sx.name = "X";
+    sx.faction_id = 3;
+    sx.system_id = sys2.id;
+    st3.ships[sx.id] = sx;
+    st3.systems[sys2.id].ships.push_back(sx.id);
+
+    Contact cx;
+    cx.ship_id = sx.id;
+    cx.system_id = sys2.id;
+    cx.last_seen_day = 0;
+    cx.last_seen_faction_id = sx.faction_id;
+    cx.last_seen_position_mkm = Vec2{0.0, 0.0};
+    st3.factions[a.id].ship_contacts[cx.ship_id] = cx;
+
+    sim3.load_game(st3);
+
+    std::string err;
+    const Id t_trade = sim3.create_treaty(a.id, b.id, TreatyType::TradeAgreement, /*duration_days=*/-1, /*push_event=*/false, &err);
+    N4X_ASSERT(t_trade != kInvalidId, std::string("create_treaty(trade) succeeds: ") + err);
+
+    // Trade agreement should share charts, but not contacts.
+    {
+      const auto& db = sim3.state().factions.at(b.id).discovered_systems;
+      N4X_ASSERT(std::find(db.begin(), db.end(), sys2.id) != db.end(), "trade shares discovered systems");
+    }
+    {
+      const auto& sj = sim3.state().factions.at(b.id).surveyed_jump_points;
+      N4X_ASSERT(std::find(sj.begin(), sj.end(), jp.id) != sj.end(), "trade shares jump surveys");
+    }
+    N4X_ASSERT(sim3.state().factions.at(b.id).ship_contacts.find(sx.id) == sim3.state().factions.at(b.id).ship_contacts.end(),
+               "trade does not share contacts");
+  }
 
   return 0;
 }

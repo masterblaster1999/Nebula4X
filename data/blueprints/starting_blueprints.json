@@ -67,6 +67,22 @@
       "damage": 8,
       "weapon_range_mkm": 6
     },
+    "missile_rack_mk1": {
+      "name": "Missile Rack Mk.I",
+      "type": "weapon",
+      "mass_tons": 25,
+      "missile_damage": 18,
+      "missile_range_mkm": 12,
+      "missile_speed_mkm_per_day": 4.0,
+      "missile_reload_days": 3
+    },
+    "pd_laser_mk1": {
+      "name": "Point Defense Laser Mk.I",
+      "type": "weapon",
+      "mass_tons": 15,
+      "point_defense_damage": 10,
+      "point_defense_range_mkm": 2.5
+    },
     "armor_mk1": {
       "name": "Armor Plating",
       "type": "armor",
@@ -186,6 +202,7 @@
         "engine_chem_mk1",
         "sensor_mk1",
         "laser_mk1",
+        "pd_laser_mk1",
         "armor_mk1",
         "fuel_tank_mk1"
       ]
@@ -211,7 +228,7 @@
       "components": [
         "engine_chem_mk1",
         "sensor_mk1",
-        "laser_mk1",
+        "missile_rack_mk1",
         "laser_mk1",
         "armor_mk1",
         "fuel_tank_mk1"

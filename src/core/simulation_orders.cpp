@@ -37,9 +37,20 @@ using sim_internal::faction_has_tech;
 using sim_internal::FactionEconomyMultipliers;
 using sim_internal::compute_faction_economy_multipliers;
 using sim_internal::compute_power_allocation;
+using sim_internal::strongest_active_treaty_between;
 
 using sim_nav::PredictedNavState;
 using sim_nav::predicted_nav_state_after_queued_jumps;
+
+const char* treaty_type_display_name(TreatyType t) {
+  switch (t) {
+    case TreatyType::Ceasefire: return "ceasefire";
+    case TreatyType::NonAggressionPact: return "non-aggression pact";
+    case TreatyType::Alliance: return "alliance";
+    case TreatyType::TradeAgreement: return "trade agreement";
+  }
+  return "treaty";
+}
 } // namespace
 
 bool Simulation::clear_orders(Id ship_id) {
@@ -987,6 +998,18 @@ bool Simulation::issue_fleet_salvage_wreck(Id fleet_id, Id wreck_id, const std::
   return any;
 }
 
+
+bool Simulation::issue_fleet_investigate_anomaly(Id fleet_id, Id anomaly_id, bool restrict_to_discovered) {
+  prune_fleets();
+  const auto* fl = find_ptr(state_.fleets, fleet_id);
+  if (!fl) return false;
+  bool any = false;
+  for (Id sid : fl->ship_ids) {
+    if (issue_investigate_anomaly(sid, anomaly_id, restrict_to_discovered)) any = true;
+  }
+  return any;
+}
+
 bool Simulation::issue_fleet_transfer_cargo_to_ship(Id fleet_id, Id target_ship_id, const std::string& mineral,
                                                     double tons, bool restrict_to_discovered) {
   prune_fleets();
@@ -1112,6 +1135,24 @@ bool Simulation::issue_attack_ship(Id attacker_ship_id, Id target_ship_id, bool 
   if (!target) return false;
   if (target->faction_id == attacker->faction_id) return false;
 
+  // If there is an active treaty between the factions, require the player/AI to
+  // explicitly cancel the treaty / declare hostilities first. This prevents
+  // ceasefires and other agreements from being immediately broken by queued
+  // attack orders.
+  TreatyType tt = TreatyType::Ceasefire;
+  if (strongest_active_treaty_between(state_, attacker->faction_id, target->faction_id, &tt)) {
+    std::ostringstream oss;
+    oss << "Attack order blocked by active " << treaty_type_display_name(tt)
+        << " between factions.";
+    EventContext ctx;
+    ctx.faction_id = attacker->faction_id;
+    ctx.faction_id2 = target->faction_id;
+    ctx.ship_id = attacker_ship_id;
+    ctx.system_id = attacker->system_id;
+    this->push_event(EventLevel::Warn, EventCategory::Diplomacy, oss.str(), ctx);
+    return false;
+  }
+
   const bool detected = is_ship_detected_by_faction(attacker->faction_id, target_ship_id);
 
   AttackShip ord;
@@ -1231,6 +1272,29 @@ bool Simulation::issue_salvage_wreck(Id ship_id, Id wreck_id, const std::string&
 }
 
 
+
+bool Simulation::issue_investigate_anomaly(Id ship_id, Id anomaly_id, bool restrict_to_discovered) {
+  auto* ship = find_ptr(state_.ships, ship_id);
+  if (!ship) return false;
+  const auto* an = find_ptr(state_.anomalies, anomaly_id);
+  if (!an) return false;
+  if (an->resolved) return false;
+
+  const Id sys_id = an->system_id;
+  if (sys_id == kInvalidId) return false;
+  if (!find_ptr(state_.systems, sys_id)) return false;
+
+  if (!issue_travel_to_system(ship_id, sys_id, restrict_to_discovered, an->position_mkm)) return false;
+
+  InvestigateAnomaly ord;
+  ord.anomaly_id = anomaly_id;
+  ord.duration_days = std::max(0, an->investigation_days);
+
+  auto& orders = state_.ship_orders[ship_id];
+  orders.queue.push_back(std::move(ord));
+  return true;
+}
+
 bool Simulation::issue_mine_body(Id ship_id, Id body_id, const std::string& mineral,
                                 bool stop_when_cargo_full, bool restrict_to_discovered) {
   auto* ship = find_ptr(state_.ships, ship_id);
@@ -1349,6 +1413,20 @@ bool Simulation::issue_invade_colony(Id ship_id, Id colony_id, bool restrict_to_
   auto* colony = find_ptr(state_.colonies, colony_id);
   if (!colony) return false;
   if (colony->faction_id == ship->faction_id) return false;
+
+  TreatyType tt = TreatyType::Ceasefire;
+  if (strongest_active_treaty_between(state_, ship->faction_id, colony->faction_id, &tt)) {
+    std::ostringstream oss;
+    oss << "Invasion order blocked by active " << treaty_type_display_name(tt)
+        << " between factions.";
+    EventContext ctx;
+    ctx.faction_id = ship->faction_id;
+    ctx.faction_id2 = colony->faction_id;
+    ctx.ship_id = ship_id;
+    this->push_event(EventLevel::Warn, EventCategory::Diplomacy, oss.str(), ctx);
+    return false;
+  }
+
   const auto* body = find_ptr(state_.bodies, colony->body_id);
   if (!body) return false;
   if (body->system_id == kInvalidId) return false;
@@ -1367,6 +1445,20 @@ bool Simulation::issue_bombard_colony(Id ship_id, Id colony_id, int duration_day
   auto* colony = find_ptr(state_.colonies, colony_id);
   if (!colony) return false;
   if (colony->faction_id == ship->faction_id) return false;
+
+  TreatyType tt = TreatyType::Ceasefire;
+  if (strongest_active_treaty_between(state_, ship->faction_id, colony->faction_id, &tt)) {
+    std::ostringstream oss;
+    oss << "Bombardment order blocked by active " << treaty_type_display_name(tt)
+        << " between factions.";
+    EventContext ctx;
+    ctx.faction_id = ship->faction_id;
+    ctx.faction_id2 = colony->faction_id;
+    ctx.ship_id = ship_id;
+    this->push_event(EventLevel::Warn, EventCategory::Diplomacy, oss.str(), ctx);
+    return false;
+  }
+
   if (duration_days < -1) return false;
   if (duration_days == 0) return false;
 

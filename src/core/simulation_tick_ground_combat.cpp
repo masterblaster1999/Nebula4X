@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace nebula4x {
@@ -27,6 +28,7 @@ void Simulation::tick_ground_combat() {
   for (auto& [cid, b] : state_.ground_battles) {
     b.defender_strength = std::max(0.0, b.defender_strength);
     b.attacker_strength = std::max(0.0, b.attacker_strength);
+    b.fortification_damage_points = std::max(0.0, b.fortification_damage_points);
     if (auto* col = find_ptr(state_.colonies, cid)) {
       col->ground_forces = b.defender_strength;
     }
@@ -124,7 +126,80 @@ void Simulation::tick_ground_combat() {
   std::sort(battle_keys.begin(), battle_keys.end());
 
   const double loss_factor = std::max(0.0, cfg_.ground_combat_loss_factor);
-  const double fort_scale = std::max(0.0, cfg_.fortification_defense_scale);
+  const double fort_def_scale = std::max(0.0, cfg_.fortification_defense_scale);
+  const double fort_atk_scale = std::max(0.0, cfg_.fortification_attack_scale);
+  const double arty_strength_per_weapon = std::max(0.0, cfg_.ground_combat_defender_artillery_strength_per_weapon_damage);
+  const double fort_damage_rate = std::max(0.0, cfg_.ground_combat_fortification_damage_per_attacker_strength_day);
+
+  // Helper: total colony weapon damage/day from installations.
+  // (Used as a proxy for defender artillery / prepared fire support.)
+  auto colony_weapon_damage_per_day = [&](const Colony& c) -> double {
+    double dmg = 0.0;
+    for (const auto& [inst_id, count] : c.installations) {
+      if (count <= 0) continue;
+      const auto it = content_.installations.find(inst_id);
+      if (it == content_.installations.end()) continue;
+      const double wd = it->second.weapon_damage;
+      if (wd <= 0.0) continue;
+      dmg += wd * static_cast<double>(count);
+    }
+    return std::max(0.0, dmg);
+  };
+
+  // Apply accumulated fortification damage by destroying fortification installations.
+  //
+  // Returns (installations_destroyed, fort_points_destroyed).
+  auto apply_fortification_damage_to_colony = [&](Colony& c, double damage_points) -> std::pair<int, double> {
+    double dmg = clamp_nonneg(damage_points);
+    if (dmg <= 1e-9) return {0, 0.0};
+
+    std::vector<std::string> forts;
+    forts.reserve(c.installations.size());
+    for (const auto& [inst_id, count] : c.installations) {
+      if (count <= 0) continue;
+      const auto it = content_.installations.find(inst_id);
+      if (it == content_.installations.end()) continue;
+      if (it->second.fortification_points <= 0.0) continue;
+      forts.push_back(inst_id);
+    }
+    if (forts.empty()) return {0, 0.0};
+    std::sort(forts.begin(), forts.end());
+    forts.erase(std::unique(forts.begin(), forts.end()), forts.end());
+
+    int destroyed_inst = 0;
+    double destroyed_points = 0.0;
+
+    for (const auto& inst_id : forts) {
+      if (dmg <= 1e-9) break;
+      auto itc = c.installations.find(inst_id);
+      if (itc == c.installations.end() || itc->second <= 0) continue;
+      const int count = itc->second;
+      const auto itdef = content_.installations.find(inst_id);
+      if (itdef == content_.installations.end()) continue;
+      const double per = std::max(0.0, itdef->second.fortification_points);
+      if (per <= 1e-9) continue;
+
+      const double max_points = per * static_cast<double>(count);
+      const double spend = std::min(dmg, max_points);
+
+      int destroy = static_cast<int>(std::floor(spend / per + 1e-9));
+      const double rem = spend - static_cast<double>(destroy) * per;
+      // Deterministic rounding: if we have at least half an installation's worth
+      // of damage, destroy one additional installation (if any remain).
+      if (destroy < count && rem >= per * 0.5) destroy += 1;
+      destroy = std::clamp(destroy, 0, count);
+      if (destroy <= 0) continue;
+
+      itc->second = count - destroy;
+      if (itc->second <= 0) c.installations.erase(itc);
+
+      destroyed_inst += destroy;
+      destroyed_points += per * static_cast<double>(destroy);
+      dmg = clamp_nonneg(dmg - per * static_cast<double>(destroy));
+    }
+
+    return {destroyed_inst, destroyed_points};
+  };
 
   for (Id cid : battle_keys) {
     auto itb = state_.ground_battles.find(cid);
@@ -142,15 +217,34 @@ void Simulation::tick_ground_combat() {
     // may have reinforced it already.)
     b.defender_strength = std::max(0.0, b.defender_strength);
     b.attacker_strength = std::max(0.0, b.attacker_strength);
+    b.fortification_damage_points = clamp_nonneg(b.fortification_damage_points);
     col->ground_forces = b.defender_strength;
 
-    const double forts = std::max(0.0, fortification_points(*col));
-    const double defense_bonus = 1.0 + forts * fort_scale;
+    // Fortifications.
+    const double total_forts = std::max(0.0, fortification_points(*col));
+    if (total_forts <= 1e-9) b.fortification_damage_points = 0.0;
+    if (b.fortification_damage_points > total_forts) b.fortification_damage_points = total_forts;
 
-    // Losses proportional to opposing strength.
-    double attacker_loss = loss_factor * b.defender_strength;
-    double defender_loss = (defense_bonus > 1e-9) ? (loss_factor * b.attacker_strength / defense_bonus)
-                                                 : (loss_factor * b.attacker_strength);
+    const double eff_forts = std::max(0.0, total_forts - b.fortification_damage_points);
+    const double defense_bonus = 1.0 + eff_forts * fort_def_scale;
+    const double offense_bonus = 1.0 + eff_forts * fort_atk_scale;
+
+    // Defender artillery (installation weapon platforms). We scale it down as
+    // fortifications are degraded during the battle.
+    double arty_weapon = colony_weapon_damage_per_day(*col);
+    double fort_integrity = 1.0;
+    if (total_forts > 1e-9) {
+      fort_integrity = std::clamp(eff_forts / total_forts, 0.0, 1.0);
+    }
+    arty_weapon *= fort_integrity;
+    const double arty_loss = arty_weapon * arty_strength_per_weapon;
+
+    // Losses proportional to opposing strength, modified by fortifications and
+    // defender artillery.
+    double attacker_loss = loss_factor * b.defender_strength * offense_bonus + arty_loss;
+    double defender_loss = (defense_bonus > 1e-9)
+                               ? (loss_factor * b.attacker_strength / defense_bonus)
+                               : (loss_factor * b.attacker_strength);
 
     attacker_loss = std::min(attacker_loss, b.attacker_strength);
     defender_loss = std::min(defender_loss, b.defender_strength);
@@ -159,6 +253,12 @@ void Simulation::tick_ground_combat() {
     b.defender_strength = clamp_nonneg(b.defender_strength - defender_loss);
     b.days_fought += 1;
 
+    // Fortification degradation happens alongside combat.
+    if (fort_damage_rate > 1e-9 && total_forts > 1e-9 && b.attacker_strength > 1e-9) {
+      b.fortification_damage_points += b.attacker_strength * fort_damage_rate;
+      if (b.fortification_damage_points > total_forts) b.fortification_damage_points = total_forts;
+    }
+
     col->ground_forces = b.defender_strength;
 
     // Resolution.
@@ -166,6 +266,9 @@ void Simulation::tick_ground_combat() {
     const bool defender_dead = (b.defender_strength <= 1e-6);
 
     if (defender_dead && !attacker_dead) {
+      // Apply fortification damage before transferring ownership.
+      auto [fort_destroyed, _pts] = apply_fortification_damage_to_colony(*col, b.fortification_damage_points);
+
       // Colony captured.
       const Id old_owner = col->faction_id;
       col->faction_id = b.attacker_faction_id;
@@ -180,9 +283,16 @@ void Simulation::tick_ground_combat() {
       ctx.faction_id2 = old_owner;
       ctx.system_id = b.system_id;
       ctx.colony_id = col->id;
-      push_event(EventLevel::Warn, EventCategory::Combat,
-                 "Colony captured: " + col->name, ctx);
+      std::string msg = "Colony captured: " + col->name;
+      if (fort_destroyed > 0) {
+        msg += " (fortifications destroyed: " + std::to_string(fort_destroyed) + ")";
+      }
+      push_event(EventLevel::Warn, EventCategory::Combat, msg, ctx);
     } else if (attacker_dead) {
+      // Apply fortification damage (the attacker may have done lasting damage
+      // even if the invasion ultimately failed).
+      auto [fort_destroyed, _pts] = apply_fortification_damage_to_colony(*col, b.fortification_damage_points);
+
       // Defense holds.
       const Id attacker = b.attacker_faction_id;
       state_.ground_battles.erase(itb);
@@ -192,8 +302,11 @@ void Simulation::tick_ground_combat() {
       ctx.faction_id2 = attacker;
       ctx.system_id = b.system_id;
       ctx.colony_id = col->id;
-      push_event(EventLevel::Info, EventCategory::Combat,
-                 "Invasion repelled at " + col->name, ctx);
+      std::string msg = "Invasion repelled at " + col->name;
+      if (fort_destroyed > 0) {
+        msg += " (fortifications destroyed: " + std::to_string(fort_destroyed) + ")";
+      }
+      push_event(EventLevel::Info, EventCategory::Combat, msg, ctx);
     }
   }
 }

@@ -14,6 +14,7 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include <utility>
 
 #include "nebula4x/core/game_state.h"
 
@@ -66,6 +67,64 @@ inline std::vector<typename Map::key_type> sorted_keys(const Map& m) {
   for (const auto& [k, _] : m) keys.push_back(k);
   std::sort(keys.begin(), keys.end());
   return keys;
+}
+
+// Treaty helpers.
+//
+// Treaties are stored in GameState with faction ids normalized (faction_a < faction_b).
+// These helpers are intentionally small/cheap and are used to gate some
+// gameplay actions (e.g. issuing hostile orders) on active diplomatic treaties.
+inline int treaty_strength(TreatyType t) {
+  switch (t) {
+    case TreatyType::Alliance: return 4;
+    case TreatyType::TradeAgreement: return 3;
+    case TreatyType::NonAggressionPact: return 2;
+    case TreatyType::Ceasefire: return 1;
+  }
+  return 0;
+}
+
+inline bool treaty_is_active(const Treaty& t, std::int64_t now_day) {
+  const int dur = t.duration_days;
+  if (dur > 0) {
+    const std::int64_t end_day = t.start_day + static_cast<std::int64_t>(dur);
+    return now_day < end_day;
+  }
+  // duration_days <= 0 => indefinite (or legacy/invalid values treated as indefinite).
+  return true;
+}
+
+// Returns true if there is any active treaty between the two factions.
+// If out_strongest_type is non-null, it is set to the "strongest" active treaty type.
+// Strength order (high -> low): Alliance, TradeAgreement, NonAggressionPact, Ceasefire.
+inline bool strongest_active_treaty_between(const GameState& s, Id faction_a, Id faction_b,
+                                           TreatyType* out_strongest_type = nullptr) {
+  if (faction_a == kInvalidId || faction_b == kInvalidId) return false;
+  if (faction_a == faction_b) return false;
+  if (s.treaties.empty()) return false;
+
+  Id a = faction_a;
+  Id b = faction_b;
+  if (b < a) std::swap(a, b);
+
+  const std::int64_t now = s.date.days_since_epoch();
+  int best = -1;
+  TreatyType best_type = TreatyType::Ceasefire;
+  bool found = false;
+
+  for (const auto& [_, t] : s.treaties) {
+    if (t.faction_a != a || t.faction_b != b) continue;
+    if (!treaty_is_active(t, now)) continue;
+    const int str = treaty_strength(t.type);
+    if (!found || str > best) {
+      found = true;
+      best = str;
+      best_type = t.type;
+    }
+  }
+
+  if (found && out_strongest_type) *out_strongest_type = best_type;
+  return found;
 }
 
 // Power allocation helpers.
@@ -193,6 +252,124 @@ inline FactionEconomyMultipliers compute_faction_economy_multipliers(const Conte
   out.terraforming = clamp_factor(out.terraforming);
   out.troop_training = clamp_factor(out.troop_training);
   return out;
+}
+
+// --- Treaty / diplomacy derived modifiers ---
+//
+// Treaties can unlock economic multipliers (e.g. trade) and intel sharing
+// between factions (e.g. alliances). These helpers live here so multiple
+// Simulation translation units can share deterministic implementations.
+
+inline constexpr double kTradeAgreementBonusPerPartner = 0.05;  // +5% per partner
+inline constexpr double kTradeAgreementBonusCap = 0.25;         // cap at +25%
+
+inline int count_trade_partners(const GameState& s, Id faction_id, bool include_alliances = true) {
+  if (faction_id == kInvalidId) return 0;
+  if (s.treaties.empty()) return 0;
+
+  std::vector<Id> partners;
+  partners.reserve(s.treaties.size());
+
+  for (const auto& [_, t] : s.treaties) {
+    (void)_;  // deterministic: order doesn't matter; we sort/unique via push_unique.
+    const bool is_trade = (t.type == TreatyType::TradeAgreement);
+    const bool is_alliance = (t.type == TreatyType::Alliance);
+    if (!is_trade && !(include_alliances && is_alliance)) continue;
+
+    if (t.faction_a == faction_id) push_unique(partners, t.faction_b);
+    if (t.faction_b == faction_id) push_unique(partners, t.faction_a);
+  }
+
+  return static_cast<int>(partners.size());
+}
+
+inline double trade_agreement_output_multiplier(const GameState& s, Id faction_id) {
+  const int n = count_trade_partners(s, faction_id, /*include_alliances=*/true);
+  if (n <= 0) return 1.0;
+  const double bonus = std::min(kTradeAgreementBonusCap, kTradeAgreementBonusPerPartner * static_cast<double>(n));
+  return 1.0 + std::max(0.0, bonus);
+}
+
+struct IntelSyncDelta {
+  int added_a_systems = 0;
+  int added_b_systems = 0;
+  int added_a_jumps = 0;
+  int added_b_jumps = 0;
+  int merged_a_contacts = 0;
+  int merged_b_contacts = 0;
+  bool route_cache_dirty = false;
+};
+
+// Deterministically merge map knowledge (systems + surveyed jump points) and,
+// optionally, ship contact intel between two factions.
+//
+// NOTE: This does *not* invalidate any Simulation caches (callers must).
+inline IntelSyncDelta sync_intel_between_factions(GameState& s, Id faction_a, Id faction_b, bool share_contacts) {
+  IntelSyncDelta d;
+  if (faction_a == kInvalidId || faction_b == kInvalidId) return d;
+  if (faction_a == faction_b) return d;
+
+  auto* fa = find_ptr(s.factions, faction_a);
+  auto* fb = find_ptr(s.factions, faction_b);
+  if (!fa || !fb) return d;
+
+  auto merge_systems = [&](Faction& dst, const Faction& src, int& added) {
+    for (Id sid : src.discovered_systems) {
+      if (sid == kInvalidId) continue;
+      if (std::find(dst.discovered_systems.begin(), dst.discovered_systems.end(), sid) != dst.discovered_systems.end()) {
+        continue;
+      }
+      dst.discovered_systems.push_back(sid);
+      added += 1;
+    }
+  };
+
+  auto merge_jump_surveys = [&](Faction& dst, const Faction& src, int& added) {
+    for (Id jid : src.surveyed_jump_points) {
+      if (jid == kInvalidId) continue;
+      if (std::find(dst.surveyed_jump_points.begin(), dst.surveyed_jump_points.end(), jid) !=
+          dst.surveyed_jump_points.end()) {
+        continue;
+      }
+      dst.surveyed_jump_points.push_back(jid);
+      added += 1;
+    }
+  };
+
+  auto merge_contacts = [&](Faction& dst, const Faction& src, int& merged) {
+    const auto keys = sorted_keys(src.ship_contacts);
+    for (Id sid : keys) {
+      const auto it_src = src.ship_contacts.find(sid);
+      if (it_src == src.ship_contacts.end()) continue;
+      const Contact& c = it_src->second;
+      // Don't import contacts for our own ships.
+      if (c.last_seen_faction_id == dst.id) continue;
+
+      auto it_dst = dst.ship_contacts.find(sid);
+      if (it_dst == dst.ship_contacts.end()) {
+        dst.ship_contacts[sid] = c;
+        merged += 1;
+      } else if (c.last_seen_day > it_dst->second.last_seen_day) {
+        it_dst->second = c;
+        merged += 1;
+      }
+    }
+  };
+
+  // Build the union (A<-B then B<-A) to preserve existing counting semantics.
+  merge_systems(*fa, *fb, d.added_a_systems);
+  merge_systems(*fb, *fa, d.added_b_systems);
+
+  merge_jump_surveys(*fa, *fb, d.added_a_jumps);
+  merge_jump_surveys(*fb, *fa, d.added_b_jumps);
+
+  if (share_contacts) {
+    merge_contacts(*fa, *fb, d.merged_a_contacts);
+    merge_contacts(*fb, *fa, d.merged_b_contacts);
+  }
+
+  d.route_cache_dirty = (d.added_a_systems + d.added_b_systems + d.added_a_jumps + d.added_b_jumps) > 0;
+  return d;
 }
 
 inline std::uint64_t double_bits(double v) {

@@ -11,6 +11,7 @@
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
 #include "nebula4x/util/log.h"
 #include "nebula4x/util/trace_events.h"
@@ -285,25 +286,31 @@ void Simulation::tick_combat(double dt_days) {
   if (!state_.missile_salvos.empty()) {
     const auto missile_ids = sorted_keys(state_.missile_salvos);
 
-    // Compute a global maximum PD range so we can cap spatial queries.
+    // Compute a global maximum PD range and a per-system list of PD-capable defenders.
     double max_pd_range_mkm = 0.0;
+    std::unordered_map<Id, std::vector<Id>> pd_defenders_by_system;
+    pd_defenders_by_system.reserve(state_.systems.size());
+
     for (Id sid : ship_ids) {
       const auto* sh = find_ptr(state_.ships, sid);
       if (!sh) continue;
+      if (sh->system_id == kInvalidId) continue;
       const auto* d = find_design(sh->design_id);
       if (!d) continue;
       if (d->point_defense_damage > 0.0 && d->point_defense_range_mkm > 0.0) {
         max_pd_range_mkm = std::max(max_pd_range_mkm, d->point_defense_range_mkm);
+        pd_defenders_by_system[sh->system_id].push_back(sid);
       }
     }
 
-    struct SalvoPos {
+    struct SalvoSeg {
       Id id{kInvalidId};
-      Vec2 pos_mkm{0.0, 0.0};
+      Vec2 p0_mkm{0.0, 0.0};
+      Vec2 p1_mkm{0.0, 0.0};
     };
 
-    // Phase 1: advance timers and compute in-system positions.
-    std::unordered_map<Id, std::vector<SalvoPos>> salvos_by_system;
+    // Phase 1: advance timers and compute per-tick in-system segments.
+    std::unordered_map<Id, std::vector<SalvoSeg>> salvos_by_system;
     salvos_by_system.reserve(state_.systems.size());
 
     std::vector<Id> erase_salvos;
@@ -329,86 +336,145 @@ void Simulation::tick_combat(double dt_days) {
       }
       if (ms.target_pos_mkm.length() <= 1e-12) ms.target_pos_mkm = tgt->position_mkm;
 
-      ms.eta_days_remaining -= dt_days;
-
       const double total = std::max(1e-6, ms.eta_days_total);
-      const double rem = std::max(0.0, ms.eta_days_remaining);
-      const double frac = clamp01(1.0 - rem / total);
-      const Vec2 pos = ms.launch_pos_mkm + (ms.target_pos_mkm - ms.launch_pos_mkm) * frac;
-      salvos_by_system[ms.system_id].push_back(SalvoPos{mid, pos});
+      const double rem_before = std::max(0.0, ms.eta_days_remaining);
+      const double rem_after = std::max(0.0, rem_before - dt_days);
+      ms.eta_days_remaining = rem_after;
+
+      const double frac0 = clamp01(1.0 - rem_before / total);
+      const double frac1 = clamp01(1.0 - rem_after / total);
+      const Vec2 p0 = ms.launch_pos_mkm + (ms.target_pos_mkm - ms.launch_pos_mkm) * frac0;
+      const Vec2 p1 = ms.launch_pos_mkm + (ms.target_pos_mkm - ms.launch_pos_mkm) * frac1;
+      salvos_by_system[ms.system_id].push_back(SalvoSeg{mid, p0, p1});
     }
 
     // Phase 2: continuous point defense during this tick.
-    // Map: defender ship id -> salvos it can engage this tick.
-    std::unordered_map<Id, std::vector<Id>> pd_engagements;
-    pd_engagements.reserve(state_.ships.size());
+    // Instead of checking only the end-of-tick position, compute the fraction
+    // of the tick each salvo spends inside each defender's PD radius, then
+    // integrate PD output over that time.
+    if (max_pd_range_mkm > 1e-9 && dt_days > 0.0 && !pd_defenders_by_system.empty()) {
+      auto seg_circle_interval_u01 = [](const Vec2& p0, const Vec2& p1, const Vec2& c, double r)
+                                        -> std::optional<std::pair<double, double>> {
+        const Vec2 d = p1 - p0;
+        const Vec2 m = p0 - c;
+        const double a = d.x * d.x + d.y * d.y;
+        const double rr = r * r;
+        if (a <= 1e-18) {
+          const double dist2 = m.x * m.x + m.y * m.y;
+          if (dist2 <= rr + 1e-12) return std::make_pair(0.0, 1.0);
+          return std::nullopt;
+        }
 
-    if (max_pd_range_mkm > 1e-9 && dt_days > 0.0) {
-      for (auto& [sys_id, salvos] : salvos_by_system) {
-        if (salvos.empty()) continue;
-        auto& idx = index_for_system(sys_id);
+        const double b = 2.0 * (m.x * d.x + m.y * d.y);
+        const double c0 = (m.x * m.x + m.y * m.y) - rr;
+        const double disc = b * b - 4.0 * a * c0;
+        if (disc < 0.0) {
+          // No boundary crossing; either fully inside or fully outside.
+          if (c0 <= 0.0) return std::make_pair(0.0, 1.0);
+          return std::nullopt;
+        }
 
-        for (const auto& sp : salvos) {
-          const auto it = state_.missile_salvos.find(sp.id);
-          if (it == state_.missile_salvos.end()) continue;
-          const auto& ms = it->second;
+        const double s = std::sqrt(std::max(0.0, disc));
+        double u1 = (-b - s) / (2.0 * a);
+        double u2 = (-b + s) / (2.0 * a);
+        if (u1 > u2) std::swap(u1, u2);
+        const double lo = std::max(0.0, u1);
+        const double hi = std::min(1.0, u2);
+        if (hi <= lo + 1e-12) return std::nullopt;
+        return std::make_pair(lo, hi);
+      };
 
-          const auto nearby = idx.query_radius(sp.pos_mkm, max_pd_range_mkm, 0.0);
-          for (Id did : nearby) {
-            const auto* def = find_ptr(state_.ships, did);
-            if (!def) continue;
-            if (def->hp <= 0.0) continue;
+      struct Entry {
+        Id mid{kInvalidId};
+        double u0{0.0};
+        double u1{0.0};
+      };
+
+      for (auto& [sys_id, segs] : salvos_by_system) {
+        if (segs.empty()) continue;
+        const auto it_def = pd_defenders_by_system.find(sys_id);
+        if (it_def == pd_defenders_by_system.end() || it_def->second.empty()) continue;
+
+        for (Id did : it_def->second) {
+          const auto* def = find_ptr(state_.ships, did);
+          if (!def || def->hp <= 0.0) continue;
+          const auto* dd = find_design(def->design_id);
+          if (!dd) continue;
+          if (dd->point_defense_damage <= 0.0 || dd->point_defense_range_mkm <= 0.0) continue;
+
+          const auto p = compute_power_allocation(*dd, def->power_policy);
+          if (!p.weapons_online) continue;
+
+          const double r = dd->point_defense_range_mkm;
+          std::vector<Entry> entries;
+          entries.reserve(segs.size());
+
+          for (const auto& seg : segs) {
+            auto it_ms = state_.missile_salvos.find(seg.id);
+            if (it_ms == state_.missile_salvos.end()) continue;
+            auto& ms = it_ms->second;
+            if (ms.damage <= 0.0) continue;
 
             // Only defend if (a) not hostile to the target and (b) hostile to the attacker.
             if (are_factions_hostile(def->faction_id, ms.target_faction_id)) continue;
             if (!are_factions_hostile(def->faction_id, ms.attacker_faction_id)) continue;
 
-            const auto* dd = find_design(def->design_id);
-            if (!dd) continue;
-            if (dd->point_defense_damage <= 0.0 || dd->point_defense_range_mkm <= 0.0) continue;
+            const auto iv = seg_circle_interval_u01(seg.p0_mkm, seg.p1_mkm, def->position_mkm, r);
+            if (!iv) continue;
+            entries.push_back(Entry{seg.id, iv->first, iv->second});
+          }
 
-            const double dist = (def->position_mkm - sp.pos_mkm).length();
-            if (dist > dd->point_defense_range_mkm + 1e-9) continue;
+          if (entries.empty()) continue;
 
-            const auto p = compute_power_allocation(*dd, def->power_policy);
-            if (!p.weapons_online) continue;
+          // Compute total exposed time (sum of per-salvo intervals) and union time
+          // (time where at least one missile is in range) in the normalized [0,1] tick domain.
+          double sum_u = 0.0;
+          std::vector<std::pair<double, double>> intervals;
+          intervals.reserve(entries.size());
+          for (const auto& e : entries) {
+            const double len = std::max(0.0, e.u1 - e.u0);
+            if (len <= 1e-12) continue;
+            sum_u += len;
+            intervals.push_back({e.u0, e.u1});
+          }
+          if (sum_u <= 1e-12 || intervals.empty()) continue;
 
-            pd_engagements[did].push_back(sp.id);
+          std::sort(intervals.begin(), intervals.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+          double union_u = 0.0;
+          double cur_s = intervals.front().first;
+          double cur_e = intervals.front().second;
+          for (std::size_t i = 1; i < intervals.size(); ++i) {
+            const double s = intervals[i].first;
+            const double e = intervals[i].second;
+            if (s <= cur_e + 1e-12) {
+              cur_e = std::max(cur_e, e);
+            } else {
+              union_u += std::max(0.0, cur_e - cur_s);
+              cur_s = s;
+              cur_e = e;
+            }
+          }
+          union_u += std::max(0.0, cur_e - cur_s);
+          union_u = std::clamp(union_u, 0.0, 1.0);
+
+          const double pd_available = std::max(0.0, dd->point_defense_damage) * (union_u * dt_days);
+          if (pd_available <= 1e-12) continue;
+
+          for (const auto& e : entries) {
+            const double len = std::max(0.0, e.u1 - e.u0);
+            if (len <= 1e-12) continue;
+            const double share = pd_available * (len / sum_u);
+            if (share <= 1e-12) continue;
+
+            auto it_ms = state_.missile_salvos.find(e.mid);
+            if (it_ms == state_.missile_salvos.end()) continue;
+            auto& ms = it_ms->second;
+            if (ms.damage <= 0.0) continue;
+
+            const double intercept = std::min(ms.damage, share);
+            ms.damage = std::max(0.0, ms.damage - intercept);
           }
         }
-      }
-    }
-
-    // Apply PD damage as a rate integrated over dt_days, splitting per-defender
-    // across all salvos in range.
-    for (Id did : sorted_keys(pd_engagements)) {
-      auto it_vec = pd_engagements.find(did);
-      if (it_vec == pd_engagements.end()) continue;
-      auto& mids = it_vec->second;
-      std::sort(mids.begin(), mids.end());
-      mids.erase(std::unique(mids.begin(), mids.end()), mids.end());
-      if (mids.empty()) continue;
-
-      const auto* def = find_ptr(state_.ships, did);
-      if (!def) continue;
-      const auto* dd = find_design(def->design_id);
-      if (!dd) continue;
-      if (dd->point_defense_damage <= 0.0) continue;
-
-      const double pd_available = std::max(0.0, dd->point_defense_damage) * dt_days;
-      if (pd_available <= 1e-12) continue;
-
-      const double share = pd_available / static_cast<double>(mids.size());
-      if (share <= 1e-12) continue;
-
-      for (Id mid : mids) {
-        auto it = state_.missile_salvos.find(mid);
-        if (it == state_.missile_salvos.end()) continue;
-        auto& ms = it->second;
-        if (ms.damage <= 0.0) continue;
-
-        const double intercept = std::min(ms.damage, share);
-        ms.damage = std::max(0.0, ms.damage - intercept);
       }
     }
 

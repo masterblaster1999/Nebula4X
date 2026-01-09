@@ -2302,9 +2302,26 @@ const bool can_up = (i > 0);
               const double forts_here = sim.fortification_points(*sel_col);
               if (forts_here > 1e-9) ImGui::Text("Fortifications: %.1f", forts_here);
 
+              // Defender ground fire support (installation weapons).
+              double defender_arty_weapon = 0.0;
+              {
+                for (const auto& [inst_id, count] : sel_col->installations) {
+                  if (count <= 0) continue;
+                  const auto it = sim.content().installations.find(inst_id);
+                  if (it == sim.content().installations.end()) continue;
+                  const double wd = it->second.weapon_damage;
+                  if (wd <= 0.0) continue;
+                  defender_arty_weapon += wd * static_cast<double>(count);
+                }
+                defender_arty_weapon = std::max(0.0, defender_arty_weapon);
+              }
+              if (defender_arty_weapon > 1e-9) {
+                ImGui::Text("Artillery: %.1f dmg/day", defender_arty_weapon);
+              }
+
               // Square-law baseline; add a small margin so players don't sit right on the knife-edge.
               const double req = nebula4x::square_law_required_attacker_strength(
-                  sim.cfg(), sel_col->ground_forces, forts_here, 1.05);
+                  sim.cfg(), sel_col->ground_forces, forts_here, defender_arty_weapon, 1.05);
 
               ImGui::Text("Advisor: ~%.1f troops to win", req);
               if (sh->troops > 1e-9) {
@@ -2314,7 +2331,7 @@ const bool can_up = (i > 0);
                 }
 
                 const auto fc_now = nebula4x::forecast_ground_battle(sim.cfg(), sh->troops, sel_col->ground_forces,
-                                                                      forts_here);
+                                                                      forts_here, defender_arty_weapon);
                 if (fc_now.ok && !fc_now.truncated) {
                   const char* winner = (fc_now.winner == nebula4x::GroundBattleWinner::Attacker) ? "attacker" : "defender";
                   ImGui::TextDisabled("If invade now: %s wins in ~%d d", winner, fc_now.days_to_resolve);
@@ -3647,7 +3664,22 @@ const bool can_up = (i > 0);
           ImGui::Text("Defender: %.1f", b.defender_strength);
           ImGui::Text("Days: %d", b.days_fought);
 
-          const auto fc = nebula4x::forecast_ground_battle(sim.cfg(), b.attacker_strength, b.defender_strength, forts);
+          // Defender artillery (installation weapons).
+          double defender_arty_weapon = 0.0;
+          {
+            for (const auto& [inst_id, count] : colony->installations) {
+              if (count <= 0) continue;
+              const auto it = sim.content().installations.find(inst_id);
+              if (it == sim.content().installations.end()) continue;
+              const double wd = it->second.weapon_damage;
+              if (wd <= 0.0) continue;
+              defender_arty_weapon += wd * static_cast<double>(count);
+            }
+            defender_arty_weapon = std::max(0.0, defender_arty_weapon);
+          }
+
+          const auto fc = nebula4x::forecast_ground_battle(sim.cfg(), b.attacker_strength, b.defender_strength, forts,
+                                                           defender_arty_weapon);
           if (fc.ok) {
             if (fc.truncated) {
               ImGui::TextDisabled("Forecast: %s", fc.truncated_reason.c_str());
@@ -7243,8 +7275,6 @@ void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_colony, Id
 
     const Faction* viewer_fac = (ui.viewer_faction_id != kInvalidId) ? find_ptr(s.factions, ui.viewer_faction_id) : nullptr;
 
-    const Faction* viewer_fac = (ui.viewer_faction_id != kInvalidId) ? find_ptr(s.factions, ui.viewer_faction_id) : nullptr;
-
     for (const auto& [wid, w] : s.wrecks) {
       if (system_filter != kInvalidId && w.system_id != system_filter) continue;
       if (ui.fog_of_war && ui.viewer_faction_id != kInvalidId) {
@@ -7401,6 +7431,200 @@ void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_colony, Id
           }
           ImGui::TableSetColumnIndex(7);
           std::string b = "Go##wreck_go_" + std::to_string((int)r.id);
+          if (ImGui::SmallButton(b.c_str())) {
+            if (r.system_id != kInvalidId) {
+              s.selected_system = r.system_id;
+              ui.request_map_tab = MapTab::System;
+              ui.request_system_map_center = true;
+              ui.request_system_map_center_system_id = r.system_id;
+              ui.request_system_map_center_x_mkm = r.pos.x;
+              ui.request_system_map_center_y_mkm = r.pos.y;
+              ui.request_system_map_center_zoom = 0.0;
+            }
+          }
+        }
+      }
+
+      ImGui::EndTable();
+    }
+
+    ImGui::EndTabItem();
+  }
+
+  // --- Anomalies tab ---
+  if (ImGui::BeginTabItem("Anomalies")) {
+    static char search[128] = "";
+    static int system_filter_idx = 0; // 0 = All
+    static bool show_resolved = false;
+
+    const auto systems = sorted_systems(s);
+
+    ImGui::InputTextWithHint("Search##anom", "name / kind / system / unlock", search, IM_ARRAYSIZE(search));
+
+    {
+      std::vector<const char*> labels;
+      labels.reserve(systems.size() + 1);
+      labels.push_back("All systems");
+      for (const auto& p : systems) labels.push_back(p.second.c_str());
+      if (labels.size() > 1) {
+        system_filter_idx = std::clamp(system_filter_idx, 0, static_cast<int>(labels.size()) - 1);
+      } else {
+        system_filter_idx = 0;
+      }
+      ImGui::Combo("System##anom", &system_filter_idx, labels.data(), static_cast<int>(labels.size()));
+    }
+
+    ImGui::SameLine();
+    ImGui::Checkbox("Show resolved##anom", &show_resolved);
+
+    const Id system_filter = (system_filter_idx <= 0 || systems.empty()) ? kInvalidId : systems[system_filter_idx - 1].first;
+
+    if (ui.fog_of_war && ui.viewer_faction_id != kInvalidId) {
+      ImGui::TextDisabled("Fog-of-war is enabled: only discovered systems are listed.");
+    }
+
+    struct AnomRow {
+      Id id{kInvalidId};
+      Id system_id{kInvalidId};
+      Vec2 pos{0.0, 0.0};
+      std::string name;
+      std::string kind;
+      std::string system;
+      int days{0};
+      double rp{0.0};
+      std::string unlock;
+      bool resolved{false};
+    };
+
+    std::vector<AnomRow> rows;
+    rows.reserve(s.anomalies.size());
+
+    for (const auto& [aid, a] : s.anomalies) {
+      if (system_filter != kInvalidId && a.system_id != system_filter) continue;
+      if (!show_resolved && a.resolved) continue;
+
+      if (ui.fog_of_war && ui.viewer_faction_id != kInvalidId) {
+        if (!sim.is_system_discovered_by_faction(ui.viewer_faction_id, a.system_id)) continue;
+      }
+
+      const StarSystem* sys = find_ptr(s.systems, a.system_id);
+
+      const std::string nm = a.name.empty() ? (std::string("Anomaly ") + std::to_string((int)aid)) : a.name;
+      const std::string kind = a.kind.empty() ? std::string("-") : a.kind;
+      const std::string sys_name = sys ? sys->name : "?";
+
+      // Search matches name, kind, system, or unlock id.
+      if (!case_insensitive_contains(nm, search) &&
+          !case_insensitive_contains(kind, search) &&
+          !case_insensitive_contains(sys_name, search) &&
+          !case_insensitive_contains(a.unlock_component_id, search)) {
+        continue;
+      }
+
+      AnomRow r;
+      r.id = aid;
+      r.system_id = a.system_id;
+      r.pos = a.position_mkm;
+      r.name = nm;
+      r.kind = kind;
+      r.system = sys_name;
+      r.days = std::max(1, a.investigation_days);
+      r.rp = std::max(0.0, a.research_reward);
+
+      if (!a.unlock_component_id.empty()) {
+        const auto itc = sim.content().components.find(a.unlock_component_id);
+        r.unlock = (itc != sim.content().components.end() && !itc->second.name.empty()) ? itc->second.name : a.unlock_component_id;
+      } else {
+        r.unlock = "-";
+      }
+
+      r.resolved = a.resolved;
+      rows.push_back(std::move(r));
+    }
+
+    ImGui::Separator();
+    ImGui::TextDisabled("Showing %d / %d anomalies", (int)rows.size(), (int)s.anomalies.size());
+
+    const ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable |
+                                 ImGuiTableFlags_Reorderable | ImGuiTableFlags_Hideable | ImGuiTableFlags_Sortable |
+                                 ImGuiTableFlags_ScrollY;
+
+    const ImVec2 avail = ImGui::GetContentRegionAvail();
+    if (ImGui::BeginTable("anomaly_directory", 8, flags, ImVec2(avail.x, avail.y))) {
+      ImGui::TableSetupScrollFreeze(0, 1);
+      ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_DefaultSort, 0.0f, 0);
+      ImGui::TableSetupColumn("Kind", 0, 0.0f, 1);
+      ImGui::TableSetupColumn("System", 0, 0.0f, 2);
+      ImGui::TableSetupColumn("Days", ImGuiTableColumnFlags_PreferSortAscending, 0.0f, 3);
+      ImGui::TableSetupColumn("RP", ImGuiTableColumnFlags_PreferSortDescending, 0.0f, 4);
+      ImGui::TableSetupColumn("Unlock", 0, 0.0f, 5);
+      ImGui::TableSetupColumn("Status", 0, 0.0f, 6);
+      ImGui::TableSetupColumn("Center", ImGuiTableColumnFlags_NoSort, 0.0f, 7);
+      ImGui::TableHeadersRow();
+
+      if (ImGuiTableSortSpecs* sort = ImGui::TableGetSortSpecs()) {
+        if (sort->SpecsDirty && sort->SpecsCount > 0) {
+          const ImGuiTableColumnSortSpecs* spec = &sort->Specs[0];
+          const bool asc = (spec->SortDirection == ImGuiSortDirection_Ascending);
+          auto cmp = [&](const AnomRow& a, const AnomRow& b) {
+            auto lt = [&](auto x, auto y) { return asc ? (x < y) : (x > y); };
+            switch (spec->ColumnUserID) {
+              case 0: return lt(a.name, b.name);
+              case 1: return lt(a.kind, b.kind);
+              case 2: return lt(a.system, b.system);
+              case 3: return lt(a.days, b.days);
+              case 4: return lt(a.rp, b.rp);
+              case 5: return lt(a.unlock, b.unlock);
+              case 6: return lt(a.resolved, b.resolved);
+              default: return lt(a.name, b.name);
+            }
+          };
+          std::stable_sort(rows.begin(), rows.end(), cmp);
+          sort->SpecsDirty = false;
+        }
+      }
+
+      static Id selected_anom = kInvalidId;
+
+      ImGuiListClipper clip;
+      clip.Begin(static_cast<int>(rows.size()));
+      while (clip.Step()) {
+        for (int i = clip.DisplayStart; i < clip.DisplayEnd; ++i) {
+          const AnomRow& r = rows[i];
+          ImGui::TableNextRow();
+
+          ImGui::TableSetColumnIndex(0);
+          const bool is_sel = (selected_anom == r.id);
+          std::string label = r.name + "##anom_" + std::to_string((int)r.id);
+          if (ImGui::Selectable(label.c_str(), is_sel, ImGuiSelectableFlags_SpanAllColumns)) {
+            selected_anom = r.id;
+            if (r.system_id != kInvalidId) {
+              s.selected_system = r.system_id;
+              ui.request_map_tab = MapTab::System;
+              ui.request_system_map_center = true;
+              ui.request_system_map_center_system_id = r.system_id;
+              ui.request_system_map_center_x_mkm = r.pos.x;
+              ui.request_system_map_center_y_mkm = r.pos.y;
+              ui.request_system_map_center_zoom = 0.0;
+            }
+          }
+
+          ImGui::TableSetColumnIndex(1);
+          ImGui::TextUnformatted(r.kind.c_str());
+          ImGui::TableSetColumnIndex(2);
+          ImGui::TextUnformatted(r.system.c_str());
+          ImGui::TableSetColumnIndex(3);
+          ImGui::Text("%d", r.days);
+          ImGui::TableSetColumnIndex(4);
+          if (r.rp > 0.0) ImGui::Text("%.1f", r.rp);
+          else ImGui::TextDisabled("-");
+          ImGui::TableSetColumnIndex(5);
+          ImGui::TextUnformatted(r.unlock.c_str());
+          ImGui::TableSetColumnIndex(6);
+          if (r.resolved) ImGui::TextDisabled("Resolved");
+          else ImGui::TextUnformatted("Unresolved");
+          ImGui::TableSetColumnIndex(7);
+          std::string b = "Go##anom_go_" + std::to_string((int)r.id);
           if (ImGui::SmallButton(b.c_str())) {
             if (r.system_id != kInvalidId) {
               s.selected_system = r.system_id;

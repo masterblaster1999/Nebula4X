@@ -37,8 +37,8 @@ struct ContentDB {
 
 // A single save-game state.
 struct GameState {
-  // v46: salvage research + reverse engineering progress.
-  int save_version{46};
+  // v47: exploration anomalies (world objects + investigation scaffolding).
+  int save_version{47};
   Date date;
 
   // Hour-of-day within the current Date (0..23).
@@ -62,6 +62,9 @@ struct GameState {
 
   // Salvageable wrecks created by ship destruction.
   std::unordered_map<Id, Wreck> wrecks;
+
+  // Exploration anomalies / points of interest.
+  std::unordered_map<Id, Anomaly> anomalies;
 
   // In-flight missile salvos.
   std::unordered_map<Id, MissileSalvo> missile_salvos;

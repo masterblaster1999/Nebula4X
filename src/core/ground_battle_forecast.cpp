@@ -26,20 +26,38 @@ const char* ground_battle_winner_label(GroundBattleWinner w) {
 }
 
 double square_law_required_attacker_strength(const SimConfig& cfg, double defender_strength, double fort_points,
-                                            double margin_factor) {
+                                            double defender_artillery_weapon_damage_per_day, double margin_factor) {
   const double def = clamp_nonneg(defender_strength);
   const double forts = clamp_nonneg(fort_points);
-  const double fort_scale = std::max(0.0, cfg.fortification_defense_scale);
-  const double bonus = std::max(0.0, 1.0 + forts * fort_scale);
+  const double art_weapon = clamp_nonneg(defender_artillery_weapon_damage_per_day);
 
-  // Continuous square-law threshold: A0 > sqrt(B) * D0.
-  const double base = std::sqrt(bonus) * def;
+  const double loss_factor = std::max(0.0, cfg.ground_combat_loss_factor);
+  const double fort_def_scale = std::max(0.0, cfg.fortification_defense_scale);
+  const double fort_atk_scale = std::max(0.0, cfg.fortification_attack_scale);
+  const double arty_strength_per_weapon =
+      std::max(0.0, cfg.ground_combat_defender_artillery_strength_per_weapon_damage);
+
+  const double defense_bonus = std::max(0.0, 1.0 + forts * fort_def_scale);
+  const double offense_bonus = std::max(0.0, 1.0 + forts * fort_atk_scale);
+
+  // Treat defender artillery as an "equivalent" defender strength term so that
+  // this remains a quick analytic estimator.
+  double artillery_equiv = 0.0;
+  if (loss_factor > 1e-9) {
+    artillery_equiv = art_weapon * arty_strength_per_weapon / loss_factor;
+  }
+  const double def_eff = def + artillery_equiv;
+
+  // Continuous square-law threshold for dA/dt = -k*(D*offense_bonus + art_equiv),
+  // dD/dt = -k*A/defense_bonus.
+  const double base = std::sqrt(defense_bonus * offense_bonus) * def_eff;
   const double m = std::max(0.0, margin_factor);
   return base * m;
 }
 
 GroundBattleForecast forecast_ground_battle(const SimConfig& cfg, double attacker_strength, double defender_strength,
-                                            double fort_points, const GroundBattleForecastOptions& opt) {
+                                            double fort_points, double defender_artillery_weapon_damage_per_day,
+                                            const GroundBattleForecastOptions& opt) {
   GroundBattleForecast out;
   out.ok = false;
 
@@ -60,9 +78,18 @@ GroundBattleForecast forecast_ground_battle(const SimConfig& cfg, double attacke
   out.fort_points = forts;
 
   const double loss_factor = std::max(0.0, cfg.ground_combat_loss_factor);
-  const double fort_scale = std::max(0.0, cfg.fortification_defense_scale);
-  const double defense_bonus = 1.0 + forts * fort_scale;
-  out.defense_bonus = defense_bonus;
+  const double fort_def_scale = std::max(0.0, cfg.fortification_defense_scale);
+  const double fort_atk_scale = std::max(0.0, cfg.fortification_attack_scale);
+  const double arty_strength_per_weapon =
+      std::max(0.0, cfg.ground_combat_defender_artillery_strength_per_weapon_damage);
+  const double fort_damage_rate =
+      std::max(0.0, cfg.ground_combat_fortification_damage_per_attacker_strength_day);
+
+  const double base_arty_weapon = clamp_nonneg(defender_artillery_weapon_damage_per_day);
+  double fort_damage = 0.0;
+
+  // Snapshot the initial defender fortification defensive bonus (for UI/debug).
+  out.defense_bonus = 1.0 + forts * fort_def_scale;
 
   constexpr double kEps = 1e-6;
 
@@ -101,15 +128,33 @@ GroundBattleForecast forecast_ground_battle(const SimConfig& cfg, double attacke
 
   // Mirror Simulation::tick_ground_combat loss model.
   for (int day = 0; day < max_days; ++day) {
-    double attacker_loss = loss_factor * def;
-    double defender_loss = (defense_bonus > 1e-9) ? (loss_factor * att / defense_bonus)
-                                                 : (loss_factor * att);
+    const double eff_forts = std::max(0.0, forts - fort_damage);
+    const double defense_bonus = 1.0 + eff_forts * fort_def_scale;
+    const double offense_bonus = 1.0 + eff_forts * fort_atk_scale;
+
+    double fort_integrity = 1.0;
+    if (forts > 1e-9) fort_integrity = std::clamp(eff_forts / forts, 0.0, 1.0);
+
+    const double arty_weapon = base_arty_weapon * fort_integrity;
+    const double arty_loss = arty_weapon * arty_strength_per_weapon;
+
+    double attacker_loss = loss_factor * def * offense_bonus + arty_loss;
+    double defender_loss = (defense_bonus > 1e-9)
+                               ? (loss_factor * att / defense_bonus)
+                               : (loss_factor * att);
 
     attacker_loss = std::min(attacker_loss, att);
     defender_loss = std::min(defender_loss, def);
 
     att = clamp_nonneg(att - attacker_loss);
     def = clamp_nonneg(def - defender_loss);
+
+    // Fortification degradation happens alongside combat and uses the remaining
+    // attacker strength (matches Simulation::tick_ground_combat).
+    if (fort_damage_rate > 1e-9 && forts > 1e-9 && att > 1e-9) {
+      fort_damage += att * fort_damage_rate;
+      if (fort_damage > forts) fort_damage = forts;
+    }
 
     const int days_fought = day + 1;
     const bool attacker_dead = (att <= kEps);

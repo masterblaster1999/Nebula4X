@@ -856,6 +856,19 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
     draw->AddLine(ImVec2(p.x - r, p.y + r), ImVec2(p.x + r, p.y - r), c, 2.0f);
   }
 
+  // Anomaly markers (unresolved points of interest)
+  for (const auto& [aid, a] : s.anomalies) {
+    if (a.system_id != sys->id) continue;
+    if (a.resolved) continue;
+
+    const ImVec2 p = to_screen(a.position_mkm, center, scale, zoom, pan);
+    const ImU32 col = IM_COL32(255, 220, 120, 220);
+
+    // Subtle shadow + question-mark glyph (simple + recognizable).
+    draw->AddCircleFilled(ImVec2(p.x + 1.0f, p.y + 1.0f), 7.0f, IM_COL32(0, 0, 0, 140));
+    draw->AddText(ImVec2(p.x - 3.5f, p.y - 8.0f), col, "?");
+  }
+
   // Fleet formation preview: when enabled, visualize the *per-ship* target points
   // that will be produced by the formation solver (raw target + offset).
   if (ui.system_map_fleet_formation_preview && selected_fleet != nullptr &&
@@ -1262,7 +1275,7 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
     constexpr float kHoverRadiusPx = 18.0f;
     const float hover_d2 = kHoverRadiusPx * kHoverRadiusPx;
 
-    enum class HoverKind { None, Ship, Missile, Wreck, Body, Jump };
+    enum class HoverKind { None, Ship, Missile, Anomaly, Wreck, Body, Jump };
     HoverKind kind = HoverKind::None;
     Id hovered_id = kInvalidId;
     float best_d2 = hover_d2;
@@ -1317,6 +1330,23 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
           best_d2 = d2;
           kind = HoverKind::Missile;
           hovered_id = mid;
+        }
+      }
+    }
+
+    if (kind == HoverKind::None) {
+      for (const auto& [aid, a] : s.anomalies) {
+        if (a.system_id != sys->id) continue;
+        if (a.resolved) continue;
+
+        const ImVec2 p = to_screen(a.position_mkm, center, scale, zoom, pan);
+        const float dx = mp.x - p.x;
+        const float dy = mp.y - p.y;
+        const float d2 = dx * dx + dy * dy;
+        if (d2 <= best_d2) {
+          best_d2 = d2;
+          kind = HoverKind::Anomaly;
+          hovered_id = aid;
         }
       }
     }
@@ -1454,6 +1484,46 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
             if (ImGui::SmallButton("Center")) {
               pan = Vec2{-target->position_mkm.x, -target->position_mkm.y};
               ui.system_map_follow_selected = false;
+            }
+          }
+        }
+      } else if (kind == HoverKind::Anomaly) {
+        const auto* a = find_ptr(s.anomalies, hovered_id);
+        if (a) {
+          const std::string nm = a->name.empty()
+                                     ? (std::string("Anomaly ") + std::to_string(static_cast<int>(a->id)))
+                                     : a->name;
+
+          ImGui::TextUnformatted(nm.c_str());
+          if (!a->kind.empty()) ImGui::TextDisabled("Kind: %s", a->kind.c_str());
+          ImGui::TextDisabled("Investigation: %d days", std::max(1, a->investigation_days));
+
+          if (a->research_reward > 1e-9) {
+            ImGui::TextDisabled("Reward: +%.1f RP", a->research_reward);
+          }
+
+          if (!a->unlock_component_id.empty()) {
+            const auto itc = sim.content().components.find(a->unlock_component_id);
+            const std::string cname = (itc != sim.content().components.end() && !itc->second.name.empty())
+                                          ? itc->second.name
+                                          : a->unlock_component_id;
+            ImGui::TextDisabled("Unlock: %s", cname.c_str());
+          }
+
+          if (ImGui::SmallButton("Center")) {
+            pan = Vec2{-a->position_mkm.x, -a->position_mkm.y};
+            ui.system_map_follow_selected = false;
+          }
+
+          // Convenience action for the currently selected ship.
+          if (selected_ship != kInvalidId && viewer_faction_id != kInvalidId) {
+            const Ship* sh = find_ptr(s.ships, selected_ship);
+            if (sh && sh->faction_id == viewer_faction_id && !a->resolved) {
+              ImGui::SameLine();
+              if (ImGui::SmallButton("Investigate")) {
+                (void)sim.issue_investigate_anomaly(selected_ship, a->id, /*restrict_to_discovered=*/ui.fog_of_war);
+                ui.request_details_tab = DetailsTab::Ship;
+              }
             }
           }
         }

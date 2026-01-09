@@ -3,6 +3,7 @@
 #include "nebula4x/core/enum_strings.h"
 
 #include <algorithm>
+#include <cmath>
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
@@ -17,7 +18,7 @@ using json::Array;
 using json::Object;
 using json::Value;
 
-constexpr int kCurrentSaveVersion = 45;
+constexpr int kCurrentSaveVersion = 47;
 
 Object ship_power_policy_to_json(const ShipPowerPolicy& p) {
   Object o;
@@ -394,6 +395,11 @@ Value order_to_json(const Order& order) {
           obj["wreck_id"] = static_cast<double>(o.wreck_id);
           if (!o.mineral.empty()) obj["mineral"] = o.mineral;
           obj["tons"] = o.tons;
+        } else if constexpr (std::is_same_v<T, InvestigateAnomaly>) {
+          obj["type"] = std::string("investigate_anomaly");
+          obj["anomaly_id"] = static_cast<double>(o.anomaly_id);
+          obj["duration_days"] = static_cast<double>(o.duration_days);
+          if (o.progress_days > 1e-12) obj["progress_days"] = o.progress_days;
         } else if constexpr (std::is_same_v<T, TransferCargoToShip>) {
           obj["type"] = std::string("transfer_cargo_to_ship");
           obj["target_ship_id"] = static_cast<double>(o.target_ship_id);
@@ -560,6 +566,17 @@ Order order_from_json(const Value& v) {
     if (auto it = o.find("mineral"); it != o.end()) s.mineral = it->second.string_value();
     if (auto it = o.find("tons"); it != o.end()) s.tons = it->second.number_value(0.0);
     return s;
+  }
+  if (type == "investigate_anomaly") {
+    InvestigateAnomaly i;
+    i.anomaly_id = static_cast<Id>(o.at("anomaly_id").int_value(kInvalidId));
+    if (auto it = o.find("duration_days"); it != o.end()) {
+      i.duration_days = static_cast<int>(it->second.int_value(0));
+    }
+    if (auto it = o.find("progress_days"); it != o.end()) {
+      i.progress_days = it->second.number_value(0.0);
+    }
+    return i;
   }
   if (type == "transfer_cargo_to_ship") {
     TransferCargoToShip t;
@@ -905,6 +922,29 @@ std::string serialize_game_to_json(const GameState& s) {
     wrecks.push_back(o);
   }
   root["wrecks"] = wrecks;
+
+  // Anomalies.
+  Array anomalies;
+  anomalies.reserve(s.anomalies.size());
+  for (Id id : sorted_keys(s.anomalies)) {
+    const auto& a = s.anomalies.at(id);
+    Object o;
+    o["id"] = static_cast<double>(a.id);
+    if (!a.name.empty()) o["name"] = a.name;
+    if (!a.kind.empty()) o["kind"] = a.kind;
+    o["system_id"] = static_cast<double>(a.system_id);
+    o["position_mkm"] = vec2_to_json(a.position_mkm);
+    if (a.investigation_days != 1) o["investigation_days"] = static_cast<double>(a.investigation_days);
+    if (std::abs(a.research_reward) > 1e-12) o["research_reward"] = a.research_reward;
+    if (!a.unlock_component_id.empty()) o["unlock_component_id"] = a.unlock_component_id;
+    if (a.resolved) o["resolved"] = true;
+    if (a.resolved_by_faction_id != kInvalidId) {
+      o["resolved_by_faction_id"] = static_cast<double>(a.resolved_by_faction_id);
+    }
+    if (a.resolved_day != 0) o["resolved_day"] = static_cast<double>(a.resolved_day);
+    anomalies.push_back(o);
+  }
+  root["anomalies"] = anomalies;
 
   // Missile salvos.
   Array missile_salvos;
@@ -1302,6 +1342,7 @@ std::string serialize_game_to_json(const GameState& s) {
       o["defender_faction_id"] = static_cast<double>(b.defender_faction_id);
       o["attacker_strength"] = b.attacker_strength;
       o["defender_strength"] = b.defender_strength;
+      o["fortification_damage_points"] = b.fortification_damage_points;
       o["days_fought"] = static_cast<double>(b.days_fought);
       battles.push_back(o);
     }
@@ -1565,6 +1606,36 @@ GameState deserialize_game_from_json(const std::string& json_text) {
       s.wrecks[w.id] = w;
     }
   }
+
+  // Anomalies (optional in older saves).
+  if (auto it = root.find("anomalies"); it != root.end()) {
+    if (!it->second.is_array()) {
+      log::warn("Save load: 'anomalies' is not an array; ignoring");
+    } else {
+      for (const auto& av : it->second.array()) {
+        if (!av.is_object()) continue;
+        const auto& o = av.object();
+        Anomaly a;
+        a.id = static_cast<Id>(o.at("id").int_value(kInvalidId));
+        if (a.id == kInvalidId) continue;
+        if (auto itn = o.find("name"); itn != o.end()) a.name = itn->second.string_value();
+        if (auto itk = o.find("kind"); itk != o.end()) a.kind = itk->second.string_value();
+        if (auto its = o.find("system_id"); its != o.end()) a.system_id = static_cast<Id>(its->second.int_value(kInvalidId));
+        if (auto itp = o.find("position_mkm"); itp != o.end()) a.position_mkm = vec2_from_json(itp->second);
+        if (auto itd = o.find("investigation_days"); itd != o.end()) a.investigation_days = static_cast<int>(itd->second.int_value(1));
+        if (auto itr = o.find("research_reward"); itr != o.end()) a.research_reward = itr->second.number_value(0.0);
+        if (auto itu = o.find("unlock_component_id"); itu != o.end()) a.unlock_component_id = itu->second.string_value();
+        if (auto itres = o.find("resolved"); itres != o.end()) a.resolved = itres->second.bool_value(false);
+        if (auto itrf = o.find("resolved_by_faction_id"); itrf != o.end()) {
+          a.resolved_by_faction_id = static_cast<Id>(itrf->second.int_value(kInvalidId));
+        }
+        if (auto itrd = o.find("resolved_day"); itrd != o.end()) a.resolved_day = static_cast<std::int64_t>(itrd->second.int_value(0));
+        if (a.investigation_days < 0) a.investigation_days = 0;
+        s.anomalies[a.id] = std::move(a);
+      }
+    }
+  }
+
 
   // Missile salvos (optional).
   if (auto it = root.find("missile_salvos"); it != root.end()) {
@@ -2270,6 +2341,9 @@ GameState deserialize_game_from_json(const std::string& json_text) {
         if (auto itd = o.find("defender_faction_id"); itd != o.end()) b.defender_faction_id = static_cast<Id>(itd->second.int_value(kInvalidId));
         if (auto itas = o.find("attacker_strength"); itas != o.end()) b.attacker_strength = itas->second.number_value(0.0);
         if (auto itds = o.find("defender_strength"); itds != o.end()) b.defender_strength = itds->second.number_value(0.0);
+        if (auto itfd = o.find("fortification_damage_points"); itfd != o.end()) {
+          b.fortification_damage_points = itfd->second.number_value(0.0);
+        }
         if (auto itdf = o.find("days_fought"); itdf != o.end()) b.days_fought = static_cast<int>(itdf->second.int_value(0));
         s.ground_battles[b.colony_id] = b;
       }
@@ -2286,6 +2360,11 @@ GameState deserialize_game_from_json(const std::string& json_text) {
   for (auto& [id, _] : s.colonies) bump(id);
   for (auto& [id, _] : s.factions) bump(id);
   for (auto& [id, _] : s.fleets) bump(id);
+  for (auto& [id, _] : s.regions) bump(id);
+  for (auto& [id, _] : s.wrecks) bump(id);
+  for (auto& [id, _] : s.anomalies) bump(id);
+  for (auto& [id, _] : s.missile_salvos) bump(id);
+  for (auto& [id, _] : s.treaties) bump(id);
   if (s.next_id <= max_id) s.next_id = max_id + 1;
 
   return s;

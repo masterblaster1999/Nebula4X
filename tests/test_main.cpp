@@ -54,6 +54,8 @@ int test_colonization();
 int test_auto_colonize();
 int test_auto_salvage();
 int test_reverse_engineering();
+int test_anomalies();
+int test_missile_components();
 int test_auto_tanker();
 int test_ship_repairs();
 int test_fleets();
@@ -211,6 +213,8 @@ int main(int argc, char** argv) {
       {"auto_colonize", test_auto_colonize},
       {"auto_salvage", test_auto_salvage},
       {"reverse_engineering", test_reverse_engineering},
+      {"anomalies", test_anomalies},
+      {"missile_components", test_missile_components},
       {"auto_tanker", test_auto_tanker},
       {"combat_events", test_combat_events},
       {"shields", test_shields},

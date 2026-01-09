@@ -35,6 +35,8 @@ using sim_internal::sorted_keys;
 using sim_internal::faction_has_tech;
 using sim_internal::FactionEconomyMultipliers;
 using sim_internal::compute_faction_economy_multipliers;
+using sim_internal::trade_agreement_output_multiplier;
+using sim_internal::sync_intel_between_factions;
 using sim_internal::compute_power_allocation;
 
 using sim_nav::PredictedNavState;
@@ -445,7 +447,8 @@ double Simulation::construction_points_per_day(const Colony& colony) const {
   // Tech-driven faction modifier.
   if (const auto* fac = find_ptr(state_.factions, colony.faction_id)) {
     const auto m = compute_faction_economy_multipliers(content_, *fac);
-    total *= std::max(0.0, m.construction);
+    const double trade = trade_agreement_output_multiplier(state_, fac->id);
+    total *= std::max(0.0, m.construction) * std::max(0.0, trade);
   }
 
   return std::max(0.0, total);
@@ -516,7 +519,8 @@ std::vector<LogisticsNeed> Simulation::logistics_needs_for_faction(Id faction_id
     const auto* fac = find_ptr(state_.factions, faction_id);
     if (!fac) return 1.0;
     const auto m = compute_faction_economy_multipliers(content_, *fac);
-    return std::max(0.0, m.shipyard);
+    const double trade = trade_agreement_output_multiplier(state_, fac->id);
+    return std::max(0.0, m.shipyard) * std::max(0.0, trade);
   }();
 
   const InstallationDef* shipyard_def = nullptr;
@@ -1067,6 +1071,50 @@ Id Simulation::create_treaty(Id faction_a, Id faction_b, TreatyType type, int du
 
   const std::int64_t now = state_.date.days_since_epoch();
 
+  auto maybe_sync_intel = [&](TreatyType tt) {
+    // Trade agreements and alliances should actually do something tangible:
+    // exchange star charts (discovered systems + surveyed jump points), and for
+    // alliances, also share contact intel.
+    const bool share_map = (tt == TreatyType::Alliance || tt == TreatyType::TradeAgreement);
+    const bool share_contacts = (tt == TreatyType::Alliance);
+    if (!share_map) return;
+
+    const auto d = sync_intel_between_factions(state_, a, b, share_contacts);
+    if (d.route_cache_dirty) invalidate_jump_route_cache();
+
+    if (!push_event) return;
+
+    const auto& name_a = state_.factions.at(a).name;
+    const auto& name_b = state_.factions.at(b).name;
+
+    auto push_one = [&](Id fid, Id other, const std::string& other_name, int add_sys, int add_jumps, int add_contacts) {
+      if (add_sys + add_jumps + add_contacts <= 0) return;
+      std::string msg = "Intel shared (";
+      msg += treaty_type_title(tt);
+      msg += ") with ";
+      msg += other_name;
+      msg += ": +";
+      msg += std::to_string(add_sys);
+      msg += " systems, +";
+      msg += std::to_string(add_jumps);
+      msg += " jump surveys";
+      if (share_contacts) {
+        msg += ", +";
+        msg += std::to_string(add_contacts);
+        msg += " contacts";
+      }
+      this->push_event(EventLevel::Info, EventCategory::Intel, msg,
+                       EventContext{.faction_id = fid,
+                                    .faction_id2 = other,
+                                    .system_id = kInvalidId,
+                                    .ship_id = kInvalidId,
+                                    .colony_id = kInvalidId});
+    };
+
+    push_one(a, b, name_b, d.added_a_systems, d.added_a_jumps, d.merged_a_contacts);
+    push_one(b, a, name_a, d.added_b_systems, d.added_b_jumps, d.merged_b_contacts);
+  };
+
   // Renew an existing treaty of the same type between the same factions.
   for (auto& [tid, t] : state_.treaties) {
     if (t.faction_a != a || t.faction_b != b) continue;
@@ -1091,6 +1139,11 @@ Id Simulation::create_treaty(Id faction_a, Id faction_b, TreatyType type, int du
       this->push_event(EventLevel::Info, EventCategory::Diplomacy, msg,
                  EventContext{.faction_id = a, .faction_id2 = b, .system_id = kInvalidId, .ship_id = kInvalidId, .colony_id = kInvalidId});
     }
+
+    // Treaties can be signed long after each side has explored. Sync intel on
+    // renew so that long-running pacts don't require manual stance toggles to
+    // exchange star charts.
+    maybe_sync_intel(type);
 
     return tid;
   }
@@ -1122,6 +1175,9 @@ Id Simulation::create_treaty(Id faction_a, Id faction_b, TreatyType type, int du
     this->push_event(EventLevel::Info, EventCategory::Diplomacy, msg,
                EventContext{.faction_id = a, .faction_id2 = b, .system_id = kInvalidId, .ship_id = kInvalidId, .colony_id = kInvalidId});
   }
+
+  // Immediately exchange intel implied by the treaty.
+  maybe_sync_intel(type);
 
   return t.id;
 }
