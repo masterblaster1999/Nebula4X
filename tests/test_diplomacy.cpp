@@ -345,5 +345,113 @@ int test_diplomacy() {
                "trade does not share contacts");
   }
 
+
+  {
+    ContentDB c4;
+
+    ShipDesign hauler;
+    hauler.id = "hauler";
+    hauler.name = "Hauler";
+    hauler.role = ShipRole::Freighter;
+    hauler.mass_tons = 100.0;
+    hauler.max_hp = 100.0;
+    hauler.cargo_tons = 100.0;
+    hauler.fuel_capacity_tons = 100.0;
+    hauler.missile_ammo_capacity = 10.0;
+    c4.designs[hauler.id] = hauler;
+
+    Simulation sim4(c4, SimConfig{});
+
+    GameState st4;
+    st4.save_version = GameState{}.save_version;
+
+    Faction a;
+    a.id = 1;
+    a.name = "Alpha";
+    st4.factions[a.id] = a;
+
+    Faction b;
+    b.id = 2;
+    b.name = "Beta";
+    st4.factions[b.id] = b;
+
+    StarSystem sys;
+    sys.id = 1;
+    sys.name = "Sys";
+    st4.systems[sys.id] = sys;
+
+    Body body;
+    body.id = 10;
+    body.name = "Body";
+    body.system_id = sys.id;
+    body.position_mkm = Vec2{0.0, 0.0};
+    st4.bodies[body.id] = body;
+    st4.systems[sys.id].bodies.push_back(body.id);
+
+    Colony col;
+    col.id = 100;
+    col.name = "Beta Colony";
+    col.faction_id = b.id;
+    col.body_id = body.id;
+    col.minerals["Duranium"] = 100.0;
+    col.minerals["Fuel"] = 1000.0;
+    col.minerals["Munitions"] = 1000.0;
+    st4.colonies[col.id] = col;
+
+    Ship sh;
+    sh.id = 200;
+    sh.name = "Hauler";
+    sh.faction_id = a.id;
+    sh.design_id = hauler.id;
+    sh.system_id = sys.id;
+    sh.position_mkm = Vec2{0.0, 0.0};
+    sh.fuel_tons = 0.0;
+    sh.missile_ammo = 0.0;
+    st4.ships[sh.id] = sh;
+    st4.systems[sys.id].ships.push_back(sh.id);
+
+    sim4.load_game(st4);
+
+    // Without a treaty or alliance, the colony is not a trade partner.
+    N4X_ASSERT(!sim4.are_factions_trade_partners(a.id, b.id), "no trade access by default");
+
+    // Without trade access, mineral transfers are blocked.
+    N4X_ASSERT(!sim4.issue_load_mineral(sh.id, col.id, "Duranium", 10.0, /*restrict_to_discovered=*/false),
+               "load mineral blocked without trade access");
+
+    std::string err;
+    const Id tid = sim4.create_treaty(a.id, b.id, TreatyType::TradeAgreement, /*duration_days=*/-1, /*push_event=*/false, &err);
+    N4X_ASSERT(tid != kInvalidId, std::string("create_treaty(trade) succeeds: ") + err);
+
+    N4X_ASSERT(sim4.are_factions_trade_partners(a.id, b.id), "trade agreement grants trade access");
+
+    // With a trade agreement, mineral transfers and port logistics should be allowed.
+    N4X_ASSERT(sim4.issue_load_mineral(sh.id, col.id, "Duranium", 10.0, /*restrict_to_discovered=*/false),
+               "load mineral allowed under trade agreement");
+
+    const double dur_before = sim4.state().colonies.at(col.id).minerals.at("Duranium");
+    const double fuel_before = sim4.state().colonies.at(col.id).minerals.at("Fuel");
+    const double mun_before = sim4.state().colonies.at(col.id).minerals.at("Munitions");
+
+    sim4.advance_days(1);
+
+    const auto& st_after = sim4.state();
+    const auto& sh_after = st_after.ships.at(sh.id);
+    const auto& col_after = st_after.colonies.at(col.id);
+
+    // Mineral transfer occurred.
+    {
+      const auto it = sh_after.cargo.find("Duranium");
+      N4X_ASSERT(it != sh_after.cargo.end() && it->second > 0.0, "trade partner mineral load transfers cargo");
+    }
+    N4X_ASSERT(col_after.minerals.at("Duranium") < dur_before, "trade partner mineral load reduces colony stockpile");
+
+    // Port logistics occurred (refuel + rearm).
+    N4X_ASSERT(sh_after.fuel_tons > 0.0, "trade partner refuels ship");
+    N4X_ASSERT(sh_after.missile_ammo > 0.0, "trade partner rearms ship");
+    N4X_ASSERT(col_after.minerals.at("Fuel") < fuel_before, "refuel consumes colony fuel");
+    N4X_ASSERT(col_after.minerals.at("Munitions") < mun_before, "rearm consumes colony munitions");
+  }
+
   return 0;
 }

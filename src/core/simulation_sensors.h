@@ -24,6 +24,10 @@ struct SensorSource {
   // perform swept detection across sub-day ticks. Colony-based sensor sources
   // use kInvalidId.
   Id ship_id{kInvalidId};
+
+  // Sensor-side electronic counter-countermeasures strength.
+  // Higher values counteract target ECM and improve detection/tracking.
+  double eccm_strength{0.0};
 };
 
 
@@ -48,7 +52,8 @@ std::vector<SensorSource> gather_sensor_sources(const Simulation& sim, Id factio
 
 // Returns true if any sensor source can detect a target position.
 bool any_source_detects(const std::vector<SensorSource>& sources, const Vec2& target_pos,
-                        double target_signature_multiplier = 1.0);
+                        double target_signature_multiplier = 1.0,
+                        double target_ecm_strength = 0.0);
 
 } // namespace sim_sensors
 } // namespace nebula4x

@@ -335,6 +335,8 @@ if(NEBULA4X_BUILD_TESTS)
     tests/test_missile_components.cpp
     tests/test_auto_tanker.cpp
     tests/test_ship_repairs.cpp
+  tests/test_crew_experience.cpp
+  tests/test_electronic_warfare.cpp
     tests/test_advisor.cpp
   )
   target_link_libraries(nebula4x_tests PRIVATE nebula4x::core)

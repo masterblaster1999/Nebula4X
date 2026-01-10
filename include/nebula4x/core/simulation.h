@@ -165,6 +165,71 @@ struct SimConfig {
   double repair_duranium_per_hp{0.0};
   double repair_neutronium_per_hp{0.0};
 
+  // --- Ship maintenance / spare parts (optional) ---
+  //
+  // When enabled, ships consume a chosen stockpiled resource ("spare parts") while
+  // operating. If they cannot draw enough supply, their maintenance_condition decays,
+  // applying speed and combat effectiveness penalties.
+  //
+  // This is intentionally lightweight and deterministic: there is no RNG breakdown
+  // model yet, only a continuous readiness/maintenance scalar.
+  bool enable_ship_maintenance{false};
+
+  // Resource id consumed as maintenance supplies. Default uses the generic
+  // processed output "Metals" from the materials chain.
+  std::string ship_maintenance_resource_id{"Metals"};
+
+  // Tons of maintenance resource required per simulated day per ship mass ton.
+  //
+  // Example: 10,000t ship with 0.00002 consumes 0.2 tons/day.
+  double ship_maintenance_tons_per_day_per_mass_ton{0.00002};
+
+  // Condition recovery/decay rates per day.
+  //
+  // If supplied_fraction == 1.0, maintenance_condition increases by
+  // ship_maintenance_recovery_per_day (capped at 1.0).
+  //
+  // Otherwise, maintenance_condition decreases by:
+  //   ship_maintenance_decay_per_day * (1 - supplied_fraction).
+  double ship_maintenance_recovery_per_day{0.02};
+  double ship_maintenance_decay_per_day{0.01};
+
+  // Minimum multipliers applied at maintenance_condition == 0.0 (linearly scaled
+  // up to 1.0 at maintenance_condition == 1.0).
+  double ship_maintenance_min_speed_multiplier{0.6};
+  double ship_maintenance_min_combat_multiplier{0.7};
+
+  // --- Crew training / experience (optional) ---
+  //
+  // Ships track a persistent crew_grade_points value (default 100) that
+  // is improved by docked training and combat. This is mapped to a small
+  // effectiveness modifier (accuracy/reload/boarding) via:
+  //   bonus = (sqrt(points) - 10) / 100
+  // which yields:
+  //   points=0   -> -10%
+  //   points=100 ->  0%
+  //   points=400 -> +10%
+  //   points=900 -> +20%
+  //   points=1600-> +30%
+  //   points=2500-> +40%
+  //
+  // This is inspired by classic 4X crew grade systems (e.g. Aurora-style
+  // grade points), but intentionally simplified and deterministic.
+  bool enable_crew_experience{true};
+
+  // Starting crew grade points for newly created ships.
+  double crew_initial_grade_points{100.0};
+
+  // Global cap on crew grade points.
+  double crew_grade_points_cap{2500.0};
+
+  // Combat experience gain: grade points added per unit of combat "intensity".
+  // Intensity is currently derived from damage dealt/received and missile intercepts.
+  double crew_combat_grade_points_per_damage{0.25};
+
+  // Global multiplier applied to colony crew_training_points_per_day.
+  double crew_training_points_multiplier{1.0};
+
   // --- Sensor modes / EMCON ---
   //
   // Ships can operate their sensors in different modes (see SensorMode):
@@ -1097,7 +1162,13 @@ class Simulation {
   // Ground ops query helpers (pure queries).
   double terraforming_points_per_day(const Colony& colony) const;
   double troop_training_points_per_day(const Colony& colony) const;
+  double crew_training_points_per_day(const Colony& colony) const;
   double fortification_points(const Colony& colony) const;
+
+  // Crew grade helpers.
+  // Returns a signed bonus fraction (e.g. +0.10 = +10%).
+  double crew_grade_bonus_for_points(double grade_points) const;
+  double crew_grade_bonus(const Ship& ship) const;
 
   // Transfer cargo directly to another ship in space.
   bool issue_transfer_cargo_to_ship(Id ship_id, Id target_ship_id, const std::string& mineral, double tons = 0.0,
@@ -1179,6 +1250,16 @@ bool move_construction_order(Id colony_id, int from_index, int to_index);
   // True if both factions consider each other Friendly (mutual friendliness).
   // Self is always friendly.
   bool are_factions_mutual_friendly(Id a_faction_id, Id b_faction_id) const;
+
+  // True if the factions have an active relationship that permits trade/logistics
+  // interactions at each other's colonies.
+  //
+  // This is granted by either:
+  //  - Mutual Friendly stances (allied access), OR
+  //  - An active TradeAgreement treaty (port access without full alliance).
+  //
+  // Self is always a trade partner.
+  bool are_factions_trade_partners(Id a_faction_id, Id b_faction_id) const;
 
   // Treaties / diplomacy agreements.
   //
@@ -1273,6 +1354,9 @@ bool move_construction_order(Id colony_id, int from_index, int to_index);
   void tick_pirate_raids();
   void tick_treaties();
   void tick_refuel();
+  void tick_rearm();
+  void tick_ship_maintenance(double dt_days);
+  void tick_crew_training(double dt_days);
   void tick_ships(double dt_days);
   void tick_contacts(double dt_days, bool emit_contact_lost_events);
   void tick_shields(double dt_days);

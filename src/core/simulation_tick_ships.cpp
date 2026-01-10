@@ -31,6 +31,23 @@ using sim_internal::push_unique;
 using sim_internal::sorted_keys;
 using sim_internal::compute_power_allocation;
 using sim_internal::strongest_active_treaty_between;
+
+// Deterministic pseudo-random helper (used for non-combat procedural events such
+// as anomaly hazards). Keeping this local avoids coupling ship tick ordering to
+// any global RNG state.
+static std::uint64_t splitmix64(std::uint64_t x) {
+  x += 0x9e3779b97f4a7c15ULL;
+  x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+  x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+  return x ^ (x >> 31);
+}
+
+static double u01_from_u64(std::uint64_t x) {
+  // Use the top 53 bits to build a double in [0,1).
+  const std::uint64_t v = x >> 11;
+  return static_cast<double>(v) * (1.0 / 9007199254740992.0); // 2^53
+}
+
 } // namespace
 
 void Simulation::tick_ships(double dt_days) {
@@ -44,6 +61,15 @@ void Simulation::tick_ships(double dt_days) {
 
   const double arrive_eps = std::max(0.0, cfg_.arrival_epsilon_mkm);
   const double dock_range = std::max(arrive_eps, cfg_.docking_range_mkm);
+
+  const double maint_min_speed = std::clamp(cfg_.ship_maintenance_min_speed_multiplier, 0.0, 1.0);
+  auto maintenance_speed_mult = [&](const Ship& s) -> double {
+    if (!cfg_.enable_ship_maintenance) return 1.0;
+    double m = s.maintenance_condition;
+    if (!std::isfinite(m)) m = 1.0;
+    m = std::clamp(m, 0.0, 1.0);
+    return maint_min_speed + (1.0 - maint_min_speed) * m;
+  };
 
   const auto ship_ids = sorted_keys(state_.ships);
 
@@ -290,6 +316,8 @@ void Simulation::tick_ships(double dt_days) {
         const auto p = compute_power_allocation(*sd, sh->power_policy);
         if (!p.engines_online) base_speed_km_s = 0.0;
       }
+
+      base_speed_km_s *= maintenance_speed_mult(*sh);
 
       const CohortKey key = *key_opt;
       auto it_min = cohort_min_speed_km_s.find(key);
@@ -889,7 +917,7 @@ void Simulation::tick_ships(double dt_days) {
       cargo_mineral = ord.mineral;
       cargo_tons = ord.tons;
       const auto* colony = find_ptr(state_.colonies, cargo_colony_id);
-      if (!colony || !are_factions_mutual_friendly(ship.faction_id, colony->faction_id)) { q.erase(q.begin()); continue; }
+      if (!colony || !are_factions_trade_partners(ship.faction_id, colony->faction_id)) { q.erase(q.begin()); continue; }
       const auto* body = find_ptr(state_.bodies, colony->body_id);
       if (!body || body->system_id != ship.system_id) { q.erase(q.begin()); continue; }
       target = body->position_mkm;
@@ -902,7 +930,7 @@ void Simulation::tick_ships(double dt_days) {
       cargo_mineral = ord.mineral;
       cargo_tons = ord.tons;
       const auto* colony = find_ptr(state_.colonies, cargo_colony_id);
-      if (!colony || !are_factions_mutual_friendly(ship.faction_id, colony->faction_id)) { q.erase(q.begin()); continue; }
+      if (!colony || !are_factions_trade_partners(ship.faction_id, colony->faction_id)) { q.erase(q.begin()); continue; }
       const auto* body = find_ptr(state_.bodies, colony->body_id);
       if (!body || body->system_id != ship.system_id) { q.erase(q.begin()); continue; }
       target = body->position_mkm;
@@ -1843,6 +1871,132 @@ void Simulation::tick_ships(double dt_days) {
             }
           }
 
+
+          // Mineral cache reward: load into ship cargo; overflow becomes a wreck (salvage cache).
+          std::unordered_map<std::string, double> minerals_loaded;
+          std::unordered_map<std::string, double> minerals_overflow;
+          double minerals_loaded_total = 0.0;
+          double minerals_overflow_total = 0.0;
+          Id cache_wreck_id = kInvalidId;
+
+          if (!anom->mineral_reward.empty()) {
+            const ShipDesign* d = find_design(ship.design_id);
+            const double cap = d ? std::max(0.0, d->cargo_tons) : 0.0;
+            double free = std::max(0.0, cap - cargo_used_tons(ship));
+
+            std::vector<std::pair<std::string, double>> items;
+            items.reserve(anom->mineral_reward.size());
+            for (const auto& [m, t] : anom->mineral_reward) {
+              if (m.empty()) continue;
+              if (!(t > 1e-9) || std::isnan(t) || std::isinf(t)) continue;
+              items.emplace_back(m, t);
+            }
+            std::sort(items.begin(), items.end(), [](const auto& a, const auto& b) {
+              if (a.second != b.second) return a.second > b.second;
+              return a.first < b.first;
+            });
+
+            for (const auto& [m, t] : items) {
+              double remaining = t;
+
+              // Load into cargo.
+              if (free > 1e-9 && cap > 1e-9) {
+                const double load = std::min(remaining, free);
+                if (load > 1e-9) {
+                  double& cur = ship.cargo[m];
+                  if (!std::isfinite(cur) || cur < 0.0) cur = 0.0;
+                  cur += load;
+                  minerals_loaded[m] += load;
+                  minerals_loaded_total += load;
+                  remaining -= load;
+                  free -= load;
+                }
+              }
+
+              if (remaining > 1e-9) {
+                minerals_overflow[m] += remaining;
+                minerals_overflow_total += remaining;
+              }
+            }
+
+            // If we couldn't carry everything, drop a salvageable cache wreck at the anomaly location.
+            if (!minerals_overflow.empty() && cfg_.enable_wrecks) {
+              const Id wid = allocate_id(state_);
+              Wreck w;
+              w.id = wid;
+              w.system_id = ship.system_id;
+              w.position_mkm = anom->position_mkm;
+              w.name = anom->name.empty()
+                           ? (std::string("Salvage Cache (Anomaly ") + std::to_string(static_cast<int>(anom->id)) + ")")
+                           : (std::string("Salvage Cache: ") + anom->name);
+              w.minerals = minerals_overflow;
+              w.source_ship_id = ship_id;
+              w.source_faction_id = ship.faction_id;
+              w.source_design_id = ship.design_id;
+              w.created_day = state_.date.days_since_epoch();
+              state_.wrecks[wid] = std::move(w);
+              cache_wreck_id = wid;
+            }
+          }
+
+          // Anomaly hazard (non-lethal damage).
+          bool hazard_triggered = false;
+          double hazard_shield_dmg = 0.0;
+          double hazard_hull_dmg = 0.0;
+          {
+            const double p = std::clamp(anom->hazard_chance, 0.0, 1.0);
+            const double dmg0 = std::max(0.0, anom->hazard_damage);
+            if (p > 1e-9 && dmg0 > 1e-9) {
+              const std::uint64_t seed = static_cast<std::uint64_t>(anom->id) * 0x9e3779b97f4a7c15ULL ^
+                                         static_cast<std::uint64_t>(ship_id) * 0xbf58476d1ce4e5b9ULL ^
+                                         static_cast<std::uint64_t>(ship.faction_id) * 0x94d049bb133111ebULL;
+              const double roll = u01_from_u64(splitmix64(seed));
+              if (roll < p) {
+                hazard_triggered = true;
+
+                const ShipDesign* d = find_design(ship.design_id);
+                const double max_hp = d ? std::max(1.0, d->max_hp) : std::max(1.0, ship.hp);
+                const double max_sh = d ? std::max(0.0, d->max_shields) : std::max(0.0, ship.shields);
+
+                ship.hp = std::clamp(ship.hp, 0.0, max_hp);
+                ship.shields = std::clamp(ship.shields, 0.0, max_sh);
+
+                double dmg = dmg0;
+
+                hazard_shield_dmg = std::min(dmg, ship.shields);
+                ship.shields -= hazard_shield_dmg;
+                dmg -= hazard_shield_dmg;
+
+                hazard_hull_dmg = std::min(dmg, std::max(0.0, ship.hp - 1.0));
+                ship.hp -= hazard_hull_dmg;
+                dmg -= hazard_hull_dmg;
+
+                // Dedicated warning event (the info event below summarizes rewards).
+                if (hazard_shield_dmg + hazard_hull_dmg > 1e-9) {
+                  std::ostringstream hs;
+                  hs.setf(std::ios::fixed);
+                  hs.precision(1);
+
+                  const std::string nm = anom->name.empty()
+                                             ? (std::string("Anomaly ") + std::to_string(static_cast<int>(anom->id)))
+                                             : anom->name;
+
+                  hs << "Anomaly hazard: " << ship.name << " took " << (hazard_shield_dmg + hazard_hull_dmg)
+                     << " damage while investigating " << nm;
+                  if (hazard_shield_dmg > 1e-9 || hazard_hull_dmg > 1e-9) {
+                    hs << " (shields -" << hazard_shield_dmg << ", hull -" << hazard_hull_dmg << ")";
+                  }
+
+                  EventContext hctx;
+                  hctx.system_id = ship.system_id;
+                  hctx.ship_id = ship_id;
+                  hctx.faction_id = ship.faction_id;
+                  push_event(EventLevel::Warn, EventCategory::Exploration, hs.str(), hctx);
+                }
+              }
+            }
+          }
+
           // Event.
           {
             const std::string nm = anom->name.empty()
@@ -1859,6 +2013,27 @@ void Simulation::tick_ships(double dt_days) {
               const std::string cname = (itc != content_.components.end() && !itc->second.name.empty()) ? itc->second.name
                                                                                                          : unlocked_component_id;
               ss << "; unlocked " << cname;
+            }
+
+            // Mineral cache rewards / salvage cache.
+            if (minerals_loaded_total > 1e-9 || minerals_overflow_total > 1e-9) {
+              if (minerals_loaded_total > 1e-9) {
+                ss << "; recovered " << minerals_loaded_total << "t minerals";
+                if (cache_wreck_id != kInvalidId && minerals_overflow_total > 1e-9) {
+                  ss << " (" << minerals_overflow_total << "t left as salvage cache)";
+                } else if (minerals_overflow_total > 1e-9 && !cfg_.enable_wrecks) {
+                  ss << " (" << minerals_overflow_total << "t lost)";
+                }
+              } else if (cache_wreck_id != kInvalidId && minerals_overflow_total > 1e-9) {
+                ss << "; located a salvage cache (" << minerals_overflow_total << "t minerals)";
+              }
+            }
+
+            // Hazard summary (details logged as a Warn event above).
+            if (hazard_triggered) {
+              const double hd = hazard_shield_dmg + hazard_hull_dmg;
+              if (hd > 1e-9) ss << "; hazard triggered (-" << hd << " dmg)";
+              else ss << "; hazard triggered";
             }
 
             EventContext ctx;
@@ -2407,6 +2582,8 @@ void Simulation::tick_ships(double dt_days) {
       const auto p = compute_power_allocation(*sd, ship.power_policy);
       if (!p.engines_online) effective_speed_km_s = 0.0;
     }
+
+    effective_speed_km_s *= maintenance_speed_mult(ship);
 
     // Fleet speed matching: for ships in the same fleet with the same current
     // movement order, cap speed to the slowest ship in that cohort.

@@ -54,9 +54,22 @@ void Simulation::tick_combat(double dt_days) {
   std::unordered_map<Id, std::vector<Id>> attackers_for_target;
   std::unordered_map<Id, std::vector<Id>> colony_attackers_for_target;
 
+  // Crew experience accumulator (combat "intensity" per ship).
+  // This is converted into crew_grade_points at the end of the tick.
+  std::unordered_map<Id, double> crew_intensity;
+
   const bool do_boarding = cfg_.enable_boarding && cfg_.boarding_range_mkm > 1e-9;
 
   auto is_hostile = [&](const Ship& a, const Ship& b) { return are_factions_hostile(a.faction_id, b.faction_id); };
+
+  const double maint_min_combat = std::clamp(cfg_.ship_maintenance_min_combat_multiplier, 0.0, 1.0);
+  auto maintenance_combat_mult = [&](const Ship& s) -> double {
+    if (!cfg_.enable_ship_maintenance) return 1.0;
+    double m = s.maintenance_condition;
+    if (!std::isfinite(m)) m = 1.0;
+    m = std::clamp(m, 0.0, 1.0);
+    return maint_min_combat + (1.0 - maint_min_combat) * m;
+  };
 
   const auto ship_ids = sorted_keys(state_.ships);
 
@@ -212,8 +225,9 @@ void Simulation::tick_combat(double dt_days) {
   // This is inspired by classic space-4X / space-sim mechanics where weapon
   // accuracy degrades with range and with poor tracking against fast targets.
   auto beam_hit_chance = [&](Id system_id, const Vec2& attacker_pos, const Vec2& attacker_vel_mkm_per_day,
-                             double attacker_sensor_mkm_raw, double tracking_ref_ang_per_day,
-                             double weapon_range_mkm, const Ship& target, const ShipDesign* target_design,
+                             double attacker_sensor_mkm_raw, double attacker_eccm_strength,
+                             double tracking_ref_ang_per_day, double weapon_range_mkm,
+                             const Ship& target, const ShipDesign* target_design,
                              double dist_mkm) -> double {
     if (!cfg_.enable_beam_hit_chance) return 1.0;
 
@@ -234,6 +248,17 @@ void Simulation::tick_combat(double dt_days) {
 
     const double ref_sensor = std::max(1e-9, cfg_.beam_tracking_reference_sensor_range_mkm);
     double tracking_ang = std::max(1e-9, tracking_ref_ang_per_day) * (attacker_sensor_mkm / ref_sensor);
+
+    // Electronic warfare: target ECM reduces tracking; attacker ECCM counters.
+    double ecm = 0.0;
+    if (target_design) ecm = std::max(0.0, target_design->ecm_strength);
+    double eccm = std::max(0.0, attacker_eccm_strength);
+
+    double ew_mult = (1.0 + eccm) / (1.0 + ecm);
+    if (!std::isfinite(ew_mult)) ew_mult = 1.0;
+    ew_mult = std::clamp(ew_mult, 0.25, 4.0);
+
+    tracking_ang *= ew_mult;
 
     // Signature influences tracking: stealth/EMCON makes it harder to keep a lock.
     double sig = sim_sensors::effective_signature_multiplier(*this, target, target_design);
@@ -457,7 +482,8 @@ void Simulation::tick_combat(double dt_days) {
           union_u += std::max(0.0, cur_e - cur_s);
           union_u = std::clamp(union_u, 0.0, 1.0);
 
-          const double pd_available = std::max(0.0, dd->point_defense_damage) * (union_u * dt_days);
+          const double crew_pd_mult = std::max(0.0, 1.0 + crew_grade_bonus(*def));
+          const double pd_available = std::max(0.0, dd->point_defense_damage) * maintenance_combat_mult(*def) * crew_pd_mult * (union_u * dt_days);
           if (pd_available <= 1e-12) continue;
 
           for (const auto& e : entries) {
@@ -472,6 +498,7 @@ void Simulation::tick_combat(double dt_days) {
             if (ms.damage <= 0.0) continue;
 
             const double intercept = std::min(ms.damage, share);
+            if (intercept > 1e-12) crew_intensity[did] += intercept;
             ms.damage = std::max(0.0, ms.damage - intercept);
           }
         }
@@ -520,6 +547,9 @@ void Simulation::tick_combat(double dt_days) {
         if (remaining > 1e-9) {
           incoming_damage[ms.target_ship_id] += remaining;
           attackers_for_target[ms.target_ship_id].push_back(ms.attacker_ship_id);
+          // Crew combat experience (both attacker and defender).
+          crew_intensity[ms.attacker_ship_id] += remaining;
+          crew_intensity[ms.target_ship_id] += remaining;
         }
         erase_salvos.push_back(mid);
       } else if (remaining <= 1e-9) {
@@ -665,7 +695,7 @@ void Simulation::tick_combat(double dt_days) {
               if (dist <= ad->weapon_range_mkm + 1e-9) {
                 // Apply damage in the order: ground forces -> installations -> population.
                 // Scale by dt_days so sub-day turn ticks don't amplify bombardment.
-                double remaining = std::max(0.0, ad->weapon_damage * dt_days);
+                double remaining = std::max(0.0, ad->weapon_damage * maintenance_combat_mult(attacker) * dt_days);
                 double killed_ground = 0.0;
                 double pop_loss_m = 0.0;
                 std::vector<std::pair<std::string, int>> destroyed;
@@ -877,48 +907,85 @@ void Simulation::tick_combat(double dt_days) {
       if (mtarget != kInvalidId) {
         const auto* tgt = find_ptr(state_.ships, mtarget);
         if (tgt) {
-          const double dmg = std::max(0.0, ad->missile_damage);
-          const double speed = std::max(1e-9, ad->missile_speed_mkm_per_day);
-          const double eta = std::max(1e-6, mtarget_dist / speed);
+          const int ammo_cap = std::max(0, ad->missile_ammo_capacity);
+          const int launchers = std::max(1, ad->missile_launcher_count);
 
-          MissileSalvo salvo;
-          salvo.id = allocate_id(state_);
-          salvo.system_id = attacker.system_id;
-          salvo.attacker_ship_id = aid;
-          salvo.attacker_faction_id = attacker.faction_id;
-          salvo.target_ship_id = mtarget;
-          salvo.target_faction_id = tgt->faction_id;
-          salvo.damage = dmg;
-          salvo.damage_initial = dmg;
-          salvo.eta_days_total = eta;
-          salvo.eta_days_remaining = eta;
-          salvo.launch_pos_mkm = attacker.position_mkm;
-          salvo.target_pos_mkm = tgt->position_mkm;
-          state_.missile_salvos[salvo.id] = salvo;
+          if (ammo_cap > 0) {
+            // Initialize/clamp for legacy saves and refits.
+            if (attacker.missile_ammo < 0) attacker.missile_ammo = ammo_cap;
+            attacker.missile_ammo = std::clamp(attacker.missile_ammo, 0, ammo_cap);
+          }
 
-          attacker.missile_cooldown_days = std::max(0.0, ad->missile_reload_days);
+          if (ammo_cap > 0 && attacker.missile_ammo <= 0) {
+            // Out of ammo: skip missile launch (beam fire may still occur).
+          } else {
+            int fired_launchers = launchers;
+            if (ammo_cap > 0) fired_launchers = std::min(launchers, attacker.missile_ammo);
 
-          auto ship_label = [](const Ship& s) -> std::string {
-            if (!s.name.empty()) return s.name;
-            return "Ship " + std::to_string(static_cast<unsigned long long>(s.id));
-          };
+            double dmg = std::max(0.0, ad->missile_damage) * maintenance_combat_mult(attacker);
+            if (fired_launchers < launchers) {
+              dmg *= static_cast<double>(fired_launchers) / static_cast<double>(launchers);
+            }
 
-          const std::string msg = ship_label(attacker) + " launched missiles at " + ship_label(*tgt) +
-                                  " (ETA " + format_duration_days(eta) + ", payload " + fmt1(dmg) + ").";
+            if (dmg > 0.0) {
+              const double speed = std::max(1e-9, ad->missile_speed_mkm_per_day);
+              const double eta = std::max(1e-6, mtarget_dist / speed);
 
-          push_event(EventLevel::Info, EventCategory::Combat, msg,
-                     EventContext{.faction_id = attacker.faction_id,
-                                  .faction_id2 = tgt->faction_id,
-                                  .system_id = attacker.system_id,
-                                  .ship_id = attacker.id,
-                                  .colony_id = kInvalidId});
+              MissileSalvo salvo;
+              salvo.id = allocate_id(state_);
+              salvo.system_id = attacker.system_id;
+              salvo.attacker_ship_id = aid;
+              salvo.attacker_faction_id = attacker.faction_id;
+              salvo.target_ship_id = mtarget;
+              salvo.target_faction_id = tgt->faction_id;
+              salvo.damage = dmg;
+              salvo.damage_initial = dmg;
+              salvo.eta_days_total = eta;
+              salvo.eta_days_remaining = eta;
+              salvo.launch_pos_mkm = attacker.position_mkm;
+              salvo.target_pos_mkm = tgt->position_mkm;
+              state_.missile_salvos[salvo.id] = salvo;
 
-          push_event(EventLevel::Info, EventCategory::Combat, msg,
-                     EventContext{.faction_id = tgt->faction_id,
-                                  .faction_id2 = attacker.faction_id,
-                                  .system_id = attacker.system_id,
-                                  .ship_id = tgt->id,
-                                  .colony_id = kInvalidId});
+              if (ammo_cap > 0) {
+                attacker.missile_ammo -= fired_launchers;
+                attacker.missile_ammo = std::clamp(attacker.missile_ammo, 0, ammo_cap);
+              }
+
+              {
+                const double base_reload = std::max(0.0, ad->missile_reload_days);
+                const double bonus = crew_grade_bonus(attacker);
+                // Crew bonus improves RoF by reducing reload time (multiplicative).
+                const double mult = std::clamp(1.0 - bonus, 0.25, 3.0);
+                attacker.missile_cooldown_days = base_reload * mult;
+              }
+
+              auto ship_label = [](const Ship& s) -> std::string {
+                if (!s.name.empty()) return s.name;
+                return "Ship " + std::to_string(static_cast<unsigned long long>(s.id));
+              };
+
+              std::string msg = ship_label(attacker) + " launched missiles at " + ship_label(*tgt) +
+                                " (ETA " + format_duration_days(eta) + ", payload " + fmt1(dmg);
+              if (ammo_cap > 0) {
+                msg += ", ammo " + std::to_string(attacker.missile_ammo) + "/" + std::to_string(ammo_cap);
+              }
+              msg += ").";
+
+              push_event(EventLevel::Info, EventCategory::Combat, msg,
+                         EventContext{.faction_id = attacker.faction_id,
+                                      .faction_id2 = tgt->faction_id,
+                                      .system_id = attacker.system_id,
+                                      .ship_id = attacker.id,
+                                      .colony_id = kInvalidId});
+
+              push_event(EventLevel::Info, EventCategory::Combat, msg,
+                         EventContext{.faction_id = tgt->faction_id,
+                                      .faction_id2 = attacker.faction_id,
+                                      .system_id = attacker.system_id,
+                                      .ship_id = tgt->id,
+                                      .colony_id = kInvalidId});
+            }
+          }
         }
       }
     }
@@ -982,12 +1049,22 @@ void Simulation::tick_combat(double dt_days) {
       const auto* tgt = find_ptr(state_.ships, chosen);
       const ShipDesign* td = tgt ? find_design(tgt->design_id) : nullptr;
       const double sensor_mkm_raw = sim_sensors::sensor_range_mkm_with_mode(*this, attacker, *ad);
-      const double hit = tgt ? beam_hit_chance(attacker.system_id, attacker.position_mkm, attacker.velocity_mkm_per_day,
-                                               sensor_mkm_raw, cfg_.beam_tracking_ref_ang_per_day,
-                                               ad->weapon_range_mkm, *tgt, td, chosen_dist)
-                             : 1.0;
-      incoming_damage[chosen] += ad->weapon_damage * dt_days * hit;
-      attackers_for_target[chosen].push_back(aid);
+      double hit = tgt ? beam_hit_chance(attacker.system_id, attacker.position_mkm, attacker.velocity_mkm_per_day,
+                                         sensor_mkm_raw, std::max(0.0, ad ? ad->eccm_strength : 0.0),
+                                         cfg_.beam_tracking_ref_ang_per_day, ad->weapon_range_mkm,
+                                         *tgt, td, chosen_dist)
+                       : 1.0;
+      // Crew bonus scales beam accuracy (Aurora-style: multiply hit chance by (1+bonus)).
+      hit *= std::max(0.0, 1.0 + crew_grade_bonus(attacker));
+      hit = std::clamp(hit, cfg_.beam_min_hit_chance, 1.0);
+
+      const double dmg = std::max(0.0, ad->weapon_damage) * maintenance_combat_mult(attacker) * dt_days * hit;
+      if (dmg > 1e-12) {
+        incoming_damage[chosen] += dmg;
+        attackers_for_target[chosen].push_back(aid);
+        crew_intensity[aid] += dmg;
+        crew_intensity[chosen] += dmg;
+      }
     }
   }
 
@@ -1023,16 +1100,22 @@ void Simulation::tick_combat(double dt_days) {
       const auto* tgt = find_ptr(state_.ships, chosen);
       const ShipDesign* td = tgt ? find_design(tgt->design_id) : nullptr;
       const double hit = tgt ? beam_hit_chance(bat.system_id, bat.position_mkm, Vec2{0.0, 0.0},
-                                               bat.sensor_range_mkm, cfg_.colony_beam_tracking_ref_ang_per_day,
-                                               bat.weapon_range_mkm, *tgt, td, chosen_dist)
+                                               bat.sensor_range_mkm, 0.0,
+                                               cfg_.colony_beam_tracking_ref_ang_per_day, bat.weapon_range_mkm,
+                                               *tgt, td, chosen_dist)
                              : 1.0;
-      incoming_damage[chosen] += bat.weapon_damage * dt_days * hit;
-      colony_attackers_for_target[chosen].push_back(bat.colony_id);
+      const double dmg = std::max(0.0, bat.weapon_damage) * dt_days * hit;
+      if (dmg > 1e-12) {
+        incoming_damage[chosen] += dmg;
+        colony_attackers_for_target[chosen].push_back(bat.colony_id);
+        crew_intensity[chosen] += dmg;
+      }
     }
   }
 
   // If nothing happened and boarding is disabled, exit early.
-  if (incoming_damage.empty() && !do_boarding) return;
+  // Note: crew_intensity can be non-empty due to missile interceptions (PD).
+  if (incoming_damage.empty() && !do_boarding && crew_intensity.empty()) return;
 
   // --- apply damage ---
   std::vector<Id> destroyed;
@@ -1492,8 +1575,17 @@ void Simulation::tick_combat(double dt_days) {
       const double defender_strength =
           std::max(0.0, target->troops) + std::max(0.0, cfg_.boarding_defense_hp_factor) * std::max(0.0, max_hp);
 
-      const double denom = std::max(1e-9, attacker_strength + defender_strength);
-      const double chance = clamp01(attacker_strength / denom);
+      const double att_mult = std::max(0.0, 1.0 + crew_grade_bonus(*attacker));
+      const double def_mult = std::max(0.0, 1.0 + crew_grade_bonus(*target));
+      const double a_eff = attacker_strength * att_mult;
+      const double d_eff = defender_strength * def_mult;
+      const double denom = std::max(1e-9, a_eff + d_eff);
+      const double chance = clamp01(a_eff / denom);
+
+      // Boarding grants crew experience even when it fails.
+      const double boarding_intensity = std::max(1.0, std::min(attacker_strength, defender_strength));
+      crew_intensity[aid] += boarding_intensity;
+      crew_intensity[tid] += boarding_intensity;
 
       const uint64_t day = static_cast<uint64_t>(std::max<long long>(0, state_.date.days_since_epoch()));
       uint64_t seed = day;
@@ -1504,8 +1596,8 @@ void Simulation::tick_combat(double dt_days) {
       const double att_loss_frac = clamp01(cfg_.boarding_attacker_casualty_fraction);
       const double def_loss_frac = clamp01(cfg_.boarding_defender_casualty_fraction);
 
-      const double ratio_def = defender_strength / denom;
-      const double ratio_att = attacker_strength / denom;
+      const double ratio_def = d_eff / denom;
+      const double ratio_att = a_eff / denom;
 
       const double att_loss = attacker_strength * att_loss_frac * ratio_def;
       const double def_loss = std::max(0.0, target->troops) * def_loss_frac * ratio_att;
@@ -1578,6 +1670,25 @@ void Simulation::tick_combat(double dt_days) {
         msg += " (p=" + fmt1(chance * 100.0) + "%, lost " + fmt1(att_loss) + ")";
 
         push_event(EventLevel::Info, EventCategory::Combat, msg, ctx);
+      }
+    }
+  }
+
+  // Apply crew experience from this tick.
+  if (cfg_.enable_crew_experience && !crew_intensity.empty()) {
+    const double k = std::max(0.0, cfg_.crew_combat_grade_points_per_damage);
+    if (k > 0.0) {
+      const double cap = std::max(0.0, cfg_.crew_grade_points_cap);
+      for (const auto& [sid, intensity] : crew_intensity) {
+        if (intensity <= 1e-12) continue;
+        Ship* sh = find_ptr(state_.ships, sid);
+        if (!sh) continue;
+        if (!std::isfinite(sh->crew_grade_points) || sh->crew_grade_points < 0.0) {
+          sh->crew_grade_points = cfg_.crew_initial_grade_points;
+        }
+        sh->crew_grade_points = std::max(0.0, sh->crew_grade_points);
+        sh->crew_grade_points += intensity * k;
+        if (cap > 0.0) sh->crew_grade_points = std::min(cap, sh->crew_grade_points);
       }
     }
   }

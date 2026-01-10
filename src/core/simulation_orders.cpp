@@ -1218,7 +1218,7 @@ bool Simulation::issue_load_mineral(Id ship_id, Id colony_id, const std::string&
   if (!ship) return false;
   auto* colony = find_ptr(state_.colonies, colony_id);
   if (!colony) return false;
-  if (!are_factions_mutual_friendly(ship->faction_id, colony->faction_id)) return false;
+  if (!are_factions_trade_partners(ship->faction_id, colony->faction_id)) return false;
   const auto* body = find_ptr(state_.bodies, colony->body_id);
   if (!body) return false;
   if (body->system_id == kInvalidId) return false;
@@ -1238,7 +1238,7 @@ bool Simulation::issue_unload_mineral(Id ship_id, Id colony_id, const std::strin
   if (!ship) return false;
   auto* colony = find_ptr(state_.colonies, colony_id);
   if (!colony) return false;
-  if (!are_factions_mutual_friendly(ship->faction_id, colony->faction_id)) return false;
+  if (!are_factions_trade_partners(ship->faction_id, colony->faction_id)) return false;
   const auto* body = find_ptr(state_.bodies, colony->body_id);
   if (!body) return false;
   if (body->system_id == kInvalidId) return false;
@@ -1545,6 +1545,24 @@ double Simulation::troop_training_points_per_day(const Colony& c) const {
   return std::max(0.0, total);
 }
 
+double Simulation::crew_training_points_per_day(const Colony& c) const {
+  double total = 0.0;
+  for (const auto& [inst_id, count] : c.installations) {
+    if (count <= 0) continue;
+    auto it = content_.installations.find(inst_id);
+    if (it == content_.installations.end()) continue;
+    const double p = it->second.crew_training_points_per_day;
+    if (p > 0.0) total += p * static_cast<double>(count);
+  }
+  // Crew training currently uses the same faction economy multiplier bucket as troop training.
+  if (const auto* fac = find_ptr(state_.factions, c.faction_id)) {
+    const auto m = compute_faction_economy_multipliers(content_, *fac);
+    total *= std::max(0.0, m.troop_training);
+  }
+  total *= std::max(0.0, cfg_.crew_training_points_multiplier);
+  return std::max(0.0, total);
+}
+
 double Simulation::fortification_points(const Colony& c) const {
   double total = 0.0;
   for (const auto& [inst_id, count] : c.installations) {
@@ -1555,6 +1573,23 @@ double Simulation::fortification_points(const Colony& c) const {
     if (p > 0.0) total += p * static_cast<double>(count);
   }
   return total;
+}
+
+double Simulation::crew_grade_bonus_for_points(double grade_points) const {
+  if (!cfg_.enable_crew_experience) return 0.0;
+  if (!std::isfinite(grade_points)) grade_points = cfg_.crew_initial_grade_points;
+  const double cap = std::max(0.0, cfg_.crew_grade_points_cap);
+  grade_points = std::clamp(grade_points, 0.0, cap > 0.0 ? cap : grade_points);
+  // Aurora-style grade points mapping.
+  // bonus = (sqrt(points) - 10) / 100
+  // points=100 -> 0; points=400 -> +10%; points=0 -> -10%.
+  const double bonus = (std::sqrt(std::max(0.0, grade_points)) - 10.0) / 100.0;
+  // Safety clamp to a sane range even if mods set extreme caps.
+  return std::clamp(bonus, -0.25, 0.75);
+}
+
+double Simulation::crew_grade_bonus(const Ship& ship) const {
+  return crew_grade_bonus_for_points(ship.crew_grade_points);
 }
 
 bool Simulation::issue_transfer_cargo_to_ship(Id ship_id, Id target_ship_id, const std::string& mineral, double tons,

@@ -69,6 +69,17 @@ void Simulation::apply_design_stats_to_ship(Ship& ship) {
     ship.shields = std::clamp(ship.shields, 0.0, max_sh);
   }
 
+  // Missile ammo initialization / clamping (finite-ammo missile designs).
+  const int ammo_cap = std::max(0, d->missile_ammo_capacity);
+  if (ammo_cap <= 0) {
+    // Unlimited ammo (legacy behavior) or no missile launchers.
+    if (ship.missile_ammo < 0) ship.missile_ammo = 0;
+    ship.missile_ammo = std::max(0, ship.missile_ammo);
+  } else {
+    if (ship.missile_ammo < 0) ship.missile_ammo = ammo_cap;
+    ship.missile_ammo = std::clamp(ship.missile_ammo, 0, ammo_cap);
+  }
+
   const double troop_cap = std::max(0.0, d->troop_capacity);
   if (troop_cap <= 1e-9) {
     ship.troops = 0.0;
@@ -82,6 +93,17 @@ void Simulation::apply_design_stats_to_ship(Ship& ship) {
   } else {
     ship.colonists_millions = std::clamp(ship.colonists_millions, 0.0, colonist_cap);
   }
+
+  if (!std::isfinite(ship.maintenance_condition)) ship.maintenance_condition = 1.0;
+  ship.maintenance_condition = std::clamp(ship.maintenance_condition, 0.0, 1.0);
+
+  // Crew grade points initialization / clamping (older saves / newly created ships).
+  if (!std::isfinite(ship.crew_grade_points) || ship.crew_grade_points < 0.0) {
+    ship.crew_grade_points = cfg_.crew_initial_grade_points;
+  }
+  const double crew_cap = std::max(0.0, cfg_.crew_grade_points_cap);
+  if (crew_cap > 0.0) ship.crew_grade_points = std::clamp(ship.crew_grade_points, 0.0, crew_cap);
+  else ship.crew_grade_points = std::max(0.0, ship.crew_grade_points);
 }
 
 bool Simulation::upsert_custom_design(ShipDesign design, std::string* error) {
@@ -119,6 +141,10 @@ bool Simulation::upsert_custom_design(ShipDesign design, std::string* error) {
   double missile_speed = 0.0;
   double missile_reload = 0.0;
   bool missile_reload_set = false;
+
+  int missile_launcher_count = 0;
+  int missile_ammo_capacity = 0;
+  bool missile_ammo_finite = true;
 
   // Point defense (anti-missile).
   double point_defense_damage = 0.0;
@@ -162,6 +188,13 @@ bool Simulation::upsert_custom_design(ShipDesign design, std::string* error) {
       // Missile launcher stats (optional).
       if (c.missile_damage > 0.0) {
         missile_damage += c.missile_damage;
+        missile_launcher_count += 1;
+        if (c.missile_ammo > 0) {
+          missile_ammo_capacity += c.missile_ammo;
+        } else {
+          // Legacy / unlimited launcher: disable ammo tracking for this design.
+          missile_ammo_finite = false;
+        }
         missile_range = std::max(missile_range, c.missile_range_mkm);
         missile_speed = std::max(missile_speed, c.missile_speed_mkm_per_day);
         if (c.missile_reload_days > 0.0) {
@@ -220,6 +253,9 @@ bool Simulation::upsert_custom_design(ShipDesign design, std::string* error) {
   design.missile_range_mkm = missile_range;
   design.missile_speed_mkm_per_day = missile_speed;
   design.missile_reload_days = missile_reload_set ? missile_reload : 0.0;
+
+  design.missile_launcher_count = missile_launcher_count;
+  design.missile_ammo_capacity = (missile_launcher_count > 0 && missile_ammo_finite) ? missile_ammo_capacity : 0;
 
   design.point_defense_damage = point_defense_damage;
   design.point_defense_range_mkm = point_defense_range;

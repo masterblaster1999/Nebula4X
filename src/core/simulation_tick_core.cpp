@@ -196,6 +196,8 @@ void Simulation::tick_one_tick_hours(int hours) {
     tick_treaties();
     tick_ai();
     tick_refuel();
+    tick_rearm();
+    tick_ship_maintenance(1.0);
   }
 
   // Continuous (sub-day) ticks.
@@ -207,6 +209,9 @@ void Simulation::tick_one_tick_hours(int hours) {
   // Post-movement maintenance / slow processes.
   if (cfg_.enable_subday_economy) {
     tick_refuel();
+    tick_rearm();
+    tick_ship_maintenance(dt_days);
+    tick_crew_training(dt_days);
     tick_terraforming(dt_days);
     tick_repairs(dt_days);
     if (day_advanced) tick_ground_combat();
@@ -214,6 +219,7 @@ void Simulation::tick_one_tick_hours(int hours) {
     tick_ground_combat();
     tick_terraforming(1.0);
     tick_repairs(1.0);
+    tick_crew_training(1.0);
 
     // Wreck cleanup (optional).
     if (cfg_.wreck_decay_days > 0 && !state_.wrecks.empty()) {
@@ -517,7 +523,13 @@ void Simulation::tick_contacts(double dt_days, bool emit_contact_lost_events) {
           // Apply target signature / EMCON.
           const auto* d = find_design(sh->design_id);
           const double sig = sim_sensors::effective_signature_multiplier(*this, *sh, d);
-          const double eff = src.range_mkm * sig;
+const double ecm = d ? std::max(0.0, d->ecm_strength) : 0.0;
+const double eccm = std::max(0.0, src.eccm_strength);
+double ew_mult = (1.0 + eccm) / (1.0 + ecm);
+if (!std::isfinite(ew_mult)) ew_mult = 1.0;
+ew_mult = std::clamp(ew_mult, 0.1, 10.0);
+
+const double eff = src.range_mkm * sig * ew_mult;
           if (eff <= 1e-9) continue;
 
           double t_seen = 1.0;

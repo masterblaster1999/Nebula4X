@@ -1,20 +1,95 @@
 {
   "version": 1,
   "resources": {
-    "Metals": { "name": "Metals", "category": "metal", "mineable": false, "salvage_research_rp_per_ton": 0.0 },
-    "Minerals": { "name": "Minerals", "category": "mineral", "mineable": false, "salvage_research_rp_per_ton": 0.0 },
-    "Duranium": { "name": "Duranium", "category": "metal", "mineable": true, "salvage_research_rp_per_ton": 0.005 },
-    "Neutronium": { "name": "Neutronium", "category": "metal", "mineable": true, "salvage_research_rp_per_ton": 0.005 },
-    "Corbomite": { "name": "Corbomite", "category": "exotic", "mineable": true, "salvage_research_rp_per_ton": 0.05 },
-    "Tritanium": { "name": "Tritanium", "category": "metal", "mineable": true, "salvage_research_rp_per_ton": 0.005 },
-    "Boronide": { "name": "Boronide", "category": "metal", "mineable": true, "salvage_research_rp_per_ton": 0.005 },
-    "Mercassium": { "name": "Mercassium", "category": "mineral", "mineable": true, "salvage_research_rp_per_ton": 0.01 },
-    "Vendarite": { "name": "Vendarite", "category": "mineral", "mineable": true, "salvage_research_rp_per_ton": 0.01 },
-    "Sorium": { "name": "Sorium", "category": "volatile", "mineable": true, "salvage_research_rp_per_ton": 0.002 },
-    "Uridium": { "name": "Uridium", "category": "mineral", "mineable": true, "salvage_research_rp_per_ton": 0.01 },
-    "Corundium": { "name": "Corundium", "category": "mineral", "mineable": true, "salvage_research_rp_per_ton": 0.01 },
-    "Gallicite": { "name": "Gallicite", "category": "mineral", "mineable": true, "salvage_research_rp_per_ton": 0.01 },
-
-    "Fuel": { "name": "Fuel", "category": "fuel", "mineable": false, "salvage_research_rp_per_ton": 0.0 }
+    "Metals": {
+      "name": "Metals",
+      "category": "metal",
+      "mineable": false,
+      "salvage_research_rp_per_ton": 0.0
+    },
+    "Minerals": {
+      "name": "Minerals",
+      "category": "mineral",
+      "mineable": false,
+      "salvage_research_rp_per_ton": 0.0
+    },
+    "Duranium": {
+      "name": "Duranium",
+      "category": "metal",
+      "mineable": true,
+      "salvage_research_rp_per_ton": 0.005
+    },
+    "Neutronium": {
+      "name": "Neutronium",
+      "category": "metal",
+      "mineable": true,
+      "salvage_research_rp_per_ton": 0.005
+    },
+    "Corbomite": {
+      "name": "Corbomite",
+      "category": "exotic",
+      "mineable": true,
+      "salvage_research_rp_per_ton": 0.05
+    },
+    "Tritanium": {
+      "name": "Tritanium",
+      "category": "metal",
+      "mineable": true,
+      "salvage_research_rp_per_ton": 0.005
+    },
+    "Boronide": {
+      "name": "Boronide",
+      "category": "metal",
+      "mineable": true,
+      "salvage_research_rp_per_ton": 0.005
+    },
+    "Mercassium": {
+      "name": "Mercassium",
+      "category": "mineral",
+      "mineable": true,
+      "salvage_research_rp_per_ton": 0.01
+    },
+    "Vendarite": {
+      "name": "Vendarite",
+      "category": "mineral",
+      "mineable": true,
+      "salvage_research_rp_per_ton": 0.01
+    },
+    "Sorium": {
+      "name": "Sorium",
+      "category": "volatile",
+      "mineable": true,
+      "salvage_research_rp_per_ton": 0.002
+    },
+    "Uridium": {
+      "name": "Uridium",
+      "category": "mineral",
+      "mineable": true,
+      "salvage_research_rp_per_ton": 0.01
+    },
+    "Corundium": {
+      "name": "Corundium",
+      "category": "mineral",
+      "mineable": true,
+      "salvage_research_rp_per_ton": 0.01
+    },
+    "Gallicite": {
+      "name": "Gallicite",
+      "category": "mineral",
+      "mineable": true,
+      "salvage_research_rp_per_ton": 0.01
+    },
+    "Munitions": {
+      "name": "Munitions",
+      "category": "munitions",
+      "mineable": false,
+      "salvage_research_rp_per_ton": 0.0
+    },
+    "Fuel": {
+      "name": "Fuel",
+      "category": "fuel",
+      "mineable": false,
+      "salvage_research_rp_per_ton": 0.0
+    }
   }
 }

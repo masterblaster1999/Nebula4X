@@ -129,6 +129,12 @@ std::vector<ContentIssue> validate_content_db_detailed(const ContentDB& db) {
                  join("Component '", key,
                       "' has signature_multiplier > 1.0 (expected [0,1]): ", c.signature_multiplier),
                  "component", key);
+if (!is_non_negative(c.ecm_strength))
+  push_error(issues, "component.invalid_ecm",
+             join("Component '", key, "' has invalid ecm_strength: ", c.ecm_strength), "component", key);
+if (!is_non_negative(c.eccm_strength))
+  push_error(issues, "component.invalid_eccm",
+             join("Component '", key, "' has invalid eccm_strength: ", c.eccm_strength), "component", key);
     if (!is_non_negative(c.colony_capacity_millions))
       push_error(issues, "component.invalid_colony_cap",
                  join("Component '", key, "' has invalid colony_capacity_millions: ", c.colony_capacity_millions),
@@ -162,6 +168,9 @@ std::vector<ContentIssue> validate_content_db_detailed(const ContentDB& db) {
       push_error(issues, "component.invalid_missile_reload",
                  join("Component '", key, "' has invalid missile_reload_days: ", c.missile_reload_days), "component",
                  key);
+    if (c.missile_ammo < 0)
+      push_error(issues, "component.invalid_missile_ammo",
+                 join("Component '", key, "' has invalid missile_ammo: ", c.missile_ammo), "component", key);
     if (!is_non_negative(c.point_defense_damage))
       push_error(issues, "component.invalid_pd_damage",
                  join("Component '", key, "' has invalid point_defense_damage: ", c.point_defense_damage), "component",
@@ -234,6 +243,12 @@ std::vector<ContentIssue> validate_content_db_detailed(const ContentDB& db) {
       push_error(issues, "design.signature_gt1",
                  join("Design '", key, "' has signature_multiplier > 1.0 (expected [0,1]): ", d.signature_multiplier),
                  "design", key);
+if (!is_non_negative(d.ecm_strength))
+  push_error(issues, "design.invalid_ecm",
+             join("Design '", key, "' has invalid ecm_strength: ", d.ecm_strength), "design", key);
+if (!is_non_negative(d.eccm_strength))
+  push_error(issues, "design.invalid_eccm",
+             join("Design '", key, "' has invalid eccm_strength: ", d.eccm_strength), "design", key);
     if (!is_non_negative(d.colony_capacity_millions))
       push_error(issues, "design.invalid_colony_cap",
                  join("Design '", key, "' has invalid colony_capacity_millions: ", d.colony_capacity_millions), "design",
@@ -285,6 +300,14 @@ std::vector<ContentIssue> validate_content_db_detailed(const ContentDB& db) {
     if (!is_non_negative(d.missile_reload_days))
       push_error(issues, "design.invalid_missile_reload",
                  join("Design '", key, "' has invalid missile_reload_days: ", d.missile_reload_days), "design", key);
+    if (d.missile_launcher_count < 0)
+      push_error(issues, "design.invalid_missile_launcher_count",
+                 join("Design '", key, "' has invalid missile_launcher_count: ", d.missile_launcher_count), "design",
+                 key);
+    if (d.missile_ammo_capacity < 0)
+      push_error(issues, "design.invalid_missile_ammo_capacity",
+                 join("Design '", key, "' has invalid missile_ammo_capacity: ", d.missile_ammo_capacity), "design",
+                 key);
     if (!is_non_negative(d.point_defense_damage))
       push_error(issues, "design.invalid_pd_damage",
                  join("Design '", key, "' has invalid point_defense_damage: ", d.point_defense_damage), "design", key);
@@ -342,6 +365,11 @@ std::vector<ContentIssue> validate_content_db_detailed(const ContentDB& db) {
       push_error(issues, "installation.invalid_training",
                  join("Installation '", key,
                       "' has invalid troop_training_points_per_day: ", inst.troop_training_points_per_day),
+                 "installation", key);
+    if (!is_non_negative(inst.crew_training_points_per_day))
+      push_error(issues, "installation.invalid_crew_training",
+                 join("Installation '", key,
+                      "' has invalid crew_training_points_per_day: ", inst.crew_training_points_per_day),
                  "installation", key);
     if (!is_non_negative(inst.habitation_capacity_millions))
       push_error(issues, "installation.invalid_hab_cap",

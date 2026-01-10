@@ -1042,6 +1042,19 @@ bool Simulation::are_factions_mutual_friendly(Id a_faction_id, Id b_faction_id) 
          diplomatic_status(b_faction_id, a_faction_id) == DiplomacyStatus::Friendly;
 }
 
+bool Simulation::are_factions_trade_partners(Id a_faction_id, Id b_faction_id) const {
+  if (a_faction_id == kInvalidId || b_faction_id == kInvalidId) return false;
+  if (a_faction_id == b_faction_id) return true;
+  // Mutual friendly implies full cooperation, which includes trade/logistics access.
+  if (are_factions_mutual_friendly(a_faction_id, b_faction_id)) return true;
+
+  // Otherwise, allow trade access if a Trade Agreement treaty exists (or stronger).
+  TreatyType tt = TreatyType::Ceasefire;
+  if (!sim_internal::strongest_active_treaty_between(state_, a_faction_id, b_faction_id, &tt)) return false;
+  return tt == TreatyType::TradeAgreement || tt == TreatyType::Alliance;
+}
+
+
 Id Simulation::create_treaty(Id faction_a, Id faction_b, TreatyType type, int duration_days, bool push_event,
                              std::string* error) {
   if (error) error->clear();
@@ -1389,7 +1402,8 @@ bool Simulation::is_ship_detected_by_faction(Id viewer_faction_id, Id target_shi
   if (sources.empty()) return false;
   const auto* d = find_design(tgt->design_id);
   const double sig = sim_sensors::effective_signature_multiplier(*this, *tgt, d);
-  return any_source_detects(sources, tgt->position_mkm, sig);
+  const double ecm = d ? std::max(0.0, d->ecm_strength) : 0.0;
+  return any_source_detects(sources, tgt->position_mkm, sig, ecm);
 }
 
 std::vector<Id> Simulation::detected_hostile_ships_in_system(Id viewer_faction_id, Id system_id) const {

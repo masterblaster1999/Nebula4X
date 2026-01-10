@@ -58,6 +58,8 @@ int test_anomalies();
 int test_missile_components();
 int test_auto_tanker();
 int test_ship_repairs();
+int test_crew_experience();
+int test_electronic_warfare();
 int test_fleets();
 int test_ai_economy();
 int test_research_planner();
@@ -226,6 +228,7 @@ int main(int argc, char** argv) {
       {"attack_lead_pursuit", test_attack_lead_pursuit},
       {"combat_doctrine", test_combat_doctrine},
       {"ship_repairs", test_ship_repairs},
+      {"crew_experience", test_crew_experience},
       {"faction_economy_modifiers", test_faction_economy_modifiers},
       {"advisor", test_advisor},
   };

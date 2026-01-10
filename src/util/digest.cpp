@@ -254,6 +254,8 @@ static void hash_ship_design(Digest64& d, const ShipDesign& sd) {
   d.add_double(sd.cargo_tons);
   d.add_double(sd.sensor_range_mkm);
   d.add_double(sd.signature_multiplier);
+  d.add_double(sd.ecm_strength);
+  d.add_double(sd.eccm_strength);
   d.add_double(sd.colony_capacity_millions);
   d.add_double(sd.troop_capacity);
   d.add_double(sd.power_generation);
@@ -481,6 +483,8 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
     d.add_double(sh.auto_tanker_reserve_fraction);
     d.add_bool(sh.auto_repair);
     d.add_double(sh.auto_repair_threshold_fraction);
+    d.add_bool(sh.auto_rearm);
+    d.add_double(sh.auto_rearm_threshold_fraction);
     d.add_u8(static_cast<std::uint8_t>(sh.repair_priority));
     d.add_u8(static_cast<std::uint8_t>(sh.sensor_mode));
 
@@ -500,6 +504,9 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
       d.add_u8(static_cast<std::uint8_t>(ss));
     }
     d.add_double(sh.hp);
+    d.add_double(sh.maintenance_condition);
+    d.add_double(sh.crew_grade_points);
+    d.add_i64(static_cast<std::int64_t>(sh.missile_ammo));
     d.add_double(sh.missile_cooldown_days);
     d.add_double(sh.boarding_cooldown_days);
     d.add_double(sh.fuel_tons);

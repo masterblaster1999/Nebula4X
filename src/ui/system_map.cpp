@@ -1502,6 +1502,34 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
             ImGui::TextDisabled("Reward: +%.1f RP", a->research_reward);
           }
 
+          // Mineral cache reward (if any).
+          {
+            double total = 0.0;
+            for (const auto& [_, t] : a->mineral_reward) total += std::max(0.0, t);
+            if (total > 1e-6) {
+              ImGui::TextDisabled("Minerals: %.0f tons", total);
+
+              // Show up to 6 minerals (largest first).
+              std::vector<std::pair<std::string, double>> items;
+              items.reserve(a->mineral_reward.size());
+              for (const auto& [m, t] : a->mineral_reward) {
+                if (!(t > 1e-6)) continue;
+                items.emplace_back(m, t);
+              }
+              std::sort(items.begin(), items.end(), [](const auto& x, const auto& y) { return x.second > y.second; });
+              int shown = 0;
+              for (const auto& [m, t] : items) {
+                if (shown++ >= 6) break;
+                ImGui::BulletText("%s: %.1f", m.c_str(), t);
+              }
+            }
+          }
+
+          // Investigation hazard (non-lethal).
+          if (a->hazard_chance > 1e-6 && a->hazard_damage > 1e-6) {
+            ImGui::TextDisabled("Hazard: %.0f%% / %.1f dmg", a->hazard_chance * 100.0, a->hazard_damage);
+          }
+
           if (!a->unlock_component_id.empty()) {
             const auto itc = sim.content().components.find(a->unlock_component_id);
             const std::string cname = (itc != sim.content().components.end() && !itc->second.name.empty())

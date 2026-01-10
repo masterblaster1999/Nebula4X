@@ -117,13 +117,13 @@ void Simulation::tick_ai() {
     const double threshold = std::clamp(ship->auto_refuel_threshold_fraction, 0.0, 1.0);
     if (frac + 1e-9 >= threshold) return false;
 
-    // If we're already docked at any friendly colony, just wait here: tick_refuel()
+    // If we're already docked at any trade-partner colony, just wait here: tick_refuel()
     // will top us up when Fuel becomes available.
     const double dock_range = std::max(0.0, cfg_.docking_range_mkm);
     for (Id cid : sorted_keys(state_.colonies)) {
       const Colony* c = find_ptr(state_.colonies, cid);
       if (!c) continue;
-      if (c->faction_id != ship->faction_id) continue;
+      if (!are_factions_trade_partners(ship->faction_id, c->faction_id)) continue;
       const Body* b = find_ptr(state_.bodies, c->body_id);
       if (!b) continue;
       if (b->system_id != ship->system_id) continue;
@@ -140,7 +140,7 @@ void Simulation::tick_ai() {
     for (Id cid : sorted_keys(state_.colonies)) {
       const Colony* c = find_ptr(state_.colonies, cid);
       if (!c) continue;
-      if (c->faction_id != ship->faction_id) continue;
+      if (!are_factions_trade_partners(ship->faction_id, c->faction_id)) continue;
       const Body* b = find_ptr(state_.bodies, c->body_id);
       if (!b) continue;
       if (b->system_id == kInvalidId) continue;
@@ -196,6 +196,123 @@ void Simulation::tick_ai() {
   };
 
 
+  auto issue_auto_rearm = [&](Id ship_id) -> bool {
+    Ship* ship = find_ptr(state_.ships, ship_id);
+    if (!ship) return false;
+    if (!ship->auto_rearm) return false;
+    if (!orders_empty(ship_id)) return false;
+    if (ship->system_id == kInvalidId) return false;
+    if (ship->speed_km_s <= 0.0) return false;
+
+    // Avoid fighting the fleet movement logic. Fleets should be controlled by fleet orders.
+    if (fleet_for_ship(ship_id) != kInvalidId) return false;
+
+    const ShipDesign* d = find_design(ship->design_id);
+    if (!d) return false;
+    const int cap = std::max(0, d->missile_ammo_capacity);
+    if (cap <= 0) return false;
+
+    int ammo = ship->missile_ammo;
+    if (ammo < 0) ammo = cap;
+    ammo = std::clamp(ammo, 0, cap);
+
+    const double threshold = std::clamp(ship->auto_rearm_threshold_fraction, 0.0, 1.0);
+
+    // If we're not actually low (or have no need), do nothing.
+    const int need = cap - ammo;
+    if (need <= 0) return false;
+
+    // Account for immediate reload from carried munitions (ammo tenders / cargo holds).
+    constexpr const char* kMunitionsKey = "Munitions";
+    int ammo_after = ammo;
+    if (auto itc = ship->cargo.find(kMunitionsKey); itc != ship->cargo.end()) {
+      const int avail = static_cast<int>(std::floor(std::max(0.0, itc->second) + 1e-9));
+      ammo_after = std::min(cap, ammo_after + std::min(need, avail));
+    }
+
+    const double frac_after = static_cast<double>(ammo_after) / static_cast<double>(cap);
+    if (frac_after + 1e-9 >= threshold) return false;
+
+    // If we're already docked at any trade-partner colony, just wait: tick_rearm() will top us up
+    // when Munitions are available (possibly via auto-freight).
+    const double dock_range = std::max(0.0, cfg_.docking_range_mkm);
+    for (Id cid : sorted_keys(state_.colonies)) {
+      const Colony* c = find_ptr(state_.colonies, cid);
+      if (!c) continue;
+      if (!are_factions_trade_partners(ship->faction_id, c->faction_id)) continue;
+      const Body* b = find_ptr(state_.bodies, c->body_id);
+      if (!b) continue;
+      if (b->system_id != ship->system_id) continue;
+      const double dist = (ship->position_mkm - b->position_mkm).length();
+      if (dist <= dock_range + 1e-9) {
+        return false;
+      }
+    }
+
+    Id best_colony_id = kInvalidId;
+    double best_eta = std::numeric_limits<double>::infinity();
+    bool best_has_mun = false;
+
+    for (Id cid : sorted_keys(state_.colonies)) {
+      const Colony* c = find_ptr(state_.colonies, cid);
+      if (!c) continue;
+      if (!are_factions_trade_partners(ship->faction_id, c->faction_id)) continue;
+      const Body* b = find_ptr(state_.bodies, c->body_id);
+      if (!b) continue;
+      if (b->system_id == kInvalidId) continue;
+
+      const double eta = estimate_eta_days_to_pos(ship->system_id, ship->position_mkm, ship->faction_id,
+                                                  ship->speed_km_s, b->system_id, b->position_mkm);
+      if (!std::isfinite(eta)) continue;
+
+      const double mun_avail = [&]() {
+        if (auto it = c->minerals.find(kMunitionsKey); it != c->minerals.end()) return std::max(0.0, it->second);
+        return 0.0;
+      }();
+      const bool has_mun = (mun_avail >= 1.0 - 1e-9);
+
+      if (best_colony_id == kInvalidId) {
+        best_colony_id = cid;
+        best_eta = eta;
+        best_has_mun = has_mun;
+        continue;
+      }
+
+      if (has_mun != best_has_mun) {
+        if (has_mun && !best_has_mun) {
+          best_colony_id = cid;
+          best_eta = eta;
+          best_has_mun = true;
+        }
+        continue;
+      }
+
+      if (eta + 1e-9 < best_eta) {
+        best_colony_id = cid;
+        best_eta = eta;
+        best_has_mun = has_mun;
+      }
+    }
+
+    if (best_colony_id == kInvalidId) return false;
+
+    const Colony* target_colony = find_ptr(state_.colonies, best_colony_id);
+    if (!target_colony) return false;
+    const Body* target_body = find_ptr(state_.bodies, target_colony->body_id);
+    if (!target_body) return false;
+    if (!find_ptr(state_.systems, target_body->system_id)) return false;
+
+    // Multi-system travel if needed.
+    if (!issue_travel_to_system(ship_id, target_body->system_id, /*restrict_to_discovered=*/true,
+                                target_body->position_mkm)) return false;
+
+    auto& orders = state_.ship_orders[ship_id];
+    orders.queue.push_back(MoveToBody{target_body->id});
+    return true;
+  };
+
+
+
   auto issue_auto_repair = [&](Id ship_id) -> bool {
     Ship* ship = find_ptr(state_.ships, ship_id);
     if (!ship) return false;
@@ -223,7 +340,7 @@ void Simulation::tick_ai() {
     for (Id cid : sorted_keys(state_.colonies)) {
       const Colony* c = find_ptr(state_.colonies, cid);
       if (!c) continue;
-      if (!are_factions_mutual_friendly(ship->faction_id, c->faction_id)) continue;
+      if (!are_factions_trade_partners(ship->faction_id, c->faction_id)) continue;
 
       const auto it_yard = c->installations.find("shipyard");
       const int yards = (it_yard != c->installations.end()) ? it_yard->second : 0;
@@ -243,11 +360,11 @@ void Simulation::tick_ai() {
     double best_score = std::numeric_limits<double>::infinity();
     int best_yards = 0;
 
-    // Consider any mutual-friendly colony with shipyards.
+    // Consider any trade-partner colony with shipyards.
     for (Id cid : sorted_keys(state_.colonies)) {
       const Colony* c = find_ptr(state_.colonies, cid);
       if (!c) continue;
-      if (!are_factions_mutual_friendly(ship->faction_id, c->faction_id)) continue;
+      if (!are_factions_trade_partners(ship->faction_id, c->faction_id)) continue;
 
       const auto it_yard = c->installations.find("shipyard");
       const int yards = (it_yard != c->installations.end()) ? it_yard->second : 0;
@@ -631,7 +748,11 @@ void Simulation::tick_ai() {
 
     // (D) Fully explored: investigate unresolved anomalies in the current system.
     {
+      const ShipDesign* d = find_design(ship->design_id);
+      const double speed_mkm_d = (d && d->speed_km_s > 1e-9) ? mkm_per_day_from_speed(d->speed_km_s, cfg_.seconds_per_day) : 1.0;
+
       Id best_anom = kInvalidId;
+      double best_score = -std::numeric_limits<double>::infinity();
       double best_d2 = std::numeric_limits<double>::infinity();
 
       for (const auto& [aid, a] : state_.anomalies) {
@@ -639,10 +760,27 @@ void Simulation::tick_ai() {
         if (a.system_id != ship->system_id) continue;
         if (a.resolved) continue;
 
+        double minerals_total = 0.0;
+        for (const auto& [_, t] : a.mineral_reward) minerals_total += std::max(0.0, t);
+
+        double value = std::max(0.0, a.research_reward);
+        value += minerals_total * 0.05; // heuristic: 20t ~ 1 RP
+        if (!a.unlock_component_id.empty()) value += 25.0;
+
+        const double risk = std::clamp(a.hazard_chance, 0.0, 1.0) * std::max(0.0, a.hazard_damage);
+
         const double d2 = (ship->position_mkm - a.position_mkm).length_squared();
-        if (best_anom == kInvalidId || d2 + 1e-9 < best_d2 ||
-            (std::abs(d2 - best_d2) <= 1e-9 && aid < best_anom)) {
+        const double dist = std::sqrt(std::max(0.0, d2));
+        const double travel_days = dist / std::max(1e-6, speed_mkm_d);
+
+        // Prefer high-value, low-risk anomalies; discount by travel time within the system.
+        const double score = value / (1.0 + travel_days) - risk;
+
+        if (best_anom == kInvalidId || score > best_score + 1e-9 ||
+            (std::abs(score - best_score) <= 1e-9 &&
+             (d2 + 1e-9 < best_d2 || (std::abs(d2 - best_d2) <= 1e-9 && aid < best_anom)))) {
           best_anom = aid;
+          best_score = score;
           best_d2 = d2;
         }
       }
@@ -663,6 +801,17 @@ void Simulation::tick_ai() {
 
     (void)issue_auto_refuel(sid);
   }
+
+  // --- Ship-level automation: Auto-rearm (munition safety) ---
+  for (Id sid : ship_ids) {
+    Ship* sh = find_ptr(state_.ships, sid);
+    if (!sh) continue;
+    if (!sh->auto_rearm) continue;
+    if (!orders_empty(sid)) continue;
+
+    (void)issue_auto_rearm(sid);
+  }
+
 
   // --- Ship-level automation: Auto-repair (damage safety) ---
   for (Id sid : ship_ids) {
@@ -1540,6 +1689,35 @@ void Simulation::tick_ai() {
       return std::clamp(hp / max_hp, 0.0, 1.0);
     };
 
+    auto ship_missile_ammo_fraction = [&](const Ship& sh) -> double {
+      const ShipDesign* d = find_design(sh.design_id);
+      const int cap = d ? std::max(0, d->missile_ammo_capacity) : 0;
+      if (cap <= 0) return 1.0;
+      int ammo = sh.missile_ammo;
+      if (ammo < 0) ammo = cap;
+      ammo = std::clamp(ammo, 0, cap);
+      return std::clamp(static_cast<double>(ammo) / static_cast<double>(cap), 0.0, 1.0);
+    };
+
+    auto ship_maintenance_fraction = [&](const Ship& sh) -> double {
+      if (!cfg_.enable_ship_maintenance) return 1.0;
+      return std::clamp(sh.maintenance_condition, 0.0, 1.0);
+    };
+
+    auto colony_resource_production_per_day = [&](const Colony& c, const std::string& resource_id) -> double {
+      double total = 0.0;
+      for (const auto& [inst_id, count] : c.installations) {
+        if (count <= 0) continue;
+        auto itdef = content_.installations.find(inst_id);
+        if (itdef == content_.installations.end()) continue;
+        const auto& def = itdef->second;
+        auto itp = def.produces_per_day.find(resource_id);
+        if (itp == def.produces_per_day.end()) continue;
+        total += static_cast<double>(count) * std::max(0.0, itp->second);
+      }
+      return total;
+    };
+
     auto select_refuel_colony_for_fleet = [&](Id fleet_faction_id, Id start_sys, Vec2 start_pos, double speed_km_s) -> Id {
       if (speed_km_s <= 0.0) return kInvalidId;
 
@@ -1550,7 +1728,7 @@ void Simulation::tick_ai() {
       for (Id cid : sorted_keys(state_.colonies)) {
         const Colony* c = find_ptr(state_.colonies, cid);
         if (!c) continue;
-        if (!are_factions_mutual_friendly(fleet_faction_id, c->faction_id)) continue;
+        if (!are_factions_trade_partners(fleet_faction_id, c->faction_id)) continue;
         const Body* b = find_ptr(state_.bodies, c->body_id);
         if (!b) continue;
         if (b->system_id == kInvalidId) continue;
@@ -1620,7 +1798,7 @@ void Simulation::tick_ai() {
       for (Id cid : sorted_keys(state_.colonies)) {
         const Colony* c = find_ptr(state_.colonies, cid);
         if (!c) continue;
-        if (!are_factions_mutual_friendly(fl.faction_id, c->faction_id)) continue;
+        if (!are_factions_trade_partners(fl.faction_id, c->faction_id)) continue;
 
         const auto it_yard = c->installations.find("shipyard");
         const int yards = (it_yard != c->installations.end()) ? it_yard->second : 0;
@@ -1650,6 +1828,151 @@ void Simulation::tick_ai() {
       return best_cid;
     };
 
+    auto select_rearm_colony_for_fleet = [&](Id fleet_faction_id, Id start_sys, Vec2 start_pos, double speed_km_s) -> Id {
+      if (speed_km_s <= 0.0) return kInvalidId;
+
+      constexpr const char* kMunitionsKey = "Munitions";
+
+      Id best_cid = kInvalidId;
+      int best_tier = -1;
+      double best_prod = 0.0;
+      double best_eta = std::numeric_limits<double>::infinity();
+
+      for (Id cid : sorted_keys(state_.colonies)) {
+        const Colony* c = find_ptr(state_.colonies, cid);
+        if (!c) continue;
+        if (!are_factions_trade_partners(fleet_faction_id, c->faction_id)) continue;
+        const Body* b = find_ptr(state_.bodies, c->body_id);
+        if (!b) continue;
+        if (b->system_id == kInvalidId) continue;
+        if (!is_system_discovered_by_faction(fleet_faction_id, b->system_id)) continue;
+
+        const double eta = estimate_eta_days_to_pos(start_sys, start_pos, fleet_faction_id, speed_km_s,
+                                                    b->system_id, b->position_mkm);
+        if (!std::isfinite(eta)) continue;
+
+        const double mun_avail = [&]() {
+          auto it = c->minerals.find(kMunitionsKey);
+          return (it != c->minerals.end()) ? std::max(0.0, it->second) : 0.0;
+        }();
+        const bool has_mun = (mun_avail >= 1.0 - 1e-9);
+
+        const double prod = colony_resource_production_per_day(*c, kMunitionsKey);
+        const bool has_prod = (prod > 1e-9);
+
+        const int tier = has_mun ? 2 : (has_prod ? 1 : 0);
+
+        if (best_cid == kInvalidId || tier > best_tier) {
+          best_cid = cid;
+          best_tier = tier;
+          best_prod = prod;
+          best_eta = eta;
+          continue;
+        }
+
+        if (tier != best_tier) continue;
+
+        if (tier == 1) {
+          if (prod > best_prod + 1e-9 ||
+              (std::abs(prod - best_prod) <= 1e-9 && (eta + 1e-9 < best_eta || (std::abs(eta - best_eta) <= 1e-9 && cid < best_cid)))) {
+            best_cid = cid;
+            best_prod = prod;
+            best_eta = eta;
+          }
+        } else {
+          // Tier 2 (stockpile) or Tier 0 (no stockpile/production): prefer nearest.
+          if (eta + 1e-9 < best_eta || (std::abs(eta - best_eta) <= 1e-9 && cid < best_cid)) {
+            best_cid = cid;
+            best_eta = eta;
+            best_prod = prod;
+          }
+        }
+      }
+
+      return best_cid;
+    };
+
+    auto select_maintenance_colony_for_fleet = [&](Id fleet_faction_id, Id start_sys, Vec2 start_pos, double speed_km_s) -> Id {
+      if (!cfg_.enable_ship_maintenance) return kInvalidId;
+      if (cfg_.ship_maintenance_resource_id.empty()) return kInvalidId;
+      if (speed_km_s <= 0.0) return kInvalidId;
+
+      const std::string& kMaintKey = cfg_.ship_maintenance_resource_id;
+
+      Id best_cid = kInvalidId;
+      int best_tier = -1;
+      double best_avail = 0.0;
+      double best_prod = 0.0;
+      double best_eta = std::numeric_limits<double>::infinity();
+
+      for (Id cid : sorted_keys(state_.colonies)) {
+        const Colony* c = find_ptr(state_.colonies, cid);
+        if (!c) continue;
+        if (!are_factions_trade_partners(fleet_faction_id, c->faction_id)) continue;
+        const Body* b = find_ptr(state_.bodies, c->body_id);
+        if (!b) continue;
+        if (b->system_id == kInvalidId) continue;
+        if (!is_system_discovered_by_faction(fleet_faction_id, b->system_id)) continue;
+
+        const double eta = estimate_eta_days_to_pos(start_sys, start_pos, fleet_faction_id, speed_km_s,
+                                                    b->system_id, b->position_mkm);
+        if (!std::isfinite(eta)) continue;
+
+        const double avail = [&]() {
+          auto it = c->minerals.find(kMaintKey);
+          return (it != c->minerals.end()) ? std::max(0.0, it->second) : 0.0;
+        }();
+        const bool has_stock = (avail > 1e-6);
+
+        const double prod = colony_resource_production_per_day(*c, kMaintKey);
+        const bool has_prod = (prod > 1e-9);
+
+        const int tier = has_stock ? 2 : (has_prod ? 1 : 0);
+
+        if (best_cid == kInvalidId || tier > best_tier) {
+          best_cid = cid;
+          best_tier = tier;
+          best_avail = avail;
+          best_prod = prod;
+          best_eta = eta;
+          continue;
+        }
+
+        if (tier != best_tier) continue;
+
+        if (tier == 2) {
+          // Prefer nearest, then higher stockpile.
+          if (eta + 1e-9 < best_eta ||
+              (std::abs(eta - best_eta) <= 1e-9 && (avail > best_avail + 1e-9 ||
+                                                   (std::abs(avail - best_avail) <= 1e-9 && cid < best_cid)))) {
+            best_cid = cid;
+            best_eta = eta;
+            best_avail = avail;
+            best_prod = prod;
+          }
+        } else if (tier == 1) {
+          // Prefer higher production, then nearest.
+          if (prod > best_prod + 1e-9 ||
+              (std::abs(prod - best_prod) <= 1e-9 && (eta + 1e-9 < best_eta || (std::abs(eta - best_eta) <= 1e-9 && cid < best_cid)))) {
+            best_cid = cid;
+            best_eta = eta;
+            best_avail = avail;
+            best_prod = prod;
+          }
+        } else {
+          // Tier 0: just go to the nearest.
+          if (eta + 1e-9 < best_eta || (std::abs(eta - best_eta) <= 1e-9 && cid < best_cid)) {
+            best_cid = cid;
+            best_eta = eta;
+            best_avail = avail;
+            best_prod = prod;
+          }
+        }
+      }
+
+      return best_cid;
+    };
+
     auto combat_target_priority = [&](ShipRole r) -> int {
       // For player-side missions we bias toward removing armed threats first.
       switch (r) {
@@ -1672,16 +1995,24 @@ void Simulation::tick_ai() {
 
       const double fleet_speed = fleet_min_speed_km_s(fl, leader->speed_km_s);
 
-      // --- Sustainment (refuel/repair) ---
+      // --- Sustainment (fleet autonomy) ---
       const double refuel_thr = std::clamp(fl.mission.refuel_threshold_fraction, 0.0, 1.0);
       const double refuel_resume = std::clamp(fl.mission.refuel_resume_fraction, 0.0, 1.0);
       const double repair_thr = std::clamp(fl.mission.repair_threshold_fraction, 0.0, 1.0);
       const double repair_resume = std::clamp(fl.mission.repair_resume_fraction, 0.0, 1.0);
+      const double rearm_thr = std::clamp(fl.mission.rearm_threshold_fraction, 0.0, 1.0);
+      const double rearm_resume = std::clamp(fl.mission.rearm_resume_fraction, 0.0, 1.0);
+      const double maint_thr = std::clamp(fl.mission.maintenance_threshold_fraction, 0.0, 1.0);
+      const double maint_resume = std::clamp(fl.mission.maintenance_resume_fraction, 0.0, 1.0);
 
       bool any_need_refuel = false;
       bool all_refueled = true;
       bool any_need_repair = false;
       bool all_repaired = true;
+      bool any_need_rearm = false;
+      bool all_rearmed = true;
+      bool any_need_maintenance = false;
+      bool all_maintained = true;
 
       for (Id sid : fl.ship_ids) {
         const Ship* sh = find_ptr(state_.ships, sid);
@@ -1695,8 +2026,17 @@ void Simulation::tick_ai() {
         const double hfrac = ship_hp_fraction(*sh);
         if (hfrac + 1e-9 < repair_thr) any_need_repair = true;
         if (hfrac + 1e-9 < repair_resume) all_repaired = false;
+
+        const double afrac = ship_missile_ammo_fraction(*sh);
+        if (afrac + 1e-9 < rearm_thr) any_need_rearm = true;
+        if (afrac + 1e-9 < rearm_resume) all_rearmed = false;
+
+        const double mfrac = ship_maintenance_fraction(*sh);
+        if (mfrac + 1e-9 < maint_thr) any_need_maintenance = true;
+        if (mfrac + 1e-9 < maint_resume) all_maintained = false;
       }
 
+      // Apply toggles / global feature flags.
       if (!fl.mission.auto_refuel) {
         any_need_refuel = false;
         all_refueled = true;
@@ -1705,15 +2045,35 @@ void Simulation::tick_ai() {
         any_need_repair = false;
         all_repaired = true;
       }
+      if (!fl.mission.auto_rearm) {
+        any_need_rearm = false;
+        all_rearmed = true;
+      }
+      if (!fl.mission.auto_maintenance || !cfg_.enable_ship_maintenance) {
+        any_need_maintenance = false;
+        all_maintained = true;
+      }
+
+      auto clear_sustainment = [&]() {
+        fl.mission.sustainment_mode = FleetSustainmentMode::None;
+        fl.mission.sustainment_colony_id = kInvalidId;
+      };
 
       // Sustainment state transitions.
+      if (fl.mission.sustainment_mode == FleetSustainmentMode::Maintenance && !cfg_.enable_ship_maintenance) {
+        clear_sustainment();
+      }
       if (fl.mission.sustainment_mode == FleetSustainmentMode::Refuel && all_refueled) {
-        fl.mission.sustainment_mode = FleetSustainmentMode::None;
-        fl.mission.sustainment_colony_id = kInvalidId;
+        clear_sustainment();
       }
       if (fl.mission.sustainment_mode == FleetSustainmentMode::Repair && all_repaired) {
-        fl.mission.sustainment_mode = FleetSustainmentMode::None;
-        fl.mission.sustainment_colony_id = kInvalidId;
+        clear_sustainment();
+      }
+      if (fl.mission.sustainment_mode == FleetSustainmentMode::Rearm && all_rearmed) {
+        clear_sustainment();
+      }
+      if (fl.mission.sustainment_mode == FleetSustainmentMode::Maintenance && all_maintained) {
+        clear_sustainment();
       }
 
       if (fl.mission.sustainment_mode == FleetSustainmentMode::None) {
@@ -1725,6 +2085,19 @@ void Simulation::tick_ai() {
           fl.mission.sustainment_mode = FleetSustainmentMode::Repair;
           fl.mission.sustainment_colony_id = select_repair_colony_for_fleet(fl, leader->system_id, leader->position_mkm,
                                                                             fleet_speed);
+        } else if (any_need_rearm) {
+          fl.mission.sustainment_mode = FleetSustainmentMode::Rearm;
+          fl.mission.sustainment_colony_id = select_rearm_colony_for_fleet(fl.faction_id, leader->system_id,
+                                                                          leader->position_mkm, fleet_speed);
+        } else if (any_need_maintenance) {
+          fl.mission.sustainment_mode = FleetSustainmentMode::Maintenance;
+          fl.mission.sustainment_colony_id = select_maintenance_colony_for_fleet(fl.faction_id, leader->system_id,
+                                                                                leader->position_mkm, fleet_speed);
+        }
+
+        if (fl.mission.sustainment_mode != FleetSustainmentMode::None &&
+            fl.mission.sustainment_colony_id == kInvalidId) {
+          clear_sustainment();
         }
       }
 
@@ -1735,11 +2108,24 @@ void Simulation::tick_ai() {
         const Body* body = col ? find_ptr(state_.bodies, col->body_id) : nullptr;
         const Id sys_id = body ? body->system_id : kInvalidId;
 
-        if (!col || !body || sys_id == kInvalidId || !are_factions_mutual_friendly(fl.faction_id, col->faction_id) ||
-            !is_system_discovered_by_faction(fl.faction_id, sys_id)) {
+        bool valid = true;
+        if (cid == kInvalidId || !col || !body || sys_id == kInvalidId) valid = false;
+        if (valid && !are_factions_trade_partners(fl.faction_id, col->faction_id)) valid = false;
+        if (valid && !is_system_discovered_by_faction(fl.faction_id, sys_id)) valid = false;
+
+        // Mode-specific validity.
+        if (valid && fl.mission.sustainment_mode == FleetSustainmentMode::Repair) {
+          const auto it_yard = col->installations.find("shipyard");
+          const int yards = (it_yard != col->installations.end()) ? it_yard->second : 0;
+          if (yards <= 0) valid = false;
+        }
+        if (valid && fl.mission.sustainment_mode == FleetSustainmentMode::Maintenance) {
+          if (!cfg_.enable_ship_maintenance || cfg_.ship_maintenance_resource_id.empty()) valid = false;
+        }
+
+        if (!valid) {
           // Can't sustain here; fall back to no sustainment.
-          fl.mission.sustainment_mode = FleetSustainmentMode::None;
-          fl.mission.sustainment_colony_id = kInvalidId;
+          clear_sustainment();
         } else {
           if (fleet_orders_overrideable(fl)) {
             // Route the fleet to the sustainment colony and keep it docked.
@@ -2080,7 +2466,7 @@ void Simulation::tick_ai() {
         for (Id cid : sorted_keys(state_.colonies)) {
           const Colony* c = find_ptr(state_.colonies, cid);
           if (!c) continue;
-          if (!are_factions_mutual_friendly(fl.faction_id, c->faction_id)) continue;
+          if (!are_factions_trade_partners(fl.faction_id, c->faction_id)) continue;
           const Body* b = find_ptr(state_.bodies, c->body_id);
           if (!b) continue;
           if (b->system_id != target_sys) continue;
@@ -2389,7 +2775,7 @@ void Simulation::tick_ai() {
         for (Id cid : sorted_keys(state_.colonies)) {
           const Colony* c = find_ptr(state_.colonies, cid);
           if (!c) continue;
-          if (!are_factions_mutual_friendly(fl.faction_id, c->faction_id)) continue;
+          if (!are_factions_trade_partners(fl.faction_id, c->faction_id)) continue;
           const Body* b = find_ptr(state_.bodies, c->body_id);
           if (!b) continue;
           if (b->system_id == kInvalidId) continue;
@@ -3113,7 +3499,7 @@ void Simulation::tick_refuel() {
     for (Id cid : it->second) {
       const Colony* col = find_ptr(state_.colonies, cid);
       if (!col) continue;
-      if (!are_factions_mutual_friendly(ship.faction_id, col->faction_id)) continue;
+      if (!are_factions_trade_partners(ship.faction_id, col->faction_id)) continue;
 
       const Body* body = find_ptr(state_.bodies, col->body_id);
       if (!body) continue;
@@ -3138,6 +3524,274 @@ void Simulation::tick_refuel() {
     if (col.minerals[kFuelKey] <= 1e-9) col.minerals[kFuelKey] = 0.0;
   }
 }
+
+
+
+void Simulation::tick_rearm() {
+  NEBULA4X_TRACE_SCOPE("tick_rearm", "sim.maintenance");
+  constexpr const char* kMunitionsKey = "Munitions";
+
+  // Fast(ish) lookup: system -> colony ids.
+  std::unordered_map<Id, std::vector<Id>> colonies_in_system;
+  colonies_in_system.reserve(state_.systems.size() * 2 + 8);
+
+  for (const auto& [cid, col] : state_.colonies) {
+    const auto* body = find_ptr(state_.bodies, col.body_id);
+    if (!body) continue;
+    colonies_in_system[body->system_id].push_back(cid);
+  }
+
+  const double arrive_eps = std::max(0.0, cfg_.arrival_epsilon_mkm);
+  const double dock_range = std::max(arrive_eps, cfg_.docking_range_mkm);
+
+  for (auto& [sid, ship] : state_.ships) {
+    (void)sid;
+    const ShipDesign* d = find_design(ship.design_id);
+    if (!d) continue;
+
+    const int cap = std::max(0, d->missile_ammo_capacity);
+    if (cap <= 0) continue;
+
+    // Clamp away any weird negative sentinel states before using.
+    if (ship.missile_ammo < 0) ship.missile_ammo = cap;
+    ship.missile_ammo = std::clamp(ship.missile_ammo, 0, cap);
+
+    int need = cap - ship.missile_ammo;
+    if (need <= 0) continue;
+
+    // First try to reload from ship-carried munitions (ammo tenders / cargo holds).
+    if (need > 0) {
+      auto cit = ship.cargo.find(kMunitionsKey);
+      if (cit != ship.cargo.end()) {
+        const double avail_d = std::max(0.0, cit->second);
+        const int avail = static_cast<int>(std::floor(avail_d + 1e-9));
+        const int take = std::min(need, avail);
+        if (take > 0) {
+          ship.missile_ammo += take;
+          ship.missile_ammo = std::clamp(ship.missile_ammo, 0, cap);
+          cit->second = avail_d - static_cast<double>(take);
+          if (cit->second <= 1e-9) ship.cargo.erase(cit);
+          need = cap - ship.missile_ammo;
+        }
+      }
+    }
+    if (need <= 0) continue;
+
+    auto it = colonies_in_system.find(ship.system_id);
+    if (it == colonies_in_system.end()) continue;
+
+    Id best_cid = kInvalidId;
+    double best_dist = 1e100;
+
+    for (Id cid : it->second) {
+      const Colony* col = find_ptr(state_.colonies, cid);
+      if (!col) continue;
+      if (!are_factions_trade_partners(ship.faction_id, col->faction_id)) continue;
+
+      const Body* body = find_ptr(state_.bodies, col->body_id);
+      if (!body) continue;
+
+      const double dist = (body->position_mkm - ship.position_mkm).length();
+      if (dist > dock_range + 1e-9) continue;
+
+      if (dist < best_dist) {
+        best_dist = dist;
+        best_cid = cid;
+      }
+    }
+
+    if (best_cid == kInvalidId) continue;
+
+    Colony& col = state_.colonies.at(best_cid);
+    auto mit = col.minerals.find(kMunitionsKey);
+    if (mit == col.minerals.end()) continue;
+
+    const double avail_d = std::max(0.0, mit->second);
+    if (avail_d < 1.0 - 1e-9) continue;
+
+    const int avail = static_cast<int>(std::floor(avail_d + 1e-9));
+    const int take = std::min(need, avail);
+    if (take <= 0) continue;
+
+    ship.missile_ammo += take;
+    mit->second = avail_d - static_cast<double>(take);
+    if (mit->second <= 1e-9) mit->second = 0.0;
+  }
+}
+
+
+void Simulation::tick_ship_maintenance(double dt_days) {
+  if (dt_days <= 0.0) return;
+  if (!cfg_.enable_ship_maintenance) return;
+  NEBULA4X_TRACE_SCOPE("tick_ship_maintenance", "sim.maintenance");
+
+  const std::string& res = cfg_.ship_maintenance_resource_id;
+  if (res.empty()) return;
+
+  const double per_ton = std::max(0.0, cfg_.ship_maintenance_tons_per_day_per_mass_ton);
+  const double rec = std::max(0.0, cfg_.ship_maintenance_recovery_per_day);
+  const double dec = std::max(0.0, cfg_.ship_maintenance_decay_per_day);
+
+  // If there is no consumption and no drift, nothing to do.
+  if (per_ton <= 0.0 && rec <= 0.0 && dec <= 0.0) return;
+
+  // Fast(ish) lookup: system -> colony ids.
+  std::unordered_map<Id, std::vector<Id>> colonies_in_system;
+  colonies_in_system.reserve(state_.systems.size() * 2 + 8);
+
+  for (const auto& [cid, col] : state_.colonies) {
+    const auto* body = find_ptr(state_.bodies, col.body_id);
+    if (!body) continue;
+    colonies_in_system[body->system_id].push_back(cid);
+  }
+
+  const double arrive_eps = std::max(0.0, cfg_.arrival_epsilon_mkm);
+  const double dock_range = std::max(arrive_eps, cfg_.docking_range_mkm);
+
+  for (auto& [sid, ship] : state_.ships) {
+    (void)sid;
+    const ShipDesign* d = find_design(ship.design_id);
+    if (!d) continue;
+
+    // Sanitize in case older saves or mods produce out-of-range values.
+    if (!std::isfinite(ship.maintenance_condition)) ship.maintenance_condition = 1.0;
+    ship.maintenance_condition = std::clamp(ship.maintenance_condition, 0.0, 1.0);
+
+    const double required = std::max(0.0, d->mass_tons) * per_ton * dt_days;
+    double supplied = 0.0;
+    double need = required;
+
+    // Pull from ship cargo first (lets players bring spare parts on long deployments).
+    if (need > 1e-9) {
+      auto cit = ship.cargo.find(res);
+      if (cit != ship.cargo.end()) {
+        const double avail = std::max(0.0, cit->second);
+        const double take = std::min(need, avail);
+        if (take > 1e-9) {
+          supplied += take;
+          need -= take;
+          cit->second = avail - take;
+          if (cit->second <= 1e-9) cit->second = 0.0;
+        }
+      }
+    }
+
+    // If still short, pull from a nearby friendly colony stockpile.
+    if (need > 1e-9) {
+      auto it = colonies_in_system.find(ship.system_id);
+      if (it != colonies_in_system.end()) {
+        Id best_cid = kInvalidId;
+        double best_avail = 0.0;
+        double best_dist = 1e100;
+
+        for (Id cid : it->second) {
+          const Colony* col = find_ptr(state_.colonies, cid);
+          if (!col) continue;
+          if (!are_factions_trade_partners(ship.faction_id, col->faction_id)) continue;
+
+          const Body* body = find_ptr(state_.bodies, col->body_id);
+          if (!body) continue;
+          const double dist = (body->position_mkm - ship.position_mkm).length();
+          if (dist > dock_range + 1e-9) continue;
+
+          const auto mit = col->minerals.find(res);
+          const double avail = (mit == col->minerals.end()) ? 0.0 : std::max(0.0, mit->second);
+          if (avail <= 1e-9) continue;
+
+          // Prefer more available supplies, tiebreak on distance then id.
+          if (avail > best_avail + 1e-9 ||
+              (std::abs(avail - best_avail) <= 1e-9 && dist < best_dist - 1e-9) ||
+              (std::abs(avail - best_avail) <= 1e-9 && std::abs(dist - best_dist) <= 1e-9 && cid < best_cid)) {
+            best_avail = avail;
+            best_dist = dist;
+            best_cid = cid;
+          }
+        }
+
+        if (best_cid != kInvalidId) {
+          Colony& col = state_.colonies.at(best_cid);
+          double& avail_ref = col.minerals[res];
+          const double avail = std::max(0.0, avail_ref);
+          const double take = std::min(need, avail);
+          if (take > 1e-9) {
+            supplied += take;
+            need -= take;
+            avail_ref = avail - take;
+            if (avail_ref <= 1e-9) avail_ref = 0.0;
+          }
+        }
+      }
+    }
+
+    // Update condition based on supply fraction.
+    if (required > 1e-9) {
+      const double frac = std::clamp(supplied / required, 0.0, 1.0);
+      if (frac >= 1.0 - 1e-9) {
+        if (rec > 0.0) ship.maintenance_condition = std::min(1.0, ship.maintenance_condition + rec * dt_days);
+      } else {
+        if (dec > 0.0) ship.maintenance_condition =
+            std::max(0.0, ship.maintenance_condition - dec * (1.0 - frac) * dt_days);
+      }
+    } else if (rec > 0.0) {
+      // No consumption configured; optionally allow condition to slowly recover.
+      ship.maintenance_condition = std::min(1.0, ship.maintenance_condition + rec * dt_days);
+    }
+  }
+}
+
+
+void Simulation::tick_crew_training(double dt_days) {
+  if (dt_days <= 0.0) return;
+  if (!cfg_.enable_crew_experience) return;
+  NEBULA4X_TRACE_SCOPE("tick_crew_training", "sim.crew");
+
+  const double dock_range = std::max(0.0, cfg_.docking_range_mkm);
+  if (dock_range <= 0.0) return;
+
+  // Deterministic processing order.
+  const auto ship_ids = sorted_keys(state_.ships);
+  const auto colony_ids = sorted_keys(state_.colonies);
+
+  for (Id cid : colony_ids) {
+    Colony* col = find_ptr(state_.colonies, cid);
+    if (!col) continue;
+    const Body* body = find_ptr(state_.bodies, col->body_id);
+    if (!body) continue;
+
+    const double pool_per_day = crew_training_points_per_day(*col);
+    if (pool_per_day <= 1e-9) continue;
+
+    std::vector<Id> docked;
+    docked.reserve(8);
+    for (Id sid : ship_ids) {
+      const Ship* sh = find_ptr(state_.ships, sid);
+      if (!sh) continue;
+      if (sh->system_id != body->system_id) continue;
+      if (sh->faction_id != col->faction_id) continue;
+      const double dist = (sh->position_mkm - body->position_mkm).length();
+      if (dist > dock_range + 1e-9) continue;
+      docked.push_back(sid);
+    }
+
+    if (docked.empty()) continue;
+
+    const double per_ship = (pool_per_day / static_cast<double>(docked.size())) * dt_days;
+    if (per_ship <= 1e-12) continue;
+
+    const double cap = std::max(0.0, cfg_.crew_grade_points_cap);
+    for (Id sid : docked) {
+      Ship& sh = state_.ships.at(sid);
+      if (!std::isfinite(sh.crew_grade_points) || sh.crew_grade_points < 0.0) {
+        sh.crew_grade_points = cfg_.crew_initial_grade_points;
+      }
+      sh.crew_grade_points = std::max(0.0, sh.crew_grade_points);
+      sh.crew_grade_points += per_ship;
+      if (cap > 0.0) sh.crew_grade_points = std::min(cap, sh.crew_grade_points);
+    }
+  }
+}
+
+
 
 
 void Simulation::tick_repairs(double dt_days) {
@@ -3178,7 +3832,7 @@ void Simulation::tick_repairs(double dt_days) {
     for (Id cid : colony_ids) {
       const auto* colony = find_ptr(state_.colonies, cid);
       if (!colony) continue;
-      if (!are_factions_mutual_friendly(ship->faction_id, colony->faction_id)) continue;
+      if (!are_factions_trade_partners(ship->faction_id, colony->faction_id)) continue;
 
       const auto it_yard = colony->installations.find("shipyard");
       const int yards = (it_yard != colony->installations.end()) ? it_yard->second : 0;

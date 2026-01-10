@@ -294,11 +294,13 @@ GameState make_sol_scenario() {
         {"Duranium", 10000.0},
         {"Neutronium", 1500.0},
         {"Fuel", 30000.0},
+        {"Munitions", 800.0},
     };
     c.installations = {
         {"automated_mine", 50},
         {"construction_factory", 5},
         {"fuel_refinery", 10},
+        {"munitions_factory", 2},
         {"shipyard", 1},
         {"research_lab", 20},
         {"sensor_station", 1},
@@ -351,9 +353,11 @@ GameState make_sol_scenario() {
     c.ground_forces = 400.0;
     c.installations["automated_mine"] = 10;
     c.installations["fuel_refinery"] = 3;
+    c.installations["munitions_factory"] = 2;
     c.minerals["Duranium"] = 15000.0;
     c.minerals["Neutronium"] = 1500.0;
     c.minerals["Fuel"] = 20000.0;
+    c.minerals["Munitions"] = 1200.0;
     s.colonies[c.id] = c;
   }
 
@@ -381,13 +385,21 @@ GameState make_sol_scenario() {
 
   // --- Pirate presence (Alpha Centauri) ---
   const Vec2 pirate_pos = {80.0, 0.5};
-  (void)add_ship(pirates, centauri, pirate_pos, "Raider I", "pirate_raider");
-  (void)add_ship(pirates, centauri, pirate_pos + Vec2{0.7, -0.3}, "Raider II", "pirate_raider");
+  const Id raider1 = add_ship(pirates, centauri, pirate_pos, "Raider I", "pirate_raider");
+  const Id raider2 = add_ship(pirates, centauri, pirate_pos + Vec2{0.7, -0.3}, "Raider II", "pirate_raider");
+  for (Id sid : {raider1, raider2}) {
+    auto& sh = s.ships[sid];
+    sh.auto_refuel = true;
+    sh.auto_repair = true;
+    sh.auto_rearm = true;
+  }
 
   // --- Anomalies (investigation targets) ---
   {
     auto add_anomaly = [&](Id system_id, const std::string& name, const std::string& kind, const Vec2& pos_mkm,
-                           int investigation_days, double research_reward, const std::string& unlock_component_id) {
+                           int investigation_days, double research_reward, const std::string& unlock_component_id,
+                           std::unordered_map<std::string, double> mineral_reward,
+                           double hazard_chance, double hazard_damage) {
       const Id id = allocate_id(s);
       Anomaly a;
       a.id = id;
@@ -398,19 +410,25 @@ GameState make_sol_scenario() {
       a.investigation_days = std::max(1, investigation_days);
       a.research_reward = research_reward;
       a.unlock_component_id = unlock_component_id;
+      a.mineral_reward = std::move(mineral_reward);
+      a.hazard_chance = std::clamp(hazard_chance, 0.0, 1.0);
+      a.hazard_damage = std::max(0.0, hazard_damage);
       s.anomalies[id] = std::move(a);
       return id;
     };
 
     // A small early-game target in the home system.
-    (void)add_anomaly(sol, "Strange Lunar Echo", "signal", earth_pos + Vec2{4.2, 0.6}, 6, 150.0, "sensor_mk2");
+    (void)add_anomaly(sol, "Strange Lunar Echo", "signal", earth_pos + Vec2{4.2, 0.6}, 6, 150.0, "sensor_mk2",
+                    {{"Duranium", 25.0}, {"Neutronium", 5.0}}, 0.05, 1.0);
 
     // A more ambitious site in pirate space.
     (void)add_anomaly(centauri, "Derelict Xeno Beacon", "artifact", pirate_pos + Vec2{6.0, -2.0}, 10, 240.0,
-                      "stealth_coating_mk1");
+                  "stealth_coating_mk1",
+                  {{"Duranium", 80.0}, {"Tritanium", 25.0}, {"Sorium", 40.0}}, 0.30, 3.5);
 
     // A quick curiosity to encourage scouting.
-    (void)add_anomaly(barnard, "Micrometeorite Halo", "phenomenon", Vec2{55.0, 30.0}, 4, 90.0, "");
+    (void)add_anomaly(barnard, "Micrometeorite Halo", "phenomenon", Vec2{55.0, 30.0}, 4, 90.0, "",
+                    {{"Sorium", 30.0}}, 0.12, 1.5);
   }
 
   return s;
@@ -3099,7 +3117,9 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
     std::mt19937 arng(seed ^ 0xA11E0B7Bu);
 
     auto add_anomaly = [&](Id system_id, const std::string& name, const std::string& kind, const Vec2& pos_mkm,
-                           int investigation_days, double research_reward, const std::string& unlock_component_id) -> Id {
+                           int investigation_days, double research_reward, const std::string& unlock_component_id,
+                           std::unordered_map<std::string, double> mineral_reward,
+                           double hazard_chance, double hazard_damage) -> Id {
       const Id aid = allocate_id(s);
       Anomaly a;
       a.id = aid;
@@ -3110,6 +3130,9 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
       a.investigation_days = std::max(1, investigation_days);
       a.research_reward = research_reward;
       a.unlock_component_id = unlock_component_id;
+      a.mineral_reward = std::move(mineral_reward);
+      a.hazard_chance = std::clamp(hazard_chance, 0.0, 1.0);
+      a.hazard_damage = std::max(0.0, hazard_damage);
       s.anomalies[aid] = std::move(a);
       return aid;
     };
@@ -3146,7 +3169,7 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
         }
       }
       const Vec2 pos = random_offset(45.0, std::max(95.0, ext * 0.35));
-      add_anomaly(home_system, "Distorted Signal", "signal", pos, 5, 90.0, "");
+      add_anomaly(home_system, "Distorted Signal", "signal", pos, 5, 90.0, "", {{"Duranium", 20.0}}, 0.03, 0.8);
     }
 
     // Candidates across the galaxy, weighted by ruins density and distance.
@@ -3267,8 +3290,80 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
         unlock = unlock_pool[static_cast<std::size_t>(rand_int(arng, 0, (int)unlock_pool.size() - 1))];
       }
 
+      // Optional mineral cache reward. This adds a "lootable" incentive to exploration
+      // beyond pure RP, and naturally interacts with the existing salvage/cargo systems.
+      std::unordered_map<std::string, double> minerals;
+      {
+        const double kind_cache = (std::string(kind) == "cache") ? 0.35 : 0.0;
+        const double p = std::clamp(0.10 + 0.55 * ruins + 0.20 * neb + kind_cache, 0.0, 0.90);
+        if (rand_unit(arng) < p) {
+          // Total tonnage scales with ruins density and distance (deeper space = better finds).
+          double total_tons = rand_real(arng, 18.0, 140.0) * (0.75 + 0.80 * ruins + 0.55 * dn);
+          if (std::string(kind) == "cache") total_tons *= 1.35;
+          total_tons = std::clamp(total_tons, 8.0, 420.0);
+
+          // A small fixed pool of common minerals (string ids used throughout scenarios/content).
+          std::vector<std::string> pool = {
+              "Duranium", "Neutronium", "Tritanium", "Boronide", "Corbomite",
+              "Mercassium", "Vendarite", "Uridium", "Corundium", "Gallicite",
+              "Sorium",
+          };
+
+          // Nebulae/outer systems skew more volatile-rich.
+          if (rand_unit(arng) < (0.15 + 0.45 * neb)) pool.push_back("Fuel");
+
+          // Pick 1..3 unique minerals.
+          const int want = std::clamp(rand_int(arng, 1, 3) + (ruins > 0.65 ? 1 : 0), 1, 4);
+          std::unordered_set<std::string> picked;
+          for (int j = 0; j < want && !pool.empty(); ++j) {
+            const int idx = rand_int(arng, 0, (int)pool.size() - 1);
+            picked.insert(pool[(std::size_t)idx]);
+          }
+
+          // Distribute tonnage across picks (simple randomized split).
+          std::vector<std::string> keys;
+          keys.reserve(picked.size());
+          for (const auto& k : picked) keys.push_back(k);
+          std::sort(keys.begin(), keys.end());
+
+          double remaining_tons = total_tons;
+          for (std::size_t j = 0; j < keys.size(); ++j) {
+            const bool last = (j + 1 == keys.size());
+            double give = last ? remaining_tons : remaining_tons * std::clamp(rand_unit(arng), 0.10, 0.80);
+            give = std::clamp(give, 0.0, remaining_tons);
+            minerals[keys[j]] += give;
+            remaining_tons -= give;
+          }
+
+          // Prune tiny entries.
+          for (auto it = minerals.begin(); it != minerals.end();) {
+            if (!(it->second > 1e-3)) it = minerals.erase(it);
+            else ++it;
+          }
+        }
+      }
+
+      // Optional hazard. Hazards are non-lethal (they will not reduce hull below 1 HP),
+      // but they do add risk and make shielded/survey ships meaningfully better explorers.
+      double hazard_chance = 0.0;
+      double hazard_damage = 0.0;
+      {
+        double kind_risk = 1.0;
+        const std::string k = std::string(kind);
+        if (k == "cache") kind_risk = 0.35;
+        else if (k == "signal" || k == "echo") kind_risk = 0.55;
+        else if (k == "distortion" || k == "phenomenon") kind_risk = 1.15;
+
+        const double p = std::clamp((0.06 + 0.22 * dn + 0.25 * neb + 0.18 * ruins) * kind_risk, 0.0, 0.85);
+        if (rand_unit(arng) < p) {
+          hazard_chance = std::clamp(0.10 + 0.35 * neb + 0.20 * ruins + 0.10 * rand_unit(arng), 0.0, 0.95);
+          hazard_damage = rand_real(arng, 0.8, 4.0) * (0.75 + 0.85 * dn + 1.20 * ruins + 0.55 * neb);
+          hazard_damage = std::clamp(hazard_damage, 0.5, 12.0);
+        }
+      }
+
       if (si) {
-        add_anomaly(si->id, nm, kind, pos, days, rp, unlock);
+        add_anomaly(si->id, nm, kind, pos, days, rp, unlock, std::move(minerals), hazard_chance, hazard_damage);
       }
 
       cands.erase(cands.begin() + static_cast<std::vector<Cand>::difference_type>(sel));
@@ -3288,11 +3383,13 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
         {"Duranium", 10000.0},
         {"Neutronium", 1500.0},
         {"Fuel", 30000.0},
+        {"Munitions", 800.0},
     };
     c.installations = {
         {"automated_mine", 50},
         {"construction_factory", 5},
         {"fuel_refinery", 10},
+        {"munitions_factory", 2},
         {"shipyard", 1},
         {"research_lab", 20},
         {"sensor_station", 1},
@@ -3335,6 +3432,7 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
         {"shipyard", 1},
         {"construction_factory", 1},
         {"fuel_refinery", 3},
+        {"munitions_factory", 2},
         {"research_lab", 5},
         {"sensor_station", 1},
         {"automated_mine", 10},
@@ -3343,6 +3441,7 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
         {"Duranium", 15000.0},
         {"Neutronium", 1500.0},
         {"Fuel", 20000.0},
+        {"Munitions", 1200.0},
     };
     s.colonies[c.id] = c;
   }
@@ -3360,6 +3459,7 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
         {"Duranium", rand_real(rng, 6000.0, 14000.0)},
         {"Neutronium", rand_real(rng, 500.0, 1600.0)},
         {"Fuel", rand_real(rng, 12000.0, 26000.0)},
+        {"Munitions", rand_real(rng, 600.0, 1600.0)},
     };
 
     const int mines = rand_int(rng, 15, 35);
@@ -3371,6 +3471,7 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
         {"automated_mine", mines},
         {"construction_factory", factories},
         {"fuel_refinery", refineries},
+        {"munitions_factory", 2},
         {"shipyard", 1},
         {"research_lab", labs},
         {"sensor_station", 1},
@@ -3468,6 +3569,8 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
         auto& sh = s.ships[sid];
         sh.auto_refuel = true;
         sh.auto_repair = true;
+        sh.auto_rearm = true;
+        sh.auto_rearm = true;
         sh.auto_freight = true;
       }
 
@@ -3477,6 +3580,7 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
         auto& sh = s.ships[sid];
         sh.auto_refuel = true;
         sh.auto_repair = true;
+        sh.auto_rearm = true;
         sh.auto_explore = true;
       }
 
@@ -3486,6 +3590,8 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
         auto& sh = s.ships[sid];
         sh.auto_refuel = true;
         sh.auto_repair = true;
+        sh.auto_rearm = true;
+        sh.auto_rearm = true;
       }
 
       // A single colony ship is enough for early expansion; the AI economy can build more later.
@@ -3495,6 +3601,7 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
         auto& sh = s.ships[sid];
         sh.auto_refuel = true;
         sh.auto_repair = true;
+        sh.auto_rearm = true;
         sh.auto_colonize = true;
       }
     }
@@ -3520,6 +3627,7 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
         auto& sh = s.ships[sid];
         sh.auto_refuel = true;
         sh.auto_repair = true;
+        sh.auto_rearm = true;
       }
     } else {
       // If only one system exists, keep pirates offset from the home fleet.
@@ -3530,6 +3638,7 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
         auto& sh = s.ships[sid];
         sh.auto_refuel = true;
         sh.auto_repair = true;
+        sh.auto_rearm = true;
       }
     }
   }

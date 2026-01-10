@@ -119,7 +119,9 @@ std::vector<SensorSource> gather_sensor_sources(const Simulation& sim, Id factio
     const double range_mkm = sensor_range_mkm_with_mode(sim, *sh, *d) * env_mult;
     if (range_mkm <= 0.0) continue;
 
-    out.push_back(SensorSource{sh->position_mkm, range_mkm, ship_id});
+    double eccm = 0.0;
+    if (d) eccm = std::max(0.0, d->eccm_strength);
+    out.push_back(SensorSource{sh->position_mkm, range_mkm, ship_id, eccm});
   }
 
   // --- colony-based sensors (installations) ---
@@ -143,14 +145,14 @@ std::vector<SensorSource> gather_sensor_sources(const Simulation& sim, Id factio
 
     best_mkm *= env_mult;
     if (best_mkm <= 0.0) continue;
-    out.push_back(SensorSource{body->position_mkm, best_mkm, kInvalidId});
+    out.push_back(SensorSource{body->position_mkm, best_mkm, kInvalidId, 0.0});
   }
 
   return out;
 }
 
 bool any_source_detects(const std::vector<SensorSource>& sources, const Vec2& target_pos_mkm,
-                        double target_signature_multiplier) {
+                        double target_signature_multiplier, double target_ecm_strength) {
   // Signature scales detection range:
   //  - < 1.0 => harder to detect (stealthy)
   //  - = 1.0 => baseline
@@ -161,7 +163,19 @@ bool any_source_detects(const std::vector<SensorSource>& sources, const Vec2& ta
   for (const auto& src : sources) {
     if (src.range_mkm <= 0.0) continue;
 
-    const double r = src.range_mkm * sig;
+    // Electronic warfare: ECCM extends effective detection; ECM reduces it.
+    double ecm = std::isfinite(target_ecm_strength) ? target_ecm_strength : 0.0;
+    if (ecm < 0.0) ecm = 0.0;
+
+    double eccm = std::isfinite(src.eccm_strength) ? src.eccm_strength : 0.0;
+    if (eccm < 0.0) eccm = 0.0;
+
+    // (1 + eccm) / (1 + ecm) multiplier, clamped to keep the game stable.
+    double ew_mult = (1.0 + eccm) / (1.0 + ecm);
+    if (!std::isfinite(ew_mult)) ew_mult = 1.0;
+    ew_mult = std::clamp(ew_mult, 0.1, 10.0);
+
+    const double r = src.range_mkm * sig * ew_mult;
     if (r <= 0.0) continue;
 
     if ((target_pos_mkm - src.pos_mkm).length() <= r) return true;

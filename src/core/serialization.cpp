@@ -259,6 +259,8 @@ const char* fleet_sustainment_mode_to_string(FleetSustainmentMode m) {
     case FleetSustainmentMode::None: return "none";
     case FleetSustainmentMode::Refuel: return "refuel";
     case FleetSustainmentMode::Repair: return "repair";
+    case FleetSustainmentMode::Rearm: return "rearm";
+    case FleetSustainmentMode::Maintenance: return "maintenance";
   }
   return "none";
 }
@@ -266,6 +268,8 @@ const char* fleet_sustainment_mode_to_string(FleetSustainmentMode m) {
 FleetSustainmentMode fleet_sustainment_mode_from_string(const std::string& s) {
   if (s == "refuel" || s == "fuel") return FleetSustainmentMode::Refuel;
   if (s == "repair" || s == "rep") return FleetSustainmentMode::Repair;
+  if (s == "rearm" || s == "ammo" || s == "munitions") return FleetSustainmentMode::Rearm;
+  if (s == "maintenance" || s == "maint" || s == "resupply") return FleetSustainmentMode::Maintenance;
   return FleetSustainmentMode::None;
 }
 
@@ -853,6 +857,10 @@ std::string serialize_game_to_json(const GameState& s) {
     }
     o["auto_repair"] = sh.auto_repair;
     o["auto_repair_threshold_fraction"] = sh.auto_repair_threshold_fraction;
+    o["auto_rearm"] = sh.auto_rearm;
+    if (sh.auto_rearm_threshold_fraction != 0.25) {
+      o["auto_rearm_threshold_fraction"] = sh.auto_rearm_threshold_fraction;
+    }
     if (sh.repair_priority != RepairPriority::Normal) {
       o["repair_priority"] = repair_priority_to_string(sh.repair_priority);
     }
@@ -893,7 +901,10 @@ std::string serialize_game_to_json(const GameState& s) {
     o["speed_km_s"] = sh.speed_km_s;
     o["velocity_mkm_per_day"] = vec2_to_json(sh.velocity_mkm_per_day);
     o["hp"] = sh.hp;
+    if (std::abs(sh.maintenance_condition - 1.0) > 1e-9) o["maintenance"] = sh.maintenance_condition;
+    if (sh.crew_grade_points >= 0.0 && std::abs(sh.crew_grade_points - 100.0) > 1e-9) o["crew_grade_points"] = sh.crew_grade_points;
     o["missile_cooldown_days"] = sh.missile_cooldown_days;
+    if (sh.missile_ammo >= 0) o["missile_ammo"] = static_cast<double>(sh.missile_ammo);
     if (sh.boarding_cooldown_days > 0.0) o["boarding_cooldown_days"] = sh.boarding_cooldown_days;
     o["fuel_tons"] = sh.fuel_tons;
     o["shields"] = sh.shields;
@@ -937,6 +948,9 @@ std::string serialize_game_to_json(const GameState& s) {
     if (a.investigation_days != 1) o["investigation_days"] = static_cast<double>(a.investigation_days);
     if (std::abs(a.research_reward) > 1e-12) o["research_reward"] = a.research_reward;
     if (!a.unlock_component_id.empty()) o["unlock_component_id"] = a.unlock_component_id;
+    if (!a.mineral_reward.empty()) o["mineral_reward"] = map_string_double_to_json(a.mineral_reward);
+    if (a.hazard_chance > 1e-12) o["hazard_chance"] = a.hazard_chance;
+    if (a.hazard_damage > 1e-12) o["hazard_damage"] = a.hazard_damage;
     if (a.resolved) o["resolved"] = true;
     if (a.resolved_by_faction_id != kInvalidId) {
       o["resolved_by_faction_id"] = static_cast<double>(a.resolved_by_faction_id);
@@ -1210,6 +1224,14 @@ std::string serialize_game_to_json(const GameState& s) {
       m["repair_threshold_fraction"] = f.mission.repair_threshold_fraction;
       m["repair_resume_fraction"] = f.mission.repair_resume_fraction;
 
+      m["auto_rearm"] = f.mission.auto_rearm;
+      m["rearm_threshold_fraction"] = f.mission.rearm_threshold_fraction;
+      m["rearm_resume_fraction"] = f.mission.rearm_resume_fraction;
+
+      m["auto_maintenance"] = f.mission.auto_maintenance;
+      m["maintenance_threshold_fraction"] = f.mission.maintenance_threshold_fraction;
+      m["maintenance_resume_fraction"] = f.mission.maintenance_resume_fraction;
+
       m["sustainment_mode"] = std::string(fleet_sustainment_mode_to_string(f.mission.sustainment_mode));
       m["sustainment_colony_id"] = static_cast<double>(f.mission.sustainment_colony_id);
 
@@ -1263,9 +1285,13 @@ std::string serialize_game_to_json(const GameState& s) {
     o["missile_range_mkm"] = d.missile_range_mkm;
     o["missile_speed_mkm_per_day"] = d.missile_speed_mkm_per_day;
     o["missile_reload_days"] = d.missile_reload_days;
+    if (d.missile_launcher_count > 0) o["missile_launcher_count"] = static_cast<double>(d.missile_launcher_count);
+    if (d.missile_ammo_capacity > 0) o["missile_ammo_capacity"] = static_cast<double>(d.missile_ammo_capacity);
     o["point_defense_damage"] = d.point_defense_damage;
     o["point_defense_range_mkm"] = d.point_defense_range_mkm;
     o["signature_multiplier"] = d.signature_multiplier;
+    o["ecm_strength"] = d.ecm_strength;
+    o["eccm_strength"] = d.eccm_strength;
     designs.push_back(o);
   }
   root["custom_designs"] = designs;
@@ -1536,6 +1562,10 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     if (auto it = o.find("auto_repair_threshold_fraction"); it != o.end()) {
       sh.auto_repair_threshold_fraction = it->second.number_value(sh.auto_repair_threshold_fraction);
     }
+    if (auto it = o.find("auto_rearm"); it != o.end()) sh.auto_rearm = it->second.bool_value(false);
+    if (auto it = o.find("auto_rearm_threshold_fraction"); it != o.end()) {
+      sh.auto_rearm_threshold_fraction = it->second.number_value(sh.auto_rearm_threshold_fraction);
+    }
     if (auto it = o.find("repair_priority"); it != o.end()) {
       sh.repair_priority = repair_priority_from_string(it->second.string_value("normal"));
     }
@@ -1571,8 +1601,17 @@ GameState deserialize_game_from_json(const std::string& json_text) {
       sh.velocity_mkm_per_day = vec2_from_json(it->second);
     }
     sh.hp = o.at("hp").number_value(0.0);
+    if (auto it = o.find("maintenance"); it != o.end()) {
+      sh.maintenance_condition = it->second.number_value(sh.maintenance_condition);
+    }
+    if (auto it = o.find("crew_grade_points"); it != o.end()) {
+      sh.crew_grade_points = it->second.number_value(sh.crew_grade_points);
+    }
     if (auto it = o.find("missile_cooldown_days"); it != o.end()) {
       sh.missile_cooldown_days = it->second.number_value(0.0);
+    }
+    if (auto it = o.find("missile_ammo"); it != o.end()) {
+      sh.missile_ammo = static_cast<int>(it->second.int_value(-1));
     }
     if (auto it = o.find("boarding_cooldown_days"); it != o.end()) {
       sh.boarding_cooldown_days = it->second.number_value(0.0);
@@ -1625,6 +1664,15 @@ GameState deserialize_game_from_json(const std::string& json_text) {
         if (auto itd = o.find("investigation_days"); itd != o.end()) a.investigation_days = static_cast<int>(itd->second.int_value(1));
         if (auto itr = o.find("research_reward"); itr != o.end()) a.research_reward = itr->second.number_value(0.0);
         if (auto itu = o.find("unlock_component_id"); itu != o.end()) a.unlock_component_id = itu->second.string_value();
+        if (auto itm = o.find("mineral_reward"); itm != o.end()) a.mineral_reward = map_string_double_from_json(itm->second);
+        if (auto ithc = o.find("hazard_chance"); ithc != o.end()) a.hazard_chance = std::clamp(ithc->second.number_value(0.0), 0.0, 1.0);
+        if (auto ithd = o.find("hazard_damage"); ithd != o.end()) a.hazard_damage = std::max(0.0, ithd->second.number_value(0.0));
+        // Prune invalid mineral entries.
+        for (auto itmr = a.mineral_reward.begin(); itmr != a.mineral_reward.end();) {
+          const double v = itmr->second;
+          if (!(v > 1e-9) || std::isnan(v) || std::isinf(v)) itmr = a.mineral_reward.erase(itmr);
+          else ++itmr;
+        }
         if (auto itres = o.find("resolved"); itres != o.end()) a.resolved = itres->second.bool_value(false);
         if (auto itrf = o.find("resolved_by_faction_id"); itrf != o.end()) {
           a.resolved_by_faction_id = static_cast<Id>(itrf->second.int_value(kInvalidId));
@@ -2081,6 +2129,27 @@ GameState deserialize_game_from_json(const std::string& json_text) {
           if (auto itpr = m.find("repair_resume_fraction"); itpr != m.end()) {
             fl.mission.repair_resume_fraction = std::clamp(itpr->second.number_value(fl.mission.repair_resume_fraction), 0.0, 1.0);
           }
+
+          if (auto itar = m.find("auto_rearm"); itar != m.end()) {
+            fl.mission.auto_rearm = itar->second.bool_value(fl.mission.auto_rearm);
+          }
+          if (auto itrt = m.find("rearm_threshold_fraction"); itrt != m.end()) {
+            fl.mission.rearm_threshold_fraction = std::clamp(itrt->second.number_value(fl.mission.rearm_threshold_fraction), 0.0, 1.0);
+          }
+          if (auto itrr = m.find("rearm_resume_fraction"); itrr != m.end()) {
+            fl.mission.rearm_resume_fraction = std::clamp(itrr->second.number_value(fl.mission.rearm_resume_fraction), 0.0, 1.0);
+          }
+
+          if (auto itam = m.find("auto_maintenance"); itam != m.end()) {
+            fl.mission.auto_maintenance = itam->second.bool_value(fl.mission.auto_maintenance);
+          }
+          if (auto itmt = m.find("maintenance_threshold_fraction"); itmt != m.end()) {
+            fl.mission.maintenance_threshold_fraction = std::clamp(itmt->second.number_value(fl.mission.maintenance_threshold_fraction), 0.0, 1.0);
+          }
+          if (auto itmr = m.find("maintenance_resume_fraction"); itmr != m.end()) {
+            fl.mission.maintenance_resume_fraction = std::clamp(itmr->second.number_value(fl.mission.maintenance_resume_fraction), 0.0, 1.0);
+          }
+
           if (auto itsm = m.find("sustainment_mode"); itsm != m.end()) {
             fl.mission.sustainment_mode = fleet_sustainment_mode_from_string(itsm->second.string_value("none"));
           }
@@ -2138,6 +2207,12 @@ GameState deserialize_game_from_json(const std::string& json_text) {
         d.missile_speed_mkm_per_day = itms->second.number_value(0.0);
       }
       if (auto itrl = o.find("missile_reload_days"); itrl != o.end()) d.missile_reload_days = itrl->second.number_value(0.0);
+      if (auto itml = o.find("missile_launcher_count"); itml != o.end()) {
+        d.missile_launcher_count = static_cast<int>(itml->second.int_value(0));
+      }
+      if (auto itma = o.find("missile_ammo_capacity"); itma != o.end()) {
+        d.missile_ammo_capacity = static_cast<int>(itma->second.int_value(0));
+      }
       if (auto itpd = o.find("point_defense_damage"); itpd != o.end()) {
         d.point_defense_damage = itpd->second.number_value(0.0);
       }
@@ -2146,6 +2221,16 @@ GameState deserialize_game_from_json(const std::string& json_text) {
       }
       if (auto itsig = o.find("signature_multiplier"); itsig != o.end()) {
         d.signature_multiplier = itsig->second.number_value(1.0);
+      }
+      if (auto itecm = o.find("ecm_strength"); itecm != o.end()) {
+        d.ecm_strength = itecm->second.number_value(0.0);
+      } else if (auto itecm2 = o.find("ecm"); itecm2 != o.end()) {
+        d.ecm_strength = itecm2->second.number_value(0.0);
+      }
+      if (auto iteccm = o.find("eccm_strength"); iteccm != o.end()) {
+        d.eccm_strength = iteccm->second.number_value(0.0);
+      } else if (auto iteccm2 = o.find("eccm"); iteccm2 != o.end()) {
+        d.eccm_strength = iteccm2->second.number_value(0.0);
       }
       s.custom_designs[d.id] = d;
     }

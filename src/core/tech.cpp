@@ -438,6 +438,22 @@ ComponentDef parse_component_def(const std::string& cid, const json::Object& cj)
     if (c.signature_multiplier == 1.0) c.signature_multiplier = v_sig3->number_value(1.0);
   }
 
+// Optional: electronic warfare.
+// - ecm_strength: target-side jamming strength (harder to detect/track)
+// - eccm_strength: sensor-side countermeasures (easier to detect/track)
+//
+// Short aliases "ecm"/"eccm" are supported for content convenience.
+if (const auto* v_ecm = find_key(cj, "ecm_strength")) {
+  c.ecm_strength = v_ecm->number_value(0.0);
+} else if (const auto* v_ecm2 = find_key(cj, "ecm")) {
+  c.ecm_strength = v_ecm2->number_value(0.0);
+}
+if (const auto* v_eccm = find_key(cj, "eccm_strength")) {
+  c.eccm_strength = v_eccm->number_value(0.0);
+} else if (const auto* v_eccm2 = find_key(cj, "eccm")) {
+  c.eccm_strength = v_eccm2->number_value(0.0);
+}
+
   // Optional stats
   if (const auto* v_speed = find_key(cj, "speed_km_s")) c.speed_km_s = v_speed->number_value(0.0);
 
@@ -522,6 +538,11 @@ ComponentDef parse_component_def(const std::string& cid, const json::Object& cj)
     }
   }
   if (const auto* v_rl = find_key(cj, "missile_reload_days")) c.missile_reload_days = v_rl->number_value(0.0);
+  if (const auto* v_ma = find_key(cj, "missile_ammo")) c.missile_ammo = std::max(0, static_cast<int>(v_ma->int_value(0)));
+  if (const auto* v_mac = find_key(cj, "missile_ammo_capacity")) {
+    // Alias for missile_ammo (per-launcher salvos).
+    if (c.missile_ammo <= 0) c.missile_ammo = std::max(0, static_cast<int>(v_mac->int_value(0)));
+  }
 
   // Point defense (anti-missile interception).
   if (const auto* v_pd = find_key(cj, "point_defense_damage")) c.point_defense_damage = v_pd->number_value(0.0);
@@ -678,6 +699,9 @@ InstallationDef parse_installation_def(const std::string& inst_id, const json::O
   if (const auto* tr_v = find_key(vo, "troop_training_points_per_day")) {
     def.troop_training_points_per_day = tr_v->number_value(0.0);
   }
+  if (const auto* cr_v = find_key(vo, "crew_training_points_per_day")) {
+    def.crew_training_points_per_day = cr_v->number_value(0.0);
+  }
 
   // Optional: habitation / life support capacity.
   // Preferred key: habitation_capacity_millions
@@ -723,6 +747,10 @@ ShipDesign parse_design_def(const json::Object& o,
   double colony_cap = 0.0;
   double troop_cap = 0.0;
 
+  // Visibility / signature multiplier
+  double ecm_strength = 0.0;
+  double eccm_strength = 0.0;
+
   // Visibility / signature multiplier (product of component multipliers).
   // 1.0 = normal visibility; lower values are harder to detect.
   double sig_mult = 1.0;
@@ -736,6 +764,10 @@ ShipDesign parse_design_def(const json::Object& o,
   double missile_speed = 0.0;
   double missile_reload = 0.0;
   bool missile_reload_set = false;
+
+  int missile_launcher_count = 0;
+  int missile_ammo_capacity = 0;
+  bool missile_ammo_finite = true;
 
   // Point defense (anti-missile).
   double point_defense_damage = 0.0;
@@ -770,6 +802,9 @@ ShipDesign parse_design_def(const json::Object& o,
     colony_cap += c.colony_capacity_millions;
     troop_cap += c.troop_capacity;
 
+    ecm_strength += std::max(0.0, c.ecm_strength);
+    eccm_strength += std::max(0.0, c.eccm_strength);
+
     const double comp_sig =
         std::clamp(std::isfinite(c.signature_multiplier) ? c.signature_multiplier : 1.0, 0.0, 1.0);
     sig_mult *= comp_sig;
@@ -781,6 +816,13 @@ ShipDesign parse_design_def(const json::Object& o,
       // Missile launcher stats (optional).
       if (c.missile_damage > 0.0) {
         missile_damage += c.missile_damage;
+        missile_launcher_count += 1;
+        if (c.missile_ammo > 0) {
+          missile_ammo_capacity += c.missile_ammo;
+        } else {
+          // Legacy / unlimited launcher: disable ammo tracking for this design.
+          missile_ammo_finite = false;
+        }
         missile_range = std::max(missile_range, c.missile_range_mkm);
         missile_speed = std::max(missile_speed, c.missile_speed_mkm_per_day);
         if (c.missile_reload_days > 0.0) {
@@ -825,6 +867,9 @@ ShipDesign parse_design_def(const json::Object& o,
   // Clamp to avoid fully-undetectable ships.
   d.signature_multiplier = std::clamp(sig_mult, 0.05, 1.0);
 
+  d.ecm_strength = std::max(0.0, ecm_strength);
+  d.eccm_strength = std::max(0.0, eccm_strength);
+
   d.power_generation = power_gen;
   d.power_use_total = power_use_total;
   d.power_use_engines = power_use_engines;
@@ -838,6 +883,9 @@ ShipDesign parse_design_def(const json::Object& o,
   d.missile_range_mkm = missile_range;
   d.missile_speed_mkm_per_day = missile_speed;
   d.missile_reload_days = missile_reload_set ? missile_reload : 0.0;
+
+  d.missile_launcher_count = missile_launcher_count;
+  d.missile_ammo_capacity = (missile_launcher_count > 0 && missile_ammo_finite) ? missile_ammo_capacity : 0;
 
   d.point_defense_damage = point_defense_damage;
   d.point_defense_range_mkm = point_defense_range;

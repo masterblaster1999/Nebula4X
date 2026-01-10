@@ -264,6 +264,17 @@ struct ComponentDef {
   // 1.0 = normal visibility. Lower values are harder to detect.
   double signature_multiplier{1.0};
 
+// Electronic warfare.
+//
+// ECM reduces the effective detection / tracking quality of opposing sensors.
+// ECCM counteracts ECM.
+//
+// Values are aggregated per-ship-design and interpreted as a multiplier
+// roughly proportional to (1 + eccm_strength) / (1 + ecm_strength).
+double ecm_strength{0.0};
+double eccm_strength{0.0};
+
+
 
   // Type-specific stats (0 means "not applicable").
   double speed_km_s{0.0};          // engine
@@ -293,6 +304,10 @@ struct ComponentDef {
   double missile_range_mkm{0.0};
   double missile_speed_mkm_per_day{0.0};
   double missile_reload_days{0.0};
+
+  // Optional magazine capacity per launcher (number of salvos).
+  // 0 => unlimited ammo (legacy behavior).
+  int missile_ammo{0};
 
   // Point defense (anti-missile interception).
   //
@@ -325,6 +340,11 @@ struct ShipDesign {
   // Visibility / sensor signature multiplier for this design.
   // 1.0 = normal; lower values are harder to detect.
   double signature_multiplier{1.0};
+
+// Electronic warfare (aggregated from components).
+double ecm_strength{0.0};
+double eccm_strength{0.0};
+
   double colony_capacity_millions{0.0};
 
   // Power budgeting.
@@ -345,6 +365,13 @@ struct ShipDesign {
   double missile_range_mkm{0.0};
   double missile_speed_mkm_per_day{0.0};
   double missile_reload_days{0.0};
+
+  // Derived missile launcher count (number of weapon components with missile_damage > 0).
+  int missile_launcher_count{0};
+
+  // Total missile ammo capacity across all launchers (salvos).
+  // 0 => unlimited ammo (legacy behavior).
+  int missile_ammo_capacity{0};
 
   // Point defense (anti-missile interception).
   double point_defense_damage{0.0};
@@ -464,6 +491,12 @@ struct InstallationDef {
 
   // Optional: troop training (points per day).
   double troop_training_points_per_day{0.0};
+
+  // Optional: crew training (points per day).
+  //
+  // This represents on-planet training infrastructure for ship crews (simulated
+  // as a colony-wide training pool distributed across docked ships).
+  double crew_training_points_per_day{0.0};
 
   // Optional: habitation / life support capacity.
   //
@@ -606,6 +639,12 @@ struct Ship {
   // Example: 0.75 means "seek repairs when below 75% HP".
   double auto_repair_threshold_fraction{0.75};
 
+  // Auto rearm (for finite-ammo missile ships).
+  bool auto_rearm{false};
+
+  // Fraction of magazine capacity at which auto-rearm triggers.
+  double auto_rearm_threshold_fraction{0.25};
+
   // Repair scheduling priority when docked at a shipyard.
   // Higher priority ships are repaired first when shipyard capacity is limited.
   RepairPriority repair_priority{RepairPriority::Normal};
@@ -635,9 +674,29 @@ struct Ship {
   // Combat state.
   double hp{0.0};
 
+  // Maintenance / readiness condition (0..1). 1 = fully maintained.
+  // Only affects simulation if cfg.enable_ship_maintenance is true.
+  double maintenance_condition{1.0};
+
+  // Crew training / experience (grade points).
+  //
+  // Points are mapped to a combat effectiveness modifier (hit chance / reload
+  // / boarding) via Simulation::crew_grade_bonus_for_points().
+  //
+  // A value < 0 indicates "uninitialized" (older saves) and will be
+  // initialized to SimConfig::crew_initial_grade_points when design stats are applied.
+  double crew_grade_points{-1.0};
+
   // Missile weapon cooldown (days until the ship can launch another salvo).
   // 0 = ready.
   double missile_cooldown_days{0.0};
+
+  // Missile ammo remaining (salvos).
+  //
+  // - Only used when the ship's design has a finite missile_ammo_capacity.
+  // - -1 is treated as "uninitialized" for legacy saves and will be
+  //   initialized to full capacity when design stats are applied.
+  int missile_ammo{-1};
 
   // Boarding attempt cooldown (days).
   //
@@ -712,6 +771,20 @@ struct Anomaly {
   int investigation_days{1};
   double research_reward{0.0};
   std::string unlock_component_id;
+
+  // Optional mineral cache reward (tons keyed by mineral name).
+  //
+  // On resolution, investigating ships will load as much as possible into cargo.
+  // Any overflow becomes a salvageable Wreck (if wrecks are enabled).
+  std::unordered_map<std::string, double> mineral_reward;
+
+  // Optional hazard applied when the anomaly is resolved.
+  //
+  // hazard_chance is a probability in [0,1] that a hazard triggers.
+  // hazard_damage is applied as non-lethal damage (shields first, then hull),
+  // with hull HP clamped to a minimum of 1.
+  double hazard_chance{0.0};
+  double hazard_damage{0.0};
 
   bool resolved{false};
   Id resolved_by_faction_id{kInvalidId};
@@ -1058,6 +1131,8 @@ enum class FleetSustainmentMode : std::uint8_t {
   None = 0,
   Refuel = 1,
   Repair = 2,
+  Rearm = 3,
+  Maintenance = 4,
 };
 
 struct FleetMission {
@@ -1144,6 +1219,14 @@ struct FleetMission {
   bool auto_repair{true};
   double repair_threshold_fraction{0.50};
   double repair_resume_fraction{0.95};
+
+  bool auto_rearm{true};
+  double rearm_threshold_fraction{0.25};
+  double rearm_resume_fraction{0.90};
+
+  bool auto_maintenance{true};
+  double maintenance_threshold_fraction{0.70};
+  double maintenance_resume_fraction{0.95};
 
   // Runtime state: active sustainment target.
   FleetSustainmentMode sustainment_mode{FleetSustainmentMode::None};

@@ -1374,6 +1374,16 @@ FixReport fix_game_state(GameState& s, const ContentDB* content) {
         note(join("Fix: Ship ", id_u64(sid), " had out-of-range auto_refuel_threshold_fraction; clamped"));
       }
 
+      if (!std::isfinite(sh.auto_rearm_threshold_fraction)) {
+        note(join("Fix: Ship ", id_u64(sid), " had NaN/inf auto_rearm_threshold_fraction; set to 0.25"));
+        sh.auto_rearm_threshold_fraction = 0.25;
+      }
+      const double before_rearm = sh.auto_rearm_threshold_fraction;
+      sh.auto_rearm_threshold_fraction = std::clamp(sh.auto_rearm_threshold_fraction, 0.0, 1.0);
+      if (sh.auto_rearm_threshold_fraction != before_rearm) {
+        note(join("Fix: Ship ", id_u64(sid), " had out-of-range auto_rearm_threshold_fraction; clamped"));
+      }
+
       if (!std::isfinite(sh.auto_repair_threshold_fraction)) {
         note(join("Fix: Ship ", id_u64(sid), " had NaN/inf auto_repair_threshold_fraction; set to 0.75"));
         sh.auto_repair_threshold_fraction = 0.75;

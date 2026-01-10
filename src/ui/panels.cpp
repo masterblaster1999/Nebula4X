@@ -1051,6 +1051,41 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
             ImGui::TextDisabled("Shields: (none)");
           }
           ImGui::Text("HP: %.0f / %.0f", sh->hp, d->max_hp);
+          if (sim.cfg().enable_ship_maintenance) {
+            const double m = std::clamp(sh->maintenance_condition, 0.0, 1.0);
+            const double min_spd = std::clamp(sim.cfg().ship_maintenance_min_speed_multiplier, 0.0, 1.0);
+            const double min_cbt = std::clamp(sim.cfg().ship_maintenance_min_combat_multiplier, 0.0, 1.0);
+            const double spd_mult = min_spd + (1.0 - min_spd) * m;
+            const double cbt_mult = min_cbt + (1.0 - min_cbt) * m;
+
+            ImGui::Text("Maintenance: %.0f%%  (Speed x%.2f, Combat x%.2f)", 100.0 * m, spd_mult, cbt_mult);
+
+            const std::string& res = sim.cfg().ship_maintenance_resource_id;
+            if (!res.empty()) {
+              const auto it = sh->cargo.find(res);
+              const double in_cargo = (it == sh->cargo.end()) ? 0.0 : std::max(0.0, it->second);
+              const double req_per_day =
+                  std::max(0.0, d->mass_tons) * std::max(0.0, sim.cfg().ship_maintenance_tons_per_day_per_mass_ton);
+              ImGui::TextDisabled("Spare parts (%s): %.1f t in cargo  (need %.2f t/day)", res.c_str(), in_cargo,
+                                  req_per_day);
+            }
+          }
+          // Crew training / experience
+          {
+            double gp = sh->crew_grade_points;
+            if (!std::isfinite(gp) || gp < 0.0) gp = sim.cfg().crew_initial_grade_points;
+            const double bonus = sim.crew_grade_bonus_for_points(gp);
+            const char* tier = (gp < 100.0)  ? "Green"
+                               : (gp < 400.0)  ? "Regular"
+                               : (gp < 900.0)  ? "Trained"
+                               : (gp < 1600.0) ? "Veteran"
+                               : "Elite";
+            ImGui::Text("Crew: %.0f pts  (%s, %+0.1f%% combat)", gp, tier, bonus * 100.0);
+            if (!sim.cfg().enable_crew_experience) {
+              ImGui::TextDisabled("Crew experience disabled in SimConfig");
+            }
+          }
+
           if (d->fuel_use_per_mkm > 0.0) {
             const double cap = std::max(0.0, d->fuel_capacity_tons);
             const double cur = std::max(0.0, sh->fuel_tons);
@@ -1065,6 +1100,26 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
             ImGui::Text("Fuel: %.0f / %.0f t", std::max(0.0, sh->fuel_tons), d->fuel_capacity_tons);
           } else {
             ImGui::TextDisabled("Fuel: (none)");
+          }
+
+          // Missile ammo / munitions
+          if (d->missile_launcher_count > 0) {
+            if (d->missile_ammo_capacity > 0) {
+              const int cap_ammo = std::max(0, d->missile_ammo_capacity);
+              int cur_ammo = sh->missile_ammo;
+              if (cur_ammo < 0) cur_ammo = cap_ammo;
+              cur_ammo = std::clamp(cur_ammo, 0, cap_ammo);
+              ImGui::Text("Missile ammo: %d / %d", cur_ammo, cap_ammo);
+
+              if (auto it = sh->cargo.find("Munitions"); it != sh->cargo.end()) {
+                const double cargo_mun = std::max(0.0, it->second);
+                if (cargo_mun >= 1.0 - 1e-9) {
+                  ImGui::TextDisabled("Munitions (cargo): %.0f", std::floor(cargo_mun + 1e-9));
+                }
+              }
+            } else {
+              ImGui::Text("Missile ammo: Unlimited");
+            }
           }
 
           // Power budget + per-ship power policy
@@ -1228,6 +1283,11 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
 
             ImGui::Text("Sensor: %.0f mkm (effective %.0f mkm)", d->sensor_range_mkm, range_eff);
             ImGui::Text("Signature: %.0f%% (effective %.0f%%)", d->signature_multiplier * 100.0, sig_eff * 100.0);
+if (d->ecm_strength > 0.0 || d->eccm_strength > 0.0) {
+  ImGui::Text("EW: ECM %.1f  ECCM %.1f", d->ecm_strength, d->eccm_strength);
+} else {
+  ImGui::TextDisabled("EW: (none)");
+}
 
             if (!sh->power_policy.sensors_enabled) {
               ImGui::TextDisabled("Note: Sensors disabled by power policy -> signature treated as Passive.");
@@ -1238,6 +1298,11 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
             ImGui::Text("Sensor: 0 mkm");
             ImGui::Text("Signature: %.0f%%", d->signature_multiplier * 100.0);
             ImGui::TextDisabled("Sensor mode: (no sensors)");
+if (d->ecm_strength > 0.0 || d->eccm_strength > 0.0) {
+  ImGui::Text("EW: ECM %.1f  ECCM %.1f", d->ecm_strength, d->eccm_strength);
+} else {
+  ImGui::TextDisabled("EW: (none)");
+}
           }
           if (d->colony_capacity_millions > 0.0) {
             ImGui::Text("Colony capacity: %.0f M", d->colony_capacity_millions);
@@ -1689,6 +1754,39 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
           ImGui::EndDisabled();
           ImGui::SameLine();
           ImGui::TextDisabled("(requires fuel tanks)");
+        }
+
+        const bool can_auto_rearm = (d && d->missile_ammo_capacity > 0);
+        if (!can_auto_rearm) ImGui::BeginDisabled();
+        if (ImGui::Checkbox("Auto-rearm missiles when low ammo (idle)", &sh->auto_rearm)) {
+          // Safety automation (can coexist with explore/freight/etc)
+          sh->auto_rearm_threshold_fraction =
+              std::clamp(sh->auto_rearm_threshold_fraction, 0.0, 1.0);
+        }
+        if (ImGui::IsItemHovered()) {
+          ImGui::SetTooltip(
+              "When enabled, if this ship is idle and its missile ammo drops below the configured threshold,\n"
+              "it will automatically route to the nearest friendly colony with Munitions to rearm.\n\n"
+              "Tip: You can also carry Munitions in cargo for forward reloading.");
+        }
+
+        if (can_auto_rearm && sh->auto_rearm) {
+          float thresh_pct = static_cast<float>(sh->auto_rearm_threshold_fraction * 100.0);
+          if (ImGui::SliderFloat("Rearm threshold", &thresh_pct, 0.0f, 100.0f, "%.0f%%")) {
+            sh->auto_rearm_threshold_fraction =
+                std::clamp(static_cast<double>(thresh_pct) / 100.0, 0.0, 1.0);
+          }
+          if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "Auto-rearm triggers when missile ammo is below this fraction of magazine capacity.\n"
+                "Example: 25%% = rearm when below 25%%.");
+          }
+        }
+
+        if (!can_auto_rearm) {
+          ImGui::EndDisabled();
+          ImGui::SameLine();
+          ImGui::TextDisabled("(requires finite missile ammo)");
         }
 
         const bool can_auto_tanker = (d && d->fuel_capacity_tons > 0.0);
@@ -2291,10 +2389,16 @@ const bool can_up = (i > 0);
           }
 
           const bool friendly = sim.are_factions_mutual_friendly(sh->faction_id, sel_col->faction_id);
+          const bool trade_partner = sim.are_factions_trade_partners(sh->faction_id, sel_col->faction_id);
           const bool own_colony = (sel_col->faction_id == sh->faction_id);
-          if (!friendly) {
+          const auto treaties_here = sim.treaties_between(sh->faction_id, sel_col->faction_id);
+          const bool hostile_actions_blocked_by_treaty = !treaties_here.empty();
+          if (!trade_partner) {
             ImGui::Spacing();
             ImGui::TextDisabled("This colony is not friendly.");
+            if (hostile_actions_blocked_by_treaty) {
+              ImGui::TextDisabled("Hostile actions are blocked by an active treaty.");
+            }
             ImGui::Text("Defenders: %.1f", sel_col->ground_forces);
 
             // --- Invasion advisor (deterministic forecast) ---
@@ -2356,7 +2460,8 @@ const bool can_up = (i > 0);
               static int bombard_days = 7;
               ImGui::InputInt("Bombard days (-1 = indefinite)", &bombard_days);
 
-              const bool can_bombard = (w_dmg > 1e-9 && w_range > 1e-9);
+              const bool has_weapons = (w_dmg > 1e-9 && w_range > 1e-9);
+              const bool can_bombard = has_weapons && !hostile_actions_blocked_by_treaty;
               if (!can_bombard) ImGui::BeginDisabled();
               if (ImGui::Button("Bombard")) {
                 if (can_bombard) {
@@ -2368,7 +2473,11 @@ const bool can_up = (i > 0);
               if (!can_bombard) {
                 ImGui::EndDisabled();
                 if (ImGui::IsItemHovered()) {
-                  ImGui::SetTooltip("Ship has no weapons.");
+                  if (hostile_actions_blocked_by_treaty) {
+                    ImGui::SetTooltip("Hostile actions are blocked by an active treaty.");
+                  } else if (!has_weapons) {
+                    ImGui::SetTooltip("Ship has no weapons.");
+                  }
                 }
               }
             }
@@ -2376,7 +2485,14 @@ const bool can_up = (i > 0);
             const auto* d2 = sim.find_design(sh->design_id);
             const double cap2 = d2 ? d2->troop_capacity : 0.0;
             ImGui::Text("Embarked troops: %.1f / %.1f", sh->troops, cap2);
-            if (sh->troops <= 1e-9 || cap2 <= 1e-9) {
+            if (hostile_actions_blocked_by_treaty) {
+              ImGui::BeginDisabled();
+              ImGui::Button("Invade (blocked by treaty)");
+              ImGui::EndDisabled();
+              if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Hostile actions are blocked by an active treaty.");
+              }
+            } else if (sh->troops <= 1e-9 || cap2 <= 1e-9) {
               ImGui::BeginDisabled();
               ImGui::Button("Invade (requires troops)");
               ImGui::EndDisabled();
@@ -2388,6 +2504,10 @@ const bool can_up = (i > 0);
               }
             }
           } else {
+            if (!friendly && !own_colony) {
+              ImGui::Spacing();
+              ImGui::TextDisabled("Trade partner colony: logistics access via Trade Agreement.");
+            }
             // --- Minerals ---
             std::vector<std::string> minerals;
             minerals.reserve(sel_col->minerals.size() + sh->cargo.size());
@@ -3449,9 +3569,42 @@ const bool can_up = (i > 0);
               fleet_mut->mission.repair_resume_fraction = std::clamp(static_cast<double>(res), 0.0, 1.0);
             }
 
+            ImGui::Checkbox("Auto-rearm (munitions)##fleet_mission_auto_rearm", &fleet_mut->mission.auto_rearm);
+            if (fleet_mut->mission.auto_rearm) {
+              float thr = static_cast<float>(std::clamp(fleet_mut->mission.rearm_threshold_fraction, 0.0, 1.0));
+              float res = static_cast<float>(std::clamp(fleet_mut->mission.rearm_resume_fraction, 0.0, 1.0));
+              ImGui::SliderFloat("Rearm at##fleet_mission_rearm_thr", &thr, 0.0f, 1.0f, "%.2f");
+              ImGui::SliderFloat("Resume at##fleet_mission_rearm_res", &res, 0.0f, 1.0f, "%.2f");
+              fleet_mut->mission.rearm_threshold_fraction = std::clamp(static_cast<double>(thr), 0.0, 1.0);
+              fleet_mut->mission.rearm_resume_fraction = std::clamp(static_cast<double>(res), 0.0, 1.0);
+              ImGui::TextDisabled("Seeks Munitions at a trade-partner port.");
+            }
+
+            if (sim.cfg().enable_ship_maintenance && !sim.cfg().ship_maintenance_resource_id.empty()) {
+              ImGui::Checkbox("Auto-maintenance##fleet_mission_auto_maintenance", &fleet_mut->mission.auto_maintenance);
+              if (fleet_mut->mission.auto_maintenance) {
+                float thr = static_cast<float>(std::clamp(fleet_mut->mission.maintenance_threshold_fraction, 0.0, 1.0));
+                float res = static_cast<float>(std::clamp(fleet_mut->mission.maintenance_resume_fraction, 0.0, 1.0));
+                ImGui::SliderFloat("Maintenance at##fleet_mission_maint_thr", &thr, 0.0f, 1.0f, "%.2f");
+                ImGui::SliderFloat("Resume at##fleet_mission_maint_res", &res, 0.0f, 1.0f, "%.2f");
+                fleet_mut->mission.maintenance_threshold_fraction = std::clamp(static_cast<double>(thr), 0.0, 1.0);
+                fleet_mut->mission.maintenance_resume_fraction = std::clamp(static_cast<double>(res), 0.0, 1.0);
+                ImGui::TextDisabled(("Uses " + sim.cfg().ship_maintenance_resource_id + " stockpiles.").c_str());
+              }
+            }
+
+            ImGui::TextDisabled("Priority: Refuel > Repair > Rearm > Maintenance.");
+
             // Status
             if (fleet_mut->mission.sustainment_mode != FleetSustainmentMode::None) {
-              const char* mode = (fleet_mut->mission.sustainment_mode == FleetSustainmentMode::Refuel) ? "Refueling" : "Repairing";
+              const char* mode = "Sustaining";
+              switch (fleet_mut->mission.sustainment_mode) {
+                case FleetSustainmentMode::Refuel: mode = "Refueling"; break;
+                case FleetSustainmentMode::Repair: mode = "Repairing"; break;
+                case FleetSustainmentMode::Rearm: mode = "Rearming"; break;
+                case FleetSustainmentMode::Maintenance: mode = "Maintaining"; break;
+                case FleetSustainmentMode::None: default: break;
+              }
               std::string at = "(unknown)";
               if (fleet_mut->mission.sustainment_colony_id != kInvalidId) {
                 if (const auto* c = find_ptr(s.colonies, fleet_mut->mission.sustainment_colony_id)) {
@@ -5686,8 +5839,9 @@ if (colony->shipyard_queue.empty()) {
             "Diplomatic stances are used for rules-of-engagement: ships will only auto-engage factions they consider "
             "Hostile. Issuing an Attack order against a non-hostile faction will automatically set the relationship "
             "to Hostile once contact is confirmed.\n\n"
-            "Mutual Friendly stances also enable cooperation: allied sensor coverage + discovered systems are shared, "
-            "and ships may refuel/repair/transfer minerals at allied colonies.");
+            "Mutual Friendly stances enable full cooperation: allied sensor coverage + discovered systems are shared, "
+            "and ships may refuel/repair/transfer minerals at allied colonies.\n\n"
+            "Trade Agreements (treaties) grant port access for refuel/rearm/transfer minerals without a full alliance.");
 
         static bool reciprocal = true;
         ImGui::Checkbox("Reciprocal edits (set both directions)", &reciprocal);
@@ -7459,7 +7613,7 @@ void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_colony, Id
 
     const auto systems = sorted_systems(s);
 
-    ImGui::InputTextWithHint("Search##anom", "name / kind / system / unlock", search, IM_ARRAYSIZE(search));
+    ImGui::InputTextWithHint("Search##anom", "name / kind / system / unlock / minerals", search, IM_ARRAYSIZE(search));
 
     {
       std::vector<const char*> labels;
@@ -7492,6 +7646,11 @@ void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_colony, Id
       std::string system;
       int days{0};
       double rp{0.0};
+
+      double minerals_total{0.0};
+      double hazard_chance{0.0};
+      double hazard_damage{0.0};
+
       std::string unlock;
       bool resolved{false};
     };
@@ -7513,11 +7672,22 @@ void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_colony, Id
       const std::string kind = a.kind.empty() ? std::string("-") : a.kind;
       const std::string sys_name = sys ? sys->name : "?";
 
-      // Search matches name, kind, system, or unlock id.
+      bool mineral_match = false;
+      if (search[0] != '\0') {
+        for (const auto& [mid, _] : a.mineral_reward) {
+          if (case_insensitive_contains(mid, search)) {
+            mineral_match = true;
+            break;
+          }
+        }
+      }
+
+      // Search matches name, kind, system, unlock id, or mineral ids.
       if (!case_insensitive_contains(nm, search) &&
           !case_insensitive_contains(kind, search) &&
           !case_insensitive_contains(sys_name, search) &&
-          !case_insensitive_contains(a.unlock_component_id, search)) {
+          !case_insensitive_contains(a.unlock_component_id, search) &&
+          !mineral_match) {
         continue;
       }
 
@@ -7530,6 +7700,9 @@ void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_colony, Id
       r.system = sys_name;
       r.days = std::max(1, a.investigation_days);
       r.rp = std::max(0.0, a.research_reward);
+      for (const auto& [_, tons] : a.mineral_reward) r.minerals_total += std::max(0.0, tons);
+      r.hazard_chance = std::clamp(a.hazard_chance, 0.0, 1.0);
+      r.hazard_damage = std::max(0.0, a.hazard_damage);
 
       if (!a.unlock_component_id.empty()) {
         const auto itc = sim.content().components.find(a.unlock_component_id);
@@ -7550,16 +7723,18 @@ void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_colony, Id
                                  ImGuiTableFlags_ScrollY;
 
     const ImVec2 avail = ImGui::GetContentRegionAvail();
-    if (ImGui::BeginTable("anomaly_directory", 8, flags, ImVec2(avail.x, avail.y))) {
+    if (ImGui::BeginTable("anomaly_directory", 10, flags, ImVec2(avail.x, avail.y))) {
       ImGui::TableSetupScrollFreeze(0, 1);
       ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_DefaultSort, 0.0f, 0);
       ImGui::TableSetupColumn("Kind", 0, 0.0f, 1);
       ImGui::TableSetupColumn("System", 0, 0.0f, 2);
       ImGui::TableSetupColumn("Days", ImGuiTableColumnFlags_PreferSortAscending, 0.0f, 3);
       ImGui::TableSetupColumn("RP", ImGuiTableColumnFlags_PreferSortDescending, 0.0f, 4);
-      ImGui::TableSetupColumn("Unlock", 0, 0.0f, 5);
-      ImGui::TableSetupColumn("Status", 0, 0.0f, 6);
-      ImGui::TableSetupColumn("Center", ImGuiTableColumnFlags_NoSort, 0.0f, 7);
+      ImGui::TableSetupColumn("Minerals", ImGuiTableColumnFlags_PreferSortDescending, 0.0f, 5);
+      ImGui::TableSetupColumn("Hazard", ImGuiTableColumnFlags_PreferSortAscending, 0.0f, 6);
+      ImGui::TableSetupColumn("Unlock", 0, 0.0f, 7);
+      ImGui::TableSetupColumn("Status", 0, 0.0f, 8);
+      ImGui::TableSetupColumn("Center", ImGuiTableColumnFlags_NoSort, 0.0f, 9);
       ImGui::TableHeadersRow();
 
       if (ImGuiTableSortSpecs* sort = ImGui::TableGetSortSpecs()) {
@@ -7574,8 +7749,10 @@ void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_colony, Id
               case 2: return lt(a.system, b.system);
               case 3: return lt(a.days, b.days);
               case 4: return lt(a.rp, b.rp);
-              case 5: return lt(a.unlock, b.unlock);
-              case 6: return lt(a.resolved, b.resolved);
+              case 5: return lt(a.minerals_total, b.minerals_total);
+              case 6: return lt(a.hazard_chance * a.hazard_damage, b.hazard_chance * b.hazard_damage);
+              case 7: return lt(a.unlock, b.unlock);
+              case 8: return lt(a.resolved, b.resolved);
               default: return lt(a.name, b.name);
             }
           };
@@ -7619,11 +7796,61 @@ void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_colony, Id
           if (r.rp > 0.0) ImGui::Text("%.1f", r.rp);
           else ImGui::TextDisabled("-");
           ImGui::TableSetColumnIndex(5);
-          ImGui::TextUnformatted(r.unlock.c_str());
+          if (r.minerals_total > 1e-6) {
+            const std::string ms = format_fixed(r.minerals_total, 0) + "t";
+            ImGui::TextUnformatted(ms.c_str());
+
+            if (ImGui::IsItemHovered()) {
+              const auto* a = find_ptr(s.anomalies, r.id);
+              if (a && !a->mineral_reward.empty()) {
+                std::vector<std::pair<std::string, double>> items;
+                items.reserve(a->mineral_reward.size());
+                for (const auto& [mid, tons] : a->mineral_reward) {
+                  if (mid.empty()) continue;
+                  if (!(tons > 1e-6)) continue;
+                  items.emplace_back(mid, tons);
+                }
+                std::sort(items.begin(), items.end(), [](const auto& x, const auto& y) {
+                  if (x.second != y.second) return x.second > y.second;
+                  return x.first < y.first;
+                });
+
+                if (!items.empty()) {
+                  ImGui::BeginTooltip();
+                  ImGui::TextUnformatted("Mineral cache:");
+                  for (const auto& [mid, tons] : items) {
+                    ImGui::Text("%s: %.1ft", mid.c_str(), tons);
+                  }
+                  ImGui::EndTooltip();
+                }
+              }
+            }
+          } else {
+            ImGui::TextDisabled("-");
+          }
+
           ImGui::TableSetColumnIndex(6);
+          if (r.hazard_chance > 1e-6 && r.hazard_damage > 1e-6) {
+            const std::string hs =
+                format_fixed(r.hazard_chance * 100.0, 0) + "% / " + format_fixed(r.hazard_damage, 1);
+            ImGui::TextUnformatted(hs.c_str());
+            if (ImGui::IsItemHovered()) {
+              ImGui::BeginTooltip();
+              ImGui::Text("Chance: %.0f%%", r.hazard_chance * 100.0);
+              ImGui::Text("Damage: %.1f", r.hazard_damage);
+              ImGui::TextDisabled("Hazards are non-lethal (hull will not drop below 1 HP).");
+              ImGui::EndTooltip();
+            }
+          } else {
+            ImGui::TextDisabled("-");
+          }
+
+          ImGui::TableSetColumnIndex(7);
+          ImGui::TextUnformatted(r.unlock.c_str());
+          ImGui::TableSetColumnIndex(8);
           if (r.resolved) ImGui::TextDisabled("Resolved");
           else ImGui::TextUnformatted("Unresolved");
-          ImGui::TableSetColumnIndex(7);
+          ImGui::TableSetColumnIndex(9);
           std::string b = "Go##anom_go_" + std::to_string((int)r.id);
           if (ImGui::SmallButton(b.c_str())) {
             if (r.system_id != kInvalidId) {

@@ -1,5 +1,5 @@
 {
-  "version": 7,
+  "version": 8,
   "components": {
     "engine_chem_mk1": {
       "name": "Chemical Engine Mk.I",
@@ -74,7 +74,8 @@
       "missile_damage": 18,
       "missile_range_mkm": 12,
       "missile_speed_mkm_per_day": 4.0,
-      "missile_reload_days": 3
+      "missile_reload_days": 3,
+      "missile_ammo": 10
     },
     "pd_laser_mk1": {
       "name": "Point Defense Laser Mk.I",
@@ -146,6 +147,18 @@
       "mass_tons": 15,
       "hp_bonus": 5,
       "signature_multiplier": 0.5
+    },
+    "ecm_suite_mk1": {
+      "name": "ECM Suite Mk.I",
+      "type": "sensor",
+      "mass_tons": 5,
+      "ecm_strength": 1.0
+    },
+    "eccm_suite_mk1": {
+      "name": "ECCM Suite Mk.I",
+      "type": "sensor",
+      "mass_tons": 5,
+      "eccm_strength": 1.0
     }
   },
   "designs": [
@@ -201,6 +214,7 @@
       "components": [
         "engine_chem_mk1",
         "sensor_mk1",
+        "eccm_suite_mk1",
         "laser_mk1",
         "pd_laser_mk1",
         "armor_mk1",
@@ -344,6 +358,7 @@
         "reactor_mk2",
         "sensor_mk2",
         "stealth_coating_mk1",
+        "ecm_suite_mk1",
         "fuel_tank_mk1"
       ]
     }
@@ -396,6 +411,26 @@
         "Duranium": 1500,
         "Neutronium": 200,
         "Corundium": 150
+      }
+    },
+    "munitions_factory": {
+      "name": "Munitions Factory",
+      "produces": {
+        "Munitions": 60.0
+      },
+      "consumes": {
+        "Duranium": 0.5,
+        "Neutronium": 0.05,
+        "Boronide": 0.2,
+        "Mercassium": 0.1
+      },
+      "construction_cost": 650,
+      "build_costs": {
+        "Duranium": 1800,
+        "Neutronium": 220,
+        "Boronide": 180,
+        "Mercassium": 120,
+        "Corundium": 80
       }
     },
     "metal_smelter": {
@@ -485,6 +520,7 @@
     "training_facility": {
       "name": "Training Facility",
       "troop_training_points_per_day": 10,
+      "crew_training_points_per_day": 5,
       "construction_cost": 350,
       "build_costs": {
         "Duranium": 800,

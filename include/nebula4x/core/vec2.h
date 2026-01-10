@@ -23,6 +23,7 @@ struct Vec2 {
   }
 
   double length() const { return std::sqrt(x * x + y * y); }
+  double length_squared() const { return x * x + y * y; }
   Vec2 normalized() const {
     const double len = length();
     if (len <= 1e-12) return {0.0, 0.0};

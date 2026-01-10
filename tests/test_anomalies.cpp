@@ -1,8 +1,10 @@
 #include <algorithm>
+#include <cmath>
 #include <iostream>
 #include <string>
 
 #include "nebula4x/core/simulation.h"
+#include "nebula4x/core/serialization.h"
 
 #define N4X_ASSERT(expr)                                                                            \
   do {                                                                                              \
@@ -22,6 +24,8 @@ int test_anomalies() {
     d.id = "scout";
     d.name = "Scout";
     d.speed_km_s = 100.0;
+    d.sensor_range_mkm = 10.0;
+    d.cargo_tons = 50.0;
     d.max_hp = 10.0;
     content.designs[d.id] = d;
   }
@@ -82,13 +86,20 @@ int test_anomalies() {
     a.position_mkm = {0.0, 0.0};
     a.name = "Test Anomaly";
     a.kind = "signal";
-    a.investigation_days = 2;
+    a.investigation_days = 1;
     a.research_reward = 123.0;
     a.unlock_component_id = "anomaly_comp";
+    a.mineral_reward = {{"Duranium", 40.0}, {"Neutronium", 30.0}};
+    a.hazard_chance = 1.0;
+    a.hazard_damage = 3.0;
     s.anomalies[anom_id] = a;
   }
 
-  sim.load_game(std::move(s));
+  // Roundtrip through JSON to exercise anomaly serialization (rewards/hazards).
+  const std::string json = serialize_game_to_json(s);
+  GameState s2 = deserialize_game_from_json(json);
+
+  sim.load_game(std::move(s2));
 
   // Issue the investigation order and advance time until completion.
   N4X_ASSERT(sim.clear_orders(ship_id));
@@ -107,6 +118,27 @@ int test_anomalies() {
 
   N4X_ASSERT(std::find(fac->unlocked_components.begin(), fac->unlocked_components.end(), "anomaly_comp") !=
              fac->unlocked_components.end());
+
+  const auto* sh = find_ptr(sim.state().ships, ship_id);
+  N4X_ASSERT(sh);
+
+  // Minerals: 50t cargo cap should load all 40t Duranium and 10t Neutronium; remaining 20t Neutronium becomes a cache wreck.
+  {
+    const double dur = sh->cargo.contains("Duranium") ? sh->cargo.at("Duranium") : 0.0;
+    const double neu = sh->cargo.contains("Neutronium") ? sh->cargo.at("Neutronium") : 0.0;
+    N4X_ASSERT(std::abs(dur - 40.0) < 1e-6);
+    N4X_ASSERT(std::abs(neu - 10.0) < 1e-6);
+  }
+
+  N4X_ASSERT(sim.state().wrecks.size() == 1);
+  {
+    const auto& w = sim.state().wrecks.begin()->second;
+    const double left = w.minerals.contains("Neutronium") ? w.minerals.at("Neutronium") : 0.0;
+    N4X_ASSERT(std::abs(left - 20.0) < 1e-6);
+  }
+
+  // Hazard: 3 damage should be applied non-lethally to the ship (no shields in this test).
+  N4X_ASSERT(std::abs(sh->hp - 7.0) < 1e-6);
 
   const auto& q = sim.state().ship_orders.at(ship_id).queue;
   N4X_ASSERT(q.empty());
