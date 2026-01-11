@@ -1158,6 +1158,69 @@ void draw_diplomacy_window(Simulation& sim, UIState& ui, Id& /*selected_ship*/, 
           }
 
           ImGui::Spacing();
+          ImGui::SeparatorText("Offers");
+
+          auto offers = sim.diplomatic_offers_between(a->id, b->id);
+          if (offers.empty()) {
+            ImGui::TextDisabled("No pending offers.");
+          } else {
+            const ImGuiTableFlags oflags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV;
+            if (ImGui::BeginTable("offer_table", 5, oflags)) {
+              ImGui::TableSetupColumn("From", ImGuiTableColumnFlags_WidthStretch);
+              ImGui::TableSetupColumn("To", ImGuiTableColumnFlags_WidthStretch);
+              ImGui::TableSetupColumn("Offer", ImGuiTableColumnFlags_WidthStretch);
+              ImGui::TableSetupColumn("Expires", ImGuiTableColumnFlags_WidthFixed, 90.0f);
+              ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 140.0f);
+              ImGui::TableHeadersRow();
+
+              for (const DiplomaticOffer& o : offers) {
+                const Faction* ofrom = find_ptr(s.factions, o.from_faction_id);
+                const Faction* oto = find_ptr(s.factions, o.to_faction_id);
+
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                ImGui::TextUnformatted(ofrom ? ofrom->name.c_str() : "(unknown)");
+
+                ImGui::TableSetColumnIndex(1);
+                ImGui::TextUnformatted(oto ? oto->name.c_str() : "(unknown)");
+
+                ImGui::TableSetColumnIndex(2);
+                ImGui::Text("%s%s", treaty_type_label(o.treaty_type),
+                            (o.treaty_duration_days < 0) ? " (∞)" : "");
+
+                ImGui::TableSetColumnIndex(3);
+                if (o.expire_day < 0) {
+                  ImGui::TextUnformatted("∞");
+                } else {
+                  const int rem = std::max(0, (int)(o.expire_day - now_day));
+                  ImGui::Text("%d d", rem);
+                }
+
+                ImGui::TableSetColumnIndex(4);
+                ImGui::PushID((void*)(uintptr_t)o.id);
+                if (ImGui::SmallButton("Accept")) {
+                  std::string err;
+                  (void)sim.accept_diplomatic_offer(o.id, /*push_event=*/true, &err);
+                  g.offer_error = err;
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Decline")) {
+                  std::string err;
+                  (void)sim.decline_diplomatic_offer(o.id, /*push_event=*/true, &err);
+                  g.offer_error = err;
+                }
+                ImGui::PopID();
+              }
+
+              ImGui::EndTable();
+            }
+          }
+
+          if (!g.offer_error.empty()) {
+            ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.55f, 1.0f), "%s", g.offer_error.c_str());
+          }
+
+          ImGui::Spacing();
           ImGui::SeparatorText("Sign / renew treaty");
 
           static const TreatyType kTreatyTypes[] = {TreatyType::Ceasefire, TreatyType::NonAggressionPact,
@@ -1191,6 +1254,23 @@ void draw_diplomacy_window(Simulation& sim, UIState& ui, Id& /*selected_ship*/, 
 
           if (!g.new_treaty_error.empty()) {
             ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.55f, 1.0f), "%s", g.new_treaty_error.c_str());
+          }
+
+          ImGui::Spacing();
+          ImGui::SeparatorText("Send offer");
+
+          g.new_offer_expires_days = std::clamp(g.new_offer_expires_days, 1, 365);
+          ImGui::InputInt("Offer expiry (days)##new_offer", &g.new_offer_expires_days);
+          g.new_offer_expires_days = std::clamp(g.new_offer_expires_days, 1, 365);
+
+          if (ImGui::Button("Send offer##new_offer", ImVec2(-1, 0))) {
+            g.offer_error.clear();
+            const TreatyType tt = kTreatyTypes[g.new_treaty_type_index];
+            const int dur = g.new_treaty_indefinite ? -1 : g.new_treaty_duration_days;
+            std::string err;
+            (void)sim.create_diplomatic_offer(a->id, b->id, tt, dur, g.new_offer_expires_days,
+                                              /*push_event=*/true, &err);
+            g.offer_error = err;
           }
         }
       }

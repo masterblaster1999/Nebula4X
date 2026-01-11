@@ -107,6 +107,32 @@ int test_turn_ticks() {
   N4X_ASSERT(std::isfinite(moved));
   N4X_ASSERT(std::abs(moved - expected) < 1e-3);
 
+  // --- movement scaling (nebula storms) ---
+  // Inject a deterministic storm and ensure movement is slowed.
+  {
+    auto* sys = nebula4x::find_ptr(st.systems, sh->system_id);
+    N4X_ASSERT(sys);
+    const std::int64_t now = st.date.days_since_epoch();
+    sys->storm_peak_intensity = 1.0;
+    sys->storm_start_day = now - 1;
+    sys->storm_end_day = now + 1;
+
+    sim.clear_orders(freighter_id);
+    const nebula4x::Vec2 start2 = sh->position_mkm;
+    const nebula4x::Vec2 goal2 = start2 + nebula4x::Vec2{100.0, 0.0};
+    N4X_ASSERT(sim.issue_move_to_point(freighter_id, goal2));
+
+    sim.advance_hours(1);
+    const nebula4x::Vec2 after2 = sh->position_mkm;
+    const double moved2 = (after2 - start2).length();
+    const double env2 = sim.system_movement_speed_multiplier(sh->system_id);
+    const double expected2 = expected * env2;
+    N4X_ASSERT(std::isfinite(moved2));
+    N4X_ASSERT(env2 < 0.999);
+    N4X_ASSERT(std::abs(moved2 - expected2) < 1e-3);
+  }
+
+
   // --- WaitDays should not consume a full day on a sub-day tick ---
   sim.clear_orders(freighter_id);
   N4X_ASSERT(sim.issue_wait_days(freighter_id, 1));

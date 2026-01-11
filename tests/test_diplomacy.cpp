@@ -453,5 +453,69 @@ int test_diplomacy() {
     N4X_ASSERT(col_after.minerals.at("Munitions") < mun_before, "rearm consumes colony munitions");
   }
 
+
+  // --- Diplomatic offers ---
+  {
+    ContentDB content;
+    SimConfig cfg;
+    Simulation sim(content, cfg);
+
+    GameState st;
+    st.save_version = GameState{}.save_version;
+
+    Faction a;
+    a.id = 1;
+    a.name = "Alpha";
+    a.control = FactionControl::Player;
+
+    Faction b;
+    b.id = 2;
+    b.name = "Beta";
+    b.control = FactionControl::AI_Explorer;
+
+    st.factions[a.id] = a;
+    st.factions[b.id] = b;
+
+    sim.load_game(st);
+
+    std::string err;
+
+    const Id oid = sim.create_diplomatic_offer(a.id, b.id, TreatyType::NonAggressionPact,
+                                               /*treaty_duration_days=*/180,
+                                               /*offer_expires_in_days=*/30,
+                                               /*push_event=*/false, &err);
+    N4X_ASSERT(oid != kInvalidId, "Failed to create diplomatic offer: %s", err.c_str());
+    N4X_ASSERT(sim.state().diplomatic_offers.size() == 1u, "Offer not stored in state");
+
+    // Save/load roundtrip should preserve offers.
+    const std::string json = serialize_game_to_json(sim.state());
+    GameState loaded = deserialize_game_from_json(json);
+    N4X_ASSERT(loaded.diplomatic_offers.size() == 1u, "Offer not serialized/deserialized");
+    const auto it = loaded.diplomatic_offers.find(oid);
+    N4X_ASSERT(it != loaded.diplomatic_offers.end(), "Offer id not preserved");
+    N4X_ASSERT(it->second.from_faction_id == a.id, "Offer from_faction_id mismatch");
+    N4X_ASSERT(it->second.to_faction_id == b.id, "Offer to_faction_id mismatch");
+    N4X_ASSERT(it->second.treaty_type == TreatyType::NonAggressionPact, "Offer treaty_type mismatch");
+
+    // Accept should create a treaty and remove the offer.
+    const bool ok = sim.accept_diplomatic_offer(oid, /*push_event=*/false, &err);
+    N4X_ASSERT(ok, "Failed to accept offer: %s", err.c_str());
+    N4X_ASSERT(sim.state().diplomatic_offers.empty(), "Offer not removed after accept");
+
+    auto treaties = sim.treaties_between(a.id, b.id);
+    N4X_ASSERT(!treaties.empty(), "Accepting offer did not create treaty");
+    N4X_ASSERT(treaties[0].type == TreatyType::NonAggressionPact, "Created wrong treaty type");
+
+    // Expiry tick: create an offer that expires quickly and ensure it is removed by ticking.
+    const Id oid2 = sim.create_diplomatic_offer(a.id, b.id, TreatyType::TradeAgreement,
+                                                /*treaty_duration_days=*/-1,
+                                                /*offer_expires_in_days=*/1,
+                                                /*push_event=*/false, &err);
+    N4X_ASSERT(oid2 != kInvalidId, "Failed to create second offer: %s", err.c_str());
+    sim.advance_days(2);
+    N4X_ASSERT(sim.state().diplomatic_offers.find(oid2) == sim.state().diplomatic_offers.end(),
+               "Offer did not expire as expected");
+  }
+
   return 0;
 }

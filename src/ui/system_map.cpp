@@ -425,13 +425,39 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
     sb.alpha = 0.85f;
     draw_scale_bar(draw, origin, avail, 1.0 / (scale * zoom), IM_COL32(220, 220, 220, 255), sb, "mkm");
 
-    // Environmental overlay: system-level nebula density (affects sensors).
-    if (sys && sys->nebula_density > 0.01) {
+    // Environmental overlay: system-level nebula + storms (affects sensors & movement).
+    if (sys) {
       const double neb = std::clamp(sys->nebula_density, 0.0, 1.0);
-      const double env = std::clamp(1.0 - 0.65 * neb, 0.25, 1.0);
-      char buf[96];
-      std::snprintf(buf, sizeof(buf), "Nebula %.0f%%  (Sensors x%.2f)", neb * 100.0, env);
-      draw->AddText(ImVec2(origin.x + 8.0f, origin.y + 8.0f), IM_COL32(170, 200, 255, 210), buf);
+      const bool has_storm = sim.system_has_storm(sys->id);
+      if (neb > 0.01 || has_storm) {
+        const double env = sim.system_sensor_environment_multiplier(sys->id);
+        const double speed_env = sim.system_movement_speed_multiplier(sys->id);
+
+        char buf[160];
+        std::snprintf(buf,
+                      sizeof(buf),
+                      "Nebula %.0f%%  (Sensors x%.2f  Speed x%.2f)",
+                      neb * 100.0,
+                      env,
+                      speed_env);
+        draw->AddText(ImVec2(origin.x + 8.0f, origin.y + 8.0f), IM_COL32(170, 200, 255, 210), buf);
+
+        if (has_storm) {
+          const double cur = sim.system_storm_intensity(sys->id);
+          const double peak = std::clamp(sys->storm_peak_intensity, 0.0, 1.0);
+          const std::int64_t now = s.date.days_since_epoch();
+          const int days_left = (sys->storm_end_day > now) ? static_cast<int>(sys->storm_end_day - now) : 0;
+
+          char buf2[160];
+          std::snprintf(buf2,
+                        sizeof(buf2),
+                        "Storm %.0f%%  (peak %.0f%%, %dd left)",
+                        cur * 100.0,
+                        peak * 100.0,
+                        days_left);
+          draw->AddText(ImVec2(origin.x + 8.0f, origin.y + 26.0f), IM_COL32(255, 210, 170, 220), buf2);
+        }
+      }
     }
   }
 
@@ -821,10 +847,15 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
         }
       }
 
-      const double total = std::max(1e-6, ms.eta_days_total);
-      const double rem = std::max(0.0, ms.eta_days_remaining);
-      const double frac = std::clamp(1.0 - rem / total, 0.0, 1.0);
-      const Vec2 pos_mkm = ms.launch_pos_mkm + (ms.target_pos_mkm - ms.launch_pos_mkm) * frac;
+      Vec2 pos_mkm = ms.pos_mkm;
+      if (pos_mkm.length() <= 1e-12) {
+        // Legacy path (pre-homing missiles): infer position from ETA on a
+        // straight-line track from launch -> target-at-launch.
+        const double total = std::max(1e-6, ms.eta_days_total);
+        const double rem = std::max(0.0, ms.eta_days_remaining);
+        const double frac = std::clamp(1.0 - rem / total, 0.0, 1.0);
+        pos_mkm = ms.launch_pos_mkm + (ms.target_pos_mkm - ms.launch_pos_mkm) * frac;
+      }
 
       Vec2 target_pos_mkm = ms.target_pos_mkm;
       if (const auto* tgt = find_ptr(s.ships, ms.target_ship_id); tgt && tgt->system_id == sys->id) {
@@ -860,6 +891,10 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
   for (const auto& [aid, a] : s.anomalies) {
     if (a.system_id != sys->id) continue;
     if (a.resolved) continue;
+
+    if (ui.fog_of_war && viewer_faction_id != kInvalidId) {
+      if (!sim.is_anomaly_discovered_by_faction(viewer_faction_id, aid)) continue;
+    }
 
     const ImVec2 p = to_screen(a.position_mkm, center, scale, zoom, pan);
     const ImU32 col = IM_COL32(255, 220, 120, 220);
@@ -1317,10 +1352,13 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
           }
         }
 
-        const double total = std::max(1e-6, ms.eta_days_total);
-        const double rem = std::max(0.0, ms.eta_days_remaining);
-        const double frac = std::clamp(1.0 - rem / total, 0.0, 1.0);
-        const Vec2 pos_mkm = ms.launch_pos_mkm + (ms.target_pos_mkm - ms.launch_pos_mkm) * frac;
+        Vec2 pos_mkm = ms.pos_mkm;
+        if (pos_mkm.length() <= 1e-12) {
+          const double total = std::max(1e-6, ms.eta_days_total);
+          const double rem = std::max(0.0, ms.eta_days_remaining);
+          const double frac = std::clamp(1.0 - rem / total, 0.0, 1.0);
+          pos_mkm = ms.launch_pos_mkm + (ms.target_pos_mkm - ms.launch_pos_mkm) * frac;
+        }
 
         const ImVec2 p = to_screen(pos_mkm, center, scale, zoom, pan);
         const float dx = mp.x - p.x;
@@ -1338,6 +1376,10 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
       for (const auto& [aid, a] : s.anomalies) {
         if (a.system_id != sys->id) continue;
         if (a.resolved) continue;
+
+        if (ui.fog_of_war && viewer_faction_id != kInvalidId) {
+          if (!sim.is_anomaly_discovered_by_faction(viewer_faction_id, aid)) continue;
+        }
 
         const ImVec2 p = to_screen(a.position_mkm, center, scale, zoom, pan);
         const float dx = mp.x - p.x;
@@ -1463,6 +1505,12 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
           }
 
           ImGui::TextDisabled("ETA: %s", format_duration_days(std::max(0.0, ms->eta_days_remaining)).c_str());
+          if (ms->speed_mkm_per_day > 1e-9) {
+            ImGui::TextDisabled("Speed: %.1f mkm/day", ms->speed_mkm_per_day);
+          }
+          if (ms->range_remaining_mkm > 1e-9) {
+            ImGui::TextDisabled("Range remaining: %.1f mkm", ms->range_remaining_mkm);
+          }
           const double payload = (ms->damage_initial > 1e-12) ? ms->damage_initial : ms->damage;
           ImGui::TextDisabled("Payload: %.1f (remaining %.1f)", payload, std::max(0.0, ms->damage));
 

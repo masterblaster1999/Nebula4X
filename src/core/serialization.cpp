@@ -18,7 +18,7 @@ using json::Array;
 using json::Object;
 using json::Value;
 
-constexpr int kCurrentSaveVersion = 47;
+constexpr int kCurrentSaveVersion = 50;
 
 Object ship_power_policy_to_json(const ShipPowerPolicy& p) {
   Object o;
@@ -160,6 +160,104 @@ TreatyType treaty_type_from_string(const std::string& s) {
   return TreatyType::Ceasefire;
 }
 
+const char* victory_reason_to_string(VictoryReason r) {
+  switch (r) {
+    case VictoryReason::None:
+      return "none";
+    case VictoryReason::ScoreThreshold:
+      return "score";
+    case VictoryReason::LastFactionStanding:
+      return "elimination";
+  }
+  return "none";
+}
+
+VictoryReason victory_reason_from_string(const std::string& s) {
+  if (s == "score" || s == "score_threshold" || s == "points") return VictoryReason::ScoreThreshold;
+  if (s == "elimination" || s == "last_faction" || s == "last_faction_standing" || s == "last" || s == "conquest") {
+    return VictoryReason::LastFactionStanding;
+  }
+  return VictoryReason::None;
+}
+
+double sane_nonneg(double v, double fallback = 0.0) {
+  if (!std::isfinite(v)) return fallback;
+  return v < 0.0 ? 0.0 : v;
+}
+
+Object victory_rules_to_json(const VictoryRules& r) {
+  Object o;
+  o["enabled"] = r.enabled;
+  o["exclude_pirates"] = r.exclude_pirates;
+  o["elimination_enabled"] = r.elimination_enabled;
+  o["elimination_requires_colony"] = r.elimination_requires_colony;
+  o["score_threshold"] = r.score_threshold;
+  o["score_lead_margin"] = r.score_lead_margin;
+
+  Object w;
+  w["colony_points"] = r.score_colony_points;
+  w["population_per_million"] = r.score_population_per_million;
+  w["installation_cost_mult"] = r.score_installation_cost_mult;
+  w["ship_mass_ton_mult"] = r.score_ship_mass_ton_mult;
+  w["known_tech_points"] = r.score_known_tech_points;
+  w["discovered_system_points"] = r.score_discovered_system_points;
+  w["discovered_anomaly_points"] = r.score_discovered_anomaly_points;
+  o["weights"] = w;
+
+  return o;
+}
+
+VictoryRules victory_rules_from_json(const Value& v) {
+  VictoryRules r;
+  if (!v.is_object()) return r;
+  const Object& o = v.object();
+  if (auto it = o.find("enabled"); it != o.end()) r.enabled = it->second.bool_value(r.enabled);
+  if (auto it = o.find("exclude_pirates"); it != o.end()) r.exclude_pirates = it->second.bool_value(r.exclude_pirates);
+  if (auto it = o.find("elimination_enabled"); it != o.end()) r.elimination_enabled = it->second.bool_value(r.elimination_enabled);
+  if (auto it = o.find("elimination_requires_colony"); it != o.end()) {
+    r.elimination_requires_colony = it->second.bool_value(r.elimination_requires_colony);
+  }
+  if (auto it = o.find("score_threshold"); it != o.end()) r.score_threshold = sane_nonneg(it->second.number_value(r.score_threshold), r.score_threshold);
+  if (auto it = o.find("score_lead_margin"); it != o.end()) r.score_lead_margin = sane_nonneg(it->second.number_value(r.score_lead_margin), r.score_lead_margin);
+
+  if (auto itw = o.find("weights"); itw != o.end() && itw->second.is_object()) {
+    const Object& w = itw->second.object();
+    if (auto it = w.find("colony_points"); it != w.end()) r.score_colony_points = sane_nonneg(it->second.number_value(r.score_colony_points), r.score_colony_points);
+    if (auto it = w.find("population_per_million"); it != w.end()) r.score_population_per_million = sane_nonneg(it->second.number_value(r.score_population_per_million), r.score_population_per_million);
+    if (auto it = w.find("installation_cost_mult"); it != w.end()) r.score_installation_cost_mult = sane_nonneg(it->second.number_value(r.score_installation_cost_mult), r.score_installation_cost_mult);
+    if (auto it = w.find("ship_mass_ton_mult"); it != w.end()) r.score_ship_mass_ton_mult = sane_nonneg(it->second.number_value(r.score_ship_mass_ton_mult), r.score_ship_mass_ton_mult);
+    if (auto it = w.find("known_tech_points"); it != w.end()) r.score_known_tech_points = sane_nonneg(it->second.number_value(r.score_known_tech_points), r.score_known_tech_points);
+    if (auto it = w.find("discovered_system_points"); it != w.end()) r.score_discovered_system_points = sane_nonneg(it->second.number_value(r.score_discovered_system_points), r.score_discovered_system_points);
+    if (auto it = w.find("discovered_anomaly_points"); it != w.end()) {
+      r.score_discovered_anomaly_points = sane_nonneg(it->second.number_value(r.score_discovered_anomaly_points), r.score_discovered_anomaly_points);
+    }
+  }
+
+  return r;
+}
+
+Object victory_state_to_json(const VictoryState& vs) {
+  Object o;
+  o["game_over"] = vs.game_over;
+  o["winner_faction_id"] = static_cast<double>(vs.winner_faction_id);
+  o["reason"] = victory_reason_to_string(vs.reason);
+  o["victory_day"] = static_cast<double>(vs.victory_day);
+  o["winner_score"] = vs.winner_score;
+  return o;
+}
+
+VictoryState victory_state_from_json(const Value& v) {
+  VictoryState vs;
+  if (!v.is_object()) return vs;
+  const Object& o = v.object();
+  if (auto it = o.find("game_over"); it != o.end()) vs.game_over = it->second.bool_value(vs.game_over);
+  if (auto it = o.find("winner_faction_id"); it != o.end()) vs.winner_faction_id = static_cast<Id>(it->second.int_value(vs.winner_faction_id));
+  if (auto it = o.find("reason"); it != o.end()) vs.reason = victory_reason_from_string(it->second.string_value());
+  if (auto it = o.find("victory_day"); it != o.end()) vs.victory_day = it->second.int_value(vs.victory_day);
+  if (auto it = o.find("winner_score"); it != o.end()) vs.winner_score = sane_nonneg(it->second.number_value(vs.winner_score), vs.winner_score);
+  return vs;
+}
+
 
 const char* sensor_mode_to_string(SensorMode m) {
   switch (m) {
@@ -240,6 +338,7 @@ const char* fleet_mission_type_to_string(FleetMissionType t) {
     case FleetMissionType::EscortFreighters: return "escort_freighters";
     case FleetMissionType::Explore: return "explore";
     case FleetMissionType::PatrolRegion: return "patrol_region";
+    case FleetMissionType::AssaultColony: return "assault_colony";
   }
   return "none";
 }
@@ -251,6 +350,7 @@ FleetMissionType fleet_mission_type_from_string(const std::string& s) {
   if (s == "escort_freighters" || s == "escort_freighter" || s == "escort") return FleetMissionType::EscortFreighters;
   if (s == "explore" || s == "explore_systems" || s == "exploration") return FleetMissionType::Explore;
   if (s == "patrol_region" || s == "patrolreg" || s == "region_patrol") return FleetMissionType::PatrolRegion;
+  if (s == "assault_colony" || s == "assault" || s == "invade" || s == "conquer") return FleetMissionType::AssaultColony;
   return FleetMissionType::None;
 }
 
@@ -714,6 +814,9 @@ std::string serialize_game_to_json(const GameState& s) {
   root["next_event_seq"] = static_cast<double>(s.next_event_seq);
   root["selected_system"] = static_cast<double>(s.selected_system);
 
+  root["victory_rules"] = victory_rules_to_json(s.victory_rules);
+  root["victory_state"] = victory_state_to_json(s.victory_state);
+
 
   // Systems
   Array systems;
@@ -726,6 +829,9 @@ std::string serialize_game_to_json(const GameState& s) {
     o["galaxy_pos"] = vec2_to_json(sys.galaxy_pos);
     if (sys.region_id != kInvalidId) o["region_id"] = static_cast<double>(sys.region_id);
     if (sys.nebula_density != 0.0) o["nebula_density"] = sys.nebula_density;
+    if (sys.storm_peak_intensity != 0.0) o["storm_peak_intensity"] = sys.storm_peak_intensity;
+    if (sys.storm_start_day != 0) o["storm_start_day"] = static_cast<double>(sys.storm_start_day);
+    if (sys.storm_end_day != 0) o["storm_end_day"] = static_cast<double>(sys.storm_end_day);
 
     Array bodies;
     {
@@ -772,6 +878,7 @@ std::string serialize_game_to_json(const GameState& s) {
       if (r.salvage_richness_mult != 1.0) o["salvage_richness_mult"] = r.salvage_richness_mult;
       if (r.nebula_bias != 0.0) o["nebula_bias"] = r.nebula_bias;
       if (r.pirate_risk != 0.0) o["pirate_risk"] = r.pirate_risk;
+      if (r.pirate_suppression != 0.0) o["pirate_suppression"] = r.pirate_suppression;
       if (r.ruins_density != 0.0) o["ruins_density"] = r.ruins_density;
       regions.push_back(o);
     }
@@ -974,6 +1081,14 @@ std::string serialize_game_to_json(const GameState& s) {
     o["target_faction_id"] = static_cast<double>(ms.target_faction_id);
     o["damage"] = ms.damage;
     if (ms.damage_initial > 0.0) o["damage_initial"] = ms.damage_initial;
+
+    // Flight model (optional / backward-compatible).
+    if (ms.speed_mkm_per_day > 0.0) o["speed_mkm_per_day"] = ms.speed_mkm_per_day;
+    if (ms.range_remaining_mkm > 0.0) o["range_remaining_mkm"] = ms.range_remaining_mkm;
+    if (ms.pos_mkm.length() > 0.0) o["pos_mkm"] = vec2_to_json(ms.pos_mkm);
+    if (ms.attacker_eccm_strength > 0.0) o["attacker_eccm_strength"] = ms.attacker_eccm_strength;
+    if (ms.attacker_sensor_mkm_raw > 0.0) o["attacker_sensor_mkm_raw"] = ms.attacker_sensor_mkm_raw;
+
     if (ms.eta_days_total > 0.0) o["eta_days_total"] = static_cast<double>(ms.eta_days_total);
     o["eta_days_remaining"] = static_cast<double>(ms.eta_days_remaining);
     // Optional visualization metadata.
@@ -1110,6 +1225,13 @@ std::string serialize_game_to_json(const GameState& s) {
     for (Id sid : disc) discovered_systems.push_back(static_cast<double>(sid));
     o["discovered_systems"] = discovered_systems;
 
+    Array discovered_anomalies;
+    const auto da = sorted_unique_copy(f.discovered_anomalies);
+    discovered_anomalies.reserve(da.size());
+    for (Id aid : da) discovered_anomalies.push_back(static_cast<double>(aid));
+    o["discovered_anomalies"] = discovered_anomalies;
+
+
     Array surveyed_jump_points;
     const auto sjp = sorted_unique_copy(f.surveyed_jump_points);
     surveyed_jump_points.reserve(sjp.size());
@@ -1150,6 +1272,32 @@ std::string serialize_game_to_json(const GameState& s) {
       co["last_seen_faction_id"] = static_cast<double>(c.last_seen_faction_id);
       contacts.push_back(co);
     }
+    // Pirate hideout rebuild cooldowns (optional).
+    if (!f.pirate_hideout_cooldown_until_day.empty()) {
+      Object cd;
+      for (Id sid : sorted_keys(f.pirate_hideout_cooldown_until_day)) {
+        if (sid == kInvalidId) continue;
+        const auto itc = f.pirate_hideout_cooldown_until_day.find(sid);
+        const int until = (itc == f.pirate_hideout_cooldown_until_day.end()) ? 0 : itc->second;
+        if (until <= 0) continue;
+        cd[std::to_string(static_cast<unsigned long long>(sid))] = static_cast<double>(until);
+      }
+      if (!cd.empty()) o["pirate_hideout_cooldowns"] = cd;
+    }
+
+    // Diplomatic offer cooldowns (optional).
+    if (!f.diplomacy_offer_cooldown_until_day.empty()) {
+      Object cd;
+      for (Id sid : sorted_keys(f.diplomacy_offer_cooldown_until_day)) {
+        if (sid == kInvalidId) continue;
+        const auto itc = f.diplomacy_offer_cooldown_until_day.find(sid);
+        const int until = (itc == f.diplomacy_offer_cooldown_until_day.end()) ? 0 : itc->second;
+        if (until <= 0) continue;
+        cd[std::to_string(static_cast<unsigned long long>(sid))] = static_cast<double>(until);
+      }
+      if (!cd.empty()) o["diplomacy_offer_cooldowns"] = cd;
+    }
+
     o["ship_contacts"] = contacts;
     factions.push_back(o);
   }
@@ -1171,6 +1319,26 @@ std::string serialize_game_to_json(const GameState& s) {
       treaties.push_back(o);
     }
     root["treaties"] = treaties;
+  }
+
+  // Diplomatic offers (optional; empty means none).
+  if (!s.diplomatic_offers.empty()) {
+    Array offers;
+    offers.reserve(s.diplomatic_offers.size());
+    for (Id id : sorted_keys(s.diplomatic_offers)) {
+      const auto& o2 = s.diplomatic_offers.at(id);
+      Object o;
+      o["id"] = static_cast<double>(id);
+      o["from_faction_id"] = static_cast<double>(o2.from_faction_id);
+      o["to_faction_id"] = static_cast<double>(o2.to_faction_id);
+      o["treaty_type"] = treaty_type_to_string(o2.treaty_type);
+      o["treaty_duration_days"] = static_cast<double>(o2.treaty_duration_days);
+      o["created_day"] = static_cast<double>(o2.created_day);
+      o["expire_day"] = static_cast<double>(o2.expire_day);
+      if (!o2.message.empty()) o["message"] = o2.message;
+      offers.push_back(o);
+    }
+    root["diplomatic_offers"] = offers;
   }
 
   // Fleets
@@ -1215,6 +1383,14 @@ std::string serialize_game_to_json(const GameState& s) {
       m["escort_last_retarget_day"] = static_cast<double>(f.mission.escort_last_retarget_day);
       m["explore_survey_first"] = f.mission.explore_survey_first;
       m["explore_allow_transit"] = f.mission.explore_allow_transit;
+
+      m["assault_colony_id"] = static_cast<double>(f.mission.assault_colony_id);
+      m["assault_staging_colony_id"] = static_cast<double>(f.mission.assault_staging_colony_id);
+      m["assault_auto_stage"] = f.mission.assault_auto_stage;
+      m["assault_troop_margin_factor"] = f.mission.assault_troop_margin_factor;
+      m["assault_use_bombardment"] = f.mission.assault_use_bombardment;
+      m["assault_bombard_days"] = static_cast<double>(f.mission.assault_bombard_days);
+      m["assault_bombard_executed"] = f.mission.assault_bombard_executed;
 
       m["auto_refuel"] = f.mission.auto_refuel;
       m["refuel_threshold_fraction"] = f.mission.refuel_threshold_fraction;
@@ -1382,13 +1558,11 @@ GameState deserialize_game_from_json(const std::string& json_text) {
   const auto root = json::parse(json_text).object();
 
   GameState s;
-  {
-    int loaded_version = 1;
-    if (auto itv = root.find("save_version"); itv != root.end()) {
-      loaded_version = static_cast<int>(itv->second.int_value(1));
-    }
-    s.save_version = loaded_version < kCurrentSaveVersion ? kCurrentSaveVersion : loaded_version;
+  int loaded_version = 1;
+  if (auto itv = root.find("save_version"); itv != root.end()) {
+    loaded_version = static_cast<int>(itv->second.int_value(1));
   }
+  s.save_version = loaded_version < kCurrentSaveVersion ? kCurrentSaveVersion : loaded_version;
 
   s.date = Date::parse_iso_ymd(root.at("date").string_value());
 
@@ -1414,6 +1588,14 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     s.selected_system = static_cast<Id>(itsel->second.int_value(kInvalidId));
   }
 
+  // Victory rules/state (optional)
+  if (auto it = root.find("victory_rules"); it != root.end()) {
+    s.victory_rules = victory_rules_from_json(it->second);
+  }
+  if (auto it = root.find("victory_state"); it != root.end()) {
+    s.victory_state = victory_state_from_json(it->second);
+  }
+
   // Regions (optional)
   if (auto it = root.find("regions"); it != root.end()) {
     for (const auto& rv : it->second.array()) {
@@ -1430,6 +1612,7 @@ GameState deserialize_game_from_json(const std::string& json_text) {
 
       if (auto inb = o.find("nebula_bias"); inb != o.end()) r.nebula_bias = std::clamp(inb->second.number_value(0.0), -1.0, 1.0);
       if (auto ip = o.find("pirate_risk"); ip != o.end()) r.pirate_risk = std::clamp(ip->second.number_value(0.0), 0.0, 1.0);
+      if (auto ips = o.find("pirate_suppression"); ips != o.end()) r.pirate_suppression = std::clamp(ips->second.number_value(0.0), 0.0, 1.0);
       if (auto ir = o.find("ruins_density"); ir != o.end()) r.ruins_density = std::clamp(ir->second.number_value(0.0), 0.0, 1.0);
 
       if (r.id != kInvalidId) s.regions[r.id] = r;
@@ -1446,6 +1629,22 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     if (auto ir = o.find("region_id"); ir != o.end()) sys.region_id = static_cast<Id>(ir->second.int_value(kInvalidId));
     if (auto it = o.find("nebula_density"); it != o.end()) {
       sys.nebula_density = std::clamp(it->second.number_value(0.0), 0.0, 1.0);
+    }
+
+    if (auto it = o.find("storm_peak_intensity"); it != o.end()) {
+      sys.storm_peak_intensity = std::clamp(it->second.number_value(0.0), 0.0, 1.0);
+    }
+    if (auto it = o.find("storm_start_day"); it != o.end()) {
+      sys.storm_start_day = std::max<std::int64_t>(0, static_cast<std::int64_t>(it->second.number_value(0.0)));
+    }
+    if (auto it = o.find("storm_end_day"); it != o.end()) {
+      sys.storm_end_day = std::max<std::int64_t>(0, static_cast<std::int64_t>(it->second.number_value(0.0)));
+    }
+    // Sanity: if malformed, clear.
+    if (!(sys.storm_peak_intensity > 0.0) || sys.storm_end_day <= sys.storm_start_day) {
+      sys.storm_peak_intensity = 0.0;
+      sys.storm_start_day = 0;
+      sys.storm_end_day = 0;
     }
 
     for (const auto& bid : o.at("bodies").array()) sys.bodies.push_back(static_cast<Id>(bid.int_value()));
@@ -1706,6 +1905,14 @@ GameState deserialize_game_from_json(const std::string& json_text) {
       }
       if (auto idmg = o.find("damage"); idmg != o.end()) ms.damage = idmg->second.number_value(0.0);
       if (auto idmgi = o.find("damage_initial"); idmgi != o.end()) ms.damage_initial = idmgi->second.number_value(0.0);
+
+      // Flight model (optional / backward-compatible).
+      if (auto is = o.find("speed_mkm_per_day"); is != o.end()) ms.speed_mkm_per_day = is->second.number_value(0.0);
+      if (auto is = o.find("range_remaining_mkm"); is != o.end()) ms.range_remaining_mkm = is->second.number_value(0.0);
+      if (auto ip = o.find("pos_mkm"); ip != o.end()) ms.pos_mkm = vec2_from_json(ip->second);
+      if (auto ie = o.find("attacker_eccm_strength"); ie != o.end()) ms.attacker_eccm_strength = ie->second.number_value(0.0);
+      if (auto ie = o.find("attacker_sensor_mkm_raw"); ie != o.end()) ms.attacker_sensor_mkm_raw = ie->second.number_value(0.0);
+
       if (auto ieta = o.find("eta_days_total"); ieta != o.end()) ms.eta_days_total = ieta->second.number_value(0.0);
       if (auto ieta = o.find("eta_days_remaining"); ieta != o.end()) {
         ms.eta_days_remaining = ieta->second.number_value(0.0);
@@ -1725,6 +1932,23 @@ GameState deserialize_game_from_json(const std::string& json_text) {
       if (ms.target_pos_mkm.length() <= 1e-12) {
         if (const auto* sh = find_ptr(s.ships, ms.target_ship_id)) ms.target_pos_mkm = sh->position_mkm;
       }
+
+      // Backfill flight model for legacy saves.
+      if (ms.speed_mkm_per_day <= 1e-12) {
+        const double dist = (ms.target_pos_mkm - ms.launch_pos_mkm).length();
+        const double total = std::max(1e-6, ms.eta_days_total);
+        if (dist > 1e-9 && total > 1e-9) ms.speed_mkm_per_day = dist / total;
+      }
+      if (ms.pos_mkm.length() <= 1e-12) {
+        const double total = std::max(1e-6, ms.eta_days_total);
+        const double rem = std::clamp(ms.eta_days_remaining, 0.0, total);
+        const double frac = std::clamp(1.0 - rem / total, 0.0, 1.0);
+        ms.pos_mkm = ms.launch_pos_mkm + (ms.target_pos_mkm - ms.launch_pos_mkm) * frac;
+      }
+      if (ms.range_remaining_mkm <= 1e-12 && ms.speed_mkm_per_day > 1e-12) {
+        ms.range_remaining_mkm = std::max(0.0, ms.speed_mkm_per_day * std::max(0.0, ms.eta_days_remaining));
+      }
+
       s.missile_salvos[ms.id] = ms;
     }
   }
@@ -1909,6 +2133,13 @@ GameState deserialize_game_from_json(const std::string& json_text) {
       }
     }
 
+    if (auto it = o.find("discovered_anomalies"); it != o.end()) {
+      for (const auto& av : it->second.array()) {
+        f.discovered_anomalies.push_back(static_cast<Id>(av.int_value(kInvalidId)));
+      }
+    }
+
+
     if (auto it = o.find("surveyed_jump_points"); it != o.end()) {
       for (const auto& jv : it->second.array()) {
         f.surveyed_jump_points.push_back(static_cast<Id>(jv.int_value(kInvalidId)));
@@ -1954,7 +2185,63 @@ GameState deserialize_game_from_json(const std::string& json_text) {
       }
     }
 
-    if (auto it = o.find("ship_contacts"); it != o.end()) {
+    // Pirate hideout rebuild cooldowns (optional).
+    if (auto it = o.find("pirate_hideout_cooldowns"); it != o.end()) {
+      if (it->second.is_object()) {
+        for (const auto& [k, v] : it->second.object()) {
+          Id sid = kInvalidId;
+          try {
+            sid = static_cast<Id>(std::stoull(k));
+          } catch (...) {
+            continue;
+          }
+          if (sid == kInvalidId) continue;
+          const int until = static_cast<int>(v.int_value(0));
+          if (until <= 0) continue;
+          f.pirate_hideout_cooldown_until_day[sid] = until;
+        }
+      } else if (it->second.is_array()) {
+        // Also accept an array-of-objects format:
+        //   [{"system_id": 123, "until_day": 456}, ...]
+        for (const auto& pv : it->second.array()) {
+          if (!pv.is_object()) continue;
+          const auto& po = pv.object();
+          const Id sid = static_cast<Id>((po.find("system_id") != po.end()) ? po.at("system_id").int_value(kInvalidId)
+                                                                           : kInvalidId);
+          if (sid == kInvalidId) continue;
+          const int until = static_cast<int>((po.find("until_day") != po.end()) ? po.at("until_day").int_value(0) : 0);
+          if (until <= 0) continue;
+          f.pirate_hideout_cooldown_until_day[sid] = until;
+        }
+      }
+    }
+
+    // Diplomatic offer cooldowns (optional).
+  if (auto itcd = o.find("diplomacy_offer_cooldowns"); itcd != o.end()) {
+    if (itcd->second.is_object()) {
+      for (const auto& [k, v] : itcd->second.object()) {
+        Id other_id = kInvalidId;
+        try {
+          other_id = static_cast<Id>(std::stoull(std::string(k)));
+        } catch (...) {
+          continue;
+        }
+        if (other_id == kInvalidId || other_id == f.id) continue;
+        f.diplomacy_offer_cooldown_until_day[other_id] = static_cast<int>(v.int_value(0));
+      }
+    } else if (itcd->second.is_array()) {
+      // Backward/forward-compat: allow array-of-objects encoding.
+      for (const auto& cv : itcd->second.array()) {
+        if (!cv.is_object()) continue;
+        const auto& c = cv.object();
+        const Id other_id = static_cast<Id>(c.at("other_faction_id").int_value(kInvalidId));
+        if (other_id == kInvalidId || other_id == f.id) continue;
+        f.diplomacy_offer_cooldown_until_day[other_id] = static_cast<int>(c.at("until_day").int_value(0));
+      }
+    }
+  }
+
+  if (auto it = o.find("ship_contacts"); it != o.end()) {
       for (const auto& cv : it->second.array()) {
         const auto& co = cv.object();
         Contact c;
@@ -1972,6 +2259,38 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     }
 
     s.factions[f.id] = f;
+  }
+
+  // Backfill anomaly discovery for legacy saves (pre-save_version 48).
+  //
+  // Prior to v48, anomalies were effectively "global" within a discovered system.
+  // To preserve that behavior when loading older saves, seed each faction's
+  // discovered_anomalies list with anomalies that exist in systems the faction
+  // has already discovered.
+  if (loaded_version < 48) {
+    for (auto& [fid, fac] : s.factions) {
+      for (const auto& [aid, a] : s.anomalies) {
+        if (aid == kInvalidId) continue;
+        if (a.system_id == kInvalidId) continue;
+        if (std::find(fac.discovered_systems.begin(), fac.discovered_systems.end(), a.system_id) ==
+            fac.discovered_systems.end()) {
+          continue;
+        }
+        if (std::find(fac.discovered_anomalies.begin(), fac.discovered_anomalies.end(), aid) !=
+            fac.discovered_anomalies.end()) {
+          continue;
+        }
+        fac.discovered_anomalies.push_back(aid);
+      }
+    }
+  }
+
+  // Validate victory winner id (in case a save was edited/modded).
+  if (s.victory_state.game_over) {
+    if (s.victory_state.winner_faction_id == kInvalidId ||
+        s.factions.find(s.victory_state.winner_faction_id) == s.factions.end()) {
+      s.victory_state = VictoryState{};
+    }
   }
 
   // Treaties (optional).
@@ -2010,6 +2329,53 @@ GameState deserialize_game_from_json(const std::string& json_text) {
         if (s.factions.find(t.faction_a) == s.factions.end() || s.factions.find(t.faction_b) == s.factions.end()) continue;
 
         s.treaties[t.id] = t;
+      }
+    }
+  }
+
+  // Diplomatic offers (optional).
+  if (auto it = root.find("diplomatic_offers"); it != root.end()) {
+    if (!it->second.is_array()) {
+      log::warn("Save load: 'diplomatic_offers' is not an array; ignoring");
+    } else {
+      for (const auto& ov : it->second.array()) {
+        if (!ov.is_object()) continue;
+        const auto& o = ov.object();
+
+        DiplomaticOffer offer;
+        offer.id = static_cast<Id>(o.at("id").int_value(kInvalidId));
+        if (offer.id == kInvalidId) continue;
+
+        offer.from_faction_id = static_cast<Id>(o.at("from_faction_id").int_value(kInvalidId));
+        offer.to_faction_id = static_cast<Id>(o.at("to_faction_id").int_value(kInvalidId));
+        if (offer.from_faction_id == kInvalidId || offer.to_faction_id == kInvalidId ||
+            offer.from_faction_id == offer.to_faction_id) {
+          continue;
+        }
+
+        // Validate referenced factions exist.
+        if (s.factions.find(offer.from_faction_id) == s.factions.end() ||
+            s.factions.find(offer.to_faction_id) == s.factions.end()) {
+          continue;
+        }
+
+        if (auto itty = o.find("treaty_type"); itty != o.end()) {
+          offer.treaty_type = treaty_type_from_string(itty->second.string_value("ceasefire"));
+        }
+        if (auto itd = o.find("treaty_duration_days"); itd != o.end()) {
+          offer.treaty_duration_days = static_cast<int>(itd->second.int_value(-1));
+        }
+        if (auto itcd = o.find("created_day"); itcd != o.end()) {
+          offer.created_day = static_cast<int>(itcd->second.int_value(0));
+        }
+        if (auto ited = o.find("expire_day"); ited != o.end()) {
+          offer.expire_day = static_cast<int>(ited->second.int_value(-1));
+        }
+        if (auto itm = o.find("message"); itm != o.end()) {
+          offer.message = itm->second.string_value("");
+        }
+
+        s.diplomatic_offers[offer.id] = offer;
       }
     }
   }
@@ -2111,6 +2477,29 @@ GameState deserialize_game_from_json(const std::string& json_text) {
           if (auto ieat = m.find("explore_allow_transit"); ieat != m.end()) {
             fl.mission.explore_allow_transit = ieat->second.bool_value(fl.mission.explore_allow_transit);
           }
+
+          if (auto iac = m.find("assault_colony_id"); iac != m.end()) {
+            fl.mission.assault_colony_id = static_cast<Id>(iac->second.int_value(fl.mission.assault_colony_id));
+          }
+          if (auto ias = m.find("assault_staging_colony_id"); ias != m.end()) {
+            fl.mission.assault_staging_colony_id = static_cast<Id>(ias->second.int_value(fl.mission.assault_staging_colony_id));
+          }
+          if (auto iaa = m.find("assault_auto_stage"); iaa != m.end()) {
+            fl.mission.assault_auto_stage = iaa->second.bool_value(fl.mission.assault_auto_stage);
+          }
+          if (auto iam = m.find("assault_troop_margin_factor"); iam != m.end()) {
+            fl.mission.assault_troop_margin_factor = std::clamp(iam->second.number_value(fl.mission.assault_troop_margin_factor), 1.0, 10.0);
+          }
+          if (auto iab = m.find("assault_use_bombardment"); iab != m.end()) {
+            fl.mission.assault_use_bombardment = iab->second.bool_value(fl.mission.assault_use_bombardment);
+          }
+          if (auto iad = m.find("assault_bombard_days"); iad != m.end()) {
+            fl.mission.assault_bombard_days = static_cast<int>(iad->second.int_value(fl.mission.assault_bombard_days));
+          }
+          if (auto iae = m.find("assault_bombard_executed"); iae != m.end()) {
+            fl.mission.assault_bombard_executed = iae->second.bool_value(fl.mission.assault_bombard_executed);
+          }
+
           if (auto itar = m.find("auto_refuel"); itar != m.end()) {
             fl.mission.auto_refuel = itar->second.bool_value(fl.mission.auto_refuel);
           }

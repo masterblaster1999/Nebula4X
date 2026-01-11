@@ -18,6 +18,7 @@
 #include "nebula4x/core/scenario.h"
 #include "nebula4x/core/ai_economy.h"
 #include "nebula4x/core/fuel_planner.h"
+#include "nebula4x/core/ground_battle_forecast.h"
 #include "nebula4x/core/troop_planner.h"
 #include "nebula4x/util/log.h"
 #include "nebula4x/util/trace_events.h"
@@ -759,6 +760,7 @@ void Simulation::tick_ai() {
         if (aid == kInvalidId) continue;
         if (a.system_id != ship->system_id) continue;
         if (a.resolved) continue;
+        if (!is_anomaly_discovered_by_faction(fid, aid)) continue;
 
         double minerals_total = 0.0;
         for (const auto& [_, t] : a.mineral_reward) minerals_total += std::max(0.0, t);
@@ -1598,7 +1600,250 @@ void Simulation::tick_ai() {
 
 
 
-  // --- Fleet missions (player automation) ---
+  // --- AI empire fleet organization (non-player automation) ---
+  //
+  // Random scenarios can spawn multiple AI-controlled empires.
+  // Economic AI keeps their colonies and shipyards progressing, but their
+  // combat ships were previously left idle because fleet missions were
+  // player-only and AI did not form/assign mission fleets.
+  //
+  // This block creates a small, stable set of fleets for each AI empire and
+  // assigns them missions:
+  //   - Defense Fleet: Defend capital colony (system-wide by default)
+  //   - Escort Fleet: Escort auto-freight traffic
+  //   - Patrol Fleet: Patrol the capital region/system (also contributes to
+  //                   piracy suppression)
+  {
+    NEBULA4X_TRACE_SCOPE("tick_ai_empire_fleets", "sim.ai");
+
+    auto capital_colony_for_faction = [&](Id fid) -> Id {
+      Id best_cid = kInvalidId;
+      double best_pop = -1.0;
+      for (Id cid : sorted_keys(state_.colonies)) {
+        const Colony* c = find_ptr(state_.colonies, cid);
+        if (!c || c->faction_id != fid) continue;
+        const double pop = std::max(0.0, c->population_millions);
+        if (best_cid == kInvalidId || pop > best_pop + 1e-9 ||
+            (std::abs(pop - best_pop) <= 1e-9 && cid < best_cid)) {
+          best_cid = cid;
+          best_pop = pop;
+        }
+      }
+      return best_cid;
+    };
+
+    auto ship_role_of = [&](Id sid) -> ShipRole {
+      const Ship* sh = find_ptr(state_.ships, sid);
+      if (!sh) return ShipRole::Unknown;
+      const ShipDesign* d = find_design(sh->design_id);
+      return d ? d->role : ShipRole::Unknown;
+    };
+
+    auto ensure_fleet_mission_defaults = [&](Fleet& fl) {
+      // Keep AI fleets a bit more conservative than the UI defaults.
+      fl.mission.auto_refuel = true;
+      fl.mission.refuel_threshold_fraction = std::clamp(fl.mission.refuel_threshold_fraction, 0.30, 0.60);
+      fl.mission.refuel_resume_fraction = std::clamp(fl.mission.refuel_resume_fraction, 0.80, 0.98);
+
+      fl.mission.auto_repair = true;
+      fl.mission.repair_threshold_fraction = std::clamp(fl.mission.repair_threshold_fraction, 0.55, 0.85);
+      fl.mission.repair_resume_fraction = std::clamp(fl.mission.repair_resume_fraction, 0.85, 0.99);
+
+      fl.mission.auto_rearm = true;
+      fl.mission.rearm_threshold_fraction = std::clamp(fl.mission.rearm_threshold_fraction, 0.30, 0.60);
+      fl.mission.rearm_resume_fraction = std::clamp(fl.mission.rearm_resume_fraction, 0.80, 0.98);
+
+      fl.mission.auto_maintenance = true;
+      fl.mission.maintenance_threshold_fraction = std::clamp(fl.mission.maintenance_threshold_fraction, 0.70, 0.90);
+      fl.mission.maintenance_resume_fraction = std::clamp(fl.mission.maintenance_resume_fraction, 0.90, 0.99);
+    };
+
+    const auto fleet_ids_snapshot = sorted_keys(state_.fleets);
+
+    for (Id fid : faction_ids) {
+      Faction* fac = find_ptr(state_.factions, fid);
+      if (!fac) continue;
+      if (fac->control != FactionControl::AI_Explorer) continue;
+
+      const Id capital_colony = capital_colony_for_faction(fid);
+      if (capital_colony == kInvalidId) continue;
+
+      const Colony* capc = find_ptr(state_.colonies, capital_colony);
+      if (!capc) continue;
+      const Body* capb = find_ptr(state_.bodies, capc->body_id);
+      const System* caps = capb ? find_ptr(state_.systems, capb->system_id) : nullptr;
+
+      const Id capital_sys = capb ? capb->system_id : kInvalidId;
+      const Id capital_region = caps ? caps->region_id : kInvalidId;
+
+      // Existing fleets and membership.
+      Fleet* defense_fleet = nullptr;
+      Fleet* escort_fleet = nullptr;
+      Fleet* patrol_fleet = nullptr;
+
+      std::unordered_set<Id> ships_in_fleets;
+      ships_in_fleets.reserve(64);
+
+      for (Id flid : fleet_ids_snapshot) {
+        Fleet* fl = find_ptr(state_.fleets, flid);
+        if (!fl || fl->faction_id != fid) continue;
+
+        for (Id sid : fl->ship_ids) ships_in_fleets.insert(sid);
+
+        if (!defense_fleet && fl->mission.type == FleetMissionType::DefendColony &&
+            fl->mission.defend_colony_id == capital_colony) {
+          defense_fleet = fl;
+          continue;
+        }
+        if (!escort_fleet && fl->mission.type == FleetMissionType::EscortFreighters) {
+          escort_fleet = fl;
+          continue;
+        }
+        if (!patrol_fleet &&
+            (fl->mission.type == FleetMissionType::PatrolRegion || fl->mission.type == FleetMissionType::PatrolSystem)) {
+          patrol_fleet = fl;
+          continue;
+        }
+      }
+
+      // Do we have auto-freight traffic worth escorting?
+      bool has_auto_freight = false;
+      for (Id sid : ship_ids) {
+        const Ship* sh = find_ptr(state_.ships, sid);
+        if (!sh || sh->faction_id != fid) continue;
+        if (ship_role_of(sid) != ShipRole::Freighter) continue;
+        if (!sh->auto_freight) continue;
+        has_auto_freight = true;
+        break;
+      }
+
+      // Gather unassigned combatants (sorted) for deterministic assignment.
+      std::vector<Id> unassigned_combatants;
+      for (Id sid : ship_ids) {
+        const Ship* sh = find_ptr(state_.ships, sid);
+        if (!sh) continue;
+        if (sh->faction_id != fid) continue;
+        if (ships_in_fleets.count(sid)) continue;
+
+        if (ship_role_of(sid) != ShipRole::Combatant) continue;
+
+        // Skip immobile bases/stations.
+        if (sh->speed_km_s <= 0.0) continue;
+
+        unassigned_combatants.push_back(sid);
+      }
+
+      std::size_t take_idx = 0;
+      auto take_next = [&]() -> Id {
+        if (take_idx >= unassigned_combatants.size()) return kInvalidId;
+        return unassigned_combatants[take_idx++];
+      };
+
+      auto take_group = [&](int n) -> std::vector<Id> {
+        std::vector<Id> out;
+        out.reserve(static_cast<std::size_t>(std::max(0, n)));
+        for (int i = 0; i < n; ++i) {
+          const Id sid = take_next();
+          if (sid == kInvalidId) break;
+          out.push_back(sid);
+        }
+        return out;
+      };
+
+      auto fill_fleet_to = [&](Fleet* fl, int target_size) {
+        if (!fl) return;
+        while (static_cast<int>(fl->ship_ids.size()) < target_size) {
+          const Id sid = take_next();
+          if (sid == kInvalidId) break;
+          std::string err;
+          (void)add_ship_to_fleet(fl->id, sid, &err);
+        }
+      };
+
+      // Create/maintain fleets in a stable order.
+      // 1) Defense
+      if (!defense_fleet) {
+        auto group = take_group(2);
+        if (!group.empty()) {
+          std::string err;
+          const Id nfl = create_fleet(fid, "Defense Fleet", group, &err);
+          defense_fleet = find_ptr(state_.fleets, nfl);
+        }
+      }
+      if (defense_fleet) {
+        defense_fleet->mission.type = FleetMissionType::DefendColony;
+        defense_fleet->mission.defend_colony_id = capital_colony;
+        defense_fleet->mission.defend_radius_mkm = 0.0;
+        ensure_fleet_mission_defaults(*defense_fleet);
+        (void)configure_fleet_formation(defense_fleet->id, FleetFormation::Wedge, 2.0);
+        fill_fleet_to(defense_fleet, 2);
+      }
+
+      // 2) Escort
+      if (has_auto_freight) {
+        if (!escort_fleet) {
+          auto group = take_group(1);
+          if (!group.empty()) {
+            std::string err;
+            const Id nfl = create_fleet(fid, "Escort Fleet", group, &err);
+            escort_fleet = find_ptr(state_.fleets, nfl);
+          }
+        }
+        if (escort_fleet) {
+          escort_fleet->mission.type = FleetMissionType::EscortFreighters;
+          escort_fleet->mission.escort_target_ship_id = kInvalidId;
+          escort_fleet->mission.escort_only_auto_freight = true;
+          escort_fleet->mission.escort_follow_distance_mkm = 2.0;
+          escort_fleet->mission.escort_defense_radius_mkm = 0.0; // in-system
+          ensure_fleet_mission_defaults(*escort_fleet);
+          (void)configure_fleet_formation(escort_fleet->id, FleetFormation::Column, 2.0);
+          fill_fleet_to(escort_fleet, 1);
+        }
+      }
+
+      // 3) Patrol (uses all remaining combatants)
+      if (!patrol_fleet) {
+        std::vector<Id> group;
+        while (true) {
+          const Id sid = take_next();
+          if (sid == kInvalidId) break;
+          group.push_back(sid);
+        }
+        if (!group.empty()) {
+          std::string err;
+          const Id nfl = create_fleet(fid, "Patrol Fleet", group, &err);
+          patrol_fleet = find_ptr(state_.fleets, nfl);
+        }
+      }
+      if (patrol_fleet) {
+        if (capital_region != kInvalidId) {
+          patrol_fleet->mission.type = FleetMissionType::PatrolRegion;
+          patrol_fleet->mission.patrol_region_id = capital_region;
+          patrol_fleet->mission.patrol_region_dwell_days = 4;
+        } else {
+          patrol_fleet->mission.type = FleetMissionType::PatrolSystem;
+          patrol_fleet->mission.patrol_system_id = capital_sys;
+          patrol_fleet->mission.patrol_dwell_days = 4;
+        }
+        ensure_fleet_mission_defaults(*patrol_fleet);
+        (void)configure_fleet_formation(patrol_fleet->id, FleetFormation::LineAbreast, 3.0);
+      }
+
+      // Any remaining combatants (should be rare) funnel into patrol, else defense.
+      while (take_idx < unassigned_combatants.size()) {
+        const Id sid = take_next();
+        if (sid == kInvalidId) break;
+        const Id target_flid = patrol_fleet ? patrol_fleet->id : (defense_fleet ? defense_fleet->id : kInvalidId);
+        if (target_flid == kInvalidId) break;
+        std::string err;
+        (void)add_ship_to_fleet(target_flid, sid, &err);
+      }
+    }
+  }
+
+
+
+  // --- Fleet missions (automation) ---
   {
     NEBULA4X_TRACE_SCOPE("tick_fleet_missions", "sim.ai");
 
@@ -1974,7 +2219,7 @@ void Simulation::tick_ai() {
     };
 
     auto combat_target_priority = [&](ShipRole r) -> int {
-      // For player-side missions we bias toward removing armed threats first.
+      // Bias toward removing armed threats first.
       switch (r) {
         case ShipRole::Combatant: return 0;
         case ShipRole::Freighter: return 1;
@@ -1988,7 +2233,7 @@ void Simulation::tick_ai() {
       if (fl.mission.type == FleetMissionType::None) continue;
 
       const Faction* fac = find_ptr(state_.factions, fl.faction_id);
-      if (!fac || fac->control != FactionControl::Player) continue;
+      if (!fac || fac->control == FactionControl::AI_Passive) continue;
 
       Ship* leader = pick_fleet_leader(fl);
       if (!leader) continue;
@@ -2692,6 +2937,216 @@ void Simulation::tick_ai() {
         continue;
       }
 
+      if (fl.mission.type == FleetMissionType::AssaultColony) {
+        const Id target_cid = fl.mission.assault_colony_id;
+        const Colony* tgt_col = (target_cid != kInvalidId) ? find_ptr(state_.colonies, target_cid) : nullptr;
+        const Body* tgt_body = tgt_col ? find_ptr(state_.bodies, tgt_col->body_id) : nullptr;
+        const Id target_sys = tgt_body ? tgt_body->system_id : kInvalidId;
+        if (!tgt_col || !tgt_body || target_sys == kInvalidId) continue;
+
+        // Mission complete: colony already belongs to us.
+        if (tgt_col->faction_id == fl.faction_id) {
+          fl.mission = FleetMission{};
+          continue;
+        }
+
+        // Can't plan against undiscovered systems.
+        if (!is_system_discovered_by_faction(fl.faction_id, target_sys)) continue;
+
+        // Respect treaties that would forbid hostile actions.
+        TreatyType tt;
+        if (sim_internal::strongest_active_treaty_between(state_, fl.faction_id, tgt_col->faction_id, &tt)) {
+          continue;
+        }
+
+        // Fleet troop/capability snapshot.
+        double embarked_strength = 0.0;
+        double troop_capacity_total = 0.0;
+        double troop_free_capacity = 0.0;
+        bool any_troop_capacity = false;
+        bool any_bombard_capable = false;
+
+        auto ship_ids = fl.ship_ids;
+        std::sort(ship_ids.begin(), ship_ids.end());
+
+        for (Id sid : ship_ids) {
+          const Ship* sh = find_ptr(state_.ships, sid);
+          if (!sh) continue;
+          if (sh->faction_id != fl.faction_id) continue;
+
+          embarked_strength += std::max(0.0, sh->troops);
+
+          const ShipDesign* d = find_design(sh->design_id);
+          const double cap = d ? std::max(0.0, d->troop_capacity) : 0.0;
+          troop_capacity_total += cap;
+          troop_free_capacity += std::max(0.0, cap - std::max(0.0, sh->troops));
+
+          if (cap > 1e-9) any_troop_capacity = true;
+          if (d && d->weapon_damage > 1e-9 && d->weapon_range_mkm > 1e-9) any_bombard_capable = true;
+        }
+
+        embarked_strength = std::max(0.0, embarked_strength);
+        troop_capacity_total = std::max(0.0, troop_capacity_total);
+        troop_free_capacity = std::max(0.0, troop_free_capacity);
+
+        // Defender snapshot (use active battle state when present).
+        double defender_strength = std::max(0.0, tgt_col->ground_forces);
+        if (auto itb = state_.ground_battles.find(tgt_col->id); itb != state_.ground_battles.end()) {
+          const auto& b = itb->second;
+          if (b.attacker_faction_id == fl.faction_id) {
+            // We already have an ongoing invasion; don't thrash orders.
+            continue;
+          }
+          if (b.defender_faction_id == tgt_col->faction_id) {
+            defender_strength = std::max(0.0, b.defender_strength);
+          }
+        }
+
+        // Defender fortifications and artillery (installation weapons).
+        const double forts = std::max(0.0, fortification_points(*tgt_col));
+
+        double defender_arty_weapon = 0.0;
+        for (const auto& [inst_id, count] : tgt_col->installations) {
+          if (count <= 0) continue;
+          const auto it = content_.installations.find(inst_id);
+          if (it == content_.installations.end()) continue;
+          const double wd = it->second.weapon_damage;
+          if (wd <= 1e-9) continue;
+          defender_arty_weapon += wd * static_cast<double>(count);
+        }
+        defender_arty_weapon = std::max(0.0, defender_arty_weapon);
+
+        const double margin = std::clamp(fl.mission.assault_troop_margin_factor, 1.0, 10.0);
+        const double required_strength = std::max(
+            0.0,
+            square_law_required_attacker_strength(cfg_, defender_strength, forts, defender_arty_weapon, margin));
+
+        // --- 1) Staging / embarkation (best-effort) ---
+        const double need_more = std::max(0.0, required_strength - embarked_strength);
+
+        auto is_valid_staging_colony = [&](Id cid) -> bool {
+          const Colony* c = find_ptr(state_.colonies, cid);
+          if (!c) return false;
+          if (c->faction_id != fl.faction_id) return false;
+          const Body* b = find_ptr(state_.bodies, c->body_id);
+          if (!b || b->system_id == kInvalidId) return false;
+          if (!is_system_discovered_by_faction(fl.faction_id, b->system_id)) return false;
+          return true;
+        };
+
+        auto staging_surplus_strength = [&](Id cid) -> double {
+          const Colony* c = find_ptr(state_.colonies, cid);
+          if (!c) return 0.0;
+          const double desired = std::max(0.0, c->garrison_target_strength);
+          return std::max(0.0, std::max(0.0, c->ground_forces) - desired);
+        };
+
+        auto pick_best_staging_colony = [&]() -> Id {
+          Id best = kInvalidId;
+          double best_score = -1e18;
+          for (Id cid : sorted_keys(state_.colonies)) {
+            const Colony* c = find_ptr(state_.colonies, cid);
+            if (!c) continue;
+            if (c->faction_id != fl.faction_id) continue;
+
+            const Body* b = find_ptr(state_.bodies, c->body_id);
+            if (!b || b->system_id == kInvalidId) continue;
+            if (!is_system_discovered_by_faction(fl.faction_id, b->system_id)) continue;
+
+            const double surplus = staging_surplus_strength(cid);
+            if (surplus <= 1e-6) continue;
+
+            const double eta = estimate_eta_days_to_pos(leader->system_id, leader->position_mkm,
+                                                       fl.faction_id, fleet_speed,
+                                                       b->system_id, b->position_mkm);
+            if (!std::isfinite(eta)) continue;
+
+            const double score = surplus * 1000.0 - eta * 10.0;
+            if (best == kInvalidId || score > best_score + 1e-9 ||
+                (std::abs(score - best_score) <= 1e-9 && cid < best)) {
+              best = cid;
+              best_score = score;
+            }
+          }
+          return best;
+        };
+
+        if (need_more > 1e-6 && fl.mission.assault_auto_stage && troop_free_capacity > 1e-6 && any_troop_capacity) {
+          Id stage_cid = fl.mission.assault_staging_colony_id;
+          if (!is_valid_staging_colony(stage_cid)) {
+            stage_cid = pick_best_staging_colony();
+            if (stage_cid != kInvalidId) {
+              fl.mission.assault_staging_colony_id = stage_cid;
+            }
+          }
+
+          const double surplus = staging_surplus_strength(stage_cid);
+          const double take_frac = std::clamp(cfg_.auto_troop_max_take_fraction_of_surplus, 0.0, 1.0);
+          const double take_cap = surplus * take_frac;
+          const double to_take = std::min({need_more, troop_free_capacity, take_cap});
+
+          if (stage_cid != kInvalidId && to_take > 1e-6 && fleet_orders_overrideable(fl)) {
+            (void)clear_fleet_orders(fid);
+
+            // Bring the whole fleet to the staging colony so escorts don't get left behind.
+            if (const Colony* sc = find_ptr(state_.colonies, stage_cid)) {
+              (void)issue_fleet_orbit_body(fid, sc->body_id, /*duration_days=*/0,
+                                          /*restrict_to_discovered=*/true);
+            }
+
+            double remaining = to_take;
+            for (Id sid : ship_ids) {
+              if (remaining <= 1e-6) break;
+              Ship* sh = find_ptr(state_.ships, sid);
+              if (!sh) continue;
+              if (sh->faction_id != fl.faction_id) continue;
+              const ShipDesign* d = find_design(sh->design_id);
+              const double cap = d ? std::max(0.0, d->troop_capacity) : 0.0;
+              const double free = std::max(0.0, cap - std::max(0.0, sh->troops));
+              if (free <= 1e-6) continue;
+
+              const double load = std::min(free, remaining);
+              if (load > 1e-6) {
+                (void)issue_load_troops(sid, stage_cid, load, /*restrict_to_discovered=*/true);
+              }
+              remaining -= load;
+            }
+
+            // Clear any prior bombard progress when we return to staging.
+            fl.mission.assault_bombard_executed = false;
+            continue;
+          }
+        }
+
+        // --- 2) Bombardment (optional, once) ---
+        const bool bombard_enabled = fl.mission.assault_use_bombardment && fl.mission.assault_bombard_days != 0;
+        if (bombard_enabled && any_bombard_capable && !fl.mission.assault_bombard_executed) {
+          if (fleet_orders_overrideable(fl)) {
+            const int days = fl.mission.assault_bombard_days;
+            (void)clear_fleet_orders(fid);
+            (void)issue_fleet_bombard_colony(fid, target_cid, days, /*restrict_to_discovered=*/true);
+            fl.mission.assault_bombard_executed = true;
+          }
+          continue;
+        }
+
+        // --- 3) Invasion ---
+        if (embarked_strength > 1e-6 && fleet_orders_overrideable(fl)) {
+          (void)clear_fleet_orders(fid);
+          (void)issue_fleet_orbit_body(fid, tgt_col->body_id, /*duration_days=*/0,
+                                      /*restrict_to_discovered=*/true);
+          for (Id sid : ship_ids) {
+            const Ship* sh = find_ptr(state_.ships, sid);
+            if (!sh) continue;
+            if (sh->faction_id != fl.faction_id) continue;
+            if (sh->troops <= 1e-6) continue;
+            (void)issue_invade_colony(sid, target_cid, /*restrict_to_discovered=*/true);
+          }
+        }
+
+        continue;
+      }
+
       if (fl.mission.type == FleetMissionType::HuntHostiles) {
         // 1) If hostiles are currently detected in-system, attack.
         const auto hostiles = detected_hostile_ships_in_system(fl.faction_id, leader->system_id);
@@ -2995,6 +3450,9 @@ void Simulation::tick_ai() {
         if (!orders_empty(sid)) continue;
         if (sh->auto_explore) continue;  // allow manual override
 
+        // Pirate hideouts are stationary bases; do not issue roaming/chasing orders.
+        if (sh->design_id == "pirate_hideout") continue;
+
         // 1) If hostiles are currently detected in-system, attack the best target.
         const auto hostiles = detected_hostile_ships_in_system(fid, sh->system_id);
         if (!hostiles.empty()) {
@@ -3088,9 +3546,299 @@ void Simulation::tick_ai() {
     }
   }
 
+  // Update region piracy suppression after AI planning, so newly assigned patrol
+  // missions take effect immediately for the raid weighting below.
+  tick_piracy_suppression();
+
   // Spawn dynamic pirate raids after AI planning, so raids don't get immediately
   // re-tasked by the same tick's AI logic.
   tick_pirate_raids();
+
+  // --- Diplomacy AI: treaty proposals (offers) ---
+  //
+  // This is a lightweight negotiation layer: AI factions propose treaties via
+  // DiplomaticOffer objects, which must be accepted to become active treaties.
+  {
+    const int now_day = static_cast<int>(state_.date.days_since_epoch());
+
+    // Rough "power" metric used for ceasefire heuristics.
+    std::unordered_map<Id, double> power_by_faction;
+    power_by_faction.reserve(faction_ids.size() * 2 + 8);
+    for (Id fid : faction_ids) power_by_faction[fid] = 0.0;
+
+    for (Id sid : ship_ids) {
+      const Ship* sh = find_ptr(state_.ships, sid);
+      if (!sh) continue;
+      if (sh->faction_id == kInvalidId) continue;
+      const ShipDesign* d = find_design(sh->design_id);
+      const double w = d ? std::max(0.0, d->weapon_damage) : 0.0;
+      const double m = d ? std::max(0.0, d->mass_tons) : 0.0;
+      // Weighted sum; tuned for "relative strength" heuristics only (not combat sim).
+      power_by_faction[sh->faction_id] += std::max(1.0, w + m * 0.05);
+    }
+
+    auto has_contact = [&](const Faction& f, Id other_faction_id) -> bool {
+      if (other_faction_id == kInvalidId) return false;
+      for (const auto& [sid, c] : f.ship_contacts) {
+        (void)sid;
+        if (c.last_seen_faction_id == other_faction_id) return true;
+      }
+      return false;
+    };
+
+    auto has_pending_offer = [&](Id from_id, Id to_id, TreatyType tt) -> bool {
+      for (const auto& [oid, o] : state_.diplomatic_offers) {
+        (void)oid;
+        if (o.from_faction_id == from_id && o.to_faction_id == to_id && o.treaty_type == tt) return true;
+      }
+      return false;
+    };
+
+    auto has_any_pending_offer_between = [&](Id a_id, Id b_id) -> bool {
+      for (const auto& [oid, o] : state_.diplomatic_offers) {
+        (void)oid;
+        if ((o.from_faction_id == a_id && o.to_faction_id == b_id) ||
+            (o.from_faction_id == b_id && o.to_faction_id == a_id)) {
+          return true;
+        }
+      }
+      return false;
+    };
+
+    auto has_active_treaty = [&](Id a_id, Id b_id, TreatyType tt) -> bool {
+      if (a_id == kInvalidId || b_id == kInvalidId) return false;
+      if (a_id == b_id) return false;
+      Id a = a_id;
+      Id b = b_id;
+      if (b < a) std::swap(a, b);
+
+      for (const auto& [tid, t] : state_.treaties) {
+        (void)tid;
+        if (t.faction_a == a && t.faction_b == b && t.type == tt) return true;
+      }
+      return false;
+    };
+
+    // 1) Generate offers from AI explorer factions.
+    for (Id from_id : faction_ids) {
+      Faction* from = find_ptr(state_.factions, from_id);
+      if (!from) continue;
+      if (from->control != FactionControl::AI_Explorer) continue;
+
+      for (Id to_id : faction_ids) {
+        if (to_id == from_id) continue;
+        const Faction* to = find_ptr(state_.factions, to_id);
+        if (!to) continue;
+
+        // Only propose after some form of contact (prevents "telepathic diplomacy").
+        if (!has_contact(*from, to_id)) continue;
+
+        // Cooldown check.
+        auto it_cd = from->diplomacy_offer_cooldown_until_day.find(to_id);
+        if (it_cd != from->diplomacy_offer_cooldown_until_day.end() && it_cd->second > now_day) continue;
+
+        // Don't clutter with multiple outstanding offers between the same pair.
+        if (has_any_pending_offer_between(from_id, to_id)) continue;
+
+        // Decide what to offer.
+        TreatyType offer_tt = TreatyType::Ceasefire;
+        int offer_treaty_days = -1;
+        int offer_expires_days = 30;
+        bool should_offer = false;
+
+        const DiplomacyStatus s_from = diplomatic_status(from_id, to_id);
+        const DiplomacyStatus s_to = diplomatic_status(to_id, from_id);
+        const bool mutual_friendly = (s_from == DiplomacyStatus::Friendly) && (s_to == DiplomacyStatus::Friendly);
+        const bool mutual_hostile = (s_from == DiplomacyStatus::Hostile) && (s_to == DiplomacyStatus::Hostile);
+
+        if (mutual_friendly) {
+          if (!has_active_treaty(from_id, to_id, TreatyType::TradeAgreement) &&
+              !has_pending_offer(from_id, to_id, TreatyType::TradeAgreement)) {
+            offer_tt = TreatyType::TradeAgreement;
+            offer_treaty_days = -1;
+            offer_expires_days = 45;
+            should_offer = true;
+          } else if (has_active_treaty(from_id, to_id, TreatyType::TradeAgreement) &&
+                     !has_active_treaty(from_id, to_id, TreatyType::Alliance) &&
+                     !has_pending_offer(from_id, to_id, TreatyType::Alliance) &&
+                     (now_day % 90 == 0)) {
+            // Periodically propose alliance after trade relations exist.
+            offer_tt = TreatyType::Alliance;
+            offer_treaty_days = -1;
+            offer_expires_days = 45;
+            should_offer = true;
+          }
+        } else if (mutual_hostile) {
+          // If we are significantly weaker, propose a ceasefire occasionally.
+          const double p_from = power_by_faction[from_id];
+          const double p_to = power_by_faction[to_id];
+          const bool weaker = (p_from + 1.0) < (p_to * 0.75);
+          if (weaker && !has_active_treaty(from_id, to_id, TreatyType::Ceasefire) &&
+              !has_pending_offer(from_id, to_id, TreatyType::Ceasefire) &&
+              (now_day % 30 == 0)) {
+            offer_tt = TreatyType::Ceasefire;
+            offer_treaty_days = 90;
+            offer_expires_days = 20;
+            should_offer = true;
+          }
+        } else {
+          // Neutral-ish: suggest a NAP as a low-commitment treaty.
+          if (!has_active_treaty(from_id, to_id, TreatyType::NonAggressionPact) &&
+              !has_pending_offer(from_id, to_id, TreatyType::NonAggressionPact) &&
+              (now_day % 45 == 0)) {
+            offer_tt = TreatyType::NonAggressionPact;
+            offer_treaty_days = 180;
+            offer_expires_days = 30;
+            should_offer = true;
+          }
+        }
+
+        if (!should_offer) continue;
+
+        const bool player_involved = (from->control == FactionControl::Player) || (to->control == FactionControl::Player);
+        std::string err;
+        const Id oid = create_diplomatic_offer(from_id, to_id, offer_tt, offer_treaty_days, offer_expires_days,
+                                               player_involved, &err);
+        if (oid != kInvalidId) {
+          // Prevent daily spam. The accept/decline path also applies a cooldown.
+          constexpr int kCooldownDays = 60;
+          from->diplomacy_offer_cooldown_until_day[to_id] = now_day + kCooldownDays;
+        }
+      }
+    }
+
+    // 2) Auto-accept offers addressed to AI recipients.
+    if (!state_.diplomatic_offers.empty()) {
+      const auto offer_ids = sorted_keys(state_.diplomatic_offers);
+      for (Id oid : offer_ids) {
+        const DiplomaticOffer* o = find_ptr(state_.diplomatic_offers, oid);
+        if (!o) continue;
+
+        const Faction* to = find_ptr(state_.factions, o->to_faction_id);
+        const Faction* from = find_ptr(state_.factions, o->from_faction_id);
+        if (!to || !from) continue;
+
+        // Player offers require explicit response.
+        if (to->control == FactionControl::Player) continue;
+
+        const DiplomacyStatus s_from = diplomatic_status(o->from_faction_id, o->to_faction_id);
+        const DiplomacyStatus s_to = diplomatic_status(o->to_faction_id, o->from_faction_id);
+        const bool mutual_friendly = (s_from == DiplomacyStatus::Friendly) && (s_to == DiplomacyStatus::Friendly);
+        const bool mutual_hostile = (s_from == DiplomacyStatus::Hostile) && (s_to == DiplomacyStatus::Hostile);
+
+        bool accept = false;
+        switch (o->treaty_type) {
+          case TreatyType::TradeAgreement:
+          case TreatyType::NonAggressionPact:
+            accept = !mutual_hostile;
+            break;
+          case TreatyType::Alliance:
+            accept = mutual_friendly;
+            break;
+          case TreatyType::Ceasefire: {
+            const double p_to = power_by_faction[o->to_faction_id];
+            const double p_from = power_by_faction[o->from_faction_id];
+            accept = (p_to + 1.0) < (p_from * 0.85) || (p_from + 1.0) < (p_to * 0.85);
+          } break;
+        }
+
+        if (accept) {
+          std::string err;
+          (void)accept_diplomatic_offer(oid, /*push_event=*/false, &err);
+        } else {
+          // AI declines are silent; the offer will expire naturally.
+        }
+      }
+    }
+  }
+
+}
+
+
+void Simulation::tick_piracy_suppression() {
+  if (!cfg_.enable_pirate_suppression) return;
+  if (state_.regions.empty()) return;
+
+  const double scale = std::max(1e-6, cfg_.pirate_suppression_power_scale);
+  const double adj = std::clamp(cfg_.pirate_suppression_adjust_fraction_per_day, 0.0, 1.0);
+
+  // Accumulate patrol power by region id from fleets currently on explicit patrol
+  // missions and physically present within the region.
+  std::unordered_map<Id, double> patrol_power;
+  patrol_power.reserve(state_.regions.size() * 2 + 8);
+
+  auto ship_patrol_power = [&](Id ship_id) -> double {
+    const auto* sh = find_ptr(state_.ships, ship_id);
+    if (!sh) return 0.0;
+
+    const auto* d = find_design(sh->design_id);
+    if (!d) return 0.0;
+
+    // Ignore unarmed hulls (freighters, tankers, etc.). We treat suppression as
+    // "combat presence" rather than mere traffic.
+    const double weapons =
+        std::max(0.0, d->weapon_damage) + std::max(0.0, d->missile_damage) +
+        0.5 * std::max(0.0, d->point_defense_damage);
+    if (weapons <= 0.0) return 0.0;
+
+    // Small bonuses so "tough" escorts contribute slightly more than paper
+    // patrol boats, and long-range sensors help maintain regional security.
+    const double durability = 0.05 * std::max(0.0, d->max_hp + d->max_shields);
+    const double sensors = 0.02 * std::max(0.0, d->sensor_range_mkm);
+
+    return weapons + durability + sensors;
+  };
+
+  const auto fleet_ids = sorted_keys(state_.fleets);
+  for (Id fid : fleet_ids) {
+    const auto* fl = find_ptr(state_.fleets, fid);
+    if (!fl) continue;
+    if (fl->ship_ids.empty()) continue;
+
+    const auto* fac = find_ptr(state_.factions, fl->faction_id);
+    if (!fac) continue;
+    if (fac->control == FactionControl::AI_Pirate) continue;
+
+    // We only count explicit patrol missions (system/region) for suppression.
+    Id rid = kInvalidId;
+    if (fl->mission.type == FleetMissionType::PatrolRegion) {
+      rid = fl->mission.patrol_region_id;
+    } else if (fl->mission.type == FleetMissionType::PatrolSystem) {
+      const auto* psys = find_ptr(state_.systems, fl->mission.patrol_system_id);
+      if (psys) rid = psys->region_id;
+    } else {
+      continue;
+    }
+    if (rid == kInvalidId) continue;
+
+    // Require the fleet to actually be in the region right now; otherwise we'd
+    // suppress regions from across the galaxy while the fleet is still in
+    // transit.
+    const Id leader_id =
+        (fl->leader_ship_id != kInvalidId)
+            ? fl->leader_ship_id
+            : (fl->ship_ids.empty() ? kInvalidId : fl->ship_ids.front());
+    const auto* leader = find_ptr(state_.ships, leader_id);
+    if (!leader) continue;
+
+    const auto* sys_here = find_ptr(state_.systems, leader->system_id);
+    if (!sys_here) continue;
+    if (sys_here->region_id != rid) continue;
+
+    double fp = 0.0;
+    for (Id sid : fl->ship_ids) fp += ship_patrol_power(sid);
+    if (fp > 0.0) patrol_power[rid] += fp;
+  }
+
+  for (auto& [rid, reg] : state_.regions) {
+    const auto it = patrol_power.find(rid);
+    const double power = (it != patrol_power.end()) ? it->second : 0.0;
+    const double target = 1.0 - std::exp(-power / scale);
+
+    const double cur = std::clamp(reg.pirate_suppression, 0.0, 1.0);
+    const double next = std::clamp(cur + (target - cur) * adj, 0.0, 1.0);
+    reg.pirate_suppression = next;
+  }
 }
 
 void Simulation::tick_pirate_raids() {
@@ -3135,26 +3883,54 @@ void Simulation::tick_pirate_raids() {
     if (!sys) return 0.0;
 
     double risk = std::clamp(cfg_.pirate_raid_default_system_risk, 0.0, 1.0);
+    double suppression = 0.0;
     if (sys->region_id != kInvalidId) {
       if (const auto* reg = find_ptr(state_.regions, sys->region_id)) {
         risk = std::clamp(reg->pirate_risk, 0.0, 1.0);
+        if (cfg_.enable_pirate_suppression) {
+          suppression = std::clamp(reg->pirate_suppression, 0.0, 1.0);
+        }
       }
     }
+    risk *= (1.0 - suppression);
     return std::clamp(risk, 0.0, 1.0);
   };
 
   struct SysAcc {
     double score{0.0};
+
+    // Mobile pirate ships currently present in the system (raiders, etc).
     int pirate_ships{0};
+
+    // Persistent pirate bases ("hideouts") currently present in the system.
+    int pirate_hideouts{0};
+
+    // Stable reference to a hideout ship for anchoring spawns (lowest id).
+    Id hideout_ship_id{kInvalidId};
+    Vec2 hideout_pos{0.0, 0.0};
   };
 
   for (Id pirate_fid : pirate_factions) {
     auto* pirate_fac = find_ptr(state_.factions, pirate_fid);
     if (!pirate_fac) continue;
 
+
+    // Prune expired hideout cooldowns (keeps saves small / avoids unbounded growth).
+    if (!pirate_fac->pirate_hideout_cooldown_until_day.empty()) {
+      for (auto it = pirate_fac->pirate_hideout_cooldown_until_day.begin();
+           it != pirate_fac->pirate_hideout_cooldown_until_day.end();) {
+        if (it->first == kInvalidId || it->second <= now_day) {
+          it = pirate_fac->pirate_hideout_cooldown_until_day.erase(it);
+        } else {
+          ++it;
+        }
+      }
+    }
+
     // Hard cap per pirate faction to keep raids from exploding in long games.
     const int max_total = std::max(0, cfg_.pirate_raid_max_total_ships_per_faction);
     int pirate_ship_count = 0;
+    int pirate_hideout_count = 0;
 
     std::unordered_map<Id, SysAcc> acc;
     acc.reserve(state_.systems.size() * 2 + 8);
@@ -3167,8 +3943,17 @@ void Simulation::tick_pirate_raids() {
       SysAcc& a = acc[sh.system_id];
 
       if (sh.faction_id == pirate_fid) {
-        ++a.pirate_ships;
-        ++pirate_ship_count;
+        if (sh.design_id == "pirate_hideout") {
+          ++a.pirate_hideouts;
+          ++pirate_hideout_count;
+          if (a.hideout_ship_id == kInvalidId || sid < a.hideout_ship_id) {
+            a.hideout_ship_id = sid;
+            a.hideout_pos = sh.position_mkm;
+          }
+        } else {
+          ++a.pirate_ships;
+          ++pirate_ship_count;
+        }
         continue;
       }
 
@@ -3205,6 +3990,10 @@ void Simulation::tick_pirate_raids() {
       double weight{0.0};
       double risk{0.0};
       double score{0.0};
+
+      int pirate_hideouts{0};
+      Id hideout_ship_id{kInvalidId};
+      Vec2 hideout_pos{0.0, 0.0};
     };
 
     std::vector<Candidate> candidates;
@@ -3227,7 +4016,11 @@ void Simulation::tick_pirate_raids() {
       const double risk = piracy_risk_for_system(sys_id);
       if (risk <= 1e-6) continue;
 
-      const double weight = std::pow(risk, risk_exp) * a.score;
+      double weight = std::pow(risk, risk_exp) * a.score;
+      if (cfg_.enable_pirate_hideouts && a.pirate_hideouts > 0) {
+        const double mult = std::max(1.0, cfg_.pirate_hideout_system_weight_multiplier);
+        weight *= mult;
+      }
       if (weight <= 1e-12) continue;
 
       Candidate c;
@@ -3235,6 +4028,9 @@ void Simulation::tick_pirate_raids() {
       c.weight = weight;
       c.risk = risk;
       c.score = a.score;
+      c.pirate_hideouts = a.pirate_hideouts;
+      c.hideout_ship_id = a.hideout_ship_id;
+      c.hideout_pos = a.hideout_pos;
       candidates.push_back(c);
 
       total_weight += weight;
@@ -3337,16 +4133,21 @@ void Simulation::tick_pirate_raids() {
 
     if (target_ship_id == kInvalidId && target_colony_id == kInvalidId) continue;
 
-    // Spawn near the closest jump point (ambush vibe); if none exist, spawn near target.
+    // Spawn near an existing pirate hideout if present (ambush around the base).
+    // Otherwise, spawn near the closest jump point; if none exist, spawn near target.
     Vec2 anchor = target_pos;
-    double best_jp_dist = 1e100;
-    for (Id jp_id : sys->jump_points) {
-      const auto* jp = find_ptr(state_.jump_points, jp_id);
-      if (!jp) continue;
-      const double d = (jp->position_mkm - target_pos).length();
-      if (d < best_jp_dist) {
-        best_jp_dist = d;
-        anchor = jp->position_mkm;
+    if (cfg_.enable_pirate_hideouts && chosen.hideout_ship_id != kInvalidId) {
+      anchor = chosen.hideout_pos;
+    } else {
+      double best_jp_dist = 1e100;
+      for (Id jp_id : sys->jump_points) {
+        const auto* jp = find_ptr(state_.jump_points, jp_id);
+        if (!jp) continue;
+        const double d = (jp->position_mkm - target_pos).length();
+        if (d < best_jp_dist) {
+          best_jp_dist = d;
+          anchor = jp->position_mkm;
+        }
       }
     }
 
@@ -3413,6 +4214,7 @@ void Simulation::tick_pirate_raids() {
     }
 
     // Spawn the ships.
+    int spawned_raiders = 0;
     for (int i = 0; i < desired; ++i) {
       const std::string design_id = choose_design_id(rng);
       if (design_id.empty()) break;
@@ -3441,6 +4243,8 @@ void Simulation::tick_pirate_raids() {
         apply_design_stats_to_ship(*sh);
       }
 
+      ++spawned_raiders;
+
       // Queue raid orders.
       auto& orders = state_.ship_orders[ship.id];
       if (target_ship_id != kInvalidId) {
@@ -3457,6 +4261,48 @@ void Simulation::tick_pirate_raids() {
         orders.queue.push_back(ord);
       }
     }
+
+    // Optionally establish a pirate hideout in the raided system.
+    if (cfg_.enable_pirate_hideouts && spawned_raiders > 0 && chosen.hideout_ship_id == kInvalidId) {
+      const int max_hideouts = std::max(0, cfg_.pirate_hideout_max_total_per_faction);
+      if (max_hideouts <= 0 || pirate_hideout_count < max_hideouts) {
+        int until_day = 0;
+        if (auto it_cd = pirate_fac->pirate_hideout_cooldown_until_day.find(chosen.system_id);
+            it_cd != pirate_fac->pirate_hideout_cooldown_until_day.end()) {
+          until_day = it_cd->second;
+        }
+        if (until_day <= now_day) {
+          const double chance = std::clamp(cfg_.pirate_hideout_establish_chance_per_raid, 0.0, 1.0);
+          if (chance > 1e-9 && u01(rng) < chance) {
+            if (find_design("pirate_hideout")) {
+              Ship hideout;
+              hideout.id = allocate_id(state_);
+              hideout.faction_id = pirate_fid;
+              hideout.system_id = chosen.system_id;
+              hideout.design_id = "pirate_hideout";
+              hideout.name = "Pirate Hideout " + std::to_string(hideout.id);
+              hideout.sensor_mode = SensorMode::Passive;
+
+              // Spawn a small random offset from the anchor (usually a jump point).
+              const double ang = u01(rng) * kTwoPi;
+              const double rad = 0.4 + u01(rng) * 1.6;
+              hideout.position_mkm = anchor + Vec2{std::cos(ang), std::sin(ang)} * rad;
+
+              state_.ships.emplace(hideout.id, hideout);
+              state_.ship_orders.emplace(hideout.id, ShipOrders{});
+              sys->ships.push_back(hideout.id);
+
+              if (auto* sh = find_ptr(state_.ships, hideout.id)) {
+                apply_design_stats_to_ship(*sh);
+              }
+
+              ++pirate_hideout_count;
+            }
+          }
+        }
+      }
+    }
+
   }
 }
 

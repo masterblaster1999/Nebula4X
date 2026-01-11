@@ -95,6 +95,42 @@ struct Treaty {
   int duration_days{-1};
 };
 
+// Directed diplomacy "offers" / proposals.
+//
+// Unlike Treaties, which are immediately active agreements, offers represent a
+// pending proposal from one faction to another that must be accepted (or can
+// be declined / expire).
+//
+// This is a lightweight negotiation layer intended primarily for AI->player
+// interaction and future diplomacy expansion.
+//
+// treaty_duration_days < 0 means "indefinite" if accepted.
+// expire_day < 0 means the offer never expires.
+struct DiplomaticOffer {
+  Id id{kInvalidId};
+
+  // Directional: from -> to.
+  Id from_faction_id{kInvalidId};
+  Id to_faction_id{kInvalidId};
+
+  // The treaty that will be created if the offer is accepted.
+  TreatyType treaty_type{TreatyType::Ceasefire};
+
+  // Treaty duration in days (<0 => indefinite).
+  int treaty_duration_days{-1};
+
+  // Day the offer was created (Date::days_since_epoch).
+  int created_day{0};
+
+  // Day the offer expires and is auto-removed (<0 => never).
+  int expire_day{-1};
+
+  // Optional free-form note / flavor text.
+  std::string message;
+};
+
+
+
 
 
 // Sensor emissions control / operating mode.
@@ -815,12 +851,39 @@ struct MissileSalvo {
   // UI visualization without having to infer history.
   double damage_initial{0.0};
 
+  // --- Flight model (homing + range limit) ---
+  //
+  // speed_mkm_per_day is the salvo's flight speed at launch.
+  //
+  // When enable_missile_homing is true, the salvo's position advances by this
+  // speed each combat tick, steering toward a predicted intercept point.
+  double speed_mkm_per_day{0.0};
+
+  // Remaining range (mkm) the salvo can travel before self-destructing.
+  //
+  // When missile_range_limits_flight is disabled, this may be set to a very
+  // large value.
+  double range_remaining_mkm{0.0};
+
+  // Current salvo position (for homing missiles and UI overlays).
+  //
+  // For legacy saves, this is derived from launch/target positions + ETA.
+  Vec2 pos_mkm{0.0, 0.0};
+
+  // Guidance snapshot at launch (used by hit chance / ECCM).
+  // These values are best-effort and may be 0 in legacy saves.
+  double attacker_eccm_strength{0.0};
+  double attacker_sensor_mkm_raw{0.0};
+
   // Total flight time at launch (days).
   // Stored as a double so sub-day turn ticks can decrement by fractional days
   // (e.g. 1h = 1/24d).
   double eta_days_total{0.0};
 
-  // Days until impact remaining.
+  // Estimated days until impact remaining.
+  //
+  // When enable_missile_homing is enabled, this is recomputed from current
+  // geometry (distance / speed) each tick for UI convenience.
   double eta_days_remaining{0.0};
 
   // For UI visualization (map overlay): the launch and target positions used
@@ -1071,6 +1134,12 @@ struct Faction {
   // updated when ships transit jump points into new systems.
   std::vector<Id> discovered_systems;
 
+  // Anomalies this faction has discovered (points of interest).
+  //
+  // Unlike systems/jump links, anomalies are discovered via sensor coverage
+  // (ships/colonies) and persist once found.
+  std::vector<Id> discovered_anomalies;
+
   // Jump point surveys (fog-of-war route knowledge).
   // When fog-of-war is enabled, the UI + route planner will only consider
   // jump links that have been surveyed by the viewing faction.
@@ -1086,6 +1155,22 @@ struct Faction {
   // Simple per-faction ship contact memory.
   // Key: ship id.
   std::unordered_map<Id, Contact> ship_contacts;
+
+
+  // Diplomatic offer cooldowns by target faction (anti-spam for AI proposals).
+  //
+  // Key: other faction id. Value: day (Date::days_since_epoch) until which this
+  // faction should not send another diplomatic offer to that faction.
+  std::unordered_map<Id, int> diplomacy_offer_cooldown_until_day;
+
+  // Pirate hideout rebuild cooldowns by system.
+  //
+  // Key: system id. Value: day (Date::days_since_epoch) until which this faction
+  // is not allowed to establish a new pirate hideout in that system.
+  //
+  // This is used to prevent immediately re-spawning a base the day after it is
+  // destroyed, giving the player a meaningful suppression window.
+  std::unordered_map<Id, int> pirate_hideout_cooldown_until_day;
 };
 
 // A lightweight grouping of ships for UI / order-issuing convenience.
@@ -1125,6 +1210,7 @@ enum class FleetMissionType : std::uint8_t {
   EscortFreighters = 4,
   Explore = 5,
   PatrolRegion = 6,
+  AssaultColony = 7,
 };
 
 enum class FleetSustainmentMode : std::uint8_t {
@@ -1210,6 +1296,42 @@ struct FleetMission {
   // systems (expansion). If false, it will only survey exits in already-
   // discovered systems.
   bool explore_allow_transit{true};
+
+  // --- AssaultColony ---
+  // High-level automation for planet-taking operations.
+  //
+  // The fleet will (best-effort):
+  //   1) Stage at a friendly colony to embark troops (optional)
+  //   2) Bombard the target colony (optional)
+  //   3) Land troops to invade
+  //
+  // Target colony (not body) id to assault.
+  Id assault_colony_id{kInvalidId};
+
+  // Optional staging colony (same-faction) to load troops from.
+  // If kInvalidId and assault_auto_stage=true, the simulation will
+  // auto-pick a good staging colony.
+  Id assault_staging_colony_id{kInvalidId};
+
+  // If true, attempt to stage at a friendly colony to load troops when the
+  // fleet does not yet have sufficient embarked strength.
+  bool assault_auto_stage{true};
+
+  // Margin factor applied when estimating attacker strength requirements.
+  // (1.0 = parity, >1.0 = safer).
+  double assault_troop_margin_factor{1.10};
+
+  // If true, bombard the target colony before attempting to invade.
+  bool assault_use_bombardment{true};
+
+  // How long to bombard before proceeding with invasion.
+  // 0 disables bombardment (equivalent to assault_use_bombardment=false).
+  // -1 means bombard indefinitely (mission will not auto-transition).
+  int assault_bombard_days{7};
+
+  // Runtime: set when the mission has already executed its initial bombardment
+  // phase (if enabled) so it can transition to invasion.
+  bool assault_bombard_executed{false};
 
   // --- Sustainment (all mission types) ---
   bool auto_refuel{true};
@@ -1302,6 +1424,13 @@ struct Region {
   // 0..1: higher => pirates and hostile "activity" more likely.
   double pirate_risk{0.0};
 
+  // 0..1: dynamic security / suppression applied to piracy in this region.
+  //
+  // Updated by the simulation based on patrol missions by non-pirate factions
+  // (see Simulation::tick_piracy_suppression). Effective piracy risk is:
+  //   pirate_risk * (1 - pirate_suppression)
+  double pirate_suppression{0.0};
+
   // 0..1: higher => ancient ruins / anomalies more likely.
   double ruins_density{0.0};
 };
@@ -1320,6 +1449,14 @@ struct StarSystem {
   // System-level nebula/dust density in [0,1].
   // Higher values reduce effective sensor ranges and add a nebula haze on maps.
   double nebula_density{0.0};
+
+  // Temporary nebula storm (dynamic environmental hazard).
+  //
+  // Peak intensity is in [0,1]. Storms ramp up/down over their lifetime using
+  // a smooth pulse; see Simulation::system_storm_intensity().
+  double storm_peak_intensity{0.0};
+  std::int64_t storm_start_day{0}; // days_since_epoch
+  std::int64_t storm_end_day{0};   // exclusive (storm active when now in [start, end))
 
   std::vector<Id> bodies;
   std::vector<Id> ships;

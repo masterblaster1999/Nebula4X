@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -325,6 +326,9 @@ int mine_target_for_colony(const Simulation& sim, const Colony& c) {
   sim_internal::FactionEconomyMultipliers mult;
   if (const auto* fac = find_ptr(sim.state().factions, c.faction_id)) {
     mult = sim_internal::compute_faction_economy_multipliers(sim.content(), *fac);
+    // Match Simulation::tick_colonies: trade agreements boost non-mining outputs.
+    const double trade = sim_internal::trade_agreement_output_multiplier(sim.state(), c.faction_id);
+    mult.shipyard *= trade;
   }
   const double shipyard_mult = std::max(0.0, mult.shipyard);
   const double mining_mult = std::max(0.0, mult.mining);
@@ -336,18 +340,54 @@ int mine_target_for_colony(const Simulation& sim, const Colony& c) {
   const InstallationDef& yard = it_yard->second;
   const InstallationDef& mine = it_mine->second;
 
-  const double rate_per_day =
-      std::max(0.0, yard.build_rate_tons_per_day) * static_cast<double>(yards) * shipyard_mult;
+  const double rate_per_day = std::max(0.0, yard.build_rate_tons_per_day) * static_cast<double>(yards) * shipyard_mult;
   if (rate_per_day <= 1e-9) return 0;
 
+  // Determine expected per-mine yields. If the mine uses the modern
+  // 'tons per day' model, distribute output across the body's deposits
+  // by remaining composition (mirrors Simulation::tick_colonies).
+  std::unordered_map<std::string, double> per_mine_yield;
+  bool using_generic = false;
+
+  if (mine.mining_tons_per_day > 0.0) {
+    if (const Body* b = find_ptr(sim.state().bodies, c.body_id)) {
+      if (!b->mineral_deposits.empty()) {
+        double total_remaining = 0.0;
+        for (const auto& [mineral, rem_raw] : b->mineral_deposits) {
+          const double rem = std::max(0.0, rem_raw);
+          if (rem > 1e-12) total_remaining += rem;
+        }
+        if (total_remaining > 1e-12) {
+          using_generic = true;
+          const double cap = mine.mining_tons_per_day * mining_mult; // per mine per day
+          for (const auto& [mineral, rem_raw] : b->mineral_deposits) {
+            const double rem = std::max(0.0, rem_raw);
+            if (rem <= 1e-12) continue;
+            per_mine_yield[mineral] = cap * (rem / total_remaining);
+          }
+        }
+      }
+    }
+  }
+
+  // Legacy fixed-output mines.
+  if (!using_generic) {
+    for (const auto& [mineral, per_day_raw] : mine.produces_per_day) {
+      const double per_day = std::max(0.0, per_day_raw) * mining_mult;
+      if (per_day <= 1e-12) continue;
+      per_mine_yield[mineral] = per_day;
+    }
+  }
+
   int target = 0;
-  for (const auto& [mineral, cost_per_ton] : yard.build_costs_per_ton) {
-    if (cost_per_ton <= 0.0) continue;
+  for (const auto& [mineral, cost_per_ton_raw] : yard.build_costs_per_ton) {
+    const double cost_per_ton = std::max(0.0, cost_per_ton_raw);
+    if (cost_per_ton <= 1e-12) continue;
     const double required = rate_per_day * cost_per_ton;
 
-    auto it_prod = mine.produces_per_day.find(mineral);
-    if (it_prod == mine.produces_per_day.end()) continue;
-    const double per_day = it_prod->second * mining_mult;
+    auto it = per_mine_yield.find(mineral);
+    if (it == per_mine_yield.end()) continue; // not mineable locally
+    const double per_day = it->second;
     if (per_day <= 1e-9) continue;
 
     const int needed = static_cast<int>(std::ceil(required / per_day));

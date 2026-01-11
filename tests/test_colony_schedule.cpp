@@ -1,3 +1,4 @@
+#include <cmath>
 #include <iostream>
 
 #include "nebula4x/core/colony_schedule.h"
@@ -177,6 +178,89 @@ int test_colony_schedule() {
     const ColonySchedule sched = estimate_colony_schedule(sim, c.id, opt);
     N4X_ASSERT(sched.ok);
     N4X_ASSERT(sched.stalled);
+  }
+
+
+
+  // --- Case 4: Generic mining (mining_tons_per_day) should feed shipyard builds in the schedule. ---
+  // This validates that the colony schedule simulation matches the modern mining model used in
+  // Simulation::tick_colonies (capacity distributed across all deposits by remaining composition).
+  {
+    ContentDB content2;
+
+    // Shipyard consumes two minerals per ton.
+    {
+      InstallationDef shipyard;
+      shipyard.id = "shipyard";
+      shipyard.name = "Shipyard";
+      shipyard.build_rate_tons_per_day = 100.0;
+      shipyard.build_costs_per_ton = {{"Duranium", 1.0}, {"Tritanium", 1.0}};
+      content2.installations[shipyard.id] = shipyard;
+    }
+
+    // Generic mine: no fixed produces_per_day; output is derived from deposits via mining_tons_per_day.
+    {
+      InstallationDef mine;
+      mine.id = "automated_mine";
+      mine.name = "Generic Mine";
+      mine.mining = true;
+      mine.mining_tons_per_day = 100.0;
+      content2.installations[mine.id] = mine;
+    }
+
+    SimConfig cfg2;
+    cfg2.seconds_per_day = 60.0;
+
+    Simulation sim2(content2, cfg2);
+    GameState& st2 = sim2.state();
+
+    Faction f2;
+    f2.id = 201;
+    f2.name = "F2";
+    st2.factions[f2.id] = f2;
+
+    Body b2;
+    b2.id = 202;
+    b2.name = "B2";
+    b2.mineral_deposits = {{"Duranium", 1000.0}, {"Tritanium", 1000.0}};
+    st2.bodies[b2.id] = b2;
+
+    Colony c2;
+    c2.id = 203;
+    c2.name = "Col4";
+    c2.body_id = b2.id;
+    c2.faction_id = f2.id;
+    c2.installations["shipyard"] = 1;
+    c2.installations["automated_mine"] = 1;
+
+    BuildOrder ord;
+    ord.design_id = "test_ship";
+    ord.tons_remaining = 100.0;
+    ord.auto_queued = false;
+    c2.shipyard_queue.push_back(ord);
+
+    st2.colonies[c2.id] = c2;
+
+    ColonyScheduleOptions opt;
+    opt.max_days = 10;
+    opt.max_events = 8;
+    opt.include_shipyard = true;
+    opt.include_construction = false;
+
+    const ColonySchedule sched = estimate_colony_schedule(sim2, c2.id, opt);
+    N4X_ASSERT(sched.ok);
+    N4X_ASSERT(!sched.stalled);
+    N4X_ASSERT(sched.events.size() == 1);
+    N4X_ASSERT(sched.events[0].kind == ColonyScheduleEventKind::ShipyardComplete);
+    N4X_ASSERT(sched.events[0].day == 2);
+
+    // Minerals should have been mined then immediately consumed by the shipyard build.
+    auto it_d = sched.minerals_end.find("Duranium");
+    auto it_t = sched.minerals_end.find("Tritanium");
+    const double d_end = (it_d == sched.minerals_end.end()) ? 0.0 : it_d->second;
+    const double t_end = (it_t == sched.minerals_end.end()) ? 0.0 : it_t->second;
+    N4X_ASSERT(std::abs(d_end) < 1e-6);
+    N4X_ASSERT(std::abs(t_end) < 1e-6);
   }
 
   return 0;

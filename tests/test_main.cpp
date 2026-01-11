@@ -18,6 +18,7 @@ int test_fuel_planner();
 int test_industry();
 int test_refit();
 int test_diplomacy();
+int test_piracy_suppression();
 int test_auto_routing();
 int test_auto_explore();
 int test_order_repeat();
@@ -55,6 +56,7 @@ int test_auto_colonize();
 int test_auto_salvage();
 int test_reverse_engineering();
 int test_anomalies();
+int test_anomaly_discovery();
 int test_missile_components();
 int test_auto_tanker();
 int test_ship_repairs();
@@ -62,6 +64,8 @@ int test_crew_experience();
 int test_electronic_warfare();
 int test_fleets();
 int test_ai_economy();
+int test_ai_empire_fleet_missions();
+int test_victory();
 int test_research_planner();
 int test_research_schedule();
 int test_colony_schedule();
@@ -165,6 +169,7 @@ int main(int argc, char** argv) {
       {"industry", test_industry},
       {"refit", test_refit},
       {"diplomacy", test_diplomacy},
+      {"piracy_suppression", test_piracy_suppression},
       {"auto_routing", test_auto_routing},
       {"auto_explore", test_auto_explore},
       {"order_repeat", test_order_repeat},
@@ -179,6 +184,8 @@ int main(int argc, char** argv) {
       {"spatial_index", test_spatial_index},
       {"random_scenario", test_random_scenario},
       {"ai_economy", test_ai_economy},
+      {"ai_empire_fleet_missions", test_ai_empire_fleet_missions},
+      {"victory", test_victory},
       {"research_planner", test_research_planner},
       {"research_schedule", test_research_schedule},
       {"colony_schedule", test_colony_schedule},
@@ -216,6 +223,7 @@ int main(int argc, char** argv) {
       {"auto_salvage", test_auto_salvage},
       {"reverse_engineering", test_reverse_engineering},
       {"anomalies", test_anomalies},
+      {"anomaly_discovery", test_anomaly_discovery},
       {"missile_components", test_missile_components},
       {"auto_tanker", test_auto_tanker},
       {"combat_events", test_combat_events},
@@ -229,6 +237,7 @@ int main(int argc, char** argv) {
       {"combat_doctrine", test_combat_doctrine},
       {"ship_repairs", test_ship_repairs},
       {"crew_experience", test_crew_experience},
+      {"electronic_warfare", test_electronic_warfare},
       {"faction_economy_modifiers", test_faction_economy_modifiers},
       {"advisor", test_advisor},
   };

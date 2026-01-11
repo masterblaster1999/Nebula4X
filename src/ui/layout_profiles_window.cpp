@@ -33,6 +33,7 @@ void apply_workspace_preset(const char* preset, UIState& ui) {
     ui.show_planner_window = false;
     ui.show_freight_window = false;
     ui.show_fuel_window = false;
+    ui.show_sustainment_window = false;
     ui.show_time_warp_window = false;
     ui.show_timeline_window = false;
     ui.show_design_studio_window = false;

@@ -199,6 +199,29 @@ void draw_advisor_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& se
     }
   }
 
+  if (st.opt.include_ships) {
+    // Missile ammo threshold.
+    double ammo_pct = std::clamp(st.opt.low_ammo_fraction, 0.0, 1.0) * 100.0;
+    const double ammo_min = 5.0;
+    const double ammo_max = 95.0;
+    if (ImGui::SliderScalar("Low ammo threshold", ImGuiDataType_Double, &ammo_pct, &ammo_min, &ammo_max, "%.0f%%",
+                            ImGuiSliderFlags_AlwaysClamp)) {
+      st.opt.low_ammo_fraction = std::clamp(ammo_pct / 100.0, 0.0, 1.0);
+      st.dirty = true;
+    }
+
+    // Maintenance threshold (only matters when ship maintenance is enabled).
+    double maint_pct = std::clamp(st.opt.low_maintenance_fraction, 0.0, 1.0) * 100.0;
+    const double maint_min = 10.0;
+    const double maint_max = 99.0;
+    if (ImGui::SliderScalar("Low maintenance threshold", ImGuiDataType_Double, &maint_pct, &maint_min, &maint_max, "%.0f%%",
+                            ImGuiSliderFlags_AlwaysClamp)) {
+      st.opt.low_maintenance_fraction = std::clamp(maint_pct / 100.0, 0.0, 1.0);
+      st.dirty = true;
+    }
+  }
+
+
   ImGui::InputTextWithHint("Filter", "(substring)", st.filter, sizeof(st.filter));
   ImGui::SameLine();
   ImGui::Checkbox("Aa", &st.filter_case_sensitive);
@@ -227,7 +250,9 @@ void draw_advisor_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& se
   int cnt_col = 0;
   for (const auto& is : st.cached) {
     if (is.kind == AdvisorIssueKind::LogisticsNeed) ++cnt_log;
-    else if (is.kind == AdvisorIssueKind::ShipLowFuel || is.kind == AdvisorIssueKind::ShipDamaged) ++cnt_ship;
+    else if (is.kind == AdvisorIssueKind::ShipLowFuel || is.kind == AdvisorIssueKind::ShipDamaged ||
+             is.kind == AdvisorIssueKind::ShipLowAmmo || is.kind == AdvisorIssueKind::ShipLowMaintenance)
+      ++cnt_ship;
     else ++cnt_col;
   }
 
@@ -315,10 +340,19 @@ void draw_advisor_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& se
               sh->auto_refuel = true;
               did_fix = true;
             }
+          } else if (is.kind == AdvisorIssueKind::ShipLowAmmo && !sh->auto_rearm) {
+            if (ImGui::SmallButton(("Enable auto-rearm##" + std::to_string((unsigned long long)is.ship_id)).c_str())) {
+              sh->auto_rearm = true;
+              did_fix = true;
+            }
           } else if (is.kind == AdvisorIssueKind::ShipDamaged && !sh->auto_repair) {
             if (ImGui::SmallButton(("Enable auto-repair##" + std::to_string((unsigned long long)is.ship_id)).c_str())) {
               sh->auto_repair = true;
               did_fix = true;
+            }
+          } else if (is.kind == AdvisorIssueKind::ShipLowMaintenance) {
+            if (ImGui::SmallButton(("Sustainment##" + std::to_string((unsigned long long)is.ship_id)).c_str())) {
+              ui.show_sustainment_window = true;
             }
           }
         }

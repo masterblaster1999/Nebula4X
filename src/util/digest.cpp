@@ -12,7 +12,7 @@
 #include <utility>
 #include <vector>
 
-#include "nebula4x/core/entities.h"
+#include "nebula4x/core/game_state.h"
 
 namespace nebula4x {
 namespace {
@@ -97,6 +97,32 @@ std::vector<T> sorted_unique_copy(std::vector<T> v) {
 static void hash_vec2(Digest64& d, const Vec2& v) {
   d.add_double(v.x);
   d.add_double(v.y);
+}
+
+static void hash_victory_rules(Digest64& d, const VictoryRules& r) {
+  d.add_bool(r.enabled);
+  d.add_bool(r.exclude_pirates);
+  d.add_bool(r.elimination_enabled);
+  d.add_bool(r.elimination_requires_colony);
+
+  d.add_double(r.score_threshold);
+  d.add_double(r.score_lead_margin);
+
+  d.add_double(r.score_colony_points);
+  d.add_double(r.score_population_per_million);
+  d.add_double(r.score_installation_cost_mult);
+  d.add_double(r.score_ship_mass_ton_mult);
+  d.add_double(r.score_known_tech_points);
+  d.add_double(r.score_discovered_system_points);
+  d.add_double(r.score_discovered_anomaly_points);
+}
+
+static void hash_victory_state(Digest64& d, const VictoryState& s) {
+  d.add_bool(s.game_over);
+  d.add_u64(s.winner_faction_id);
+  d.add_enum(s.reason);
+  d.add_i64(s.victory_day);
+  d.add_double(s.winner_score);
 }
 
 static void hash_order(Digest64& d, const Order& ord) {
@@ -374,6 +400,11 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
   d.add_u64(s.next_id);
   d.add_u64(s.next_event_seq);
 
+  // Victory rules/state affect simulation behavior (e.g. game over checks), so
+  // they are included even when UI state is excluded.
+  hash_victory_rules(d, s.victory_rules);
+  hash_victory_state(d, s.victory_state);
+
   if (opt.include_ui_state) d.add_u64(s.selected_system);
 
   // Systems
@@ -385,6 +416,9 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
     hash_vec2(d, sys.galaxy_pos);
     d.add_u64(sys.region_id);
     d.add_double(sys.nebula_density);
+    d.add_double(sys.storm_peak_intensity);
+    d.add_i64(sys.storm_start_day);
+    d.add_i64(sys.storm_end_day);
 
     auto bodies = sys.bodies;
     bodies = sorted_unique_copy(std::move(bodies));
@@ -415,6 +449,7 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
     d.add_double(r.salvage_richness_mult);
     d.add_double(r.nebula_bias);
     d.add_double(r.pirate_risk);
+    d.add_double(r.pirate_suppression);
     d.add_double(r.ruins_density);
   }
 
@@ -559,6 +594,11 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
     d.add_u64(ms.target_faction_id);
     d.add_double(ms.damage);
     d.add_double(ms.damage_initial);
+    d.add_double(ms.speed_mkm_per_day);
+    d.add_double(ms.range_remaining_mkm);
+    hash_vec2(d, ms.pos_mkm);
+    d.add_double(ms.attacker_eccm_strength);
+    d.add_double(ms.attacker_sensor_mkm_raw);
     d.add_double(ms.eta_days_total);
     d.add_double(ms.eta_days_remaining);
     hash_vec2(d, ms.launch_pos_mkm);
@@ -670,6 +710,22 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
       d.add_string(c.last_seen_design_id);
       d.add_u64(c.last_seen_faction_id);
     }
+
+    // Diplomatic offer cooldowns.
+    d.add_size(f.diplomacy_offer_cooldown_until_day.size());
+    for (Id sid : sorted_keys(f.diplomacy_offer_cooldown_until_day)) {
+      d.add_u64(sid);
+      auto it = f.diplomacy_offer_cooldown_until_day.find(sid);
+      d.add_i64(it == f.diplomacy_offer_cooldown_until_day.end() ? 0 : it->second);
+    }
+
+    // Pirate hideout rebuild cooldowns.
+    d.add_size(f.pirate_hideout_cooldown_until_day.size());
+    for (Id sid : sorted_keys(f.pirate_hideout_cooldown_until_day)) {
+      d.add_u64(sid);
+      auto it = f.pirate_hideout_cooldown_until_day.find(sid);
+      d.add_i64(it == f.pirate_hideout_cooldown_until_day.end() ? 0 : it->second);
+    }
   }
 
   // Treaties
@@ -682,6 +738,20 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
     d.add_enum(t.type);
     d.add_i64(t.start_day);
     d.add_i64(t.duration_days);
+  // Diplomatic offers
+  d.add_size(s.diplomatic_offers.size());
+  for (Id oid : sorted_keys(s.diplomatic_offers)) {
+    const auto& o = s.diplomatic_offers.at(oid);
+    d.add_u64(oid);
+    d.add_u64(o.from_faction_id);
+    d.add_u64(o.to_faction_id);
+    d.add_enum(o.treaty_type);
+    d.add_i64(o.treaty_duration_days);
+    d.add_i64(o.created_day);
+    d.add_i64(o.expire_day);
+    d.add_string(o.message);
+  }
+
   }
 
   // Fleets

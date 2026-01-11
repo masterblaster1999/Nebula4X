@@ -440,6 +440,59 @@ void Simulation::discover_system_for_faction(Id faction_id, Id system_id) {
   }
 }
 
+
+void Simulation::discover_anomaly_for_faction(Id faction_id, Id anomaly_id, Id discovered_by_ship_id) {
+  if (anomaly_id == kInvalidId) return;
+  auto* fac = find_ptr(state_.factions, faction_id);
+  if (!fac) return;
+
+  const auto* anom = find_ptr(state_.anomalies, anomaly_id);
+  if (!anom) return;
+
+  if (std::find(fac->discovered_anomalies.begin(), fac->discovered_anomalies.end(), anomaly_id) !=
+      fac->discovered_anomalies.end()) {
+    return;
+  }
+
+  fac->discovered_anomalies.push_back(anomaly_id);
+
+  const auto* sys = find_ptr(state_.systems, anom->system_id);
+  const std::string sys_name = sys ? sys->name : std::string("(unknown)");
+  const std::string anom_name = !anom->name.empty() ? anom->name : std::string("(unnamed anomaly)");
+
+  EventContext ctx;
+  ctx.faction_id = faction_id;
+  ctx.system_id = anom->system_id;
+  ctx.ship_id = discovered_by_ship_id;
+
+  const std::string msg = fac->name + " detected anomaly " + anom_name + " in " + sys_name;
+  push_event(EventLevel::Info, EventCategory::Exploration, msg, ctx);
+
+  // Share anomaly intel with mutual-friendly factions.
+  const auto faction_ids = sorted_keys(state_.factions);
+  for (Id other_id : faction_ids) {
+    if (other_id == faction_id) continue;
+    if (!are_factions_mutual_friendly(faction_id, other_id)) continue;
+    auto* other = find_ptr(state_.factions, other_id);
+    if (!other) continue;
+
+    if (std::find(other->discovered_anomalies.begin(), other->discovered_anomalies.end(), anomaly_id) !=
+        other->discovered_anomalies.end()) {
+      continue;
+    }
+
+    other->discovered_anomalies.push_back(anomaly_id);
+
+    EventContext ctx2;
+    ctx2.faction_id = other_id;
+    ctx2.faction_id2 = faction_id;
+    ctx2.system_id = anom->system_id;
+
+    const std::string msg2 = "Intel: " + fac->name + " shared anomaly location " + anom_name + " in " + sys_name;
+    push_event(EventLevel::Info, EventCategory::Intel, msg2, ctx2);
+  }
+}
+
 void Simulation::survey_jump_point_for_faction(Id faction_id, Id jump_point_id) {
   if (jump_point_id == kInvalidId) return;
   auto* fac = find_ptr(state_.factions, faction_id);

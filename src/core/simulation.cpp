@@ -778,6 +778,90 @@ std::vector<LogisticsNeed> Simulation::logistics_needs_for_faction(Id faction_id
         n.missing_tons = std::max(0.0, desired - have);
         out.push_back(std::move(n));
       }
+
+      // Rearm needs: enough Munitions at the colony to top up docked ships' missile ammo.
+      {
+        constexpr const char* kMunitions = "Munitions";
+        double desired_munitions = 0.0;
+
+        for (Id sid : ship_ids) {
+          const Ship* ship = find_ptr(state_.ships, sid);
+          if (!ship) continue;
+          if (ship->faction_id != faction_id) continue;
+          if (ship->system_id != body->system_id) continue;
+
+          const double dist = (ship->position_mkm - body->position_mkm).length();
+          if (dist > dock_range + 1e-9) continue;
+
+          const ShipDesign* d = find_design(ship->design_id);
+          if (!d) continue;
+          const int cap = std::max(0, d->missile_ammo_capacity);
+          if (cap <= 0) continue;
+
+          int have_ship = ship->missile_ammo;
+          if (have_ship < 0) have_ship = cap;
+          have_ship = std::clamp(have_ship, 0, cap);
+          const int need = cap - have_ship;
+          if (need > 0) desired_munitions += static_cast<double>(need);
+        }
+
+        if (desired_munitions > 1e-9) {
+          const double have = [&]() {
+            if (auto it2 = colony->minerals.find(kMunitions); it2 != colony->minerals.end()) return it2->second;
+            return 0.0;
+          }();
+
+          LogisticsNeed n;
+          n.colony_id = cid;
+          n.kind = LogisticsNeedKind::Rearm;
+          n.mineral = kMunitions;
+          n.desired_tons = desired_munitions;
+          n.have_tons = have;
+          n.missing_tons = std::max(0.0, desired_munitions - have);
+          out.push_back(std::move(n));
+        }
+      }
+
+      // Maintenance needs: keep a buffer of maintenance supplies at the colony for docked ships.
+      if (cfg_.enable_ship_maintenance && cfg_.ship_maintenance_tons_per_day_per_mass_ton > 0.0 &&
+          !cfg_.ship_maintenance_resource_id.empty()) {
+        const std::string& res = cfg_.ship_maintenance_resource_id;
+
+        double per_day = 0.0;
+        for (Id sid : ship_ids) {
+          const Ship* ship = find_ptr(state_.ships, sid);
+          if (!ship) continue;
+          if (ship->faction_id != faction_id) continue;
+          if (ship->system_id != body->system_id) continue;
+
+          const double dist = (ship->position_mkm - body->position_mkm).length();
+          if (dist > dock_range + 1e-9) continue;
+
+          const ShipDesign* d = find_design(ship->design_id);
+          if (!d) continue;
+          const double mass = std::max(0.0, d->mass_tons);
+          per_day += mass * cfg_.ship_maintenance_tons_per_day_per_mass_ton;
+        }
+
+        const double buffer_days = std::max(0.0, cfg_.auto_freight_industry_input_buffer_days);
+        const double desired_maint = per_day * buffer_days;
+
+        if (desired_maint > 1e-9) {
+          const double have = [&]() {
+            if (auto it2 = colony->minerals.find(res); it2 != colony->minerals.end()) return it2->second;
+            return 0.0;
+          }();
+
+          LogisticsNeed n;
+          n.colony_id = cid;
+          n.kind = LogisticsNeedKind::Maintenance;
+          n.mineral = res;
+          n.desired_tons = desired_maint;
+          n.have_tons = have;
+          n.missing_tons = std::max(0.0, desired_maint - have);
+          out.push_back(std::move(n));
+        }
+      }
     }
   }
 
@@ -799,6 +883,95 @@ bool Simulation::is_jump_point_surveyed_by_faction(Id viewer_faction_id, Id jump
   if (!fac) return true;
   return std::find(fac->surveyed_jump_points.begin(), fac->surveyed_jump_points.end(), jump_point_id) !=
          fac->surveyed_jump_points.end();
+}
+
+bool Simulation::is_anomaly_discovered_by_faction(Id viewer_faction_id, Id anomaly_id) const {
+  if (anomaly_id == kInvalidId) return false;
+  // When there is no "viewer" (e.g. omniscient mode / tools), treat all anomalies as known.
+  if (viewer_faction_id == kInvalidId) return true;
+  const auto* fac = find_ptr(state_.factions, viewer_faction_id);
+  if (!fac) return true;
+  return std::find(fac->discovered_anomalies.begin(), fac->discovered_anomalies.end(), anomaly_id) !=
+         fac->discovered_anomalies.end();
+}
+
+
+
+// --- Environmental helpers (nebula + storms) ---
+
+bool Simulation::system_has_storm(Id system_id) const {
+  const auto* sys = find_ptr(state_.systems, system_id);
+  if (!sys) return false;
+  if (!(sys->storm_peak_intensity > 0.0)) return false;
+  if (sys->storm_end_day <= sys->storm_start_day) return false;
+
+  const double now = static_cast<double>(state_.date.days_since_epoch()) +
+                     static_cast<double>(state_.hour_of_day) / 24.0;
+  return now >= static_cast<double>(sys->storm_start_day) &&
+         now < static_cast<double>(sys->storm_end_day);
+}
+
+double Simulation::system_storm_intensity(Id system_id) const {
+  const auto* sys = find_ptr(state_.systems, system_id);
+  if (!sys) return 0.0;
+  if (!(sys->storm_peak_intensity > 0.0)) return 0.0;
+  if (sys->storm_end_day <= sys->storm_start_day) return 0.0;
+
+  const double now = static_cast<double>(state_.date.days_since_epoch()) +
+                     static_cast<double>(state_.hour_of_day) / 24.0;
+  const double start = static_cast<double>(sys->storm_start_day);
+  const double end = static_cast<double>(sys->storm_end_day);
+  if (now < start || now >= end) return 0.0;
+
+  const double dur = end - start;
+  if (dur <= 0.0) return 0.0;
+
+  // Smooth pulse: 0 -> 1 -> 0 across the storm window.
+  double t = (now - start) / dur;
+  t = std::clamp(t, 0.0, 1.0);
+  constexpr double kPi = 3.141592653589793238462643383279502884;
+  const double pulse = std::sin(kPi * t);
+
+  const double peak = std::clamp(sys->storm_peak_intensity, 0.0, 1.0);
+  return std::clamp(peak * std::max(0.0, pulse), 0.0, 1.0);
+}
+
+double Simulation::system_sensor_environment_multiplier(Id system_id) const {
+  const auto* sys = find_ptr(state_.systems, system_id);
+  if (!sys) return 1.0;
+
+  const double neb = std::clamp(sys->nebula_density, 0.0, 1.0);
+  const double base = std::clamp(1.0 - 0.65 * neb, 0.25, 1.0);
+
+  if (!cfg_.enable_nebula_storms) return base;
+
+  const double storm = system_storm_intensity(system_id);
+  const double pen = std::max(0.0, cfg_.nebula_storm_sensor_penalty);
+  const double storm_mult = std::clamp(1.0 - pen * storm, 0.05, 1.0);
+
+  return std::clamp(base * storm_mult, 0.05, 1.0);
+}
+
+double Simulation::system_movement_speed_multiplier(Id system_id) const {
+  const auto* sys = find_ptr(state_.systems, system_id);
+  if (!sys) return 1.0;
+
+  const double neb = std::clamp(sys->nebula_density, 0.0, 1.0);
+  const double storm = (cfg_.enable_nebula_storms ? system_storm_intensity(system_id) : 0.0);
+
+  double m = 1.0;
+
+  if (cfg_.enable_nebula_drag) {
+    const double drag = std::max(0.0, cfg_.nebula_drag_speed_penalty_at_max_density);
+    m *= std::clamp(1.0 - drag * neb, 0.05, 1.0);
+  }
+
+  if (cfg_.enable_nebula_storms) {
+    const double pen = std::max(0.0, cfg_.nebula_storm_speed_penalty);
+    m *= std::clamp(1.0 - pen * storm, 0.05, 1.0);
+  }
+
+  return std::clamp(m, 0.05, 1.0);
 }
 
 
@@ -1244,6 +1417,326 @@ std::vector<Treaty> Simulation::treaties_between(Id faction_a, Id faction_b) con
 }
 
 
+std::vector<DiplomaticOffer> Simulation::diplomatic_offers_between(Id faction_a, Id faction_b) const {
+  std::vector<DiplomaticOffer> out;
+  if (faction_a == kInvalidId || faction_b == kInvalidId) return out;
+  if (faction_a == faction_b) return out;
+  if (state_.diplomatic_offers.empty()) return out;
+
+  for (const auto& [oid, o] : state_.diplomatic_offers) {
+    (void)oid;
+    if ((o.from_faction_id == faction_a && o.to_faction_id == faction_b) ||
+        (o.from_faction_id == faction_b && o.to_faction_id == faction_a)) {
+      out.push_back(o);
+    }
+  }
+
+  std::sort(out.begin(), out.end(), [](const DiplomaticOffer& x, const DiplomaticOffer& y) { return x.id < y.id; });
+  return out;
+}
+
+std::vector<DiplomaticOffer> Simulation::incoming_diplomatic_offers(Id to_faction_id) const {
+  std::vector<DiplomaticOffer> out;
+  if (to_faction_id == kInvalidId) return out;
+  if (state_.diplomatic_offers.empty()) return out;
+
+  for (const auto& [oid, o] : state_.diplomatic_offers) {
+    (void)oid;
+    if (o.to_faction_id == to_faction_id) out.push_back(o);
+  }
+
+  std::sort(out.begin(), out.end(), [](const DiplomaticOffer& x, const DiplomaticOffer& y) { return x.id < y.id; });
+  return out;
+}
+
+Id Simulation::create_diplomatic_offer(Id from_faction_id, Id to_faction_id, TreatyType treaty_type,
+                                       int treaty_duration_days, int offer_expires_in_days,
+                                       bool push_event, std::string* error) {
+  if (error) error->clear();
+
+  if (from_faction_id == kInvalidId || to_faction_id == kInvalidId) {
+    if (error) *error = "Invalid faction id.";
+    return kInvalidId;
+  }
+  if (from_faction_id == to_faction_id) {
+    if (error) *error = "Cannot create an offer to self.";
+    return kInvalidId;
+  }
+  const auto* from = find_ptr(state_.factions, from_faction_id);
+  const auto* to = find_ptr(state_.factions, to_faction_id);
+  if (!from || !to) {
+    if (error) *error = "One or both factions do not exist.";
+    return kInvalidId;
+  }
+
+  // Do not allow duplicate pending offers of the same type.
+  for (const auto& [oid, o] : state_.diplomatic_offers) {
+    (void)oid;
+    if (o.from_faction_id == from_faction_id && o.to_faction_id == to_faction_id && o.treaty_type == treaty_type) {
+      if (error) *error = "An offer of this type is already pending.";
+      return kInvalidId;
+    }
+  }
+
+  // Do not offer a treaty that is already active.
+  Id a = from_faction_id;
+  Id b = to_faction_id;
+  normalize_faction_pair(a, b);
+  for (const auto& [tid, t] : state_.treaties) {
+    (void)tid;
+    if (t.faction_a == a && t.faction_b == b && t.type == treaty_type) {
+      if (error) *error = "A treaty of this type is already active.";
+      return kInvalidId;
+    }
+  }
+
+  if (treaty_duration_days == 0) treaty_duration_days = 1;
+
+  const int now_day = static_cast<int>(state_.date.days_since_epoch());
+  const int expire_day = (offer_expires_in_days <= 0) ? -1 : (now_day + std::max(1, offer_expires_in_days));
+
+  DiplomaticOffer offer;
+  offer.id = allocate_id(state_);
+  offer.from_faction_id = from_faction_id;
+  offer.to_faction_id = to_faction_id;
+  offer.treaty_type = treaty_type;
+  offer.treaty_duration_days = treaty_duration_days;
+  offer.created_day = now_day;
+  offer.expire_day = expire_day;
+
+  state_.diplomatic_offers[offer.id] = offer;
+
+  if (push_event) {
+    EventContext ctx;
+    ctx.faction_id = to_faction_id;
+    ctx.faction_id2 = from_faction_id;
+
+    std::string msg = "Diplomatic offer received from " + from->name + ": ";
+    msg += treaty_type_title(treaty_type);
+
+    if (treaty_duration_days < 0) {
+      msg += " (indefinite)";
+    } else {
+      msg += " (" + std::to_string(treaty_duration_days) + " days)";
+    }
+
+    if (expire_day >= 0) {
+      msg += " [expires in " + std::to_string(std::max(0, expire_day - now_day)) + " days]";
+    }
+
+    this->push_event(EventLevel::Info, EventCategory::Diplomacy, std::move(msg), ctx);
+  }
+
+  return offer.id;
+}
+
+bool Simulation::accept_diplomatic_offer(Id offer_id, bool push_event, std::string* error) {
+  if (error) error->clear();
+
+  auto it = state_.diplomatic_offers.find(offer_id);
+  if (it == state_.diplomatic_offers.end()) {
+    if (error) *error = "Offer not found.";
+    return false;
+  }
+
+  const DiplomaticOffer offer = it->second;
+
+  // Ensure factions still exist.
+  const auto* from = find_ptr(state_.factions, offer.from_faction_id);
+  const auto* to = find_ptr(state_.factions, offer.to_faction_id);
+  if (!from || !to) {
+    if (error) *error = "One or both factions no longer exist.";
+    return false;
+  }
+
+  const Id treaty_id = create_treaty(offer.from_faction_id, offer.to_faction_id, offer.treaty_type,
+                                     offer.treaty_duration_days, push_event, error);
+  if (treaty_id == kInvalidId) return false;
+
+  // Remove the offer after the treaty is created.
+  state_.diplomatic_offers.erase(it);
+
+  // Anti-spam cooldown for both factions.
+  const int now_day = static_cast<int>(state_.date.days_since_epoch());
+  constexpr int kCooldownDays = 60;
+
+  if (auto* f = find_ptr(state_.factions, offer.from_faction_id)) {
+    int& until = f->diplomacy_offer_cooldown_until_day[offer.to_faction_id];
+    until = std::max(until, now_day + kCooldownDays);
+  }
+  if (auto* f = find_ptr(state_.factions, offer.to_faction_id)) {
+    int& until = f->diplomacy_offer_cooldown_until_day[offer.from_faction_id];
+    until = std::max(until, now_day + kCooldownDays);
+  }
+
+  return true;
+}
+
+bool Simulation::decline_diplomatic_offer(Id offer_id, bool push_event, std::string* error) {
+  if (error) error->clear();
+
+  auto it = state_.diplomatic_offers.find(offer_id);
+  if (it == state_.diplomatic_offers.end()) {
+    if (error) *error = "Offer not found.";
+    return false;
+  }
+
+  const DiplomaticOffer offer = it->second;
+  const auto* from = find_ptr(state_.factions, offer.from_faction_id);
+  const auto* to = find_ptr(state_.factions, offer.to_faction_id);
+
+  state_.diplomatic_offers.erase(it);
+
+  const int now_day = static_cast<int>(state_.date.days_since_epoch());
+  constexpr int kCooldownDays = 90;
+
+  if (auto* f = find_ptr(state_.factions, offer.from_faction_id)) {
+    int& until = f->diplomacy_offer_cooldown_until_day[offer.to_faction_id];
+    until = std::max(until, now_day + kCooldownDays);
+  }
+
+  if (push_event) {
+    EventContext ctx;
+    ctx.faction_id = offer.to_faction_id;
+    ctx.faction_id2 = offer.from_faction_id;
+
+    std::string msg = "Diplomatic offer declined: ";
+    if (to) msg += to->name + " declined ";
+    msg += treaty_type_title(offer.treaty_type);
+    if (from) msg += " proposed by " + from->name;
+    this->push_event(EventLevel::Info, EventCategory::Diplomacy, std::move(msg), ctx);
+  }
+
+  return true;
+}
+
+
+FactionScoreBreakdown Simulation::compute_faction_score(Id faction_id) const {
+  return compute_faction_score(faction_id, state_.victory_rules);
+}
+
+FactionScoreBreakdown Simulation::compute_faction_score(Id faction_id, const VictoryRules& rules) const {
+  FactionScoreBreakdown out;
+  const auto* fac = find_ptr(state_.factions, faction_id);
+  if (!fac) return out;
+
+  int colony_count = 0;
+  double pop_million = 0.0;
+  double installation_cost = 0.0;
+
+  for (const auto& [cid, c] : state_.colonies) {
+    (void)cid;
+    if (c.faction_id != faction_id) continue;
+    colony_count++;
+    pop_million += c.population_millions;
+
+    for (const auto& [inst_id, count] : c.installations) {
+      if (count <= 0) continue;
+      auto it = content_.installations.find(inst_id);
+      if (it == content_.installations.end()) continue;
+      installation_cost += it->second.construction_cost * static_cast<double>(count);
+    }
+  }
+
+  double ship_mass_tons = 0.0;
+  for (const auto& [sid, sh] : state_.ships) {
+    (void)sid;
+    if (sh.faction_id != faction_id) continue;
+    if (const ShipDesign* d = find_design(sh.design_id)) ship_mass_tons += d->mass_tons;
+  }
+
+  const double tech_count = static_cast<double>(fac->known_techs.size());
+  const double discovered_systems = static_cast<double>(fac->discovered_systems.size());
+  const double discovered_anomalies = static_cast<double>(fac->discovered_anomalies.size());
+
+  out.colonies_points = static_cast<double>(colony_count) * rules.score_colony_points;
+  out.population_points = pop_million * rules.score_population_per_million;
+  out.installations_points = installation_cost * rules.score_installation_cost_mult;
+  out.ships_points = ship_mass_tons * rules.score_ship_mass_ton_mult;
+  out.tech_points = tech_count * rules.score_known_tech_points;
+  out.exploration_points = discovered_systems * rules.score_discovered_system_points +
+                           discovered_anomalies * rules.score_discovered_anomaly_points;
+
+  return out;
+}
+
+std::vector<ScoreboardEntry> Simulation::compute_scoreboard() const {
+  return compute_scoreboard(state_.victory_rules);
+}
+
+std::vector<ScoreboardEntry> Simulation::compute_scoreboard(const VictoryRules& rules) const {
+  std::vector<ScoreboardEntry> out;
+  out.reserve(state_.factions.size());
+
+  // Pre-aggregate a few values in one pass for performance.
+  std::unordered_map<Id, int> colony_counts;
+  std::unordered_map<Id, double> pops;
+  std::unordered_map<Id, double> inst_costs;
+  colony_counts.reserve(state_.factions.size() * 2 + 8);
+  pops.reserve(state_.factions.size() * 2 + 8);
+  inst_costs.reserve(state_.factions.size() * 2 + 8);
+
+  for (const auto& [cid, c] : state_.colonies) {
+    (void)cid;
+    if (c.faction_id == kInvalidId) continue;
+    colony_counts[c.faction_id] += 1;
+    pops[c.faction_id] += c.population_millions;
+    if (rules.score_installation_cost_mult > 0.0) {
+      double cost = 0.0;
+      for (const auto& [inst_id, count] : c.installations) {
+        if (count <= 0) continue;
+        auto it = content_.installations.find(inst_id);
+        if (it == content_.installations.end()) continue;
+        cost += it->second.construction_cost * static_cast<double>(count);
+      }
+      if (cost != 0.0) inst_costs[c.faction_id] += cost;
+    }
+  }
+
+  std::unordered_map<Id, double> ship_mass;
+  ship_mass.reserve(state_.factions.size() * 2 + 8);
+  for (const auto& [sid, sh] : state_.ships) {
+    (void)sid;
+    if (sh.faction_id == kInvalidId) continue;
+    if (const ShipDesign* d = find_design(sh.design_id)) ship_mass[sh.faction_id] += d->mass_tons;
+  }
+
+  for (Id fid : sorted_keys(state_.factions)) {
+    const auto& f = state_.factions.at(fid);
+    ScoreboardEntry e;
+    e.faction_id = fid;
+    e.faction_name = f.name;
+    e.control = f.control;
+    e.eligible_for_victory = !(rules.exclude_pirates && f.control == FactionControl::AI_Pirate);
+
+    const int colonies = colony_counts.contains(fid) ? colony_counts.at(fid) : 0;
+    const bool has_colony = colonies > 0;
+    const bool has_ship = ship_mass.contains(fid) && ship_mass.at(fid) > 0.0;
+    e.alive = rules.elimination_requires_colony ? has_colony : (has_colony || has_ship);
+
+    // Build score breakdown using aggregated values.
+    e.score.colonies_points = static_cast<double>(colonies) * rules.score_colony_points;
+    e.score.population_points = (pops.contains(fid) ? pops.at(fid) : 0.0) * rules.score_population_per_million;
+    e.score.installations_points = (inst_costs.contains(fid) ? inst_costs.at(fid) : 0.0) * rules.score_installation_cost_mult;
+    e.score.ships_points = (ship_mass.contains(fid) ? ship_mass.at(fid) : 0.0) * rules.score_ship_mass_ton_mult;
+    e.score.tech_points = static_cast<double>(f.known_techs.size()) * rules.score_known_tech_points;
+    e.score.exploration_points = static_cast<double>(f.discovered_systems.size()) * rules.score_discovered_system_points +
+                                 static_cast<double>(f.discovered_anomalies.size()) * rules.score_discovered_anomaly_points;
+
+    out.push_back(std::move(e));
+  }
+
+  std::sort(out.begin(), out.end(), [](const ScoreboardEntry& a, const ScoreboardEntry& b) {
+    const double at = a.score.total_points();
+    const double bt = b.score.total_points();
+    if (at != bt) return at > bt;
+    return a.faction_id < b.faction_id;
+  });
+
+  return out;
+}
+
+
 bool Simulation::set_diplomatic_status(Id from_faction_id, Id to_faction_id, DiplomacyStatus status, bool reciprocal,
                                        bool push_event_on_change) {
   if (from_faction_id == kInvalidId || to_faction_id == kInvalidId) return false;
@@ -1420,9 +1913,24 @@ std::vector<Id> Simulation::detected_hostile_ships_in_system(Id viewer_faction_i
 
   const double max_sig = sim_sensors::max_signature_multiplier_for_detection(*this);
 
+  auto sane_nonneg = [](double x, double fallback) {
+    if (!std::isfinite(x)) return fallback;
+    if (x < 0.0) return 0.0;
+    return x;
+  };
+
   for (const auto& src : sources) {
     if (src.range_mkm <= 1e-9) continue;
-    const auto nearby = idx.query_radius(src.pos_mkm, src.range_mkm * max_sig, 1e-9);
+
+    // EW multiplier can increase effective range (ECCM) or reduce it (target ECM).
+    // For the spatial index broadphase, assume target ECM = 0 (worst case range),
+    // and clamp to match sim_sensors::any_source_detects().
+    const double src_eccm = sane_nonneg(src.eccm_strength, 0.0);
+    double max_ew_mult = (1.0 + src_eccm) / 1.0;
+    if (!std::isfinite(max_ew_mult)) max_ew_mult = 1.0;
+    max_ew_mult = std::clamp(max_ew_mult, 0.1, 10.0);
+
+    const auto nearby = idx.query_radius(src.pos_mkm, src.range_mkm * max_sig * max_ew_mult, 1e-9);
     for (Id sid : nearby) {
       const auto* sh = find_ptr(state_.ships, sid);
       if (!sh) continue;
@@ -1430,12 +1938,17 @@ std::vector<Id> Simulation::detected_hostile_ships_in_system(Id viewer_faction_i
       if (sh->faction_id == viewer_faction_id) continue;
       if (!are_factions_hostile(viewer_faction_id, sh->faction_id)) continue;
 
-      // Apply target signature/stealth + EMCON: effective detection range scales by the
-      // target's signature multiplier. Values < 1.0 are harder to detect, values > 1.0 are
-      // easier to detect.
+      // Apply target signature/stealth + EMCON and electronic warfare.
       const auto* d = find_design(sh->design_id);
       const double sig = sim_sensors::effective_signature_multiplier(*this, *sh, d);
-      const double eff = src.range_mkm * sig;
+
+      // Apply electronic warfare (ECCM vs ECM) consistently with any_source_detects().
+      const double tgt_ecm = d ? sane_nonneg(d->ecm_strength, 0.0) : 0.0;
+      double ew_mult = (1.0 + src_eccm) / (1.0 + tgt_ecm);
+      if (!std::isfinite(ew_mult)) ew_mult = 1.0;
+      ew_mult = std::clamp(ew_mult, 0.1, 10.0);
+
+      const double eff = src.range_mkm * sig * ew_mult;
       if (eff <= 1e-9) continue;
       const double dx = sh->position_mkm.x - src.pos_mkm.x;
       const double dy = sh->position_mkm.y - src.pos_mkm.y;

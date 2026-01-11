@@ -213,10 +213,7 @@ void Simulation::tick_combat(double dt_days) {
 
   // Environmental attenuation factor for a system (match simulation_sensors).
   auto system_env_mult = [&](Id system_id) -> double {
-    const auto* sys = find_ptr(state_.systems, system_id);
-    if (!sys) return 1.0;
-    const double nebula = std::clamp(sys->nebula_density, 0.0, 1.0);
-    return std::clamp(1.0 - 0.65 * nebula, 0.25, 1.0);
+    return this->system_sensor_environment_multiplier(system_id);
   };
 
   // Expected beam hit chance (no RNG) based on range + relative angular velocity
@@ -328,18 +325,108 @@ void Simulation::tick_combat(double dt_days) {
       }
     }
 
+    auto dot = [](const Vec2& a, const Vec2& b) -> double { return a.x * b.x + a.y * b.y; };
+
     struct SalvoSeg {
       Id id{kInvalidId};
       Vec2 p0_mkm{0.0, 0.0};
       Vec2 p1_mkm{0.0, 0.0};
+      double dt_days{0.0};
     };
 
-    // Phase 1: advance timers and compute per-tick in-system segments.
+    // Helper: solve for time-to-intercept (days) for a constant-speed missile chasing
+    // a linearly moving target. Returns the smallest non-negative solution, if any.
+    auto intercept_time_days = [&](const Vec2& missile_pos_mkm, double missile_speed_mkm_per_day,
+                                   const Vec2& target_pos_mkm, const Vec2& target_vel_mkm_per_day)
+                                   -> std::optional<double> {
+      if (missile_speed_mkm_per_day <= 1e-9) return std::nullopt;
+      const Vec2 r = target_pos_mkm - missile_pos_mkm;
+      const double c = dot(r, r);
+      if (c <= 1e-12) return 0.0;
+
+      const double vv = dot(target_vel_mkm_per_day, target_vel_mkm_per_day);
+      const double a = vv - missile_speed_mkm_per_day * missile_speed_mkm_per_day;
+      const double b = 2.0 * dot(r, target_vel_mkm_per_day);
+
+      if (std::abs(a) <= 1e-12) {
+        // Linear case: a ~= 0 => b*t + c = 0.
+        if (std::abs(b) <= 1e-12) return std::nullopt;
+        const double t = -c / b;
+        if (t >= 0.0) return t;
+        return std::nullopt;
+      }
+
+      const double disc = b * b - 4.0 * a * c;
+      if (disc < 0.0) return std::nullopt;
+      const double s = std::sqrt(std::max(0.0, disc));
+      const double t1 = (-b - s) / (2.0 * a);
+      const double t2 = (-b + s) / (2.0 * a);
+
+      double best = 1e100;
+      if (t1 >= 0.0) best = std::min(best, t1);
+      if (t2 >= 0.0) best = std::min(best, t2);
+      if (best > 1e50) return std::nullopt;
+      return best;
+    };
+
+    // Helper: expected missile hit chance based on target maneuvering + signature + ECM.
+    auto missile_hit_chance = [&](const MissileSalvo& ms, const Ship& target, const ShipDesign* target_design,
+                                  const Vec2& missile_pos_mkm, const Vec2& missile_vel_mkm_per_day) -> double {
+      if (!cfg_.enable_missile_hit_chance) return 1.0;
+
+      const double base = std::clamp(cfg_.missile_base_hit_chance, 0.0, 1.0);
+      const double min_hit = std::clamp(cfg_.missile_min_hit_chance, 0.0, 1.0);
+
+      const Vec2 los = target.position_mkm - missile_pos_mkm;
+      const double dist = std::max(1e-6, los.length());
+      const Vec2 los_hat = los * (1.0 / dist);
+
+      // Relative angular velocity approximation (radians/day).
+      const Vec2 rel_v = target.velocity_mkm_per_day - missile_vel_mkm_per_day;
+      const double rel_par = dot(rel_v, los_hat);
+      const Vec2 rel_trans = rel_v - los_hat * rel_par;
+      const double ang = rel_trans.length() / dist;
+
+      // Sensor scaling: use a snapshot from launch (best-effort) and apply
+      // the current system's sensor environment multiplier.
+      const double env_mult = system_env_mult(ms.system_id);
+      const double sensor_mkm = std::max(cfg_.beam_tracking_min_sensor_range_mkm,
+                                         std::max(0.0, ms.attacker_sensor_mkm_raw) * env_mult);
+      const double sensor_scale = std::clamp(sensor_mkm / std::max(1e-6, cfg_.beam_tracking_reference_sensor_range_mkm),
+                                            0.25, 4.0);
+
+      double tracking_ref = std::max(0.05, cfg_.missile_tracking_ref_ang_per_day * sensor_scale);
+
+      // Signature scaling.
+      const double sig = std::max(0.05, sim_sensors::effective_signature_multiplier(*this, target, target_design));
+      const double sig_scale = std::pow(sig, cfg_.missile_signature_exponent);
+      tracking_ref /= std::max(1e-6, sig_scale);
+
+      // ECM/ECCM scaling.
+      double ecm = 0.0;
+      if (target_design) ecm = std::max(0.0, target_design->ecm_strength);
+      const double eccm = std::max(0.0, ms.attacker_eccm_strength);
+
+      double ew_mult = (1.0 + eccm) / (1.0 + ecm);
+      if (!std::isfinite(ew_mult)) ew_mult = 1.0;
+      ew_mult = std::clamp(ew_mult, 0.25, 4.0);
+      tracking_ref *= ew_mult;
+
+      const double denom = std::max(1e-6, tracking_ref);
+      const double x = ang / denom;
+      const double tracking_factor = 1.0 / (1.0 + x * x);
+      return std::clamp(base * tracking_factor, min_hit, 1.0);
+    };
+
+    // Phase 1: advance salvos and compute per-tick in-system segments.
     std::unordered_map<Id, std::vector<SalvoSeg>> salvos_by_system;
     salvos_by_system.reserve(state_.systems.size());
 
     std::vector<Id> erase_salvos;
     erase_salvos.reserve(state_.missile_salvos.size());
+
+    std::vector<Id> expired_salvos;
+    expired_salvos.reserve(state_.missile_salvos.size());
 
     for (Id mid : missile_ids) {
       auto it = state_.missile_salvos.find(mid);
@@ -359,24 +446,164 @@ void Simulation::tick_combat(double dt_days) {
       if (ms.launch_pos_mkm.length() <= 1e-12) {
         if (const auto* sh = find_ptr(state_.ships, ms.attacker_ship_id)) ms.launch_pos_mkm = sh->position_mkm;
       }
-      if (ms.target_pos_mkm.length() <= 1e-12) ms.target_pos_mkm = tgt->position_mkm;
+      // Keep visualization target position current.
+      ms.target_pos_mkm = tgt->position_mkm;
 
-      const double total = std::max(1e-6, ms.eta_days_total);
-      const double rem_before = std::max(0.0, ms.eta_days_remaining);
-      const double rem_after = std::max(0.0, rem_before - dt_days);
-      ms.eta_days_remaining = rem_after;
+      // Best-effort: recover a flight position for legacy saves.
+      if (ms.pos_mkm.length() <= 1e-12) {
+        const double total = std::max(1e-6, ms.eta_days_total);
+        const double rem = std::clamp(std::max(0.0, ms.eta_days_remaining), 0.0, total);
+        const double frac = clamp01(1.0 - rem / total);
+        ms.pos_mkm = ms.launch_pos_mkm + (ms.target_pos_mkm - ms.launch_pos_mkm) * frac;
+      }
 
-      const double frac0 = clamp01(1.0 - rem_before / total);
-      const double frac1 = clamp01(1.0 - rem_after / total);
-      const Vec2 p0 = ms.launch_pos_mkm + (ms.target_pos_mkm - ms.launch_pos_mkm) * frac0;
-      const Vec2 p1 = ms.launch_pos_mkm + (ms.target_pos_mkm - ms.launch_pos_mkm) * frac1;
-      salvos_by_system[ms.system_id].push_back(SalvoSeg{mid, p0, p1});
+      // Backfill missile speed if missing.
+      if (ms.speed_mkm_per_day <= 1e-9) {
+        const double total = std::max(1e-6, ms.eta_days_total);
+        const double dist0 = (ms.target_pos_mkm - ms.launch_pos_mkm).length();
+        if (dist0 > 1e-9 && total > 1e-9) {
+          ms.speed_mkm_per_day = dist0 / total;
+        } else if (const auto* sh = find_ptr(state_.ships, ms.attacker_ship_id)) {
+          if (const auto* ad = find_design(sh->design_id)) {
+            ms.speed_mkm_per_day = std::max(0.0, ad->missile_speed_mkm_per_day);
+          }
+        }
+      }
+
+      // Backfill guidance snapshot if missing (best-effort).
+      if (ms.attacker_sensor_mkm_raw <= 1e-9 || ms.attacker_eccm_strength <= 1e-9) {
+        if (const auto* sh = find_ptr(state_.ships, ms.attacker_ship_id)) {
+          if (const auto* ad = find_design(sh->design_id)) {
+            if (ms.attacker_sensor_mkm_raw <= 1e-9) ms.attacker_sensor_mkm_raw = std::max(0.0, ad->sensor_range_mkm);
+            if (ms.attacker_eccm_strength <= 1e-9) ms.attacker_eccm_strength = std::max(0.0, ad->eccm_strength);
+          }
+        }
+      }
+
+      // Backfill remaining range if missing.
+      if (ms.range_remaining_mkm <= 1e-12) {
+        if (cfg_.missile_range_limits_flight) {
+          double total_range = 0.0;
+          if (const auto* sh = find_ptr(state_.ships, ms.attacker_ship_id)) {
+            if (const auto* ad = find_design(sh->design_id)) total_range = std::max(0.0, ad->missile_range_mkm);
+          }
+          if (total_range > 1e-9) {
+            const double traveled = (ms.pos_mkm - ms.launch_pos_mkm).length();
+            ms.range_remaining_mkm = std::max(0.0, total_range - traveled);
+          } else if (ms.speed_mkm_per_day > 1e-9) {
+            ms.range_remaining_mkm = std::max(0.0, ms.speed_mkm_per_day * std::max(0.0, ms.eta_days_remaining));
+          }
+        } else {
+          ms.range_remaining_mkm = 1e30;
+        }
+      }
+
+      const double speed = ms.speed_mkm_per_day;
+      if (speed <= 1e-9) {
+        // Invalid missile (missing design data) - drop it.
+        erase_salvos.push_back(mid);
+        continue;
+      }
+
+      Vec2 p0 = ms.pos_mkm;
+      Vec2 p1 = p0;
+      double seg_dt = dt_days;
+      bool expired_this_tick = false;
+
+      if (!cfg_.enable_missile_homing) {
+        // Legacy: straight-line time-of-flight toward the target position at launch.
+        const double total = std::max(1e-6, ms.eta_days_total);
+        const double rem_before = std::max(0.0, ms.eta_days_remaining);
+        const double rem_after = std::max(0.0, rem_before - dt_days);
+        const double move_dt = std::min(dt_days, rem_before);
+
+        ms.eta_days_remaining = rem_after;
+
+        const double frac0 = clamp01(1.0 - rem_before / total);
+        const double frac1 = clamp01(1.0 - rem_after / total);
+        p0 = ms.launch_pos_mkm + (ms.target_pos_mkm - ms.launch_pos_mkm) * frac0;
+        p1 = ms.launch_pos_mkm + (ms.target_pos_mkm - ms.launch_pos_mkm) * frac1;
+        ms.pos_mkm = p1;
+        seg_dt = move_dt;
+
+        if (cfg_.missile_range_limits_flight) {
+          const double travel = (p1 - p0).length();
+          ms.range_remaining_mkm = std::max(0.0, ms.range_remaining_mkm - travel);
+          if (ms.range_remaining_mkm <= 1e-9 && ms.eta_days_remaining > 1e-9) {
+            expired_this_tick = true;
+          }
+        }
+      } else {
+        // Homing: steer toward a predicted intercept point each tick.
+        const Vec2 tpos = tgt->position_mkm;
+        const Vec2 tvel = tgt->velocity_mkm_per_day;
+
+        // Fuel/range limit.
+        if (cfg_.missile_range_limits_flight) {
+          if (ms.range_remaining_mkm <= 1e-12) {
+            // Prevent instant disappearance in legacy edge cases.
+            ms.range_remaining_mkm = std::max(0.0, (tpos - p0).length());
+          }
+          const double t_fuel = ms.range_remaining_mkm / speed;
+          if (t_fuel <= 1e-9) {
+            expired_salvos.push_back(mid);
+            continue;
+          }
+          seg_dt = std::min(seg_dt, t_fuel);
+        }
+
+        // Determine if we can intercept within this tick.
+        std::optional<double> t_intercept = intercept_time_days(p0, speed, tpos, tvel);
+        Vec2 aim = tpos;
+        bool will_impact = false;
+
+        if (t_intercept && *t_intercept <= seg_dt + 1e-9) {
+          will_impact = true;
+          seg_dt = std::max(0.0, *t_intercept);
+          aim = tpos + tvel * seg_dt;
+        } else if (t_intercept) {
+          // Aim at the future intercept point (helps with fast transverse targets).
+          aim = tpos + tvel * (*t_intercept);
+        }
+
+        Vec2 dir = (aim - p0).normalized();
+        if (dir.length() <= 1e-12) dir = (tpos - p0).normalized();
+        if (dir.length() <= 1e-12) dir = {1.0, 0.0};
+
+        const double travel = std::max(0.0, speed * seg_dt);
+        p1 = will_impact ? aim : (p0 + dir * travel);
+
+        // Consume range.
+        if (cfg_.missile_range_limits_flight) {
+          const double dist_travel = (p1 - p0).length();
+          ms.range_remaining_mkm = std::max(0.0, ms.range_remaining_mkm - dist_travel);
+          if (!will_impact && seg_dt + 1e-9 < dt_days && ms.range_remaining_mkm <= 1e-9) {
+            expired_this_tick = true;
+          }
+        }
+
+        ms.pos_mkm = p1;
+        ms.eta_days_remaining = 0.0;
+        if (!will_impact) {
+          // Recompute ETA for UI purposes (best-effort).
+          if (auto tn = intercept_time_days(p1, speed, tpos, tvel); tn) {
+            ms.eta_days_remaining = std::max(0.0, *tn);
+          } else {
+            ms.eta_days_remaining = std::max(0.0, (tpos - p1).length() / speed);
+          }
+        }
+      }
+
+      if (seg_dt > 1e-12) {
+        salvos_by_system[ms.system_id].push_back(SalvoSeg{mid, p0, p1, seg_dt});
+      }
+      if (expired_this_tick) expired_salvos.push_back(mid);
     }
 
     // Phase 2: continuous point defense during this tick.
-    // Instead of checking only the end-of-tick position, compute the fraction
-    // of the tick each salvo spends inside each defender's PD radius, then
-    // integrate PD output over that time.
+    // Instead of checking only the end-of-tick position, compute the time
+    // each salvo spends inside each defender's PD radius, then integrate PD
+    // output over that time.
     if (max_pd_range_mkm > 1e-9 && dt_days > 0.0 && !pd_defenders_by_system.empty()) {
       auto seg_circle_interval_u01 = [](const Vec2& p0, const Vec2& p1, const Vec2& c, double r)
                                         -> std::optional<std::pair<double, double>> {
@@ -411,8 +638,8 @@ void Simulation::tick_combat(double dt_days) {
 
       struct Entry {
         Id mid{kInvalidId};
-        double u0{0.0};
-        double u1{0.0};
+        double t0_days{0.0};
+        double t1_days{0.0};
       };
 
       for (auto& [sys_id, segs] : salvos_by_system) {
@@ -435,6 +662,7 @@ void Simulation::tick_combat(double dt_days) {
           entries.reserve(segs.size());
 
           for (const auto& seg : segs) {
+            if (seg.dt_days <= 1e-12) continue;
             auto it_ms = state_.missile_salvos.find(seg.id);
             if (it_ms == state_.missile_salvos.end()) continue;
             auto& ms = it_ms->second;
@@ -446,26 +674,29 @@ void Simulation::tick_combat(double dt_days) {
 
             const auto iv = seg_circle_interval_u01(seg.p0_mkm, seg.p1_mkm, def->position_mkm, r);
             if (!iv) continue;
-            entries.push_back(Entry{seg.id, iv->first, iv->second});
+            const double t0 = std::max(0.0, iv->first) * seg.dt_days;
+            const double t1 = std::min(1.0, iv->second) * seg.dt_days;
+            if (t1 <= t0 + 1e-12) continue;
+            entries.push_back(Entry{seg.id, t0, t1});
           }
 
           if (entries.empty()) continue;
 
           // Compute total exposed time (sum of per-salvo intervals) and union time
-          // (time where at least one missile is in range) in the normalized [0,1] tick domain.
-          double sum_u = 0.0;
+          // (time where at least one missile is in range) in the tick time domain.
+          double sum_t = 0.0;
           std::vector<std::pair<double, double>> intervals;
           intervals.reserve(entries.size());
           for (const auto& e : entries) {
-            const double len = std::max(0.0, e.u1 - e.u0);
+            const double len = std::max(0.0, e.t1_days - e.t0_days);
             if (len <= 1e-12) continue;
-            sum_u += len;
-            intervals.push_back({e.u0, e.u1});
+            sum_t += len;
+            intervals.push_back({e.t0_days, e.t1_days});
           }
-          if (sum_u <= 1e-12 || intervals.empty()) continue;
+          if (sum_t <= 1e-12 || intervals.empty()) continue;
 
           std::sort(intervals.begin(), intervals.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
-          double union_u = 0.0;
+          double union_t = 0.0;
           double cur_s = intervals.front().first;
           double cur_e = intervals.front().second;
           for (std::size_t i = 1; i < intervals.size(); ++i) {
@@ -474,22 +705,23 @@ void Simulation::tick_combat(double dt_days) {
             if (s <= cur_e + 1e-12) {
               cur_e = std::max(cur_e, e);
             } else {
-              union_u += std::max(0.0, cur_e - cur_s);
+              union_t += std::max(0.0, cur_e - cur_s);
               cur_s = s;
               cur_e = e;
             }
           }
-          union_u += std::max(0.0, cur_e - cur_s);
-          union_u = std::clamp(union_u, 0.0, 1.0);
+          union_t += std::max(0.0, cur_e - cur_s);
+          union_t = std::clamp(union_t, 0.0, dt_days);
 
           const double crew_pd_mult = std::max(0.0, 1.0 + crew_grade_bonus(*def));
-          const double pd_available = std::max(0.0, dd->point_defense_damage) * maintenance_combat_mult(*def) * crew_pd_mult * (union_u * dt_days);
+          const double pd_available = std::max(0.0, dd->point_defense_damage) * maintenance_combat_mult(*def) *
+                                      crew_pd_mult * union_t;
           if (pd_available <= 1e-12) continue;
 
           for (const auto& e : entries) {
-            const double len = std::max(0.0, e.u1 - e.u0);
+            const double len = std::max(0.0, e.t1_days - e.t0_days);
             if (len <= 1e-12) continue;
-            const double share = pd_available * (len / sum_u);
+            const double share = pd_available * (len / sum_t);
             if (share <= 1e-12) continue;
 
             auto it_ms = state_.missile_salvos.find(e.mid);
@@ -505,10 +737,11 @@ void Simulation::tick_combat(double dt_days) {
       }
     }
 
-    // Phase 3: impacts and early interceptions.
+    // Phase 3: impacts, interceptions, and expirations.
     struct Agg {
       double payload{0.0};
       double intercepted{0.0};
+      double missed{0.0};
       double damage{0.0};
       int salvos{0};
       Id system_id{kInvalidId};
@@ -517,8 +750,16 @@ void Simulation::tick_combat(double dt_days) {
 
     std::unordered_map<Id, Agg> impacts;
     std::unordered_map<Id, Agg> interceptions;
+    std::unordered_map<Id, Agg> expirations;
     impacts.reserve(state_.missile_salvos.size());
     interceptions.reserve(state_.missile_salvos.size());
+    expirations.reserve(state_.missile_salvos.size());
+
+    std::sort(expired_salvos.begin(), expired_salvos.end());
+    expired_salvos.erase(std::unique(expired_salvos.begin(), expired_salvos.end()), expired_salvos.end());
+    auto is_expired = [&](Id mid) -> bool {
+      return std::binary_search(expired_salvos.begin(), expired_salvos.end(), mid);
+    };
 
     for (Id mid : missile_ids) {
       const auto it = state_.missile_salvos.find(mid);
@@ -535,30 +776,57 @@ void Simulation::tick_combat(double dt_days) {
       const double remaining = std::max(0.0, ms.damage);
       const double intercepted_total = std::max(0.0, payload - remaining);
 
-      if (ms.eta_days_remaining <= 1e-9) {
-        auto& a = impacts[ms.target_ship_id];
-        a.payload += payload;
-        a.intercepted += intercepted_total;
-        a.damage += remaining;
-        a.salvos += 1;
-        a.system_id = ms.system_id;
-        a.attacker_factions.push_back(ms.attacker_faction_id);
-
-        if (remaining > 1e-9) {
-          incoming_damage[ms.target_ship_id] += remaining;
-          attackers_for_target[ms.target_ship_id].push_back(ms.attacker_ship_id);
-          // Crew combat experience (both attacker and defender).
-          crew_intensity[ms.attacker_ship_id] += remaining;
-          crew_intensity[ms.target_ship_id] += remaining;
-        }
-        erase_salvos.push_back(mid);
-      } else if (remaining <= 1e-9) {
+      // Fully intercepted (even if it would have impacted this tick).
+      if (remaining <= 1e-9) {
         auto& a = interceptions[ms.target_ship_id];
         a.payload += payload;
         a.intercepted += payload;
         a.salvos += 1;
         a.system_id = ms.system_id;
         a.attacker_factions.push_back(ms.attacker_faction_id);
+        erase_salvos.push_back(mid);
+        continue;
+      }
+
+      // Ran out of fuel/range before reaching the target.
+      if (is_expired(mid)) {
+        auto& a = expirations[ms.target_ship_id];
+        a.payload += payload;
+        a.intercepted += intercepted_total;
+        a.salvos += 1;
+        a.system_id = ms.system_id;
+        a.attacker_factions.push_back(ms.attacker_faction_id);
+        erase_salvos.push_back(mid);
+        continue;
+      }
+
+      // Impact.
+      if (ms.eta_days_remaining <= 1e-9) {
+        const ShipDesign* target_design = find_design(tgt->design_id);
+        const Vec2 los = tgt->position_mkm - ms.pos_mkm;
+        const Vec2 dir = (los.length() <= 1e-12) ? Vec2{1.0, 0.0} : los.normalized();
+        const Vec2 missile_vel = dir * std::max(0.0, ms.speed_mkm_per_day);
+
+        const double hit = missile_hit_chance(ms, *tgt, target_design, ms.pos_mkm, missile_vel);
+        const double applied = remaining * hit;
+        const double missed = std::max(0.0, remaining - applied);
+
+        auto& a = impacts[ms.target_ship_id];
+        a.payload += payload;
+        a.intercepted += intercepted_total;
+        a.missed += missed;
+        a.damage += applied;
+        a.salvos += 1;
+        a.system_id = ms.system_id;
+        a.attacker_factions.push_back(ms.attacker_faction_id);
+
+        if (applied > 1e-9) {
+          incoming_damage[ms.target_ship_id] += applied;
+          attackers_for_target[ms.target_ship_id].push_back(ms.attacker_ship_id);
+          // Crew combat experience (both attacker and defender).
+          crew_intensity[ms.attacker_ship_id] += applied;
+          crew_intensity[ms.target_ship_id] += applied;
+        }
         erase_salvos.push_back(mid);
       }
     }
@@ -568,20 +836,24 @@ void Simulation::tick_combat(double dt_days) {
       return "Ship " + std::to_string(static_cast<unsigned long long>(s.id));
     };
 
+    auto dedupe_factions = [](std::vector<Id>& f) {
+      std::sort(f.begin(), f.end());
+      f.erase(std::unique(f.begin(), f.end()), f.end());
+    };
+
     for (auto& [target_id, agg] : impacts) {
       auto* target = find_ptr(state_.ships, target_id);
       if (!target) continue;
       if (agg.payload <= 1e-9) continue;
 
-      std::sort(agg.attacker_factions.begin(), agg.attacker_factions.end());
-      agg.attacker_factions.erase(std::unique(agg.attacker_factions.begin(), agg.attacker_factions.end()),
-                                  agg.attacker_factions.end());
-
+      dedupe_factions(agg.attacker_factions);
       const Id primary_attacker_fid = agg.attacker_factions.empty() ? kInvalidId : agg.attacker_factions.front();
 
-      const std::string msg =
+      std::string msg =
           "Missile impacts on " + ship_label(*target) + ": payload " + fmt1(agg.payload) + ", intercepted " +
-          fmt1(agg.intercepted) + ", damage " + fmt1(agg.damage) + ".";
+          fmt1(agg.intercepted);
+      if (agg.missed > 1e-9) msg += ", spoofed " + fmt1(agg.missed);
+      msg += ", damage " + fmt1(agg.damage) + ".";
 
       // Defender event.
       push_event(EventLevel::Info, EventCategory::Combat, msg,
@@ -608,9 +880,7 @@ void Simulation::tick_combat(double dt_days) {
       if (!target) continue;
       if (agg.payload <= 1e-9) continue;
 
-      std::sort(agg.attacker_factions.begin(), agg.attacker_factions.end());
-      agg.attacker_factions.erase(std::unique(agg.attacker_factions.begin(), agg.attacker_factions.end()),
-                                  agg.attacker_factions.end());
+      dedupe_factions(agg.attacker_factions);
       const Id primary_attacker_fid = agg.attacker_factions.empty() ? kInvalidId : agg.attacker_factions.front();
 
       const std::string msg = "Missiles intercepted en route to " + ship_label(*target) + ": salvos " +
@@ -636,6 +906,37 @@ void Simulation::tick_combat(double dt_days) {
       }
     }
 
+    for (auto& [target_id, agg] : expirations) {
+      auto* target = find_ptr(state_.ships, target_id);
+      if (!target) continue;
+      if (agg.payload <= 1e-9) continue;
+
+      dedupe_factions(agg.attacker_factions);
+      const Id primary_attacker_fid = agg.attacker_factions.empty() ? kInvalidId : agg.attacker_factions.front();
+
+      std::string msg = "Missiles ran out of fuel en route to " + ship_label(*target) + ": salvos " +
+                        std::to_string(agg.salvos) + ", payload " + fmt1(agg.payload);
+      if (agg.intercepted > 1e-9) msg += ", intercepted " + fmt1(agg.intercepted);
+      msg += ".";
+
+      push_event(EventLevel::Info, EventCategory::Combat, msg,
+                 EventContext{.faction_id = target->faction_id,
+                              .faction_id2 = primary_attacker_fid,
+                              .system_id = agg.system_id,
+                              .ship_id = target_id,
+                              .colony_id = kInvalidId});
+
+      for (Id afid : agg.attacker_factions) {
+        if (afid == kInvalidId) continue;
+        push_event(EventLevel::Info, EventCategory::Combat, msg,
+                   EventContext{.faction_id = afid,
+                                .faction_id2 = target->faction_id,
+                                .system_id = agg.system_id,
+                                .ship_id = target_id,
+                                .colony_id = kInvalidId});
+      }
+    }
+
     // Remove resolved/invalidated salvos.
     std::sort(erase_salvos.begin(), erase_salvos.end());
     erase_salvos.erase(std::unique(erase_salvos.begin(), erase_salvos.end()), erase_salvos.end());
@@ -643,7 +944,6 @@ void Simulation::tick_combat(double dt_days) {
       state_.missile_salvos.erase(mid);
     }
   }
-
 
   // --- weapon fire ---
   for (Id aid : ship_ids) {
@@ -940,6 +1240,12 @@ void Simulation::tick_combat(double dt_days) {
               salvo.target_faction_id = tgt->faction_id;
               salvo.damage = dmg;
               salvo.damage_initial = dmg;
+              salvo.speed_mkm_per_day = speed;
+              // Treat missile_range_mkm as a flight fuel/range budget for in-flight salvos (configurable).
+              salvo.range_remaining_mkm = cfg_.missile_range_limits_flight ? std::max(0.0, ad->missile_range_mkm) : 1e30;
+              salvo.pos_mkm = attacker.position_mkm;
+              salvo.attacker_eccm_strength = std::max(0.0, ad->eccm_strength);
+              salvo.attacker_sensor_mkm_raw = std::max(0.0, ad->sensor_range_mkm);
               salvo.eta_days_total = eta;
               salvo.eta_days_remaining = eta;
               salvo.launch_pos_mkm = attacker.position_mkm;
@@ -1322,6 +1628,26 @@ void Simulation::tick_combat(double dt_days) {
 
       const auto* sys = find_ptr(state_.systems, sys_id);
       const std::string sys_name = sys ? sys->name : std::string("(unknown)");
+
+      // Pirate hideout side-effects: when a hideout is destroyed, apply a rebuild
+      // cooldown for that pirate faction in this system, and (optionally) reduce
+      // the region's pirate risk as a reward for counter-piracy.
+      if (cfg_.enable_pirate_hideouts && victim.design_id == "pirate_hideout") {
+        const int now_day = static_cast<int>(state_.date.days_since_epoch());
+
+        if (auto* fac = find_ptr(state_.factions, victim_fid);
+            fac && fac->control == FactionControl::AI_Pirate && sys_id != kInvalidId) {
+          const int cd = std::max(0, cfg_.pirate_hideout_rebuild_cooldown_days);
+          if (cd > 0) fac->pirate_hideout_cooldown_until_day[sys_id] = now_day + cd;
+        }
+
+        const double red = std::clamp(cfg_.pirate_hideout_destroy_region_risk_reduction_fraction, 0.0, 1.0);
+        if (red > 1e-9 && sys && sys->region_id != kInvalidId) {
+          if (auto* reg = find_ptr(state_.regions, sys->region_id)) {
+            reg->pirate_risk = std::clamp(reg->pirate_risk * (1.0 - red), 0.0, 1.0);
+          }
+        }
+      }
 
       const auto* victim_fac = find_ptr(state_.factions, victim_fid);
       const std::string victim_fac_name = victim_fac ? victim_fac->name : std::string("(unknown)");

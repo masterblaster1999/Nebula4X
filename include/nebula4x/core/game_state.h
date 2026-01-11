@@ -35,10 +35,80 @@ struct ContentDB {
   std::vector<std::string> tech_source_paths;
 };
 
+// --- Victory / scoring ---
+
+// Why the game ended (if it ended).
+enum class VictoryReason : std::uint8_t {
+  None = 0,
+  // A faction met or exceeded VictoryRules::score_threshold.
+  ScoreThreshold = 1,
+  // Only one eligible faction remained "alive" under the elimination rules.
+  LastFactionStanding = 2,
+};
+
+// Configurable victory rules stored in save-games.
+//
+// These are stored in GameState (not SimConfig) so the player can tweak them
+// in the UI and have them persist with the save.
+struct VictoryRules {
+  // Master enable.
+  bool enabled{false};
+
+  // If true, factions with FactionControl::AI_Pirate are excluded from victory
+  // checks (they still appear on the scoreboard).
+  bool exclude_pirates{true};
+
+  // --- Elimination victory ---
+  // If enabled, the game ends when only one eligible faction remains alive.
+  bool elimination_enabled{true};
+
+  // If true, a faction counts as "alive" only if it owns at least one colony.
+  // If false, fleets/ships also keep a faction alive.
+  bool elimination_requires_colony{true};
+
+  // --- Score victory ---
+  // If > 0, the game ends when an eligible faction reaches this score.
+  // (If 0, score victory is disabled.)
+  double score_threshold{0.0};
+
+  // Optional lead margin over the runner-up when score_threshold is met.
+  // 0 => no margin requirement.
+  double score_lead_margin{0.0};
+
+  // --- Scoring weights (points) ---
+  // Colonies owned.
+  double score_colony_points{100.0};
+
+  // Per million population.
+  double score_population_per_million{1.0};
+
+  // Per unit of installation "construction_cost".
+  double score_installation_cost_mult{0.1};
+
+  // Per ton of ship mass.
+  double score_ship_mass_ton_mult{0.05};
+
+  // Per known technology.
+  double score_known_tech_points{5.0};
+
+  // Exploration points.
+  double score_discovered_system_points{10.0};
+  double score_discovered_anomaly_points{5.0};
+};
+
+// The (persistent) game-over state.
+struct VictoryState {
+  bool game_over{false};
+  Id winner_faction_id{kInvalidId};
+  VictoryReason reason{VictoryReason::None};
+  std::int64_t victory_day{0};
+  double winner_score{0.0};
+};
+
 // A single save-game state.
 struct GameState {
-  // v47: exploration anomalies (world objects + investigation scaffolding).
-  int save_version{47};
+  // v50: nebula storms (temporary system-level environmental hazards).
+  int save_version{50};
   Date date;
 
   // Hour-of-day within the current Date (0..23).
@@ -74,6 +144,13 @@ struct GameState {
 
   // Active diplomacy treaties (symmetric agreements between two factions).
   std::unordered_map<Id, Treaty> treaties;
+
+  // Pending diplomatic offers / treaty proposals (directed: from -> to).
+  std::unordered_map<Id, DiplomaticOffer> diplomatic_offers;
+
+  // Optional win conditions & scoring.
+  VictoryRules victory_rules;
+  VictoryState victory_state;
 
   // Fleets are lightweight groupings of ships for convenience.
   std::unordered_map<Id, Fleet> fleets;

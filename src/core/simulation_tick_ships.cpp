@@ -1835,6 +1835,9 @@ void Simulation::tick_ships(double dt_days) {
         continue;
       }
 
+      // Ensure the investigating faction has intel on this anomaly.
+      discover_anomaly_for_faction(ship.faction_id, anom->id, ship.id);
+
       if (investigate_anom_ord) {
         if (investigate_anom_ord->duration_days > 0) {
           investigate_anom_ord->progress_days = std::max(0.0, investigate_anom_ord->progress_days) + dt_days;
@@ -2597,6 +2600,10 @@ void Simulation::tick_ships(double dt_days) {
       }
     }
 
+
+    // Environmental movement modifiers (nebula drag / storms).
+    effective_speed_km_s *= this->system_movement_speed_multiplier(ship.system_id);
+
     const double max_step = mkm_per_day_from_speed(effective_speed_km_s, cfg_.seconds_per_day) * dt_days;
     if (max_step <= 0.0) continue;
 
@@ -2715,8 +2722,7 @@ void Simulation::tick_ships(double dt_days) {
     if (!sd) continue;
 
     // Environmental sensor attenuation (match simulation_sensors).
-    const double nebula = std::clamp(sys->nebula_density, 0.0, 1.0);
-    const double env_mult = std::clamp(1.0 - 0.65 * nebula, 0.25, 1.0);
+    const double env_mult = this->system_sensor_environment_multiplier(sh->system_id);
 
     // Need online sensors to contribute.
     double sensor_mkm = sim_sensors::sensor_range_mkm_with_mode(*this, *sh, *sd);

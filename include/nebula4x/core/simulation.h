@@ -245,6 +245,46 @@ struct SimConfig {
   double sensor_mode_active_signature_multiplier{1.5};
 
 
+  // --- Nebula storms / environmental hazards ---
+  //
+  // Star systems have a static nebula_density from the scenario generator, but
+  // can also experience temporary "nebula storms" that intensify sensor
+  // interference and slow movement.
+  bool enable_nebula_storms{true};
+
+  // Storms only occur in systems with at least this nebula_density.
+  double nebula_storm_min_nebula_density{0.35};
+
+  // At nebula_density = 1.0, this is the per-day chance of a storm starting.
+  // Actual chance scales by pow(nebula_density, nebula_storm_start_chance_exponent).
+  double nebula_storm_start_chance_per_day_at_max_density{0.02};
+  double nebula_storm_start_chance_exponent{2.0};
+
+  // Storm duration range in days.
+  int nebula_storm_duration_days_min{5};
+  int nebula_storm_duration_days_max{20};
+
+  // Peak intensity range for a newly spawned storm.
+  double nebula_storm_peak_intensity_min{0.4};
+  double nebula_storm_peak_intensity_max{1.0};
+
+  // Additional sensor attenuation at storm intensity 1.0.
+  // Final sensor multiplier = base_nebula_multiplier * (1 - penalty * storm_intensity).
+  double nebula_storm_sensor_penalty{0.50};
+
+  // Movement speed penalty at storm intensity 1.0.
+  // Final speed multiplier = base * (1 - penalty * storm_intensity).
+  double nebula_storm_speed_penalty{0.40};
+
+  // Optional baseline movement drag from nebula density (even without storms).
+  bool enable_nebula_drag{false};
+  double nebula_drag_speed_penalty_at_max_density{0.25};
+
+  // Shield drain per day at storm intensity 1.0 (applied when shields are online).
+  double nebula_storm_shield_drain_per_day_at_intensity1{4.0};
+
+
+
   // --- Jump point surveying ---
   //
   // Under fog-of-war, factions must "survey" jump points before the jump network
@@ -278,6 +318,16 @@ struct SimConfig {
 
   // Cap per-ship survey rate to avoid extreme values from modded sensor ranges.
   double jump_survey_points_per_day_cap{5.0};
+
+  // --- Anomaly discovery (fog-of-war / exploration) ---
+  //
+  // Anomalies are discovered via sensor coverage. To avoid requiring ships to
+  // pass extremely close to every point of interest, anomaly detection uses a
+  // small multiplier relative to the normal sensor range used for ship contacts.
+  //
+  // 1.0 => anomalies are detected at normal sensor range.
+  // >1.0 => anomalies are easier to discover (recommended for early-game).
+  double anomaly_detection_range_multiplier{3.0};
 
   // --- Intel / contact prediction ---
   //
@@ -334,6 +384,35 @@ struct SimConfig {
   // Reference angular velocity for colony beam batteries (radians/day).
   // Colonies are assumed to have slightly better fire control than ships at equal sensor level.
   double colony_beam_tracking_ref_ang_per_day{0.80};
+
+  // --- Missile guidance / homing ---
+  //
+  // Missiles are modeled as time-of-flight salvos. When homing is enabled,
+  // in-flight salvos steer toward their moving target rather than following
+  // a fixed straight-line track to the target's launch position.
+  bool enable_missile_homing{true};
+
+  // If true, a missile's configured missile_range_mkm also acts as an in-flight
+  // fuel/range limit. Salvos that exhaust their remaining range self-destruct
+  // without dealing damage (even if their ETA has not elapsed).
+  bool missile_range_limits_flight{true};
+
+  // Expected missile hit chance (no RNG) based on target maneuvering +
+  // ECM/ECCM + signature (stealth/EMCON).
+  //
+  // When enabled, missile damage that "leaks" through point defense is scaled
+  // by a computed hit chance (clamped to [missile_min_hit_chance, 1]).
+  bool enable_missile_hit_chance{true};
+  double missile_base_hit_chance{0.90};
+  double missile_min_hit_chance{0.05};
+
+  // Reference angular velocity (radians/day) for missile guidance/tracking.
+  // Higher values make missiles less sensitive to fast target maneuvers.
+  double missile_tracking_ref_ang_per_day{2.0};
+
+  // Exponent applied to target signature multiplier when influencing missile
+  // guidance/tracking. (See beam_signature_exponent for beams.)
+  double missile_signature_exponent{0.35};
 
   // --- Boarding / capture (space combat) ---
   //
@@ -599,6 +678,23 @@ struct SimConfig {
   // procedural Region (e.g. the handcrafted Sol scenario).
   double pirate_raid_default_system_risk{0.25};
 
+  // When enabled, patrol missions by non-pirate factions dynamically suppress
+  // piracy within Regions, reducing the effective pirate raid weighting.
+  //
+  // Suppression is a first-order filter toward a target value computed from the
+  // total "patrol power" currently present in the region:
+  //   target = 1 - exp(-patrol_power / pirate_suppression_power_scale)
+  //   effective_risk = pirate_risk * (1 - pirate_suppression)
+  bool enable_pirate_suppression{true};
+
+  // Power scale for the suppression curve above. Smaller values mean fewer
+  // ships are needed to significantly suppress piracy.
+  double pirate_suppression_power_scale{50.0};
+
+  // Fraction of the gap to target suppression applied per day (0..1).
+  // Higher values make suppression ramp up/down faster.
+  double pirate_suppression_adjust_fraction_per_day{0.15};
+
   // Risk exponent used when weighting candidate raid target systems.
   // Higher values concentrate raids more heavily in the highest-risk areas.
   double pirate_raid_risk_exponent{1.5};
@@ -620,6 +716,36 @@ struct SimConfig {
   // by a player faction. (Contacts are still revealed via the existing
   // detection/intel event system.)
   bool pirate_raid_log_event{false};
+
+
+  // --- Pirate hideouts (persistent pirate bases) ---
+  //
+  // When enabled, pirate factions can establish stealthy "hideout" bases inside
+  // systems they raid. Hideouts make piracy more persistent by increasing the
+  // likelihood of future raids in that system.
+  bool enable_pirate_hideouts{true};
+
+  // Chance to establish a hideout when a raid is spawned into a system that does
+  // not already contain a hideout for that pirate faction (0..1).
+  double pirate_hideout_establish_chance_per_raid{0.15};
+
+  // Hard cap on the number of hideouts a single pirate faction can maintain.
+  int pirate_hideout_max_total_per_faction{4};
+
+  // Multiplier applied to a system's raid-selection weight when a hideout owned
+  // by that pirate faction exists in the system.
+  double pirate_hideout_system_weight_multiplier{2.5};
+
+  // Cooldown applied when a pirate hideout is destroyed, preventing that pirate
+  // faction from rebuilding a hideout in the same system for this many days.
+  int pirate_hideout_rebuild_cooldown_days{180};
+
+  // Optional reward for counter-piracy: when a pirate hideout is destroyed, the
+  // owning Region's pirate_risk is reduced multiplicatively by:
+  //   pirate_risk *= (1 - pirate_hideout_destroy_region_risk_reduction_fraction)
+  //
+  // 0 disables this effect.
+  double pirate_hideout_destroy_region_risk_reduction_fraction{0.05};
 };
 
 // Optional context passed when recording a persistent simulation event.
@@ -714,6 +840,12 @@ enum class LogisticsNeedKind {
 
   // Fuel required to top up docked ships (and optionally maintain a buffer).
   Fuel,
+
+  // Munitions required to rearm docked ships (finite missile magazines).
+  Rearm,
+
+  // Maintenance supplies required to service docked ships (when enabled).
+  Maintenance,
 };
 
 // A computed mineral shortfall at a colony.
@@ -771,6 +903,38 @@ struct JumpRoutePlan {
   double total_eta_days{0.0};
 };
 
+// --- Scoring / victory helper types ---
+
+// A breakdown of score contributions for a faction.
+//
+// The shows the *already weighted* point contributions (not raw values).
+struct FactionScoreBreakdown {
+  double colonies_points{0.0};
+  double population_points{0.0};
+  double installations_points{0.0};
+  double ships_points{0.0};
+  double tech_points{0.0};
+  double exploration_points{0.0};
+
+  double total_points() const {
+    return colonies_points + population_points + installations_points + ships_points + tech_points + exploration_points;
+  }
+};
+
+// A single scoreboard row.
+struct ScoreboardEntry {
+  Id faction_id{kInvalidId};
+  std::string faction_name;
+  FactionControl control{FactionControl::Player};
+
+  // Eligibility & liveness for victory rule evaluation.
+  bool eligible_for_victory{true};
+  bool alive{true};
+
+  // Score breakdown.
+  FactionScoreBreakdown score;
+};
+
 class Simulation {
  public:
   Simulation(ContentDB content, SimConfig cfg);
@@ -789,6 +953,20 @@ class Simulation {
 
   GameState& state() { return state_; }
   const GameState& state() const { return state_; }
+
+  // --- Victory / scoring (query helpers) ---
+  // Compute a weighted score breakdown for a faction using the current save's
+  // VictoryRules weights.
+  FactionScoreBreakdown compute_faction_score(Id faction_id) const;
+
+  // Same as above, but with explicit rules (useful for UI previews).
+  FactionScoreBreakdown compute_faction_score(Id faction_id, const VictoryRules& rules) const;
+
+  // Build a scoreboard for all factions, sorted by total score descending.
+  std::vector<ScoreboardEntry> compute_scoreboard() const;
+
+  // Same as above, but with explicit rules.
+  std::vector<ScoreboardEntry> compute_scoreboard(const VictoryRules& rules) const;
 
   // Monotonic counter that increments whenever the simulation's GameState is replaced
   // (new_game/load_game). UI code can use this to clear stale selections / caches.
@@ -1278,6 +1456,27 @@ bool move_construction_order(Id colony_id, int from_index, int to_index);
   // List currently active treaties between the two factions (order-insensitive).
   std::vector<Treaty> treaties_between(Id faction_a, Id faction_b) const;
 
+  // --- Diplomatic offers / proposals ---
+  //
+  // Offers are directed (from -> to). Accepting an offer creates a Treaty.
+  //
+  // treaty_duration_days < 0 => indefinite if accepted.
+  // offer_expires_in_days <= 0 => never expires.
+  //
+  // Returns the offer id (or kInvalidId on failure).
+  Id create_diplomatic_offer(Id from_faction_id, Id to_faction_id, TreatyType treaty_type,
+                             int treaty_duration_days = -1, int offer_expires_in_days = 30,
+                             bool push_event = true, std::string* error = nullptr);
+
+  // Accept / decline a pending offer. On accept, a treaty is created and the offer is removed.
+  bool accept_diplomatic_offer(Id offer_id, bool push_event = true, std::string* error = nullptr);
+  bool decline_diplomatic_offer(Id offer_id, bool push_event = true, std::string* error = nullptr);
+
+  // Query helpers.
+  std::vector<DiplomaticOffer> diplomatic_offers_between(Id faction_a, Id faction_b) const;
+  std::vector<DiplomaticOffer> incoming_diplomatic_offers(Id to_faction_id) const;
+
+
 
   // Set a diplomatic stance. If reciprocal is true, also sets the inverse (B->A).
   //
@@ -1298,6 +1497,20 @@ bool move_construction_order(Id colony_id, int from_index, int to_index);
   // Exploration / map knowledge helpers.
   bool is_system_discovered_by_faction(Id viewer_faction_id, Id system_id) const;
   bool is_jump_point_surveyed_by_faction(Id viewer_faction_id, Id jump_point_id) const;
+  bool is_anomaly_discovered_by_faction(Id viewer_faction_id, Id anomaly_id) const;
+
+
+  // --- Environmental helpers (nebula + storms) ---
+  //
+  // These functions expose system-level environmental multipliers used by both
+  // the simulation and UI.
+  bool system_has_storm(Id system_id) const;
+  // Current storm intensity in [0,1], accounting for ramp up/down over time.
+  double system_storm_intensity(Id system_id) const;
+  // Sensor attenuation multiplier in [0,1]. Includes nebula density + storm intensity.
+  double system_sensor_environment_multiplier(Id system_id) const;
+  // Movement speed multiplier in [0,1]. Includes optional nebula drag + storms.
+  double system_movement_speed_multiplier(Id system_id) const;
 
   // --- Jump route planning (query-only) ---
   // Plan a path through the jump network without mutating ship orders.
@@ -1351,8 +1564,12 @@ bool move_construction_order(Id colony_id, int from_index, int to_index);
   void tick_shipyards(double dt_days);
   void tick_construction(double dt_days);
   void tick_ai();
+  void tick_piracy_suppression();
   void tick_pirate_raids();
+  void tick_nebula_storms();
   void tick_treaties();
+  void tick_diplomatic_offers();
+  void tick_victory();
   void tick_refuel();
   void tick_rearm();
   void tick_ship_maintenance(double dt_days);
@@ -1366,6 +1583,7 @@ bool move_construction_order(Id colony_id, int from_index, int to_index);
   void tick_repairs(double dt_days);
 
   void discover_system_for_faction(Id faction_id, Id system_id);
+  void discover_anomaly_for_faction(Id faction_id, Id anomaly_id, Id discovered_by_ship_id = kInvalidId);
   void survey_jump_point_for_faction(Id faction_id, Id jump_point_id);
 
   void apply_design_stats_to_ship(Ship& ship);

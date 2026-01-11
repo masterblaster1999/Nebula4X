@@ -337,6 +337,22 @@
       ]
     },
     {
+      "id": "pirate_hideout",
+      "name": "Pirate Hideout",
+      "role": "combatant",
+      "components": [
+        "reactor_mk2",
+        "sensor_mk2",
+        "stealth_coating_mk1",
+        "ecm_suite_mk1",
+        "missile_rack_mk1",
+        "laser_mk2",
+        "pd_laser_mk1",
+        "shield_mk1",
+        "armor_mk2"
+      ]
+    },
+    {
       "id": "freighter_beta",
       "name": "Freighter Beta",
       "role": "freighter",

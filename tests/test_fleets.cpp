@@ -333,7 +333,7 @@ int test_fleets() {
     N4X_ASSERT(sim.configure_fleet_formation(fid, FleetFormation::Wedge, 2.5));
 
     // ...and fleet mission automation config / runtime.
-    sim.state().fleets.at(fid).mission.type = FleetMissionType::EscortFreighters;
+    sim.state().fleets.at(fid).mission.type = FleetMissionType::AssaultColony;
     sim.state().fleets.at(fid).mission.patrol_system_id = 12345;
     sim.state().fleets.at(fid).mission.patrol_dwell_days = 7;
     sim.state().fleets.at(fid).mission.patrol_leg_index = 3;
@@ -355,6 +355,15 @@ int test_fleets() {
     sim.state().fleets.at(fid).mission.sustainment_colony_id = 999;
     sim.state().fleets.at(fid).mission.last_target_ship_id = 4242;
 
+    // Assault mission params should also round-trip.
+    sim.state().fleets.at(fid).mission.assault_colony_id = 123;
+    sim.state().fleets.at(fid).mission.assault_staging_colony_id = 456;
+    sim.state().fleets.at(fid).mission.assault_auto_stage = false;
+    sim.state().fleets.at(fid).mission.assault_troop_margin_factor = 1.23;
+    sim.state().fleets.at(fid).mission.assault_use_bombardment = true;
+    sim.state().fleets.at(fid).mission.assault_bombard_days = 42;
+    sim.state().fleets.at(fid).mission.assault_bombard_executed = true;
+
     const std::string json_text = serialize_game_to_json(sim.state());
     const GameState loaded = deserialize_game_from_json(json_text);
 
@@ -371,7 +380,7 @@ int test_fleets() {
     N4X_ASSERT(std::fabs(fl.formation_spacing_mkm - 2.5) < 1e-9);
 
     // Fleet mission should also round-trip.
-    N4X_ASSERT(fl.mission.type == FleetMissionType::EscortFreighters);
+    N4X_ASSERT(fl.mission.type == FleetMissionType::AssaultColony);
     N4X_ASSERT(fl.mission.patrol_system_id == 12345);
     N4X_ASSERT(fl.mission.patrol_dwell_days == 7);
     N4X_ASSERT(fl.mission.patrol_leg_index == 3);
@@ -392,6 +401,14 @@ int test_fleets() {
     N4X_ASSERT(fl.mission.sustainment_mode == FleetSustainmentMode::Refuel);
     N4X_ASSERT(fl.mission.sustainment_colony_id == 999);
     N4X_ASSERT(fl.mission.last_target_ship_id == 4242);
+
+    N4X_ASSERT(fl.mission.assault_colony_id == 123);
+    N4X_ASSERT(fl.mission.assault_staging_colony_id == 456);
+    N4X_ASSERT(fl.mission.assault_auto_stage == false);
+    N4X_ASSERT(std::fabs(fl.mission.assault_troop_margin_factor - 1.23) < 1e-9);
+    N4X_ASSERT(fl.mission.assault_use_bombardment == true);
+    N4X_ASSERT(fl.mission.assault_bombard_days == 42);
+    N4X_ASSERT(fl.mission.assault_bombard_executed == true);
   }
 
 

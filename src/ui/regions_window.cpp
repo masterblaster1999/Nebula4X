@@ -43,6 +43,8 @@ struct RegionAgg {
 
   int colonies{0};
   double pop_millions{0.0};
+
+  int known_hideouts{0};
 };
 
 struct RegionRow {
@@ -135,9 +137,15 @@ int compare_rows(const RegionRow& a, const RegionRow& b, const ImGuiTableSortSpe
         else delta = 0;
         break;
       }
-      case 7: { // Pirates
-        const double av = a.reg ? a.reg->pirate_risk : 0.0;
-        const double bv = b.reg ? b.reg->pirate_risk : 0.0;
+      case 7: { // Pirates (effective)
+        const auto eff = [](const Region* r) -> double {
+          if (!r) return 0.0;
+          const double base = std::clamp(r->pirate_risk, 0.0, 1.0);
+          const double supp = std::clamp(r->pirate_suppression, 0.0, 1.0);
+          return std::clamp(base * (1.0 - supp), 0.0, 1.0);
+        };
+        const double av = eff(a.reg);
+        const double bv = eff(b.reg);
         if (av < bv) delta = -1;
         else if (av > bv) delta = 1;
         else delta = 0;
@@ -268,6 +276,37 @@ void draw_regions_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& se
     a.pop_millions += c.population_millions;
   }
 
+  // Known pirate hideouts per region.
+  //
+  // Under Fog-of-War: derive from the viewer faction's ship contacts (no leakage).
+  // Without Fog-of-War: count actual hideout ships.
+  if (!ui.fog_of_war || viewer_faction_id == kInvalidId) {
+    for (const auto& [sid, sh] : s.ships) {
+      (void)sid;
+      if (sh.design_id != "pirate_hideout") continue;
+      if (sh.system_id == kInvalidId) continue;
+      const auto* sys = find_ptr(s.systems, sh.system_id);
+      if (!sys) continue;
+      const Id rid = sys->region_id;
+      if (rid == kInvalidId) continue;
+      agg[rid].known_hideouts += 1;
+    }
+  } else {
+    const auto* fac = find_ptr(s.factions, viewer_faction_id);
+    if (fac) {
+      for (const auto& [_, c] : fac->ship_contacts) {
+        if (c.system_id == kInvalidId) continue;
+        if (c.last_seen_design_id != "pirate_hideout") continue;
+        if (!sim.is_system_discovered_by_faction(viewer_faction_id, c.system_id)) continue;
+        const auto* sys = find_ptr(s.systems, c.system_id);
+        if (!sys) continue;
+        const Id rid = sys->region_id;
+        if (rid == kInvalidId) continue;
+        agg[rid].known_hideouts += 1;
+      }
+    }
+  }
+
   // Build display rows.
   std::vector<RegionRow> rows;
   rows.reserve(s.regions.size());
@@ -370,7 +409,13 @@ void draw_regions_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& se
       ImGui::Text("%+.2f", r.nebula_bias);
 
       ImGui::TableSetColumnIndex(7);
-      ImGui::Text("%.2f", r.pirate_risk);
+      const double base_risk = std::clamp(r.pirate_risk, 0.0, 1.0);
+      const double supp = std::clamp(r.pirate_suppression, 0.0, 1.0);
+      const double eff_risk = std::clamp(base_risk * (1.0 - supp), 0.0, 1.0);
+      ImGui::Text("%.2f", eff_risk);
+      if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Base risk %.2f\nSuppression %.2f\nEffective %.2f\nKnown hideouts %d", base_risk, supp, eff_risk, row.a.known_hideouts);
+      }
 
       ImGui::TableSetColumnIndex(8);
       ImGui::Text("%.2f", r.ruins_density);
@@ -445,7 +490,12 @@ void draw_regions_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& se
   ImGui::SeparatorText("Procedural modifiers");
   ImGui::TextDisabled("Minerals:  x%.2f   Volatiles: x%.2f   Salvage: x%.2f", r->mineral_richness_mult, r->volatile_richness_mult,
                       r->salvage_richness_mult);
-  ImGui::TextDisabled("Nebula bias: %+.2f   Pirate risk: %.2f   Ruins density: %.2f", r->nebula_bias, r->pirate_risk, r->ruins_density);
+  const double base_risk = std::clamp(r->pirate_risk, 0.0, 1.0);
+  const double supp = std::clamp(r->pirate_suppression, 0.0, 1.0);
+  const double eff_risk = std::clamp(base_risk * (1.0 - supp), 0.0, 1.0);
+  ImGui::TextDisabled(
+      "Nebula bias: %+.2f   Pirate risk: %.2f (base %.2f, supp %.2f)   Known hideouts: %d   Ruins density: %.2f",
+      r->nebula_bias, eff_risk, base_risk, supp, row.a.known_hideouts, r->ruins_density);
 
   // Systems list.
   ImGui::SeparatorText("Systems in region");

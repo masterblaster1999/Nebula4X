@@ -219,6 +219,7 @@ struct UIState {
   bool show_regions_window{false};
   bool show_freight_window{false};
   bool show_fuel_window{false};
+  bool show_sustainment_window{false};
   bool show_troop_window{false};
   bool show_advisor_window{false};
   bool show_time_warp_window{false};
@@ -227,6 +228,7 @@ struct UIState {
   bool show_balance_lab_window{false};
   bool show_intel_window{false};
   bool show_diplomacy_window{false};
+  bool show_victory_window{false};
   bool show_colony_profiles_window{false};
   bool show_settings_window{false};
 

@@ -23,6 +23,7 @@ using sim_internal::FactionEconomyMultipliers;
 using sim_internal::compute_faction_economy_multipliers;
 using sim_internal::is_mining_installation;
 using sim_internal::sorted_keys;
+using sim_internal::trade_agreement_output_multiplier;
 
 inline double get_mineral(const std::unordered_map<std::string, double>& m, const std::string& key) {
   auto it = m.find(key);
@@ -270,6 +271,33 @@ bool simulate_mining_day(const Simulation& sim,
       if (it_def == sim.content().installations.end()) continue;
       const InstallationDef& def = it_def->second;
       if (!is_mining_installation(def)) continue;
+
+      // New model: generic mining capacity distributed across all deposits.
+      // Mirrors Simulation::tick_colonies for accuracy.
+      if (def.mining_tons_per_day > 0.0 && !deposits.empty()) {
+        const double cap = def.mining_tons_per_day * static_cast<double>(count) * mining_mult * dt_days;
+        if (cap > 1e-12) {
+          const auto keys = sorted_keys(deposits);
+          double total_remaining = 0.0;
+          for (const auto& k : keys) {
+            const double rem = std::max(0.0, deposits.at(k));
+            if (rem > 1e-12) total_remaining += rem;
+          }
+          if (total_remaining > 1e-12) {
+            for (const auto& k : keys) {
+              const double rem = std::max(0.0, deposits.at(k));
+              if (rem <= 1e-12) continue;
+              const double req = cap * (rem / total_remaining);
+              if (req <= 1e-12) continue;
+              total_req[k] += req;
+              if (is_target) target_req[k] += req;
+            }
+          }
+        }
+        continue;
+      }
+
+      // Legacy model: fixed per-mineral extraction rates.
       for (const auto& [mineral, per_day_raw] : def.produces_per_day) {
         const double per_day = std::max(0.0, per_day_raw);
         if (per_day <= 1e-12) continue;
@@ -564,7 +592,14 @@ ColonySchedule estimate_colony_schedule(const Simulation& sim, Id colony_id, con
   std::unordered_map<Id, FactionEconomyMultipliers> fac_mult;
   fac_mult.reserve(sim.state().factions.size());
   for (Id fid : sorted_keys(sim.state().factions)) {
-    fac_mult.emplace(fid, compute_faction_economy_multipliers(sim.content(), sim.state().factions.at(fid)));
+    auto m = compute_faction_economy_multipliers(sim.content(), sim.state().factions.at(fid));
+    const double trade = trade_agreement_output_multiplier(sim.state(), fid);
+    // Match Simulation::tick_colonies: trade boosts non-mining outputs.
+    m.industry *= trade;
+    m.research *= trade;
+    m.construction *= trade;
+    m.shipyard *= trade;
+    fac_mult.emplace(fid, m);
   }
   const FactionEconomyMultipliers default_mult;
   auto mult_for = [&](Id fid) -> const FactionEconomyMultipliers& {

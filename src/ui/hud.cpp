@@ -564,6 +564,12 @@ void draw_status_bar(Simulation& sim, UIState& ui, HUDState& /*hud*/, Id& select
   }
 
   ImGui::SameLine();
+  if (ImGui::SmallButton("Sustain")) ui.show_sustainment_window = true;
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip("Open the Sustainment Planner (fleet base stockpile targets)");
+  }
+
+  ImGui::SameLine();
   if (ImGui::SmallButton("Advisor")) ui.show_advisor_window = true;
   if (ImGui::IsItemHovered()) {
     ImGui::SetTooltip("Open the Advisor (issues + quick fixes)");

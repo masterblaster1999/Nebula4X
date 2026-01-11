@@ -86,6 +86,8 @@ nebula4x::GameState make_state() {
     sh.design_id = "scout";
     sh.fuel_tons = 10.0;
     sh.hp = 50.0;
+    sh.missile_ammo = 0;
+    sh.maintenance_condition = 0.30;
     s.ships[sh.id] = sh;
     s.systems[sh.system_id].ships.push_back(sh.id);
   }
@@ -103,7 +105,9 @@ nebula4x::ContentDB make_content() {
     ShipDesign d;
     d.id = "scout";
     d.name = "Scout";
+    d.mass_tons = 1000.0;
     d.fuel_capacity_tons = 100.0;
+    d.missile_ammo_capacity = 20;
     d.max_hp = 100.0;
     c.designs[d.id] = d;
   }
@@ -125,7 +129,9 @@ nebula4x::ContentDB make_content() {
 int test_advisor() {
   using namespace nebula4x;
 
-  Simulation sim(make_content(), SimConfig{});
+  SimConfig cfg;
+  cfg.enable_ship_maintenance = true;
+  Simulation sim(make_content(), cfg);
   sim.load_game(make_state());
 
   AdvisorIssueOptions opt;
@@ -139,9 +145,16 @@ int test_advisor() {
   N4X_ASSERT(issues_a.size() == issues_b.size());
   N4X_ASSERT(!issues_a.empty());
 
-  bool saw_logistics = false;
+  bool saw_duranium_need = false;
+  bool saw_fuel_need = false;
+  bool saw_munitions_need = false;
+  bool saw_metals_need = false;
+
   bool saw_low_fuel = false;
   bool saw_damaged = false;
+  bool saw_low_ammo = false;
+  bool saw_low_maint = false;
+
   bool saw_hab = false;
   bool saw_garrison = false;
 
@@ -158,9 +171,21 @@ int test_advisor() {
 
     switch (ia.kind) {
       case AdvisorIssueKind::LogisticsNeed:
-        saw_logistics = true;
-        N4X_ASSERT(ia.resource == "Duranium");
-        N4X_ASSERT(ia.missing >= 99.9);
+        if (ia.resource == "Duranium") {
+          N4X_ASSERT(ia.missing >= 99.9);
+          saw_duranium_need = true;
+        } else if (ia.resource == "Fuel") {
+          N4X_ASSERT(ia.missing >= 89.9);
+          saw_fuel_need = true;
+        } else if (ia.resource == "Munitions") {
+          N4X_ASSERT(ia.missing >= 19.9);
+          saw_munitions_need = true;
+        } else if (ia.resource == "Metals") {
+          N4X_ASSERT(ia.missing >= 0.5);
+          saw_metals_need = true;
+        } else {
+          N4X_ASSERT(false && "Unexpected logistics resource");
+        }
         break;
       case AdvisorIssueKind::ShipLowFuel:
         saw_low_fuel = true;
@@ -168,6 +193,14 @@ int test_advisor() {
         break;
       case AdvisorIssueKind::ShipDamaged:
         saw_damaged = true;
+        N4X_ASSERT(ia.ship_id == 300);
+        break;
+      case AdvisorIssueKind::ShipLowAmmo:
+        saw_low_ammo = true;
+        N4X_ASSERT(ia.ship_id == 300);
+        break;
+      case AdvisorIssueKind::ShipLowMaintenance:
+        saw_low_maint = true;
         N4X_ASSERT(ia.ship_id == 300);
         break;
       case AdvisorIssueKind::ColonyHabitationShortfall:
@@ -181,9 +214,16 @@ int test_advisor() {
     }
   }
 
-  N4X_ASSERT(saw_logistics);
+    N4X_ASSERT(saw_duranium_need);
+  N4X_ASSERT(saw_fuel_need);
+  N4X_ASSERT(saw_munitions_need);
+  N4X_ASSERT(saw_metals_need);
+
   N4X_ASSERT(saw_low_fuel);
   N4X_ASSERT(saw_damaged);
+  N4X_ASSERT(saw_low_ammo);
+  N4X_ASSERT(saw_low_maint);
+
   N4X_ASSERT(saw_hab);
   N4X_ASSERT(saw_garrison);
 

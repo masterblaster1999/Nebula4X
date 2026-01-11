@@ -41,6 +41,23 @@ using sim_internal::compute_power_allocation;
 
 using sim_sensors::SensorSource;
 using sim_sensors::gather_sensor_sources;
+
+
+// Deterministic tiny RNG helpers (used for daily environmental events).
+inline std::uint32_t hash_u32(std::uint32_t x) {
+  x ^= x >> 16;
+  x *= 0x7feb352dU;
+  x ^= x >> 15;
+  x *= 0x846ca68bU;
+  x ^= x >> 16;
+  return x;
+}
+
+inline double hash_to_unit01(std::uint32_t x) {
+  // Map to [0,1). Use 24 bits to avoid denorms.
+  return static_cast<double>(x & 0x00FFFFFFu) / static_cast<double>(0x01000000u);
+}
+
 } // namespace
 
 void Simulation::recompute_body_positions() {
@@ -171,6 +188,9 @@ void Simulation::tick_one_tick_hours(int hours) {
 
   const double dt_days = static_cast<double>(hours) / 24.0;
 
+  // Daily environmental updates (midnight boundary).
+  if (day_advanced) tick_nebula_storms();
+
   if (cfg_.enable_subday_economy) {
     // Economy ticks every step (scaled by dt_days).
     //
@@ -185,6 +205,7 @@ void Simulation::tick_one_tick_hours(int hours) {
     // Keep AI as a daily tick for now (avoid thrashing decisions every hour).
     if (day_advanced) {
       tick_treaties();
+      tick_diplomatic_offers();
       tick_ai();
     }
   } else if (day_advanced) {
@@ -194,6 +215,7 @@ void Simulation::tick_one_tick_hours(int hours) {
     tick_shipyards(1.0);
     tick_construction(1.0);
     tick_treaties();
+    tick_diplomatic_offers();
     tick_ai();
     tick_refuel();
     tick_rearm();
@@ -254,7 +276,215 @@ void Simulation::tick_one_tick_hours(int hours) {
       }
     }
   }
+
+  // Victory conditions are evaluated on day boundaries so that all daily
+  // effects (combat, invasion results, economy) have already been applied.
+  if (day_advanced) {
+    tick_victory();
+  }
 }
+
+void Simulation::tick_victory() {
+  // No-op if disabled or already ended.
+  if (!state_.victory_rules.enabled) return;
+  if (state_.victory_state.game_over) return;
+
+  const auto scores = compute_scoreboard(state_.victory_rules);
+  if (scores.empty()) return;
+
+  // Determine eligible competitors.
+  int eligible_total = 0;
+  int eligible_alive = 0;
+  Id last_alive_id = kInvalidId;
+  for (const auto& e : scores) {
+    if (!e.eligible_for_victory) continue;
+    eligible_total++;
+    if (e.alive) {
+      eligible_alive++;
+      last_alive_id = e.faction_id;
+    }
+  }
+
+  // Don't auto-win in single-faction sandboxes.
+  if (eligible_total < 2) return;
+
+  // --- Elimination victory ---
+  if (state_.victory_rules.elimination_enabled && eligible_alive == 1 && last_alive_id != kInvalidId) {
+    const auto* winner = find_ptr(state_.factions, last_alive_id);
+    state_.victory_state.game_over = true;
+    state_.victory_state.winner_faction_id = last_alive_id;
+    state_.victory_state.reason = VictoryReason::LastFactionStanding;
+    state_.victory_state.victory_day = state_.date.days_since_epoch();
+    state_.victory_state.winner_score = 0.0;
+
+    std::string msg = "Victory: ";
+    msg += (winner ? winner->name : std::to_string(static_cast<unsigned long long>(last_alive_id)));
+    msg += " wins by elimination.";
+    this->push_event(EventLevel::Warn, EventCategory::General, msg,
+                     EventContext{.faction_id = last_alive_id,
+                                  .faction_id2 = kInvalidId,
+                                  .system_id = kInvalidId,
+                                  .ship_id = kInvalidId,
+                                  .colony_id = kInvalidId});
+    return;
+  }
+
+  // --- Score victory ---
+  const double threshold = state_.victory_rules.score_threshold;
+  if (threshold > 0.0) {
+    // Find top two eligible factions by score.
+    const ScoreboardEntry* best = nullptr;
+    const ScoreboardEntry* second = nullptr;
+    for (const auto& e : scores) {
+      if (!e.eligible_for_victory) continue;
+      if (!best) {
+        best = &e;
+        continue;
+      }
+      if (!second) {
+        second = &e;
+        continue;
+      }
+      break;
+    }
+
+    if (best) {
+      const double best_score = best->score.total_points();
+      const double second_score = second ? second->score.total_points() : 0.0;
+      const double margin = state_.victory_rules.score_lead_margin;
+      if (best_score >= threshold && best_score >= second_score + margin) {
+        const auto* winner = find_ptr(state_.factions, best->faction_id);
+        state_.victory_state.game_over = true;
+        state_.victory_state.winner_faction_id = best->faction_id;
+        state_.victory_state.reason = VictoryReason::ScoreThreshold;
+        state_.victory_state.victory_day = state_.date.days_since_epoch();
+        state_.victory_state.winner_score = best_score;
+
+        std::string msg = "Victory: ";
+        msg += (winner ? winner->name : std::to_string(static_cast<unsigned long long>(best->faction_id)));
+        msg += " reaches the score threshold (";
+        msg += std::to_string(static_cast<long long>(std::llround(best_score)));
+        msg += " / ";
+        msg += std::to_string(static_cast<long long>(std::llround(threshold)));
+        msg += ").";
+        this->push_event(EventLevel::Warn, EventCategory::General, msg,
+                         EventContext{.faction_id = best->faction_id,
+                                      .faction_id2 = kInvalidId,
+                                      .system_id = kInvalidId,
+                                      .ship_id = kInvalidId,
+                                      .colony_id = kInvalidId});
+      }
+    }
+  }
+}
+
+
+
+void Simulation::tick_nebula_storms() {
+  if (!cfg_.enable_nebula_storms) return;
+
+  const std::int64_t now = state_.date.days_since_epoch();
+
+  // Track which systems have colonies for relevance filtering (storms that affect nothing are not announced).
+  std::unordered_set<Id> systems_with_colonies;
+  systems_with_colonies.reserve(state_.colonies.size() * 2 + 1);
+  for (const auto& [cid, c] : state_.colonies) {
+    (void)cid;
+    const Body* b = find_ptr(state_.bodies, c.body_id);
+    if (!b) continue;
+    if (b->system_id != kInvalidId) systems_with_colonies.insert(b->system_id);
+  }
+
+  const auto sys_ids = sorted_keys(state_.systems);
+  for (Id sid : sys_ids) {
+    auto* sys = find_ptr(state_.systems, sid);
+    if (!sys) continue;
+
+    // Expire finished storms.
+    if (sys->storm_peak_intensity > 0.0 && sys->storm_end_day > sys->storm_start_day && now >= sys->storm_end_day) {
+      const bool important = !sys->ships.empty() || (systems_with_colonies.find(sid) != systems_with_colonies.end());
+      if (important) {
+        std::string msg = "Nebula storm dissipated in ";
+        msg += sys->name;
+        msg += ".";
+        this->push_event(EventLevel::Info, EventCategory::Exploration, msg,
+                         EventContext{.faction_id = kInvalidId,
+                                      .faction_id2 = kInvalidId,
+                                      .system_id = sid,
+                                      .ship_id = kInvalidId,
+                                      .colony_id = kInvalidId});
+      }
+      sys->storm_peak_intensity = 0.0;
+      sys->storm_start_day = 0;
+      sys->storm_end_day = 0;
+    }
+
+    // Skip if a storm is still active (or scheduled).
+    if (sys->storm_peak_intensity > 0.0 && sys->storm_end_day > sys->storm_start_day && now < sys->storm_end_day) {
+      continue;
+    }
+
+    // Consider starting a new storm.
+    const double neb = std::clamp(sys->nebula_density, 0.0, 1.0);
+    if (neb < cfg_.nebula_storm_min_nebula_density) continue;
+
+    const double base = std::clamp(std::max(0.0, cfg_.nebula_storm_start_chance_per_day_at_max_density), 0.0, 1.0);
+    const double exp = std::max(0.0, cfg_.nebula_storm_start_chance_exponent);
+
+    double p = 0.0;
+    if (base > 0.0) {
+      // At low nebula density, storms should be much rarer.
+      p = base * ((exp == 1.0) ? neb : std::pow(neb, exp));
+      p = std::clamp(p, 0.0, 1.0);
+    }
+    if (p <= 0.0) continue;
+
+    // Deterministic seed based on day + system id.
+    const std::uint32_t seed = hash_u32(static_cast<std::uint32_t>(now) ^
+                                        hash_u32(static_cast<std::uint32_t>(sid)) ^
+                                        0x4E42554Cu /*'NBUL'*/);
+    const double u = hash_to_unit01(seed);
+    if (u >= p) continue;
+
+    const double u_int = hash_to_unit01(hash_u32(seed ^ 0xA531u));
+    const double u_dur = hash_to_unit01(hash_u32(seed ^ 0xBEEFu));
+
+    int dur_min = std::max(1, cfg_.nebula_storm_duration_days_min);
+    int dur_max = std::max(dur_min, cfg_.nebula_storm_duration_days_max);
+    int dur = dur_min +
+              static_cast<int>(std::floor(u_dur * static_cast<double>(dur_max - dur_min + 1)));
+    dur = std::clamp(dur, dur_min, dur_max);
+
+    double i_min = std::clamp(cfg_.nebula_storm_peak_intensity_min, 0.0, 1.0);
+    double i_max = std::clamp(cfg_.nebula_storm_peak_intensity_max, 0.0, 1.0);
+    if (i_max < i_min) std::swap(i_min, i_max);
+
+    double peak = i_min + (i_max - i_min) * u_int;
+    // Bias storm strength upward in very dense nebulae.
+    peak = std::clamp(peak * (0.5 + 0.5 * neb), 0.0, 1.0);
+
+    sys->storm_peak_intensity = peak;
+    sys->storm_start_day = now;
+    sys->storm_end_day = now + static_cast<std::int64_t>(dur);
+
+    const bool important = !sys->ships.empty() || (systems_with_colonies.find(sid) != systems_with_colonies.end());
+    if (important) {
+      const int pct = static_cast<int>(std::llround(peak * 100.0));
+      std::string msg = "Nebula storm forming in ";
+      msg += sys->name;
+      msg += " (peak ";
+      msg += std::to_string(pct);
+      msg += "%).";
+      this->push_event(EventLevel::Info, EventCategory::Exploration, msg,
+                       EventContext{.faction_id = kInvalidId,
+                                    .faction_id2 = kInvalidId,
+                                    .system_id = sid,
+                                    .ship_id = kInvalidId,
+                                    .colony_id = kInvalidId});
+    }
+  }
+}
+
 
 void Simulation::tick_treaties() {
   if (state_.treaties.empty()) return;
@@ -347,6 +577,54 @@ void Simulation::tick_treaties() {
     invalidate_jump_route_cache();
   }
 }
+
+
+void Simulation::tick_diplomatic_offers() {
+  if (state_.diplomatic_offers.empty()) return;
+
+  const int now_day = static_cast<int>(state_.date.days_since_epoch());
+  std::vector<Id> expired;
+  expired.reserve(state_.diplomatic_offers.size());
+
+  for (const auto& [oid, o] : state_.diplomatic_offers) {
+    (void)oid;
+    if (o.expire_day >= 0 && now_day >= o.expire_day) expired.push_back(o.id);
+  }
+
+  if (expired.empty()) return;
+  std::sort(expired.begin(), expired.end());
+
+  for (Id oid : expired) {
+    const DiplomaticOffer* o = find_ptr(state_.diplomatic_offers, oid);
+    if (!o) continue;
+
+    const auto* from = find_ptr(state_.factions, o->from_faction_id);
+    const auto* to = find_ptr(state_.factions, o->to_faction_id);
+
+    const bool player_involved = (from && from->control == FactionControl::Player) ||
+                                 (to && to->control == FactionControl::Player);
+
+    // Apply a small cooldown to avoid immediate re-offers after expiry.
+    constexpr int kExpiredCooldownDays = 30;
+    if (auto* f = find_ptr(state_.factions, o->from_faction_id)) {
+      int& until = f->diplomacy_offer_cooldown_until_day[o->to_faction_id];
+      until = std::max(until, now_day + kExpiredCooldownDays);
+    }
+
+    if (player_involved) {
+      EventContext ctx;
+      ctx.faction_id = o->to_faction_id;
+      ctx.faction_id2 = o->from_faction_id;
+
+      std::string msg = "Diplomatic offer expired";
+      if (from) msg += " from " + from->name;
+      this->push_event(EventLevel::Info, EventCategory::Diplomacy, std::move(msg), ctx);
+    }
+
+    state_.diplomatic_offers.erase(oid);
+  }
+}
+
 
 void Simulation::push_event(EventLevel level, std::string message) {
   push_event(level, EventCategory::General, std::move(message), {});
@@ -662,6 +940,93 @@ const double eff = src.range_mkm * sig * ew_mult;
     }
   }
 
+  // --- Anomaly discovery (fog-of-war exploration intel) ---
+  //
+  // Discover unresolved anomalies when they enter any sensor coverage bubble.
+  // This reuses the same per-faction sensor source cache as ship contacts.
+  const double anom_range_mult = std::clamp(cfg_.anomaly_detection_range_multiplier, 0.0, 100.0);
+  if (anom_range_mult > 1e-9 && !state_.anomalies.empty()) {
+    std::unordered_map<Id, std::vector<Id>> anomalies_by_system;
+    anomalies_by_system.reserve(state_.anomalies.size());
+
+    for (const auto& [aid, a] : state_.anomalies) {
+      if (aid == kInvalidId) continue;
+      if (a.system_id == kInvalidId) continue;
+      if (a.resolved) continue;
+      anomalies_by_system[a.system_id].push_back(aid);
+    }
+
+    std::vector<Id> anomaly_system_ids;
+    anomaly_system_ids.reserve(anomalies_by_system.size());
+    for (auto& [sid, vec] : anomalies_by_system) {
+      std::sort(vec.begin(), vec.end());
+      vec.erase(std::unique(vec.begin(), vec.end()), vec.end());
+      anomaly_system_ids.push_back(sid);
+    }
+    std::sort(anomaly_system_ids.begin(), anomaly_system_ids.end());
+
+    for (Id sys_id : anomaly_system_ids) {
+      const auto itv = anomalies_by_system.find(sys_id);
+      if (itv == anomalies_by_system.end()) continue;
+      const auto& anom_ids = itv->second;
+
+      for (Id fid : faction_ids) {
+        const auto& sources = sources_for(fid, sys_id);
+        if (sources.empty()) continue;
+
+        for (Id aid : anom_ids) {
+          if (is_anomaly_discovered_by_faction(fid, aid)) continue;
+          const auto* a = find_ptr(state_.anomalies, aid);
+          if (!a || a->resolved) continue;
+
+          const Vec2 tgt = a->position_mkm;
+          bool detected_any = false;
+          Id discovered_by = kInvalidId;
+
+          for (const auto& src : sources) {
+            if (src.range_mkm <= 1e-9) continue;
+
+            const double r = src.range_mkm * anom_range_mult;
+            if (!std::isfinite(r) || r <= 1e-9) continue;
+            const double r2 = r * r;
+
+            bool detected = false;
+
+            // Swept check for fast-moving ships: did we pass within range at
+            // any time during this tick?
+            if (swept && src.ship_id != kInvalidId) {
+              const auto* sh = find_ptr(state_.ships, src.ship_id);
+              const Vec2 src1 = src.pos_mkm;
+              Vec2 src0 = src1;
+              if (sh) src0 = src1 - sh->velocity_mkm_per_day * dt_days;
+
+              double t = 1.0;
+              const double d2 = min_dist_sq_and_t(src0, src1, tgt, tgt, &t);
+              detected = (d2 <= r2);
+            } else {
+              const double dx = tgt.x - src.pos_mkm.x;
+              const double dy = tgt.y - src.pos_mkm.y;
+              const double d2 = dx * dx + dy * dy;
+              detected = (d2 <= r2);
+            }
+
+            if (!detected) continue;
+            detected_any = true;
+
+            // Prefer the smallest ship_id for deterministic attribution.
+            if (src.ship_id != kInvalidId) {
+              if (discovered_by == kInvalidId || src.ship_id < discovered_by) discovered_by = src.ship_id;
+            }
+          }
+
+          if (detected_any) {
+            discover_anomaly_for_faction(fid, aid, discovered_by);
+          }
+        }
+      }
+    }
+  }
+
   if (!emit_contact_lost_events) return;
 
   for (Id fid : faction_ids) {
@@ -740,7 +1105,18 @@ void Simulation::tick_shields(double dt_days) {
     if (sh->shields < 0.0) sh->shields = max_sh;
 
     const double regen = std::max(0.0, d->shield_regen_per_day);
-    sh->shields = std::clamp(sh->shields + regen * dt_days, 0.0, max_sh);
+
+    // Nebula storms can interfere with shield systems (net negative regen).
+    double drain = 0.0;
+    if (cfg_.enable_nebula_storms) {
+      const double per_day = std::max(0.0, cfg_.nebula_storm_shield_drain_per_day_at_intensity1);
+      if (per_day > 0.0) {
+        const double storm = this->system_storm_intensity(sh->system_id);
+        if (storm > 0.0) drain = per_day * storm;
+      }
+    }
+
+    sh->shields = std::clamp(sh->shields + (regen - drain) * dt_days, 0.0, max_sh);
   }
 }
 

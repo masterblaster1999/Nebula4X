@@ -399,6 +399,28 @@ void draw_intel_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& sele
       detected_hostiles = sim.detected_hostile_ships_in_system(viewer_faction_id, sys->id);
     }
 
+    // Selected contact (for EW-aware sensor overlays).
+    const ShipDesign* selected_contact_design = nullptr;
+    double selected_contact_sig = 1.0;
+    double selected_contact_ecm = 0.0;
+
+    if (viewer && ui.selected_contact_ship_id != kInvalidId) {
+      auto itc = viewer->ship_contacts.find(ui.selected_contact_ship_id);
+      if (itc != viewer->ship_contacts.end()) {
+        selected_contact_design = sim.find_design(itc->second.last_seen_design_id);
+        if (selected_contact_design) {
+          selected_contact_sig = std::isfinite(selected_contact_design->signature_multiplier)
+                                   ? selected_contact_design->signature_multiplier
+                                   : 1.0;
+          selected_contact_sig = std::clamp(selected_contact_sig, 0.0,
+                                            sim_sensors::max_signature_multiplier_for_detection(sim));
+          selected_contact_ecm = std::isfinite(selected_contact_design->ecm_strength)
+                                   ? std::max(0.0, selected_contact_design->ecm_strength)
+                                   : 0.0;
+        }
+      }
+    }
+
     // Sensor heat / rings.
     if (!sensor_sources.empty()) {
       const ImU32 fill_col = IM_COL32(0, 190, 255, 255);
@@ -412,6 +434,25 @@ void draw_intel_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& sele
         // Rings remain useful even when heat is off.
         draw->AddCircle(p, rr, modulate_alpha(ring_col, 0.14f), 0, 1.0f);
         draw->AddCircleFilled(p, 2.1f, modulate_alpha(IM_COL32(0, 220, 255, 255), 0.70f), 0);
+
+        // If a contact is selected, draw the *effective* detection range against
+        // that contact's assumed signature + ECM (ECCM counters).
+        //
+        // This helps explain why a contact may blink in/out near the edge of
+        // sensor range under electronic warfare.
+        if (selected_contact_design) {
+          const double eccm = std::max(0.0, src.eccm_strength);
+          double ew_mult = (1.0 + eccm) / (1.0 + selected_contact_ecm);
+          if (!std::isfinite(ew_mult)) ew_mult = 1.0;
+          ew_mult = std::clamp(ew_mult, 0.1, 10.0);
+
+          const double rr2_mkm = std::max(0.0, src.range_mkm) * selected_contact_sig * ew_mult;
+          const float rr2 = (float)(rr2_mkm * px_per_mkm);
+          if (rr2 > 2.0f) {
+            const ImU32 ew_col = IM_COL32(255, 200, 90, 255);
+            draw->AddCircle(p, rr2, modulate_alpha(ew_col, 0.16f), 0, 1.2f);
+          }
+        }
       }
     }
 
@@ -732,6 +773,37 @@ void draw_intel_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& sele
         ImGui::TextDisabled("System: %s", sys2 ? sys2->name.c_str() : "?");
         ImGui::TextDisabled("Age: %d days", age);
         ImGui::TextDisabled("Design: %s", c.last_seen_design_id.c_str());
+
+        if (const auto* d = sim.find_design(c.last_seen_design_id)) {
+          double sig0 = std::isfinite(d->signature_multiplier) ? d->signature_multiplier : 1.0;
+          sig0 = std::clamp(sig0, 0.0, sim_sensors::max_signature_multiplier_for_detection(sim));
+          const double ecm = std::isfinite(d->ecm_strength) ? std::max(0.0, d->ecm_strength) : 0.0;
+          const double eccm = std::isfinite(d->eccm_strength) ? std::max(0.0, d->eccm_strength) : 0.0;
+
+          ImGui::TextDisabled("Sig (design): %.0f%%", sig0 * 100.0);
+          if (ecm > 0.0 || eccm > 0.0) {
+            ImGui::TextDisabled("EW (design): ECM %.1f  ECCM %.1f", ecm, eccm);
+          } else {
+            ImGui::TextDisabled("EW (design): (none)");
+          }
+
+          if (viewer_faction_id != kInvalidId) {
+            double best = 0.0;
+            for (const auto& src : sim_sensors::gather_sensor_sources(sim, viewer_faction_id, c.system_id)) {
+              const double src_eccm = std::max(0.0, src.eccm_strength);
+              double ew_mult = (1.0 + src_eccm) / (1.0 + ecm);
+              if (!std::isfinite(ew_mult)) ew_mult = 1.0;
+              ew_mult = std::clamp(ew_mult, 0.1, 10.0);
+
+              const double r = std::max(0.0, src.range_mkm) * sig0 * ew_mult;
+              if (std::isfinite(r)) best = std::max(best, r);
+            }
+            if (best > 0.0) {
+              ImGui::TextDisabled("Est. detect radius vs viewer: up to %.0f mkm", best);
+              ImGui::TextDisabled("(Assumes target EMCON = Normal)");
+            }
+          }
+        }
         ImGui::TextDisabled("Last pos: (%.1f, %.1f) mkm", c.last_seen_position_mkm.x, c.last_seen_position_mkm.y);
         ImGui::TextDisabled("Pred pos: (%.1f, %.1f) mkm (%dd extrap)", pred_pos.x, pred_pos.y, pred.extrapolated_days);
         if (pred.has_velocity) {

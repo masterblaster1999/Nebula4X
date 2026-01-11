@@ -20,6 +20,13 @@ enum class AdvisorIssueKind {
   LogisticsNeed,
   ShipLowFuel,
   ShipDamaged,
+
+  // Missile ammunition below threshold (finite magazines only).
+  ShipLowAmmo,
+
+  // Maintenance condition below threshold (when ship maintenance is enabled).
+  ShipLowMaintenance,
+
   ColonyHabitationShortfall,
   ColonyGarrisonProblem,
 };
@@ -62,6 +69,14 @@ struct AdvisorIssueOptions {
   // Example: 0.25 means "flag ships below 25% fuel".
   double low_fuel_fraction{0.25};
   double low_hp_fraction{0.75};
+
+  // Missile ammo fraction threshold for finite-magazine ships.
+  // Example: 0.25 means "flag ships below 25% ammo".
+  double low_ammo_fraction{0.25};
+
+  // Maintenance condition threshold (0..1) when ship maintenance is enabled.
+  // Example: 0.70 means "flag ships below 70% maintenance condition".
+  double low_maintenance_fraction{0.70};
 
   // Caps (safety guards for huge saves).
   int max_logistics_issues{250};

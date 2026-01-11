@@ -472,6 +472,7 @@ void draw_main_menu(Simulation& sim, UIState& ui, char* save_path, char* load_pa
       ImGui::MenuItem("Regions (Sectors Overview)", "Ctrl+Shift+R", &ui.show_regions_window);
       ImGui::MenuItem("Freight Planner (Auto-freight Preview)", nullptr, &ui.show_freight_window);
       ImGui::MenuItem("Fuel Planner (Auto-tanker Preview)", nullptr, &ui.show_fuel_window);
+      ImGui::MenuItem("Sustainment Planner (Fleet Base Targets)", nullptr, &ui.show_sustainment_window);
       ImGui::MenuItem("Advisor (Issues)", "Ctrl+Shift+A", &ui.show_advisor_window);
       ImGui::MenuItem("Colony Profiles (Automation Presets)", "Ctrl+Shift+B", &ui.show_colony_profiles_window);
       ImGui::MenuItem("Time Warp (Until Event)", nullptr, &ui.show_time_warp_window);
@@ -480,6 +481,7 @@ void draw_main_menu(Simulation& sim, UIState& ui, char* save_path, char* load_pa
       ImGui::MenuItem("Balance Lab (Duel Tournament)", nullptr, &ui.show_balance_lab_window);
       ImGui::MenuItem("Intel (Contacts/Sensors)", nullptr, &ui.show_intel_window);
       ImGui::MenuItem("Diplomacy Graph (Relations)", nullptr, &ui.show_diplomacy_window);
+      ImGui::MenuItem("Victory & Score", nullptr, &ui.show_victory_window);
       ImGui::MenuItem("Settings Window", nullptr, &ui.show_settings_window);
       ImGui::MenuItem("Save Tools (Diff/Patch)", nullptr, &ui.show_save_tools_window);
       ImGui::MenuItem("Time Machine (State History)", "Ctrl+Shift+D", &ui.show_time_machine_window);
@@ -527,6 +529,9 @@ void draw_main_menu(Simulation& sim, UIState& ui, char* save_path, char* load_pa
       if (ImGui::MenuItem("Open Fuel Planner")) {
         ui.show_fuel_window = true;
       }
+      if (ImGui::MenuItem("Open Sustainment Planner")) {
+        ui.show_sustainment_window = true;
+      }
       if (ImGui::MenuItem("Open Colony Profiles")) {
         ui.show_colony_profiles_window = true;
       }
@@ -547,6 +552,9 @@ void draw_main_menu(Simulation& sim, UIState& ui, char* save_path, char* load_pa
       }
       if (ImGui::MenuItem("Open Diplomacy Graph")) {
         ui.show_diplomacy_window = true;
+      }
+      if (ImGui::MenuItem("Open Victory & Score")) {
+        ui.show_victory_window = true;
       }
       if (ImGui::MenuItem("Open Save Tools (Diff/Patch)")) {
         ui.show_save_tools_window = true;
@@ -3284,7 +3292,18 @@ const bool can_up = (i > 0);
 
         Fleet* fleet_mut = find_ptr(s.fleets, selected_fleet->id);
         if (fleet_mut) {
-          static const char* kMissionNames[] = {"None", "Defend colony", "Patrol system", "Hunt hostiles", "Escort freighters", "Explore systems", "Patrol region"};
+          static const char* kMissionNames[] = {
+            "None",
+            "Defend colony",
+            "Patrol system",
+            "Hunt hostiles",
+            "Escort freighters",
+            "Explore systems",
+            "Patrol region",
+            "Assault colony",
+          };
+          static_assert(IM_ARRAYSIZE(kMissionNames) == 1 + static_cast<int>(FleetMissionType::AssaultColony),
+                        "Update mission names array");
           int mission_idx = static_cast<int>(fleet_mut->mission.type);
           if (mission_idx < 0 || mission_idx >= static_cast<int>(IM_ARRAYSIZE(kMissionNames))) mission_idx = 0;
           if (ImGui::Combo("Type##fleet_mission_type", &mission_idx, kMissionNames, IM_ARRAYSIZE(kMissionNames))) {
@@ -3339,6 +3358,17 @@ const bool can_up = (i > 0);
             if (fleet_mut->mission.type == FleetMissionType::Explore) {
               fleet_mut->mission.explore_survey_first = true;
               fleet_mut->mission.explore_allow_transit = true;
+            }
+
+            if (fleet_mut->mission.type == FleetMissionType::AssaultColony) {
+              fleet_mut->mission.assault_bombard_executed = false;
+              if (fleet_mut->mission.assault_colony_id == kInvalidId && selected_colony != kInvalidId) {
+                fleet_mut->mission.assault_colony_id = selected_colony;
+              }
+            } else {
+              fleet_mut->mission.assault_colony_id = kInvalidId;
+              fleet_mut->mission.assault_staging_colony_id = kInvalidId;
+              fleet_mut->mission.assault_bombard_executed = false;
             }
           }
 
@@ -3534,6 +3564,133 @@ const bool can_up = (i > 0);
                 fleet_mut->mission.escort_defense_radius_mkm = std::max(0.0, r);
               }
               ImGui::TextDisabled("Automatically escorts a civilian ship and intercepts detected hostiles near it.\n0 radius = anywhere in-system.");
+            }
+
+            if (fleet_mut->mission.type == FleetMissionType::AssaultColony) {
+              ImGui::Spacing();
+              ImGui::Text("Assault colony");
+
+              // --- Target colony ---
+              const Colony* tgt = (fleet_mut->mission.assault_colony_id != kInvalidId)
+                                    ? find_ptr(s.colonies, fleet_mut->mission.assault_colony_id)
+                                    : nullptr;
+              const char* tgt_label = tgt ? tgt->name.c_str() : "(select colony)";
+              if (ImGui::BeginCombo("Target##fleet_mission_assault_target", tgt_label)) {
+                for (Id cid : sorted_keys(s.colonies)) {
+                  const auto* c = find_ptr(s.colonies, cid);
+                  if (!c) continue;
+                  if (c->faction_id == fleet_mut->faction_id) continue;
+
+                  const auto* body = find_ptr(s.bodies, c->body_id);
+                  if (!body || body->system_id == kInvalidId) continue;
+                  if (!sim.is_system_discovered_by_faction(fleet_mut->faction_id, body->system_id)) continue;
+
+                  std::string label = c->name;
+                  if (const auto* own = find_ptr(s.factions, c->faction_id)) {
+                    label += " (" + own->name + ")";
+                  }
+                  if (const auto* sys = find_ptr(s.systems, body->system_id)) {
+                    label += " - " + sys->name;
+                  }
+
+                  const bool sel = (fleet_mut->mission.assault_colony_id == cid);
+                  const std::string key = label + "##fleet_mission_assault_target_" + std::to_string(static_cast<unsigned long long>(cid));
+                  if (ImGui::Selectable(key.c_str(), sel)) {
+                    fleet_mut->mission.assault_colony_id = cid;
+                    fleet_mut->mission.assault_bombard_executed = false;
+                  }
+                }
+                ImGui::EndCombo();
+              }
+
+              if (selected_colony != kInvalidId) {
+                const Colony* sc = find_ptr(s.colonies, selected_colony);
+                if (sc && sc->faction_id != fleet_mut->faction_id) {
+                  if (ImGui::SmallButton("Use selected colony##fleet_mission_assault_use_selected")) {
+                    fleet_mut->mission.assault_colony_id = selected_colony;
+                    fleet_mut->mission.assault_bombard_executed = false;
+                  }
+                }
+              }
+
+              // --- Staging ---
+              ImGui::Checkbox("Auto stage troops##fleet_mission_assault_auto_stage", &fleet_mut->mission.assault_auto_stage);
+              const Colony* stage = (fleet_mut->mission.assault_staging_colony_id != kInvalidId)
+                                      ? find_ptr(s.colonies, fleet_mut->mission.assault_staging_colony_id)
+                                      : nullptr;
+              const char* stage_label = stage ? stage->name.c_str() : "(auto)";
+              if (ImGui::BeginCombo("Staging colony##fleet_mission_assault_stage", stage_label)) {
+                const bool sel_auto = (fleet_mut->mission.assault_staging_colony_id == kInvalidId);
+                if (ImGui::Selectable("(auto)", sel_auto)) {
+                  fleet_mut->mission.assault_staging_colony_id = kInvalidId;
+                }
+                ImGui::Separator();
+                for (Id cid : sorted_keys(s.colonies)) {
+                  const auto* c = find_ptr(s.colonies, cid);
+                  if (!c) continue;
+                  if (c->faction_id != fleet_mut->faction_id) continue;
+                  const auto* body = find_ptr(s.bodies, c->body_id);
+                  if (!body || body->system_id == kInvalidId) continue;
+                  if (!sim.is_system_discovered_by_faction(fleet_mut->faction_id, body->system_id)) continue;
+
+                  std::string label = c->name;
+                  if (const auto* sys = find_ptr(s.systems, body->system_id)) {
+                    label += " - " + sys->name;
+                  }
+
+                  const bool sel = (fleet_mut->mission.assault_staging_colony_id == cid);
+                  const std::string key = label + "##fleet_mission_assault_stage_" + std::to_string(static_cast<unsigned long long>(cid));
+                  if (ImGui::Selectable(key.c_str(), sel)) {
+                    fleet_mut->mission.assault_staging_colony_id = cid;
+                  }
+                }
+                ImGui::EndCombo();
+              }
+
+              double margin = std::clamp(fleet_mut->mission.assault_troop_margin_factor, 1.0, 10.0);
+              if (ImGui::InputDouble("Troop margin##fleet_mission_assault_margin", &margin, 0.05, 0.25, "%.2f")) {
+                fleet_mut->mission.assault_troop_margin_factor = std::clamp(margin, 1.0, 10.0);
+              }
+
+              // --- Bombardment ---
+              ImGui::Checkbox("Bombard before invade##fleet_mission_assault_bombard", &fleet_mut->mission.assault_use_bombardment);
+              int bd = fleet_mut->mission.assault_bombard_days;
+              if (!fleet_mut->mission.assault_use_bombardment) {
+                ImGui::BeginDisabled();
+              }
+              if (ImGui::InputInt("Bombard days##fleet_mission_assault_bombard_days", &bd)) {
+                // 0 disables bombardment; -1 means bombard indefinitely.
+                fleet_mut->mission.assault_bombard_days = std::clamp(bd, -1, 3650);
+                if (fleet_mut->mission.assault_bombard_days == 0) {
+                  fleet_mut->mission.assault_use_bombardment = false;
+                }
+              }
+              if (!fleet_mut->mission.assault_use_bombardment) {
+                ImGui::EndDisabled();
+              }
+
+              if (ImGui::SmallButton("Reset assault progress##fleet_mission_assault_reset")) {
+                fleet_mut->mission.assault_bombard_executed = false;
+              }
+
+              // --- Quick status ---
+              double embarked = 0.0;
+              double cap = 0.0;
+              for (Id sid : selected_fleet->ship_ids) {
+                const auto* sh = find_ptr(s.ships, sid);
+                if (!sh) continue;
+                const auto* d = sim.find_design(sh->design_id);
+                embarked += std::max(0.0, sh->troops);
+                if (d) cap += std::max(0.0, d->troop_capacity);
+              }
+              ImGui::TextDisabled("Embarked troops: %.1f / %.1f", embarked, cap);
+
+              if (tgt) {
+                ImGui::TextDisabled("Target garrison: %.1f (garrison target %.1f)",
+                                    std::max(0.0, tgt->ground_forces), std::max(0.0, tgt->garrison_target_strength));
+              }
+
+              ImGui::TextDisabled("Stages troops (optional), bombards once (optional), then invades with troop ships.\nTip: Use 'Start mission' to clear any existing orders before running.");
             }
 
             if (fleet_mut->mission.type == FleetMissionType::Explore) {
@@ -5122,6 +5279,12 @@ if (colony->shipyard_queue.empty()) {
               break;
             case LogisticsNeedKind::Fuel:
               reason = "Fuel";
+              break;
+            case LogisticsNeedKind::Rearm:
+              reason = "Rearm";
+              break;
+            case LogisticsNeedKind::Maintenance:
+              reason = "Maintenance";
               break;
           }
           if (!n.context_id.empty()) reason += (":" + n.context_id);
@@ -6985,6 +7148,7 @@ void draw_settings_window(UIState& ui, char* ui_prefs_path, UIPrefActions& actio
   ImGui::Checkbox("Balance Lab", &ui.show_balance_lab_window);
   ImGui::Checkbox("Intel", &ui.show_intel_window);
   ImGui::Checkbox("Diplomacy Graph", &ui.show_diplomacy_window);
+  ImGui::Checkbox("Victory & Score", &ui.show_victory_window);
   if (ImGui::Button("Reset window layout")) {
     actions.reset_window_layout = true;
   }
@@ -7664,6 +7828,10 @@ void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_colony, Id
 
       if (ui.fog_of_war && ui.viewer_faction_id != kInvalidId) {
         if (!sim.is_system_discovered_by_faction(ui.viewer_faction_id, a.system_id)) continue;
+      }
+
+      if (ui.fog_of_war && ui.viewer_faction_id != kInvalidId) {
+        if (!sim.is_anomaly_discovered_by_faction(ui.viewer_faction_id, aid)) continue;
       }
 
       const StarSystem* sys = find_ptr(s.systems, a.system_id);

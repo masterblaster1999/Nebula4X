@@ -45,6 +45,10 @@ std::string need_kind_label(LogisticsNeedKind k, const std::string& context_id) 
       return "StockpileTarget";
     case LogisticsNeedKind::Fuel:
       return "Fuel";
+    case LogisticsNeedKind::Rearm:
+      return "Rearm";
+    case LogisticsNeedKind::Maintenance:
+      return "Maintenance";
   }
   return "Need";
 }

@@ -200,6 +200,7 @@ if(NEBULA4X_BUILD_UI)
     src/ui/regions_window.cpp
     src/ui/freight_window.cpp
     src/ui/fuel_window.cpp
+    src/ui/sustainment_window.cpp
     src/ui/troop_window.cpp
     src/ui/advisor_window.cpp
     src/ui/colony_profiles_window.cpp
@@ -228,6 +229,7 @@ if(NEBULA4X_BUILD_UI)
     src/ui/balance_lab_window.cpp
     src/ui/intel_window.cpp
     src/ui/diplomacy_window.cpp
+    src/ui/victory_window.cpp
   )
   target_include_directories(nebula4x PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -269,6 +271,8 @@ if(NEBULA4X_BUILD_TESTS)
     tests/test_auto_freight.cpp
     tests/test_industry.cpp
     tests/test_ai_economy.cpp
+    tests/test_ai_empire_fleet_missions.cpp
+    tests/test_victory.cpp
     tests/test_research_planner.cpp
     tests/test_research_schedule.cpp
     tests/test_colony_schedule.cpp
@@ -294,6 +298,7 @@ if(NEBULA4X_BUILD_TESTS)
     tests/test_faction_economy_modifiers.cpp
     tests/test_refit.cpp
     tests/test_diplomacy.cpp
+    tests/test_piracy_suppression.cpp
     tests/test_auto_routing.cpp
     tests/test_auto_explore.cpp
     tests/test_order_repeat.cpp
@@ -332,6 +337,7 @@ if(NEBULA4X_BUILD_TESTS)
     tests/test_auto_salvage.cpp
     tests/test_reverse_engineering.cpp
     tests/test_anomalies.cpp
+    tests/test_anomaly_discovery.cpp
     tests/test_missile_components.cpp
     tests/test_auto_tanker.cpp
     tests/test_ship_repairs.cpp

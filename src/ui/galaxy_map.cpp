@@ -1093,11 +1093,24 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
       ImGui::Separator();
       const double neb = std::clamp(sys->nebula_density, 0.0, 1.0);
       if (neb > 0.01) {
-        const double env = std::clamp(1.0 - 0.65 * neb, 0.25, 1.0);
         ImGui::Text("Nebula density: %.0f%%", neb * 100.0);
-        ImGui::TextDisabled("Sensor env: x%.2f", env);
       } else {
         ImGui::TextDisabled("Nebula density: none");
+      }
+
+      const double env = sim.system_sensor_environment_multiplier(sys->id);
+      if (env < 0.999) ImGui::TextDisabled("Sensor env: x%.2f", env);
+
+      const double speed_env = sim.system_movement_speed_multiplier(sys->id);
+      if (speed_env < 0.999) ImGui::TextDisabled("Speed env: x%.2f", speed_env);
+
+      if (sim.system_has_storm(sys->id)) {
+        const double cur = sim.system_storm_intensity(sys->id);
+        const double peak = std::clamp(sys->storm_peak_intensity, 0.0, 1.0);
+        const std::int64_t now = s.date.days_since_epoch();
+        const int days_left = (sys->storm_end_day > now) ? static_cast<int>(sys->storm_end_day - now) : 0;
+        ImGui::Text("Nebula storm: %.0f%% (peak %.0f%%)", cur * 100.0, peak * 100.0);
+        ImGui::TextDisabled("Ends in %d days", days_left);
       }
 
       if (sys->region_id != kInvalidId) {

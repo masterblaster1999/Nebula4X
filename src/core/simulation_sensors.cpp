@@ -88,9 +88,8 @@ std::vector<SensorSource> gather_sensor_sources(const Simulation& sim, Id factio
   const auto* sys = find_ptr(s.systems, system_id);
   if (!sys) return out;
 
-  // Environmental sensor attenuation (e.g., nebula dust).
-  const double nebula = std::clamp(sys->nebula_density, 0.0, 1.0);
-  const double env_mult = std::clamp(1.0 - 0.65 * nebula, 0.25, 1.0);
+  // Environmental sensor attenuation (nebula + storms).
+  const double env_mult = sim.system_sensor_environment_multiplier(system_id);
 
   // Mutual-friendly factions share sensor coverage.
   std::vector<Id> sensor_factions;

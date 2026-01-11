@@ -21,6 +21,7 @@
 #include "ui/regions_window.h"
 #include "ui/freight_window.h"
 #include "ui/fuel_window.h"
+#include "ui/sustainment_window.h"
 #include "ui/advisor_window.h"
 #include "ui/colony_profiles_window.h"
 #include "ui/time_warp_window.h"
@@ -31,6 +32,7 @@
 #include "ui/design_studio_window.h"
 #include "ui/balance_lab_window.h"
 #include "ui/intel_window.h"
+#include "ui/victory_window.h"
 #include "ui/diplomacy_window.h"
 #include "ui/save_tools_window.h"
 #include "ui/time_machine_window.h"
@@ -338,6 +340,8 @@ void App::frame() {
   if (ui_.show_regions_window) draw_regions_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   if (ui_.show_freight_window) draw_freight_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   if (ui_.show_fuel_window) draw_fuel_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  if (ui_.show_sustainment_window)
+    draw_sustainment_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   if (ui_.show_advisor_window) draw_advisor_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   if (ui_.show_colony_profiles_window) draw_colony_profiles_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   if (ui_.show_time_warp_window) draw_time_warp_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
@@ -353,6 +357,9 @@ void App::frame() {
   }
   if (ui_.show_diplomacy_window) {
     draw_diplomacy_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  }
+  if (ui_.show_victory_window) {
+    draw_victory_window(sim_, ui_);
   }
 
   if (ui_.show_save_tools_window) draw_save_tools_window(sim_, ui_, save_path_, load_path_);
@@ -902,6 +909,9 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       if (auto it = obj->find("show_fuel_window"); it != obj->end()) {
         ui_.show_fuel_window = it->second.bool_value(ui_.show_fuel_window);
       }
+      if (auto it = obj->find("show_sustainment_window"); it != obj->end()) {
+        ui_.show_sustainment_window = it->second.bool_value(ui_.show_sustainment_window);
+      }
       if (auto it = obj->find("show_time_warp_window"); it != obj->end()) {
         ui_.show_time_warp_window = it->second.bool_value(ui_.show_time_warp_window);
       }
@@ -919,6 +929,9 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       }
       if (auto it = obj->find("show_diplomacy_window"); it != obj->end()) {
         ui_.show_diplomacy_window = it->second.bool_value(ui_.show_diplomacy_window);
+      }
+      if (auto it = obj->find("show_victory_window"); it != obj->end()) {
+        ui_.show_victory_window = it->second.bool_value(ui_.show_victory_window);
       }
       if (auto it = obj->find("show_settings_window"); it != obj->end()) {
         ui_.show_settings_window = it->second.bool_value(ui_.show_settings_window);
@@ -1557,12 +1570,14 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     o["show_regions_window"] = ui_.show_regions_window;
     o["show_freight_window"] = ui_.show_freight_window;
     o["show_fuel_window"] = ui_.show_fuel_window;
+    o["show_sustainment_window"] = ui_.show_sustainment_window;
     o["show_time_warp_window"] = ui_.show_time_warp_window;
     o["show_timeline_window"] = ui_.show_timeline_window;
     o["show_design_studio_window"] = ui_.show_design_studio_window;
     o["show_balance_lab_window"] = ui_.show_balance_lab_window;
     o["show_intel_window"] = ui_.show_intel_window;
     o["show_diplomacy_window"] = ui_.show_diplomacy_window;
+    o["show_victory_window"] = ui_.show_victory_window;
     o["show_settings_window"] = ui_.show_settings_window;
     o["show_save_tools_window"] = ui_.show_save_tools_window;
     o["show_time_machine_window"] = ui_.show_time_machine_window;
@@ -1789,12 +1804,14 @@ void App::reset_window_layout_defaults() {
   ui_.show_regions_window = false;
   ui_.show_freight_window = false;
   ui_.show_fuel_window = false;
+  ui_.show_sustainment_window = false;
   ui_.show_time_warp_window = false;
   ui_.show_timeline_window = false;
   ui_.show_design_studio_window = false;
   ui_.show_balance_lab_window = false;
   ui_.show_intel_window = false;
   ui_.show_diplomacy_window = false;
+  ui_.show_victory_window = false;
   ui_.show_settings_window = false;
   ui_.show_save_tools_window = false;
   ui_.show_time_machine_window = false;

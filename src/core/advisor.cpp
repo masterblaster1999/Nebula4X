@@ -44,6 +44,8 @@ const char* advisor_issue_kind_label(AdvisorIssueKind k) {
     case AdvisorIssueKind::LogisticsNeed: return "Logistics";
     case AdvisorIssueKind::ShipLowFuel: return "Low Fuel";
     case AdvisorIssueKind::ShipDamaged: return "Damaged";
+    case AdvisorIssueKind::ShipLowAmmo: return "Low Ammo";
+    case AdvisorIssueKind::ShipLowMaintenance: return "Maintenance";
     case AdvisorIssueKind::ColonyHabitationShortfall: return "Habitation";
     case AdvisorIssueKind::ColonyGarrisonProblem: return "Garrison";
   }
@@ -58,6 +60,8 @@ const char* logistics_need_kind_label(LogisticsNeedKind k) {
     case LogisticsNeedKind::IndustryInput: return "Industry Input";
     case LogisticsNeedKind::StockpileTarget: return "Stockpile Target";
     case LogisticsNeedKind::Fuel: return "Fuel";
+    case LogisticsNeedKind::Rearm: return "Rearm";
+    case LogisticsNeedKind::Maintenance: return "Maintenance";
   }
   return "Unknown";
 }
@@ -121,6 +125,8 @@ std::vector<AdvisorIssue> advisor_issues_for_faction(const Simulation& sim, Id f
   if (opt.include_ships) {
     const double fuel_thresh = std::clamp(opt.low_fuel_fraction, 0.0, 1.0);
     const double hp_thresh = std::clamp(opt.low_hp_fraction, 0.0, 1.0);
+    const double ammo_thresh = std::clamp(opt.low_ammo_fraction, 0.0, 1.0);
+    const double maint_thresh = std::clamp(opt.low_maintenance_fraction, 0.0, 1.0);
 
     const auto ship_ids = sorted_keys(s.ships);
     int ship_issue_count = 0;
@@ -190,6 +196,67 @@ std::vector<AdvisorIssue> advisor_issues_for_faction(const Simulation& sim, Id f
           if (ship_issue_count >= std::max(0, opt.max_ship_issues)) break;
         }
       }
+      // Low missile ammo (finite magazines).
+      if (d->missile_ammo_capacity > 0 && ammo_thresh > 1e-9) {
+        const int cap_i = std::max(0, d->missile_ammo_capacity);
+        int have_i = sh->missile_ammo;
+        if (have_i < 0) have_i = cap_i;
+        have_i = std::clamp(have_i, 0, cap_i);
+        const double cap = static_cast<double>(cap_i);
+        const double have = static_cast<double>(have_i);
+        const double frac = (cap > 1e-9) ? std::clamp(have / cap, 0.0, 1.0) : 1.0;
+
+        if (frac + 1e-9 < ammo_thresh) {
+          AdvisorIssue is;
+          is.kind = AdvisorIssueKind::ShipLowAmmo;
+          is.level = (have_i == 0) ? EventLevel::Warn : EventLevel::Info;
+          is.severity = std::max(0.0, ammo_thresh * cap - have);
+          is.faction_id = faction_id;
+          is.system_id = sh->system_id;
+          is.ship_id = shid;
+          is.resource = "Munitions";
+          is.desired = cap;
+          is.have = have;
+          is.missing = std::max(0.0, ammo_thresh * cap - have);
+
+          std::ostringstream ss;
+          ss << "Ammo " << have_i << "/" << cap_i << " (" << fmt_double(frac * 100.0, 0) << "%)";
+          is.summary = ss.str();
+
+          push_issue(std::move(is));
+          ++ship_issue_count;
+          if (ship_issue_count >= std::max(0, opt.max_ship_issues)) break;
+        }
+      }
+
+      // Low maintenance condition (only when ship maintenance is enabled).
+      if (sim.cfg().enable_ship_maintenance && maint_thresh > 1e-9) {
+        const double cond = std::clamp(sh->maintenance_condition, 0.0, 1.0);
+        if (cond + 1e-9 < maint_thresh) {
+          AdvisorIssue is;
+          is.kind = AdvisorIssueKind::ShipLowMaintenance;
+          is.level = (cond <= 0.25) ? EventLevel::Warn : EventLevel::Info;
+          is.severity = std::max(0.0, maint_thresh - cond);
+          is.faction_id = faction_id;
+          is.system_id = sh->system_id;
+          is.ship_id = shid;
+          is.resource = "Maintenance";
+          is.context_id = sim.cfg().ship_maintenance_resource_id;
+          is.desired = 1.0;
+          is.have = cond;
+          is.missing = std::max(0.0, maint_thresh - cond);
+
+          std::ostringstream ss;
+          ss << "Maint " << fmt_double(cond * 100.0, 0) << "%";
+          if (!sim.cfg().ship_maintenance_resource_id.empty()) ss << " (" << sim.cfg().ship_maintenance_resource_id << ")";
+          is.summary = ss.str();
+
+          push_issue(std::move(is));
+          ++ship_issue_count;
+          if (ship_issue_count >= std::max(0, opt.max_ship_issues)) break;
+        }
+      }
+
     }
   }
 
