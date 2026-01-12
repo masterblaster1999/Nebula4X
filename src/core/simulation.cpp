@@ -848,8 +848,6 @@ std::vector<LogisticsNeed> Simulation::logistics_needs_for_faction(Id faction_id
           const double mass = std::max(0.0, d->mass_tons);
           per_day += mass * cfg_.ship_maintenance_tons_per_day_per_mass_ton;
         }
-
-        const double buffer_days = std::max(0.0, cfg_.auto_freight_industry_input_buffer_days);
         const double desired_maint = per_day * buffer_days;
 
         if (desired_maint > 1e-9) {

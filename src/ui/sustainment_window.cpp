@@ -3,6 +3,9 @@
 #include <imgui.h>
 
 #include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <unordered_map>
 #include <string>
 #include <vector>
 
@@ -40,6 +43,14 @@ struct FleetTotals {
   double avg_maintenance_condition{1.0};
 };
 
+std::string fmt_double(double v, int precision) {
+  if (!std::isfinite(v)) return "?";
+  precision = std::max(0, precision);
+  char buf[64];
+  std::snprintf(buf, sizeof(buf), "%.*f", precision, v);
+  return std::string(buf);
+}
+
 SustainmentWindowState& st() {
   static SustainmentWindowState s;
   return s;
@@ -51,13 +62,13 @@ void select_colony(UIState& ui, const Colony* colony, Id& selected_ship, Id& sel
   selected_colony = colony->id;
   selected_body = colony->body_id;
   ui.show_details_window = true;
-  ui.details_active_tab = DetailsTab::Colony;
+  ui.request_details_tab = DetailsTab::Colony;
 }
 
 void select_fleet(UIState& ui, Id fleet_id) {
   ui.selected_fleet_id = fleet_id;
   ui.show_details_window = true;
-  ui.details_active_tab = DetailsTab::Fleet;
+  ui.request_details_tab = DetailsTab::Fleet;
 }
 
 FleetTotals compute_fleet_totals(const Simulation& sim, const Fleet& fleet) {
@@ -291,14 +302,18 @@ void draw_sustainment_window(Simulation& sim, UIState& ui, Id& selected_ship, Id
 
   // Reload multiplier slider.
   ImGui::SetNextItemWidth(240);
-  ImGui::SliderScalar("Reload multiplier", ImGuiDataType_Double, &s.reload_multiplier, &(double){0.0}, &(double){3.0}, "%.2fx");
+  const double reload_min = 0.0;
+  const double reload_max = 3.0;
+  ImGui::SliderScalar("Reload multiplier", ImGuiDataType_Double, &s.reload_multiplier, &reload_min, &reload_max, "%.2fx");
   if (ImGui::IsItemHovered()) {
     ImGui::SetTooltip("Recommended stockpile relative to the fleet's full loadout.\n1.0 => enough to refill/rearm from empty.");
   }
 
   // Maintenance buffer slider.
   ImGui::SetNextItemWidth(240);
-  ImGui::SliderScalar("Maintenance buffer (days)", ImGuiDataType_Double, &s.maintenance_buffer_days, &(double){0.0}, &(double){180.0}, "%.0f");
+  const double maint_min = 0.0;
+  const double maint_max = 180.0;
+  ImGui::SliderScalar("Maintenance buffer (days)", ImGuiDataType_Double, &s.maintenance_buffer_days, &maint_min, &maint_max, "%.0f");
   if (ImGui::IsItemHovered()) {
     ImGui::SetTooltip("Recommended maintenance supplies to keep at the support colony for this fleet.");
   }

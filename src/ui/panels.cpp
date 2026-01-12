@@ -11,6 +11,7 @@
 #include <iomanip>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <unordered_map>
 #include <unordered_set>
@@ -35,16 +36,23 @@ namespace {
 
 using nebula4x::util::sorted_keys;
 
-bool case_insensitive_contains(const std::string& haystack, const char* needle_cstr) {
-  if (!needle_cstr) return true;
-  if (needle_cstr[0] == '\0') return true;
-  const std::string needle(needle_cstr);
+bool case_insensitive_contains_sv(std::string_view haystack, std::string_view needle) {
+  if (needle.empty()) return true;
   const auto it = std::search(
       haystack.begin(), haystack.end(), needle.begin(), needle.end(),
       [](char a, char b) {
         return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
       });
   return it != haystack.end();
+}
+
+bool case_insensitive_contains(const std::string& haystack, const char* needle_cstr) {
+  if (!needle_cstr) return true;
+  return case_insensitive_contains_sv(std::string_view(haystack), std::string_view(needle_cstr));
+}
+
+bool case_insensitive_contains(const std::string& haystack, const std::string& needle) {
+  return case_insensitive_contains_sv(std::string_view(haystack), std::string_view(needle));
 }
 
 bool ends_with_ci(const std::string& s, const std::string& suffix) {
@@ -1383,7 +1391,7 @@ if (sim.cfg().enable_ship_maintenance) {
 
             if (sim.ship_heat_enabled()) {
               const double cap =
-                  std::max(0.0, sim.cfg().ship_heat_base_capacity_per_mass_ton) * std::max(0.0, sh->mass_tons) +
+                  std::max(0.0, sim.cfg().ship_heat_base_capacity_per_mass_ton) * std::max(0.0, d->mass_tons) +
                   std::max(0.0, d->heat_capacity_bonus);
               if (cap > 1e-9) {
                 ImGui::TextDisabled("Heat: %.0f / %.0f (%.0f%%)", sh->heat, cap, sim.ship_heat_fraction(*sh) * 100.0);
@@ -1391,11 +1399,11 @@ if (sim.cfg().enable_ship_maintenance) {
                 ImGui::TextDisabled("Heat: (no capacity)");
               }
             }
-if (d->ecm_strength > 0.0 || d->eccm_strength > 0.0) {
-  ImGui::Text("EW: ECM %.1f  ECCM %.1f", d->ecm_strength, d->eccm_strength);
-} else {
-  ImGui::TextDisabled("EW: (none)");
-}
+            if (d->ecm_strength > 0.0 || d->eccm_strength > 0.0) {
+              ImGui::Text("EW: ECM %.1f  ECCM %.1f", d->ecm_strength, d->eccm_strength);
+            } else {
+              ImGui::TextDisabled("EW: (none)");
+            }
 
             if (!sh->power_policy.sensors_enabled) {
               ImGui::TextDisabled("Note: Sensors disabled by power policy -> signature treated as Passive.");
@@ -1416,7 +1424,7 @@ if (d->ecm_strength > 0.0 || d->eccm_strength > 0.0) {
 
             if (sim.ship_heat_enabled()) {
               const double cap =
-                  std::max(0.0, sim.cfg().ship_heat_base_capacity_per_mass_ton) * std::max(0.0, sh->mass_tons) +
+                  std::max(0.0, sim.cfg().ship_heat_base_capacity_per_mass_ton) * std::max(0.0, d->mass_tons) +
                   std::max(0.0, d->heat_capacity_bonus);
               if (cap > 1e-9) {
                 ImGui::TextDisabled("Heat: %.0f / %.0f (%.0f%%)", sh->heat, cap, sim.ship_heat_fraction(*sh) * 100.0);
@@ -1426,11 +1434,11 @@ if (d->ecm_strength > 0.0 || d->eccm_strength > 0.0) {
             }
 
             ImGui::TextDisabled("Sensor mode: (no sensors)");
-if (d->ecm_strength > 0.0 || d->eccm_strength > 0.0) {
-  ImGui::Text("EW: ECM %.1f  ECCM %.1f", d->ecm_strength, d->eccm_strength);
-} else {
-  ImGui::TextDisabled("EW: (none)");
-}
+            if (d->ecm_strength > 0.0 || d->eccm_strength > 0.0) {
+              ImGui::Text("EW: ECM %.1f  ECCM %.1f", d->ecm_strength, d->eccm_strength);
+            } else {
+              ImGui::TextDisabled("EW: (none)");
+            }
           }
           if (d->colony_capacity_millions > 0.0) {
             ImGui::Text("Colony capacity: %.0f M", d->colony_capacity_millions);
@@ -6175,7 +6183,7 @@ if (colony->shipyard_queue.empty()) {
               ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_None, 0.12f);
               ImGui::TableHeadersRow();
 
-              const int now_day = static_cast<int>(s.date.days_since_epoch());
+              const std::int64_t now_day = s.date.days_since_epoch();
               for (const auto& o : incoming) {
                 const Faction* from = find_ptr(s.factions, o.from_faction_id);
                 const std::string from_name = from ? from->name : std::string("<unknown>");
@@ -6258,7 +6266,7 @@ if (colony->shipyard_queue.empty()) {
                 ImGui::TableSetupColumn("Message", ImGuiTableColumnFlags_None, 0.28f);
                 ImGui::TableHeadersRow();
 
-                const int now_day = static_cast<int>(s.date.days_since_epoch());
+                const std::int64_t now_day = s.date.days_since_epoch();
                 for (const auto& o : outgoing) {
                   const Faction* to = find_ptr(s.factions, o.to_faction_id);
                   const std::string to_name = to ? to->name : std::string("<unknown>");
@@ -6403,14 +6411,14 @@ if (colony->shipyard_queue.empty()) {
               ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_None, 0.20f);
               ImGui::TableHeadersRow();
 
-              const int now_day = static_cast<int>(s.date.days_since_epoch());
+              const std::int64_t now_day = s.date.days_since_epoch();
               for (const auto& t : mine) {
                 const Id other = (t.faction_a == selected_faction_id) ? t.faction_b : t.faction_a;
                 const Faction* of = find_ptr(s.factions, other);
                 const std::string other_name = of ? of->name : std::string("<unknown>");
                 const bool indefinite = (t.duration_days < 0);
-                const int end_day = indefinite ? -1 : (t.start_day + t.duration_days);
-                const int remaining = indefinite ? -1 : std::max(0, end_day - now_day);
+                const std::int64_t end_day = indefinite ? -1 : (t.start_day + static_cast<std::int64_t>(t.duration_days));
+                const std::int64_t remaining = indefinite ? -1 : std::max<std::int64_t>(0, end_day - now_day);
 
                 ImGui::TableNextRow();
                 ImGui::TableSetColumnIndex(0);
@@ -6418,12 +6426,12 @@ if (colony->shipyard_queue.empty()) {
                 ImGui::TableSetColumnIndex(1);
                 ImGui::TextUnformatted(treaty_type_label(t.type));
                 ImGui::TableSetColumnIndex(2);
-                ImGui::Text("Day %d", t.start_day);
+                ImGui::Text("Day %lld", static_cast<long long>(t.start_day));
                 ImGui::TableSetColumnIndex(3);
                 if (indefinite) {
                   ImGui::TextUnformatted("Indefinite");
                 } else {
-                  ImGui::Text("Day %d (%d left)", end_day, remaining);
+                  ImGui::Text("Day %lld (%lld left)", static_cast<long long>(end_day), static_cast<long long>(remaining));
                 }
                 ImGui::TableSetColumnIndex(4);
                 const std::string cancel_id = "Cancel##treaty_" + std::to_string(static_cast<unsigned long long>(t.id));
@@ -6482,10 +6490,10 @@ if (colony->shipyard_queue.empty()) {
                   if (indefinite) {
                     ImGui::BulletText("%s (indefinite)", treaty_type_label(t.type));
                   } else {
-                    const int now_day = static_cast<int>(s.date.days_since_epoch());
-                    const int end_day = t.start_day + t.duration_days;
-                    const int remaining = std::max(0, end_day - now_day);
-                    ImGui::BulletText("%s (%d days left)", treaty_type_label(t.type), remaining);
+                    const std::int64_t now_day = s.date.days_since_epoch();
+                    const std::int64_t end_day = t.start_day + static_cast<std::int64_t>(t.duration_days);
+                    const std::int64_t remaining = std::max<std::int64_t>(0, end_day - now_day);
+                    ImGui::BulletText("%s (%lld days left)", treaty_type_label(t.type), static_cast<long long>(remaining));
                   }
                 }
                 ImGui::EndTooltip();

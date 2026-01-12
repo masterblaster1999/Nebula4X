@@ -633,6 +633,8 @@ void Simulation::tick_ai() {
 
   std::unordered_map<Id, std::unordered_set<Id>> reserved_explore_frontier_targets;
   reserved_explore_frontier_targets.reserve(faction_ids.size() * 2 + 8);
+  std::unordered_map<Id, std::unordered_set<Id>> reserved_explore_anomaly_targets;
+  reserved_explore_anomaly_targets.reserve(faction_ids.size() * 2 + 8);
 
   // A system-level ETA helper (no specific goal position; just "get into the system").
   auto estimate_eta_days_to_system = [&](Id start_system_id, Vec2 start_pos_mkm, Id fid, double speed_km_s,
@@ -663,6 +665,7 @@ void Simulation::tick_ai() {
 
     auto& reserved_jumps = reserved_explore_jump_targets[fid];
     auto& reserved_frontiers = reserved_explore_frontier_targets[fid];
+    auto& reserved_anoms = reserved_explore_anomaly_targets[fid];
 
     std::vector<Id> jps = sys->jump_points;
     std::sort(jps.begin(), jps.end());
@@ -767,7 +770,7 @@ void Simulation::tick_ai() {
       const double speed_mkm_d = (d && d->speed_km_s > 1e-9) ? mkm_per_day_from_speed(d->speed_km_s, cfg_.seconds_per_day) : 1.0;
 
       Id best_anom = kInvalidId;
-      double best_score = -std::numeric_limits<double>::infinity();
+      double best_anom_score = -std::numeric_limits<double>::infinity();
       double best_d2 = std::numeric_limits<double>::infinity();
 
       for (const auto& [aid, a] : state_.anomalies) {
@@ -775,6 +778,7 @@ void Simulation::tick_ai() {
         if (a.system_id != ship->system_id) continue;
         if (a.resolved) continue;
         if (!is_anomaly_discovered_by_faction(fid, aid)) continue;
+        if (reserved_anoms.contains(aid)) continue;
 
         double minerals_total = 0.0;
         for (const auto& [_, t] : a.mineral_reward) minerals_total += std::max(0.0, t);
@@ -792,16 +796,17 @@ void Simulation::tick_ai() {
         // Prefer high-value, low-risk anomalies; discount by travel time within the system.
         const double score = value / (1.0 + travel_days) - risk;
 
-        if (best_anom == kInvalidId || score > best_score + 1e-9 ||
-            (std::abs(score - best_score) <= 1e-9 &&
+        if (best_anom == kInvalidId || score > best_anom_score + 1e-9 ||
+            (std::abs(score - best_anom_score) <= 1e-9 &&
              (d2 + 1e-9 < best_d2 || (std::abs(d2 - best_d2) <= 1e-9 && aid < best_anom)))) {
           best_anom = aid;
-          best_score = score;
+          best_anom_score = score;
           best_d2 = d2;
         }
       }
 
       if (best_anom != kInvalidId) {
+        reserved_anoms.insert(best_anom);
         return issue_investigate_anomaly(ship_id, best_anom, /*restrict_to_discovered=*/true);
       }
     }
@@ -2644,10 +2649,10 @@ void Simulation::tick_ai() {
         bool any_troop_capacity = false;
         bool any_bombard_capable = false;
 
-        auto ship_ids = fl.ship_ids;
-        std::sort(ship_ids.begin(), ship_ids.end());
+        auto fleet_ship_ids = fl.ship_ids;
+        std::sort(fleet_ship_ids.begin(), fleet_ship_ids.end());
 
-        for (Id sid : ship_ids) {
+        for (Id sid : fleet_ship_ids) {
           const Ship* sh = find_ptr(state_.ships, sid);
           if (!sh) continue;
           if (sh->faction_id != fl.faction_id) continue;

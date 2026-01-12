@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -64,6 +65,16 @@ bool contains_case_insensitive(std::string_view hay, std::string_view needle) {
   const std::string n = to_lower_copy(needle);
   return h.find(n) != std::string::npos;
 }
+
+
+template <std::size_t N>
+void set_cstr(char (&dst)[N], std::string_view src) {
+  static_assert(N > 0, "destination buffer must have positive size");
+  const std::size_t n = std::min<std::size_t>(src.size(), N - 1);
+  if (n > 0) std::memcpy(dst, src.data(), n);
+  dst[n] = '\0';
+}
+
 
 std::string issues_to_text(const std::vector<nebula4x::ContentIssue>& issues, bool include_warnings) {
   std::string out;
@@ -143,13 +154,13 @@ void run_validation(nebula4x::Simulation& sim, ContentValidationState& s) {
   }
 }
 
-} // namespace
+}  // namespace
 
 void draw_content_validation_window(Simulation& sim, UIState& ui) {
   auto& s = st();
   if (!s.initialized) {
-    std::strncpy(s.export_text_path, "content_validation_report.txt", sizeof(s.export_text_path) - 1);
-    std::strncpy(s.export_json_path, "content_validation_report.json", sizeof(s.export_json_path) - 1);
+    set_cstr(s.export_text_path, "content_validation_report.txt");
+    set_cstr(s.export_json_path, "content_validation_report.json");
     s.initialized = true;
   }
 

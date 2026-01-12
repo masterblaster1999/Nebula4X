@@ -1,0 +1,19 @@
+Nebula4X Patch Apply Notes (Round 2+)
+
+This patch ZIP is meant to be extracted into the *repo root*:
+  - the folder that contains:  CMakeLists.txt,  src/,  include/,  data/
+
+Common gotcha on Windows:
+If you extracted the original repo ZIP into a folder called 'Nebula4X-main', you may end up with:
+
+  ...\Nebula4X-main\Nebula4X-main\src\...
+
+In that case, the repo root is the *inner* 'Nebula4X-main' directory.
+Extract this patch ZIP into that inner folder so that paths like:
+
+  src\ui\sustainment_window.cpp
+
+overwrite the existing file in the build.
+
+(If you see a new 'src' folder created next to an inner 'Nebula4X-main' folder,
+you extracted into the wrong directory level.)
