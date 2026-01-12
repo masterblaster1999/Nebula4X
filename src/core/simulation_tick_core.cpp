@@ -160,6 +160,20 @@ void Simulation::tick_one_tick_hours(int hours) {
   if (hours <= 0) return;
   hours = std::clamp(hours, 1, 24);
 
+  // If the game has ended, freeze simulation time/processing.
+  // (The UI may still inspect the final state.)
+  if (state_.victory_state.game_over) return;
+
+  // Elimination victory can otherwise be "dodged" within a single day by
+  // colonizing again before the midnight evaluation. To keep elimination
+  // semantics intuitive, we evaluate elimination-only rules immediately at the
+  // start of each tick.
+  if (state_.victory_rules.enabled && state_.victory_rules.elimination_enabled &&
+      state_.victory_rules.score_threshold <= 0.0) {
+    tick_victory();
+    if (state_.victory_state.game_over) return;
+  }
+
   // Defensive: if a caller asks for a tick that crosses more than one day
   // boundary, split it.
   const int start_hod = std::clamp(state_.hour_of_day, 0, 23);
@@ -223,6 +237,7 @@ void Simulation::tick_one_tick_hours(int hours) {
   }
 
   // Continuous (sub-day) ticks.
+  tick_heat(dt_days);
   tick_ships(dt_days);
   tick_contacts(dt_days, day_advanced);
   tick_shields(dt_days);
@@ -236,12 +251,16 @@ void Simulation::tick_one_tick_hours(int hours) {
     tick_crew_training(dt_days);
     tick_terraforming(dt_days);
     tick_repairs(dt_days);
-    if (day_advanced) tick_ground_combat();
+    if (day_advanced) {
+      tick_ground_combat();
+      tick_ship_maintenance_failures();
+    }
   } else if (day_advanced) {
     tick_ground_combat();
     tick_terraforming(1.0);
     tick_repairs(1.0);
     tick_crew_training(1.0);
+    tick_ship_maintenance_failures();
 
     // Wreck cleanup (optional).
     if (cfg_.wreck_decay_days > 0 && !state_.wrecks.empty()) {
@@ -288,6 +307,78 @@ void Simulation::tick_victory() {
   // No-op if disabled or already ended.
   if (!state_.victory_rules.enabled) return;
   if (state_.victory_state.game_over) return;
+
+  // If no victory mode is enabled, there is nothing to do.
+  if (!state_.victory_rules.elimination_enabled && state_.victory_rules.score_threshold <= 0.0) return;
+
+  // Fast path: elimination-only rules (score victory disabled).
+  // This is called both on the daily boundary and opportunistically at the
+  // start of ticks to prevent "revive before evaluation" edge cases.
+  if (state_.victory_rules.elimination_enabled && state_.victory_rules.score_threshold <= 0.0) {
+    const VictoryRules& rules = state_.victory_rules;
+
+    // Track which factions currently own any colony (and optionally any ship).
+    std::unordered_set<Id> has_colony;
+    has_colony.reserve(state_.factions.size() * 2 + 8);
+    for (const auto& [cid, c] : state_.colonies) {
+      (void)cid;
+      if (c.faction_id == kInvalidId) continue;
+      has_colony.insert(c.faction_id);
+    }
+
+    std::unordered_set<Id> has_ship;
+    if (!rules.elimination_requires_colony) {
+      has_ship.reserve(state_.factions.size() * 2 + 8);
+      for (const auto& [sid, sh] : state_.ships) {
+        (void)sid;
+        if (sh.faction_id == kInvalidId) continue;
+        has_ship.insert(sh.faction_id);
+      }
+    }
+
+    int eligible_total = 0;
+    int eligible_alive = 0;
+    Id last_alive_id = kInvalidId;
+
+    for (Id fid : sorted_keys(state_.factions)) {
+      const auto& f = state_.factions.at(fid);
+      const bool eligible = !(rules.exclude_pirates && f.control == FactionControl::AI_Pirate);
+      if (!eligible) continue;
+
+      eligible_total++;
+
+      const bool alive = rules.elimination_requires_colony
+                             ? has_colony.contains(fid)
+                             : (has_colony.contains(fid) || has_ship.contains(fid));
+      if (alive) {
+        eligible_alive++;
+        last_alive_id = fid;
+      }
+    }
+
+    // Don't auto-win in single-faction sandboxes.
+    if (eligible_total < 2) return;
+
+    if (eligible_alive == 1 && last_alive_id != kInvalidId) {
+      const auto* winner = find_ptr(state_.factions, last_alive_id);
+      state_.victory_state.game_over = true;
+      state_.victory_state.winner_faction_id = last_alive_id;
+      state_.victory_state.reason = VictoryReason::LastFactionStanding;
+      state_.victory_state.victory_day = state_.date.days_since_epoch();
+      state_.victory_state.winner_score = 0.0;
+
+      std::string msg = "Victory: ";
+      msg += (winner ? winner->name : std::to_string(static_cast<unsigned long long>(last_alive_id)));
+      msg += " wins by elimination.";
+      this->push_event(EventLevel::Warn, EventCategory::General, msg,
+                       EventContext{.faction_id = last_alive_id,
+                                    .faction_id2 = kInvalidId,
+                                    .system_id = kInvalidId,
+                                    .ship_id = kInvalidId,
+                                    .colony_id = kInvalidId});
+    }
+    return;
+  }
 
   const auto scores = compute_scoreboard(state_.victory_rules);
   if (scores.empty()) return;
@@ -682,8 +773,16 @@ void Simulation::tick_contacts(double dt_days, bool emit_contact_lost_events) {
     bool operator==(const Key& o) const { return faction_id == o.faction_id && system_id == o.system_id; }
   };
   struct KeyHash {
-    size_t operator()(const Key& k) const {
-      return std::hash<long long>()((static_cast<long long>(k.faction_id) << 32) ^ static_cast<long long>(k.system_id));
+    size_t operator()(const Key& k) const noexcept {
+      // Avoid UB from shifting signed integers; Id is uint64_t.
+      std::uint64_t h = 1469598103934665603ull;
+      auto mix = [&](std::uint64_t v) {
+        h ^= v;
+        h *= 1099511628211ull;
+      };
+      mix(static_cast<std::uint64_t>(k.faction_id));
+      mix(static_cast<std::uint64_t>(k.system_id));
+      return static_cast<size_t>(h);
     }
   };
 
@@ -720,6 +819,11 @@ void Simulation::tick_contacts(double dt_days, bool emit_contact_lost_events) {
     // Fraction of the current tick in [0,1] at which the ship was "seen".
     // 1.0 corresponds to the end-of-tick position.
     double t{1.0};
+
+    // Estimated 1-sigma position uncertainty (radius, mkm) at the seen time.
+    //
+    // This is used to seed Contact::last_seen_position_uncertainty_mkm.
+    double uncertainty_mkm{0.0};
   };
 
   std::vector<DetectionRecord> detections;
@@ -759,6 +863,15 @@ void Simulation::tick_contacts(double dt_days, bool emit_contact_lost_events) {
   };
 
   const double max_sig = sim_sensors::max_signature_multiplier_for_detection(*this);
+
+  const bool enable_uncertainty = cfg_.enable_contact_uncertainty;
+  const double unc_frac_center = std::clamp(cfg_.contact_uncertainty_center_fraction_of_detect_range, 0.0, 1.0);
+  const double unc_frac_edge = std::clamp(cfg_.contact_uncertainty_edge_fraction_of_detect_range, 0.0, 1.0);
+  const double unc_frac_lo = std::min(unc_frac_center, unc_frac_edge);
+  const double unc_frac_hi = std::max(unc_frac_center, unc_frac_edge);
+  const double unc_min_mkm = std::max(0.0, cfg_.contact_uncertainty_min_mkm);
+  const double unc_ecm_mult = std::max(0.0, cfg_.contact_uncertainty_ecm_strength_multiplier);
+  const double unc_cap_mkm = cfg_.contact_uncertainty_max_mkm;
 
   for (Id sys_id : system_ids) {
     const auto* sys = find_ptr(state_.systems, sys_id);
@@ -801,33 +914,42 @@ void Simulation::tick_contacts(double dt_days, bool emit_contact_lost_events) {
           // Apply target signature / EMCON.
           const auto* d = find_design(sh->design_id);
           const double sig = sim_sensors::effective_signature_multiplier(*this, *sh, d);
-const double ecm = d ? std::max(0.0, d->ecm_strength) : 0.0;
-const double eccm = std::max(0.0, src.eccm_strength);
-double ew_mult = (1.0 + eccm) / (1.0 + ecm);
-if (!std::isfinite(ew_mult)) ew_mult = 1.0;
-ew_mult = std::clamp(ew_mult, 0.1, 10.0);
+          const double ecm = d ? std::max(0.0, d->ecm_strength) : 0.0;
+          const double eccm = std::max(0.0, src.eccm_strength);
+          double ew_mult = (1.0 + eccm) / (1.0 + ecm);
+          if (!std::isfinite(ew_mult)) ew_mult = 1.0;
+          ew_mult = std::clamp(ew_mult, 0.1, 10.0);
 
-const double eff = src.range_mkm * sig * ew_mult;
+          const double eff = src.range_mkm * sig * ew_mult;
           if (eff <= 1e-9) continue;
 
           double t_seen = 1.0;
+
+          // If swept detection is enabled, keep endpoints so we can sample
+          // positions at t_seen for uncertainty estimation.
+          Vec2 tgt0 = sh->position_mkm;
+          Vec2 tgt1 = sh->position_mkm;
+          Vec2 src0 = src.pos_mkm;
+          Vec2 src1 = src.pos_mkm;
+          bool have_swept_endpoints = false;
 
           if (!swept) {
             const double dx = sh->position_mkm.x - src.pos_mkm.x;
             const double dy = sh->position_mkm.y - src.pos_mkm.y;
             if (dx * dx + dy * dy > eff * eff + 1e-9) continue;
           } else {
-            const Vec2 tgt1 = sh->position_mkm;
-            const Vec2 tgt0 = tgt1 - sh->velocity_mkm_per_day * dt_days;
+            tgt1 = sh->position_mkm;
+            tgt0 = tgt1 - sh->velocity_mkm_per_day * dt_days;
 
-            Vec2 src1 = src.pos_mkm;
-            Vec2 src0 = src1;
+            src1 = src.pos_mkm;
+            src0 = src1;
             if (src.ship_id != kInvalidId) {
               const auto* src_sh = find_ptr(state_.ships, src.ship_id);
               if (src_sh && src_sh->system_id == sys_id) {
                 src0 = src1 - src_sh->velocity_mkm_per_day * dt_days;
               }
             }
+            have_swept_endpoints = true;
 
             double t_closest = 0.0;
             const double min_d2 = min_dist_sq_and_t(src0, src1, tgt0, tgt1, &t_closest);
@@ -843,7 +965,30 @@ const double eff = src.range_mkm * sig * ew_mult;
             t_seen = (d2_end <= eff2 + 1e-9) ? 1.0 : t_closest;
           }
 
-          detections.push_back(DetectionRecord{ship_id, fid, t_seen});
+          // --- Seed contact uncertainty estimate ---
+          double unc_mkm = 0.0;
+          if (enable_uncertainty) {
+            const double tt = std::clamp(t_seen, 0.0, 1.0);
+            const Vec2 srcp = have_swept_endpoints ? (src0 + (src1 - src0) * tt) : src.pos_mkm;
+            const Vec2 tgtp = have_swept_endpoints ? (tgt0 + (tgt1 - tgt0) * tt) : sh->position_mkm;
+            const Vec2 dd = tgtp - srcp;
+            const double d_mkm = std::sqrt(dd.x * dd.x + dd.y * dd.y);
+            double frac = unc_frac_lo;
+            if (eff > 1e-9) {
+              const double u = std::clamp(d_mkm / eff, 0.0, 1.0);
+              frac = unc_frac_lo + (unc_frac_hi - unc_frac_lo) * u;
+            }
+            unc_mkm = std::max(unc_min_mkm, frac * eff);
+            if (unc_ecm_mult > 0.0) {
+              unc_mkm *= (1.0 + ecm * unc_ecm_mult);
+            }
+            if (!std::isfinite(unc_mkm) || unc_mkm < 0.0) unc_mkm = 0.0;
+            if (std::isfinite(unc_cap_mkm) && unc_cap_mkm > 0.0) {
+              unc_mkm = std::min(unc_mkm, unc_cap_mkm);
+            }
+          }
+
+          detections.push_back(DetectionRecord{ship_id, fid, t_seen, unc_mkm});
         }
       }
     }
@@ -852,7 +997,8 @@ const double eff = src.range_mkm * sig * ew_mult;
   std::sort(detections.begin(), detections.end(), [](const DetectionRecord& a, const DetectionRecord& b) {
     if (a.ship_id != b.ship_id) return a.ship_id < b.ship_id;
     if (a.viewer_faction_id != b.viewer_faction_id) return a.viewer_faction_id < b.viewer_faction_id;
-    return a.t > b.t;
+    if (a.t != b.t) return a.t > b.t;
+    return a.uncertainty_mkm < b.uncertainty_mkm;
   });
   detections.erase(std::unique(detections.begin(), detections.end(), [](const DetectionRecord& a, const DetectionRecord& b) {
     return a.ship_id == b.ship_id && a.viewer_faction_id == b.viewer_faction_id;
@@ -888,9 +1034,9 @@ const double eff = src.range_mkm * sig * ew_mult;
       // If the contact changed systems since the last detection, reset the
       // previous snapshot (coordinate frame changed).
       if (c.system_id != sh->system_id) {
-        c.prev_seen_day = 0;
+        c.prev_seen_day = -1;
         c.prev_seen_position_mkm = Vec2{0.0, 0.0};
-      } else if (c.last_seen_day > 0 && c.last_seen_day < now) {
+      } else if (c.last_seen_day >= 0 && c.last_seen_day < now) {
         // Shift last -> prev only once per day, so repeated detections within
         // the same day don't destroy a useful day-over-day velocity estimate.
         c.prev_seen_day = c.last_seen_day;
@@ -909,6 +1055,10 @@ const double eff = src.range_mkm * sig * ew_mult;
     if (swept) start_pos = end_pos - sh->velocity_mkm_per_day * dt_days;
     const double tt = std::clamp(det.t, 0.0, 1.0);
     c.last_seen_position_mkm = start_pos + (end_pos - start_pos) * tt;
+    c.last_seen_position_uncertainty_mkm = det.uncertainty_mkm;
+    if (!std::isfinite(c.last_seen_position_uncertainty_mkm) || c.last_seen_position_uncertainty_mkm < 0.0) {
+      c.last_seen_position_uncertainty_mkm = 0.0;
+    }
     c.last_seen_name = sh->name;
     c.last_seen_design_id = sh->design_id;
     c.last_seen_faction_id = sh->faction_id;
@@ -1089,7 +1239,9 @@ void Simulation::tick_shields(double dt_days) {
     const auto p = compute_power_allocation(*d, sh->power_policy);
 
     const double max_sh = std::max(0.0, d->max_shields);
-    if (max_sh <= 1e-9) {
+    const double subsys_mult = ship_subsystem_shield_multiplier(*sh);
+    const double max_sh_eff = max_sh * subsys_mult;
+    if (max_sh_eff <= 1e-9) {
       sh->shields = 0.0;
       continue;
     }
@@ -1102,9 +1254,11 @@ void Simulation::tick_shields(double dt_days) {
     }
 
     // Initialize shields for older saves / freshly spawned ships.
-    if (sh->shields < 0.0) sh->shields = max_sh;
+    if (sh->shields < 0.0) sh->shields = max_sh_eff;
 
-    const double regen = std::max(0.0, d->shield_regen_per_day);
+    double regen = std::max(0.0, d->shield_regen_per_day);
+    regen *= ship_heat_shield_regen_multiplier(*sh);
+    regen *= subsys_mult;
 
     // Nebula storms can interfere with shield systems (net negative regen).
     double drain = 0.0;
@@ -1116,7 +1270,7 @@ void Simulation::tick_shields(double dt_days) {
       }
     }
 
-    sh->shields = std::clamp(sh->shields + (regen - drain) * dt_days, 0.0, max_sh);
+    sh->shields = std::clamp(sh->shields + (regen - drain) * dt_days, 0.0, max_sh_eff);
   }
 }
 

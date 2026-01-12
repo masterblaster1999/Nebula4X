@@ -25,7 +25,7 @@ int test_anomaly_discovery() {
   scout.mass_tons = 50;
   scout.speed_km_s = 200;          // ~17.28 mkm/day
   scout.sensor_range_mkm = 5.0;    // Passive sensor range
-  scout.fuel_capacity_kg = 1e6;
+  scout.fuel_capacity_tons = 1000.0;
   content.designs[scout.id] = scout;
 
   nebula4x::SimConfig cfg;
@@ -39,7 +39,7 @@ int test_anomaly_discovery() {
   nebula4x::StarSystem sys;
   sys.id = 1;
   sys.name = "Test System";
-  sys.position = nebula4x::Vec2{0, 0};
+  sys.galaxy_pos = nebula4x::Vec2{0.0, 0.0};
   s.systems[sys.id] = sys;
 
   // One faction that already discovered the system.
@@ -55,9 +55,9 @@ int test_anomaly_discovery() {
   a.id = 1;
   a.system_id = sys.id;
   a.name = "Mysterious Signal";
-  a.kind = nebula4x::AnomalyKind::Signal;
+  a.kind = "signal";
   a.position_mkm = nebula4x::Vec2{10.0, 0.0};
-  a.investigation_days = 5.0;
+  a.investigation_days = 5;
   s.anomalies[a.id] = a;
 
   // One ship with sensors.
@@ -68,7 +68,7 @@ int test_anomaly_discovery() {
   sh.system_id = sys.id;
   sh.position_mkm = nebula4x::Vec2{0.0, 0.0};
   sh.design_id = scout.id;
-  sh.fuel_kg = 1e6;
+  sh.fuel_tons = 1000.0;
   s.ships[sh.id] = sh;
 
   // Link ship to system.

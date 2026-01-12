@@ -1,10 +1,10 @@
 #include "nebula4x/util/regression_tape.h"
 
+#include <array>
 #include <algorithm>
 #include <chrono>
 #include <cctype>
 #include <ctime>
-#include <cstdio>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -26,11 +26,18 @@ std::string utc_now_iso8601() {
   gmtime_r(&t, &tm);
 #endif
 
-  char buf[32];
-  std::snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02dZ",
-                tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
-                tm.tm_hour, tm.tm_min, tm.tm_sec);
-  return std::string(buf);
+  // Avoid fixed-size snprintf warnings by relying on strftime, which reports
+  // failure instead of truncating.
+  std::array<char, 64> buf{};
+  if (std::strftime(buf.data(), buf.size(), "%Y-%m-%dT%H:%M:%SZ", &tm) == 0) {
+    // Extremely unlikely (would require a very large year), but keep it safe.
+    std::array<char, 128> big{};
+    if (std::strftime(big.data(), big.size(), "%Y-%m-%dT%H:%M:%SZ", &tm) == 0) {
+      return std::string("1970-01-01T00:00:00Z");
+    }
+    return std::string(big.data());
+  }
+  return std::string(buf.data());
 }
 
 bool is_hex_digit(char c) {

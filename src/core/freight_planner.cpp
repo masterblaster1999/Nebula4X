@@ -67,7 +67,7 @@ FreightPlannerResult compute_freight_plan(const Simulation& sim, Id faction_id,
     return out;
   }
 
-  const double min_tons = std::max(0.0, sim.cfg().auto_freight_min_transfer_tons);
+  const double min_tons = std::max(1e-6, sim.cfg().auto_freight_min_transfer_tons);
   const double take_frac = std::clamp(sim.cfg().auto_freight_max_take_fraction_of_surplus, 0.0, 1.0);
   const bool bundle_multi = opt.bundle_multi_mineral.has_value() ? *opt.bundle_multi_mineral
                                                                  : sim.cfg().auto_freight_multi_mineral;

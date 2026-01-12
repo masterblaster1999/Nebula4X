@@ -6,6 +6,7 @@
 
 #include "core/simulation_sensors.h"
 
+#include "nebula4x/core/contact_prediction.h"
 #include "nebula4x/core/fleet_formation.h"
 #include "nebula4x/core/enum_strings.h"
 #include "nebula4x/core/power.h"
@@ -1066,7 +1067,7 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
     }
   }
 
-  // Contact markers (last known positions)
+  // Contact markers (fog-of-war memory)
   if (!recent_contacts.empty() && viewer_faction_id != kInvalidId) {
     const int now = static_cast<int>(s.date.days_since_epoch());
 
@@ -1075,27 +1076,70 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
       if (c.ship_id != kInvalidId && sim.is_ship_detected_by_faction(viewer_faction_id, c.ship_id)) continue;
 
       const int age = std::max(0, now - c.last_seen_day);
-      const ImVec2 p = to_screen(c.last_seen_position_mkm, center, scale, zoom, pan);
-      const float t = 1.0f - (ui.contact_max_age_days > 0 ? (static_cast<float>(age) / static_cast<float>(ui.contact_max_age_days)) : 1.0f);
-      const int a = std::clamp(static_cast<int>(60 + 140 * std::clamp(t, 0.0f, 1.0f)), 40, 220);
-      const ImU32 col = IM_COL32(255, 180, 0, a);
 
-      draw->AddCircle(p, 6.0f, col, 0, 2.0f);
-      draw->AddLine(ImVec2(p.x - 5, p.y - 5), ImVec2(p.x + 5, p.y + 5), col, 2.0f);
-      draw->AddLine(ImVec2(p.x - 5, p.y + 5), ImVec2(p.x + 5, p.y - 5), col, 2.0f);
+      // Predict a "best guess" position from the last two detections.
+      const auto pred = predict_contact_position(c, now, sim.cfg().contact_prediction_max_days);
+      const Vec2 pred_pos = pred.predicted_position_mkm;
+
+      const ImVec2 p_pred = to_screen(pred_pos, center, scale, zoom, pan);
+      const ImVec2 p_last = to_screen(c.last_seen_position_mkm, center, scale, zoom, pan);
+
+      const float t_age = 1.0f -
+                          (ui.contact_max_age_days > 0 ? (static_cast<float>(age) / static_cast<float>(ui.contact_max_age_days))
+                                                       : 1.0f);
+      const int a = std::clamp(static_cast<int>(60 + 140 * std::clamp(t_age, 0.0f, 1.0f)), 40, 220);
+      const ImU32 col = IM_COL32(255, 180, 0, a);
+      const ImU32 col_faint = modulate_alpha(col, 0.55f);
+      const ImU32 col_ring = modulate_alpha(col, 0.30f);
+
+      // Uncertainty ring centered on predicted position.
+      double unc_mkm = 0.0;
+      if (ui.show_contact_uncertainty) {
+        unc_mkm = sim.contact_uncertainty_radius_mkm(c, now);
+        if (unc_mkm > 1e-6) {
+          const float r_px = static_cast<float>(unc_mkm * scale * zoom);
+          // Skip degenerate or absurdly huge rings.
+          if (r_px > 1.5f && r_px < 1.0e6f) {
+            draw->AddCircle(p_pred, r_px, col_ring, 0, 1.25f);
+          }
+        }
+      }
+
+      // Draw a faint "track" from last seen -> predicted (if non-trivial).
+      const float dx_lp = p_pred.x - p_last.x;
+      const float dy_lp = p_pred.y - p_last.y;
+      const float d2_lp = dx_lp * dx_lp + dy_lp * dy_lp;
+      const bool show_track = d2_lp > 25.0f; // > ~5px
+      if (show_track) {
+        draw->AddLine(p_last, p_pred, col_ring, 1.0f);
+        draw->AddCircle(p_last, 4.0f, col_faint, 0, 1.25f);
+        draw->AddLine(ImVec2(p_last.x - 3.0f, p_last.y - 3.0f), ImVec2(p_last.x + 3.0f, p_last.y + 3.0f), col_faint, 1.5f);
+        draw->AddLine(ImVec2(p_last.x - 3.0f, p_last.y + 3.0f), ImVec2(p_last.x + 3.0f, p_last.y - 3.0f), col_faint, 1.5f);
+      }
+
+      // Predicted marker.
+      draw->AddCircle(p_pred, 6.0f, col, 0, 2.0f);
+      draw->AddLine(ImVec2(p_pred.x - 5, p_pred.y - 5), ImVec2(p_pred.x + 5, p_pred.y + 5), col, 2.0f);
+      draw->AddLine(ImVec2(p_pred.x - 5, p_pred.y + 5), ImVec2(p_pred.x + 5, p_pred.y - 5), col, 2.0f);
 
       // Highlight the actively selected contact (from Intel window / previous clicks).
       if (ui.selected_contact_ship_id != kInvalidId && c.ship_id == ui.selected_contact_ship_id) {
         const float t_p = (float)ImGui::GetTime();
         const float pulse = 0.5f + 0.5f * std::sin(t_p * 4.0f);
         const float r = 10.0f + pulse * 4.0f;
-        draw->AddCircle(p, r, IM_COL32(255, 230, 140, 190), 0, 2.5f);
+        draw->AddCircle(p_pred, r, IM_COL32(255, 230, 140, 190), 0, 2.5f);
       }
 
       if (ui.show_contact_labels) {
         std::string lbl = c.last_seen_name.empty() ? std::string("Unknown") : c.last_seen_name;
-        lbl += "  (" + std::to_string(age) + "d)";
-        draw->AddText(ImVec2(p.x + 8, p.y + 8), IM_COL32(240, 220, 180, 220), lbl.c_str());
+        lbl += "  (" + std::to_string(age) + "d";
+        if (ui.show_contact_uncertainty && unc_mkm > 1e-3) {
+          // Round for readability.
+          const int unc_i = static_cast<int>(std::round(unc_mkm));
+          lbl += ", ±" + std::to_string(unc_i) + " mkm";
+        }
+        lbl += ")";
+        draw->AddText(ImVec2(p_pred.x + 8, p_pred.y + 8), IM_COL32(240, 220, 180, 220), lbl.c_str());
       }
     }
   }
@@ -1262,16 +1306,30 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
           // Treat contact markers as a distinct selectable entity in fog-of-war mode.
           Id picked_contact = kInvalidId;
           float best_contact_d2 = pick_d2;
+          const int now = static_cast<int>(s.date.days_since_epoch());
           for (const auto& c : recent_contacts) {
             if (c.ship_id == kInvalidId) continue;
             // Skip contacts that are currently detected (the real ship marker is pickable).
             if (viewer_faction_id != kInvalidId && sim.is_ship_detected_by_faction(viewer_faction_id, c.ship_id)) continue;
-            const ImVec2 p = to_screen(c.last_seen_position_mkm, center, scale, zoom, pan);
-            const float dx = mp.x - p.x;
-            const float dy = mp.y - p.y;
-            const float d2 = dx * dx + dy * dy;
-            if (d2 <= best_contact_d2) {
-              best_contact_d2 = d2;
+            const auto pred = predict_contact_position(c, now, sim.cfg().contact_prediction_max_days);
+            const ImVec2 p_pred = to_screen(pred.predicted_position_mkm, center, scale, zoom, pan);
+            const ImVec2 p_last = to_screen(c.last_seen_position_mkm, center, scale, zoom, pan);
+
+            float best_d2_this = std::numeric_limits<float>::max();
+            {
+              const float dx = mp.x - p_pred.x;
+              const float dy = mp.y - p_pred.y;
+              best_d2_this = dx * dx + dy * dy;
+            }
+            {
+              const float dx = mp.x - p_last.x;
+              const float dy = mp.y - p_last.y;
+              const float d2 = dx * dx + dy * dy;
+              best_d2_this = std::min(best_d2_this, d2);
+            }
+
+            if (best_d2_this <= best_contact_d2) {
+              best_contact_d2 = best_d2_this;
               picked_contact = c.ship_id;
             }
           }
@@ -1828,10 +1886,12 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
 
     // Recent-contact markers (optional).
     if (ui.fog_of_war && ui.show_contact_markers && !recent_contacts.empty() && viewer_faction_id != kInvalidId) {
+      const int now = static_cast<int>(s.date.days_since_epoch());
       for (const auto& c : recent_contacts) {
         if (c.ship_id == kInvalidId) continue;
         if (sim.is_ship_detected_by_faction(viewer_faction_id, c.ship_id)) continue;
-        ImVec2 p = world_to_minimap_px(mm, c.last_seen_position_mkm);
+        const auto pred = predict_contact_position(c, now, sim.cfg().contact_prediction_max_days);
+        ImVec2 p = world_to_minimap_px(mm, pred.predicted_position_mkm);
         p = clamp_to_rect(p, mm_p0, mm_p1);
         const ImU32 col = IM_COL32(255, 180, 0, 170);
         draw->AddLine(ImVec2(p.x - 3, p.y - 3), ImVec2(p.x + 3, p.y + 3), col, 1.5f);
@@ -1985,6 +2045,8 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
   ImGui::Checkbox("Show contacts", &ui.show_contact_markers);
   ImGui::SameLine();
   ImGui::Checkbox("Labels", &ui.show_contact_labels);
+  ImGui::SameLine();
+  ImGui::Checkbox("Uncertainty", &ui.show_contact_uncertainty);
 
   ImGui::Separator();
   ImGui::Checkbox("Show minor bodies", &ui.show_minor_bodies);

@@ -171,8 +171,9 @@ struct SimConfig {
   // operating. If they cannot draw enough supply, their maintenance_condition decays,
   // applying speed and combat effectiveness penalties.
   //
-  // This is intentionally lightweight and deterministic: there is no RNG breakdown
-  // model yet, only a continuous readiness/maintenance scalar.
+  // This is intentionally lightweight and deterministic: readiness is tracked as a
+  // continuous scalar. Optional deterministic malfunctions can be enabled via the
+  // ship_maintenance_breakdown_* parameters.
   bool enable_ship_maintenance{false};
 
   // Resource id consumed as maintenance supplies. Default uses the generic
@@ -198,6 +199,31 @@ struct SimConfig {
   // up to 1.0 at maintenance_condition == 1.0).
   double ship_maintenance_min_speed_multiplier{0.6};
   double ship_maintenance_min_combat_multiplier{0.7};
+
+
+// Optional: deterministic maintenance breakdown / failures.
+//
+// When ship maintenance is enabled, ships that fall below
+// ship_maintenance_breakdown_start_fraction have a per-day chance of suffering
+// a subsystem malfunction (engines/weapons/sensors/shields). Malfunctions
+// reduce subsystem integrity and generally require shipyard repairs to restore,
+// creating a more meaningful sustainment loop beyond simple speed/combat
+// multipliers.
+//
+// The hazard rate at condition==0 is ship_maintenance_breakdown_rate_per_day_at_zero.
+// For condition in [0, start], the hazard scales as:
+//   rate = rate0 * pow((start - condition) / start, exponent)
+// and is converted into a Bernoulli probability via p = 1 - exp(-rate).
+//
+// Set rate0 to 0 to disable malfunctions (restoring the old behavior).
+double ship_maintenance_breakdown_start_fraction{0.50};
+double ship_maintenance_breakdown_rate_per_day_at_zero{0.03};
+double ship_maintenance_breakdown_exponent{2.0};
+
+// Subsystem integrity damage applied on a malfunction (fraction of integrity).
+double ship_maintenance_breakdown_subsystem_damage_min{0.05};
+double ship_maintenance_breakdown_subsystem_damage_max{0.20};
+
 
   // --- Crew training / experience (optional) ---
   //
@@ -229,6 +255,89 @@ struct SimConfig {
 
   // Global multiplier applied to colony crew_training_points_per_day.
   double crew_training_points_multiplier{1.0};
+
+  // --- Ship heat / thermal management (optional) ---
+  //
+  // When enabled, ships accumulate heat based on online power usage and
+  // dissipate heat based on hull mass (radiator area proxy) plus optional
+  // design bonuses from components. Excess heat reduces ship performance
+  // (speed/sensors/weapons/shields), and extreme overheating can damage hull.
+  bool enable_ship_heat{false};
+
+  // Baseline heat capacity derived from ship mass.
+  // Total capacity = mass_tons * ship_heat_base_capacity_per_mass_ton + design.heat_capacity_bonus.
+  double ship_heat_base_capacity_per_mass_ton{1.0};
+
+  // Baseline heat generation derived from *online* power usage.
+  // Generation/day = online_power_use * ship_heat_generation_per_power_use_per_day + design.heat_generation_bonus_per_day.
+  double ship_heat_generation_per_power_use_per_day{0.05};
+
+  // Baseline heat dissipation derived from ship mass.
+  // Dissipation/day = mass_tons * ship_heat_base_dissipation_per_mass_ton_per_day + design.heat_dissipation_bonus_per_day.
+  double ship_heat_base_dissipation_per_mass_ton_per_day{0.02};
+
+  // Performance penalties scale linearly from penalty_start_fraction to penalty_full_fraction
+  // of heat capacity.
+  double ship_heat_penalty_start_fraction{0.70};
+  double ship_heat_penalty_full_fraction{1.00};
+
+  // Minimum subsystem multipliers at/above ship_heat_penalty_full_fraction.
+  double ship_heat_min_speed_multiplier{0.50};
+  double ship_heat_min_sensor_range_multiplier{0.50};
+  double ship_heat_min_weapon_output_multiplier{0.60};
+  double ship_heat_min_shield_regen_multiplier{0.50};
+
+  // Damage kicks in at severe overheating. Threshold is a fraction of capacity.
+  double ship_heat_damage_threshold_fraction{1.20};
+
+  // Hull damage rate at 200% of capacity (scaled linearly from threshold).
+  // Example: 0.25 means 25% of max HP per day at 200% heat.
+  double ship_heat_damage_fraction_per_day_at_200pct{0.25};
+
+  // Thermal signature bloom: additional detectability multiplier derived from ship heat.
+  //
+  // When ship heat is enabled, a ship's effective signature multiplier is further
+  // multiplied by:
+  //   heat_sig = clamp(1 + ship_heat_signature_multiplier_per_fraction * heat_fraction,
+  //                    1, ship_heat_signature_multiplier_max)
+  // where heat_fraction is ship_heat / heat_capacity.
+  //
+  // Set ship_heat_signature_multiplier_per_fraction to 0 to disable this coupling.
+  double ship_heat_signature_multiplier_per_fraction{0.50};
+
+  // Upper bound for the thermal signature multiplier from heat (see above).
+  double ship_heat_signature_multiplier_max{2.00};
+
+  // --- Ship subsystem damage / critical hits (optional) ---
+  //
+  // When enabled, combat hull damage can inflict deterministic "critical hits"
+  // that reduce key subsystem integrity (engines/weapons/sensors/shields).
+  //
+  // Integrity is modeled as a simple 0..1 scalar per subsystem and affects
+  // performance until repaired at a shipyard. This is intentionally lightweight
+  // (not per-component) but provides a meaningful mid-layer between "full HP"
+  // and "destroyed".
+  bool enable_ship_subsystem_damage{false};
+
+  // Average number of subsystem crits inflicted when a ship takes hull damage
+  // equal to 100% of its max HP.
+  double ship_subsystem_crits_per_full_hull_damage{1.0};
+
+  // Hard cap on crits applied to a single ship in one combat damage resolution.
+  int ship_subsystem_max_crits_per_damage_instance{4};
+
+  // Integrity loss per crit hit is sampled uniformly in [min, max].
+  double ship_subsystem_integrity_loss_min{0.05};
+  double ship_subsystem_integrity_loss_max{0.25};
+
+  // Shipyard repairs can restore subsystem integrity using the same "repair
+  // capacity" pool as hull HP. Subsystem repairs consume an HP-equivalent amount
+  // of capacity:
+  //   hp_equiv = deficit_integrity * max_hp * ship_subsystem_repair_hp_equiv_per_integrity
+  // e.g. with 0.25, restoring a subsystem from 0 -> 1 costs 25% of max HP worth
+  // of repair capacity.
+  double ship_subsystem_repair_hp_equiv_per_integrity{0.25};
+
 
   // --- Sensor modes / EMCON ---
   //
@@ -338,6 +447,47 @@ struct SimConfig {
   // To avoid chasing stale tracks forever, extrapolation is clamped to
   // at most this many days after the last detection.
   int contact_prediction_max_days{30};
+
+  // --- Intel / contact uncertainty ---
+  //
+  // When enabled, detected ship contacts remember an estimated position
+  // uncertainty radius at last detection. As contacts age, their uncertainty
+  // expands based on the estimated target speed.
+  //
+  // This supports:
+  //  - UI: uncertainty rings on the system map and intel window.
+  //  - Gameplay: simple deterministic "search wandering" when pursuing a lost
+  //    contact (prevents perfect tail-chasing of stale tracks).
+  bool enable_contact_uncertainty{true};
+
+  // Measurement error at detection time is modeled as a fraction of the
+  // effective detection range (after signature + EW). We interpolate between
+  // these fractions based on distance/range.
+  double contact_uncertainty_center_fraction_of_detect_range{0.01};
+  double contact_uncertainty_edge_fraction_of_detect_range{0.08};
+
+  // Absolute minimum measurement uncertainty (mkm) at the moment of detection.
+  double contact_uncertainty_min_mkm{0.5};
+
+  // Additional measurement error multiplier per point of target ECM strength.
+  // error *= (1 + ecm * multiplier).
+  double contact_uncertainty_ecm_strength_multiplier{0.25};
+
+  // Uncertainty growth per day (mkm/day) as a fraction of estimated target
+  // speed (mkm/day).
+  double contact_uncertainty_growth_fraction_of_speed{0.25};
+
+  // Optional minimum growth floor (mkm/day).
+  double contact_uncertainty_growth_min_mkm_per_day{0.0};
+
+  // Cap uncertainty radius to avoid runaway values on very old contacts.
+  double contact_uncertainty_max_mkm{5000.0};
+
+  // When pursuing a lost contact, wander within this fraction of the current
+  // uncertainty radius around the predicted track.
+  //
+  // 0 disables the search offset (pure tail-chasing).
+  double contact_search_offset_fraction{0.5};
 
   // Master toggle for space combat.
   //
@@ -951,6 +1101,38 @@ class Simulation {
   bool subday_economy_enabled() const { return cfg_.enable_subday_economy; }
   void set_subday_economy_enabled(bool enabled) { cfg_.enable_subday_economy = enabled; }
 
+  bool ship_heat_enabled() const { return cfg_.enable_ship_heat; }
+  void set_ship_heat_enabled(bool enabled) { cfg_.enable_ship_heat = enabled; }
+
+  bool ship_subsystem_damage_enabled() const { return cfg_.enable_ship_subsystem_damage; }
+  void set_ship_subsystem_damage_enabled(bool enabled) { cfg_.enable_ship_subsystem_damage = enabled; }
+
+  // --- Ship heat query helpers ---
+  // Returns current heat as a fraction of the ship's heat capacity. If the
+  // ship has no capacity or heat is disabled, returns 0.
+  double ship_heat_fraction(const Ship& ship) const;
+
+  // Subsystem performance multipliers based on current ship heat.
+  double ship_heat_speed_multiplier(const Ship& ship) const;
+  double ship_heat_sensor_range_multiplier(const Ship& ship) const;
+  double ship_heat_weapon_output_multiplier(const Ship& ship) const;
+  double ship_heat_shield_regen_multiplier(const Ship& ship) const;
+
+  // Additional signature multiplier derived from heat (thermal bloom).
+  // Returns 1.0 when ship heat is disabled.
+  double ship_heat_signature_multiplier(const Ship& ship) const;
+
+  // Effective signature multiplier for detection (design stealth * EMCON * thermal bloom).
+  // If design is null, it will be looked up by ship.design_id.
+  double ship_effective_signature_multiplier(const Ship& ship, const ShipDesign* design = nullptr) const;
+
+  // --- Ship subsystem integrity query helpers ---
+  // Returns 1.0 when subsystem damage is disabled.
+  double ship_subsystem_engine_multiplier(const Ship& ship) const;
+  double ship_subsystem_weapon_output_multiplier(const Ship& ship) const;
+  double ship_subsystem_sensor_range_multiplier(const Ship& ship) const;
+  double ship_subsystem_shield_multiplier(const Ship& ship) const;
+
   GameState& state() { return state_; }
   const GameState& state() const { return state_; }
 
@@ -1424,6 +1606,12 @@ bool move_construction_order(Id colony_id, int from_index, int to_index);
   //
   // Backward compatibility: if no stance is defined, the relationship defaults to Hostile.
   DiplomacyStatus diplomatic_status(Id from_faction_id, Id to_faction_id) const;
+
+  // Raw directed stance without treaty overlays.
+  //
+  // This is useful for UI: treaties can temporarily force at least Neutral (Ceasefire/NAP/Trade)
+  // or Friendly (Alliance) even if the underlying stance is Hostile.
+  DiplomacyStatus diplomatic_status_base(Id from_faction_id, Id to_faction_id) const;
   bool are_factions_hostile(Id from_faction_id, Id to_faction_id) const;
   // True if both factions consider each other Friendly (mutual friendliness).
   // Self is always friendly.
@@ -1466,7 +1654,8 @@ bool move_construction_order(Id colony_id, int from_index, int to_index);
   // Returns the offer id (or kInvalidId on failure).
   Id create_diplomatic_offer(Id from_faction_id, Id to_faction_id, TreatyType treaty_type,
                              int treaty_duration_days = -1, int offer_expires_in_days = 30,
-                             bool push_event = true, std::string* error = nullptr);
+                             bool push_event = true, std::string* error = nullptr,
+                             const std::string& message = "");
 
   // Accept / decline a pending offer. On accept, a treaty is created and the offer is removed.
   bool accept_diplomatic_offer(Id offer_id, bool push_event = true, std::string* error = nullptr);
@@ -1493,6 +1682,12 @@ bool move_construction_order(Id colony_id, int from_index, int to_index);
   // Returns recently seen (last known) hostile ship contacts in the given system.
   // Contacts are updated automatically during simulation ticks.
   std::vector<Contact> recent_contacts_in_system(Id viewer_faction_id, Id system_id, int max_age_days = 30) const;
+
+  // Compute the current uncertainty radius (mkm) for a stale contact.
+  //
+  // The returned value can be used by the UI to draw uncertainty rings and by
+  // orders to perform lightweight "search" behavior around a predicted track.
+  double contact_uncertainty_radius_mkm(const Contact& c, int now_day) const;
 
   // Exploration / map knowledge helpers.
   bool is_system_discovered_by_faction(Id viewer_faction_id, Id system_id) const;
@@ -1573,7 +1768,9 @@ bool move_construction_order(Id colony_id, int from_index, int to_index);
   void tick_refuel();
   void tick_rearm();
   void tick_ship_maintenance(double dt_days);
+  void tick_ship_maintenance_failures();
   void tick_crew_training(double dt_days);
+  void tick_heat(double dt_days);
   void tick_ships(double dt_days);
   void tick_contacts(double dt_days, bool emit_contact_lost_events);
   void tick_shields(double dt_days);

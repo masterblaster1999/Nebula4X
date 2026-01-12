@@ -1015,6 +1015,11 @@ std::string serialize_game_to_json(const GameState& s) {
     if (sh.boarding_cooldown_days > 0.0) o["boarding_cooldown_days"] = sh.boarding_cooldown_days;
     o["fuel_tons"] = sh.fuel_tons;
     o["shields"] = sh.shields;
+    if (std::abs(sh.engines_integrity - 1.0) > 1e-9) o["engines_integrity"] = sh.engines_integrity;
+    if (std::abs(sh.weapons_integrity - 1.0) > 1e-9) o["weapons_integrity"] = sh.weapons_integrity;
+    if (std::abs(sh.sensors_integrity - 1.0) > 1e-9) o["sensors_integrity"] = sh.sensors_integrity;
+    if (std::abs(sh.shields_integrity - 1.0) > 1e-9) o["shields_integrity"] = sh.shields_integrity;
+    if (sh.heat > 1e-12) o["heat"] = sh.heat;
     o["cargo"] = map_string_double_to_json(sh.cargo);
     if (sh.troops > 0.0) o["troops"] = sh.troops;
     if (sh.colonists_millions > 0.0) o["colonists_millions"] = sh.colonists_millions;
@@ -1263,7 +1268,10 @@ std::string serialize_game_to_json(const GameState& s) {
       co["system_id"] = static_cast<double>(c.system_id);
       co["last_seen_day"] = static_cast<double>(c.last_seen_day);
       co["last_seen_position_mkm"] = vec2_to_json(c.last_seen_position_mkm);
-      if (c.prev_seen_day > 0) {
+      if (std::isfinite(c.last_seen_position_uncertainty_mkm) && c.last_seen_position_uncertainty_mkm > 1e-9) {
+        co["last_seen_position_uncertainty_mkm"] = c.last_seen_position_uncertainty_mkm;
+      }
+      if (c.prev_seen_day >= 0 && c.prev_seen_day < c.last_seen_day) {
         co["prev_seen_day"] = static_cast<double>(c.prev_seen_day);
         co["prev_seen_position_mkm"] = vec2_to_json(c.prev_seen_position_mkm);
       }
@@ -1817,6 +1825,21 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     }
     if (auto it = o.find("fuel_tons"); it != o.end()) sh.fuel_tons = it->second.number_value(-1.0);
     if (auto it = o.find("shields"); it != o.end()) sh.shields = it->second.number_value(-1.0);
+    if (auto it = o.find("heat"); it != o.end()) sh.heat = it->second.number_value(0.0);
+    if (!std::isfinite(sh.heat) || sh.heat < 0.0) sh.heat = 0.0;
+    if (auto it = o.find("engines_integrity"); it != o.end()) sh.engines_integrity = it->second.number_value(1.0);
+    if (auto it = o.find("weapons_integrity"); it != o.end()) sh.weapons_integrity = it->second.number_value(1.0);
+    if (auto it = o.find("sensors_integrity"); it != o.end()) sh.sensors_integrity = it->second.number_value(1.0);
+    if (auto it = o.find("shields_integrity"); it != o.end()) sh.shields_integrity = it->second.number_value(1.0);
+
+    auto clamp01 = [](double x) {
+      if (!std::isfinite(x)) return 1.0;
+      return std::clamp(x, 0.0, 1.0);
+    };
+    sh.engines_integrity = clamp01(sh.engines_integrity);
+    sh.weapons_integrity = clamp01(sh.weapons_integrity);
+    sh.sensors_integrity = clamp01(sh.sensors_integrity);
+    sh.shields_integrity = clamp01(sh.shields_integrity);
     if (auto it = o.find("cargo"); it != o.end()) sh.cargo = map_string_double_from_json(it->second);
     if (auto it = o.find("troops"); it != o.end()) sh.troops = it->second.number_value(0.0);
     if (auto it = o.find("colonists_millions"); it != o.end()) sh.colonists_millions = it->second.number_value(0.0);
@@ -2249,7 +2272,10 @@ GameState deserialize_game_from_json(const std::string& json_text) {
         c.system_id = static_cast<Id>(co.at("system_id").int_value(kInvalidId));
         c.last_seen_day = static_cast<int>(co.at("last_seen_day").int_value(0));
         if (auto itp = co.find("last_seen_position_mkm"); itp != co.end()) c.last_seen_position_mkm = vec2_from_json(itp->second);
-        if (auto itp = co.find("prev_seen_day"); itp != co.end()) c.prev_seen_day = static_cast<int>(itp->second.int_value(0));
+        if (auto itu = co.find("last_seen_position_uncertainty_mkm"); itu != co.end()) {
+          c.last_seen_position_uncertainty_mkm = itu->second.number_value(0.0);
+        }
+        if (auto itp = co.find("prev_seen_day"); itp != co.end()) c.prev_seen_day = static_cast<int>(itp->second.int_value(-1));
         if (auto itp = co.find("prev_seen_position_mkm"); itp != co.end()) c.prev_seen_position_mkm = vec2_from_json(itp->second);
         if (auto itn = co.find("last_seen_name"); itn != co.end()) c.last_seen_name = itn->second.string_value();
         if (auto itd = co.find("last_seen_design_id"); itd != co.end()) c.last_seen_design_id = itd->second.string_value();

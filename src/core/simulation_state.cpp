@@ -561,6 +561,35 @@ void Simulation::new_game() {
   ++state_generation_;
   for (auto& [_, ship] : state_.ships) {
     apply_design_stats_to_ship(ship);
+
+    // heat_state is not serialized (it is a runtime bucket used to throttle
+    // repeated warnings). Initialize it from the current heat fraction so
+    // loading a save doesn't re-emit heat threshold events.
+    if (!std::isfinite(ship.heat) || ship.heat < 0.0) ship.heat = 0.0;
+
+    if (!cfg_.enable_ship_heat) {
+      ship.heat_state = 0;
+    } else {
+      const ShipDesign* d = find_design(ship.design_id);
+      if (!d) {
+        ship.heat_state = 0;
+      } else {
+        const double cap =
+            std::max(0.0, cfg_.ship_heat_base_capacity_per_mass_ton) * std::max(0.0, d->mass_tons) +
+            std::max(0.0, d->heat_capacity_bonus);
+        if (cap <= 1e-9) {
+          ship.heat_state = 0;
+          ship.heat = 0.0;
+        } else {
+          const double frac = std::clamp(ship.heat / cap, 0.0, 10.0);
+          std::uint8_t st = 0;
+          if (frac >= cfg_.ship_heat_damage_threshold_fraction) st = 3;
+          else if (frac >= cfg_.ship_heat_penalty_full_fraction) st = 2;
+          else if (frac >= cfg_.ship_heat_penalty_start_fraction) st = 1;
+          ship.heat_state = st;
+        }
+      }
+    }
   }
   for (auto& [_, f] : state_.factions) initialize_unlocks_for_faction(f);
   recompute_body_positions();
@@ -573,6 +602,35 @@ void Simulation::new_game_random(std::uint32_t seed, int num_systems) {
   ++state_generation_;
   for (auto& [_, ship] : state_.ships) {
     apply_design_stats_to_ship(ship);
+
+    // heat_state is not serialized (it is a runtime bucket used to throttle
+    // repeated warnings). Initialize it from the current heat fraction so
+    // loading a save doesn't re-emit heat threshold events.
+    if (!std::isfinite(ship.heat) || ship.heat < 0.0) ship.heat = 0.0;
+
+    if (!cfg_.enable_ship_heat) {
+      ship.heat_state = 0;
+    } else {
+      const ShipDesign* d = find_design(ship.design_id);
+      if (!d) {
+        ship.heat_state = 0;
+      } else {
+        const double cap =
+            std::max(0.0, cfg_.ship_heat_base_capacity_per_mass_ton) * std::max(0.0, d->mass_tons) +
+            std::max(0.0, d->heat_capacity_bonus);
+        if (cap <= 1e-9) {
+          ship.heat_state = 0;
+          ship.heat = 0.0;
+        } else {
+          const double frac = std::clamp(ship.heat / cap, 0.0, 10.0);
+          std::uint8_t st = 0;
+          if (frac >= cfg_.ship_heat_damage_threshold_fraction) st = 3;
+          else if (frac >= cfg_.ship_heat_penalty_full_fraction) st = 2;
+          else if (frac >= cfg_.ship_heat_penalty_start_fraction) st = 1;
+          ship.heat_state = st;
+        }
+      }
+    }
   }
   for (auto& [_, f] : state_.factions) initialize_unlocks_for_faction(f);
   recompute_body_positions();
@@ -607,6 +665,35 @@ void Simulation::load_game(GameState loaded) {
 
   for (auto& [_, ship] : state_.ships) {
     apply_design_stats_to_ship(ship);
+
+    // heat_state is not serialized (it is a runtime bucket used to throttle
+    // repeated warnings). Initialize it from the current heat fraction so
+    // loading a save doesn't re-emit heat threshold events.
+    if (!std::isfinite(ship.heat) || ship.heat < 0.0) ship.heat = 0.0;
+
+    if (!cfg_.enable_ship_heat) {
+      ship.heat_state = 0;
+    } else {
+      const ShipDesign* d = find_design(ship.design_id);
+      if (!d) {
+        ship.heat_state = 0;
+      } else {
+        const double cap =
+            std::max(0.0, cfg_.ship_heat_base_capacity_per_mass_ton) * std::max(0.0, d->mass_tons) +
+            std::max(0.0, d->heat_capacity_bonus);
+        if (cap <= 1e-9) {
+          ship.heat_state = 0;
+          ship.heat = 0.0;
+        } else {
+          const double frac = std::clamp(ship.heat / cap, 0.0, 10.0);
+          std::uint8_t st = 0;
+          if (frac >= cfg_.ship_heat_damage_threshold_fraction) st = 3;
+          else if (frac >= cfg_.ship_heat_penalty_full_fraction) st = 2;
+          else if (frac >= cfg_.ship_heat_penalty_start_fraction) st = 1;
+          ship.heat_state = st;
+        }
+      }
+    }
   }
 
   for (auto& [_, f] : state_.factions) {

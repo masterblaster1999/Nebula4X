@@ -59,6 +59,8 @@ target_sources(nebula4x_core
     src/core/simulation_tick_economy.cpp
     src/core/simulation_tick_ai.cpp
     src/core/simulation_sensors.cpp
+    src/core/simulation_subsystems.cpp
+    src/core/simulation_tick_heat.cpp
     src/core/simulation_tick_ships.cpp
     src/core/simulation_tick_combat.cpp
     src/core/simulation_tick_ground_combat.cpp

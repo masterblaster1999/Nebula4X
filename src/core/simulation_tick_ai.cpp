@@ -18,6 +18,7 @@
 #include "nebula4x/core/scenario.h"
 #include "nebula4x/core/ai_economy.h"
 #include "nebula4x/core/fuel_planner.h"
+#include "nebula4x/core/freight_planner.h"
 #include "nebula4x/core/ground_battle_forecast.h"
 #include "nebula4x/core/troop_planner.h"
 #include "nebula4x/util/log.h"
@@ -53,6 +54,19 @@ static double u01(std::uint64_t& s) {
   // Use the top 53 bits for an IEEE-754 double in [0,1).
   return (s >> 11) * (1.0 / 9007199254740992.0);
 }
+
+
+static bool is_player_faction(const GameState& s, Id faction_id) {
+  const auto* fac = find_ptr(s.factions, faction_id);
+  return fac && fac->control == FactionControl::Player;
+}
+
+static double cargo_used_tons(const Ship& s) {
+  double used = 0.0;
+  for (const auto& [_, tons] : s.cargo) used += std::max(0.0, tons);
+  return used;
+}
+
 } // namespace
 
 void Simulation::run_ai_planning() { tick_ai(); }
@@ -1195,412 +1209,65 @@ void Simulation::tick_ai() {
 
 
   // --- Ship-level automation: Auto-freight (mineral logistics) ---
-  auto cargo_used_tons = [](const Ship& s) {
-    double used = 0.0;
-    for (const auto& [_, tons] : s.cargo) used += std::max(0.0, tons);
-    return used;
-  };
+  {
+    NEBULA4X_TRACE_SCOPE("tick_auto_freight", "sim.ai");
 
-  // Group idle auto-freight ships by faction so we can avoid over-assigning the same minerals.
-  std::unordered_map<Id, std::vector<Id>> freight_ships_by_faction;
-  freight_ships_by_faction.reserve(faction_ids.size() * 2);
-
-  for (Id sid : ship_ids) {
-    Ship* sh = find_ptr(state_.ships, sid);
-    if (!sh) continue;
-    if (!sh->auto_freight) continue;
-    if (sh->auto_explore) continue;  // mutually exclusive; auto-explore handled above
-    if (sh->auto_colonize) continue; // mutually exclusive; auto-colonize handled above
-    if (sh->auto_salvage) continue;  // mutually exclusive; auto-salvage handled above
-    if (sh->auto_mine) continue;     // mutually exclusive; auto-mine handled above
-    if (sh->auto_tanker) continue;   // mutually exclusive; auto-tanker handled above
-    if (!orders_empty(sid)) continue;
-    if (sh->system_id == kInvalidId) continue;
-    if (sh->speed_km_s <= 0.0) continue;
-
-    // Avoid fighting the fleet movement logic. Fleets should be controlled by fleet orders.
-    if (fleet_for_ship(sid) != kInvalidId) continue;
-
-    const auto* d = find_design(sh->design_id);
-    const double cap = d ? std::max(0.0, d->cargo_tons) : 0.0;
-    if (cap <= 1e-9) continue;
-
-    freight_ships_by_faction[sh->faction_id].push_back(sid);
-  }
-
-  for (Id fid : faction_ids) {
-    auto it_auto = freight_ships_by_faction.find(fid);
-    if (it_auto == freight_ships_by_faction.end()) continue;
-
-    // Gather colonies for this faction and their body positions.
-    std::vector<Id> colony_ids;
-    colony_ids.reserve(state_.colonies.size());
-    std::unordered_map<Id, Id> colony_system;
-    std::unordered_map<Id, Vec2> colony_pos;
-    for (Id cid : sorted_keys(state_.colonies)) {
-      const Colony* c = find_ptr(state_.colonies, cid);
-      if (!c) continue;
-      if (c->faction_id != fid) continue;
-      const Body* b = find_ptr(state_.bodies, c->body_id);
-      if (!b) continue;
-      if (b->system_id == kInvalidId) continue;
-      colony_ids.push_back(cid);
-      colony_system[cid] = b->system_id;
-      colony_pos[cid] = b->position_mkm;
-    }
-
-    if (colony_ids.empty()) continue;
-
-    // Compute per-colony mineral reserves (to avoid starving the source colony's own queues),
-    // and compute mineral shortfalls that we want to relieve.
-    std::unordered_map<Id, std::unordered_map<std::string, double>> reserve_by_colony;
-    std::unordered_map<Id, std::unordered_map<std::string, double>> missing_by_colony;
-    const auto needs = logistics_needs_for_faction(fid);
-
-    // Seed reserves from user-configured colony reserve settings.
-    for (Id cid : colony_ids) {
-      const Colony* c = find_ptr(state_.colonies, cid);
-      if (!c) continue;
-      for (const auto& [mineral, tons_raw] : c->mineral_reserves) {
-        const double tons = std::max(0.0, tons_raw);
-        if (tons <= 1e-9) continue;
-        double& r = reserve_by_colony[cid][mineral];
-        r = std::max(r, tons);
-      }
-    }
-
-
-    for (const auto& n : needs) {
-      // Reserve: keep enough at the colony to satisfy the local target (one day shipyard throughput or one build unit).
-      double& r = reserve_by_colony[n.colony_id][n.mineral];
-      r = std::max(r, std::max(0.0, n.desired_tons));
-
-      const double missing = std::max(0.0, n.missing_tons);
-      if (missing > 1e-9) {
-        double& m = missing_by_colony[n.colony_id][n.mineral];
-        m = std::max(m, missing);
-      }
-    }
-
-    // Precompute per-destination mineral priority lists (descending missing tons).
-    // This provides deterministic iteration order even though our storage is hash-based.
-    std::unordered_map<Id, std::vector<std::string>> need_minerals_by_colony;
-    need_minerals_by_colony.reserve(missing_by_colony.size() * 2 + 8);
-    for (Id cid : colony_ids) {
-      auto it_miss = missing_by_colony.find(cid);
-      if (it_miss == missing_by_colony.end()) continue;
-
-      std::vector<std::pair<std::string, double>> pairs;
-      pairs.reserve(it_miss->second.size());
-      for (const auto& [mineral, miss_raw] : it_miss->second) {
-        const double miss = std::max(0.0, miss_raw);
-        if (miss <= 1e-9) continue;
-        pairs.emplace_back(mineral, miss);
-      }
-      if (pairs.empty()) continue;
-
-      std::sort(pairs.begin(), pairs.end(), [](const auto& a, const auto& b) {
-        if (a.second != b.second) return a.second > b.second;
-        return a.first < b.first;
-      });
-
-      std::vector<std::string> minerals;
-      minerals.reserve(pairs.size());
-      for (const auto& [m, _] : pairs) minerals.push_back(m);
-      need_minerals_by_colony[cid] = std::move(minerals);
-    }
-
-    // Stable lists of destinations and sources.
-    std::vector<Id> dests_with_needs;
-    dests_with_needs.reserve(need_minerals_by_colony.size());
-    for (Id cid : colony_ids) {
-      if (need_minerals_by_colony.find(cid) != need_minerals_by_colony.end()) dests_with_needs.push_back(cid);
-    }
-
-    // Compute exportable minerals for each colony = stockpile - local reserve.
-    std::unordered_map<Id, std::unordered_map<std::string, double>> exportable_by_colony;
-    exportable_by_colony.reserve(colony_ids.size() * 2);
-    for (Id cid : colony_ids) {
-      const Colony* c = find_ptr(state_.colonies, cid);
-      if (!c) continue;
-      for (const auto& [mineral, have_raw] : c->minerals) {
-        const double have = std::max(0.0, have_raw);
-        double reserve = 0.0;
-        if (auto it_r = reserve_by_colony.find(cid); it_r != reserve_by_colony.end()) {
-          if (auto it_m = it_r->second.find(mineral); it_m != it_r->second.end()) reserve = std::max(0.0, it_m->second);
-        }
-        const double surplus = std::max(0.0, have - reserve);
-        if (surplus > 1e-9) {
-          exportable_by_colony[cid][mineral] = surplus;
-        }
-      }
-    }
-
-    auto auto_ships = it_auto->second;
-    std::sort(auto_ships.begin(), auto_ships.end());
-
-    const bool bundle_multi = cfg_.auto_freight_multi_mineral;
-    // Avoid degenerate "0 ton" shipments if the config is set to 0.
+    // Note: auto_freight_min_transfer_tons can be configured to 0 in some saves.
+    // Guard against degenerate 0-ton plans by clamping to a small epsilon.
     const double min_tons = std::max(1e-6, cfg_.auto_freight_min_transfer_tons);
-    const double take_frac = std::clamp(cfg_.auto_freight_max_take_fraction_of_surplus, 0.0, 1.0);
 
-    struct FreightItem {
-      std::string mineral;
-      double tons{0.0};
-    };
+    // Collect factions that have eligible idle auto-freight ships.
+    std::unordered_map<Id, int> eligible_count;
+    eligible_count.reserve(faction_ids.size() * 2);
 
-    auto dec_map_value = [](std::unordered_map<std::string, double>& m, const std::string& key, double amount) {
-      if (amount <= 0.0) return;
-      auto it = m.find(key);
-      if (it == m.end()) return;
-      it->second = std::max(0.0, it->second - amount);
-      if (it->second <= 1e-9) m.erase(it);
-    };
-
-    auto dec_missing = [&](Id cid, const std::string& mineral, double amount) {
-      if (amount <= 0.0) return;
-      auto itc = missing_by_colony.find(cid);
-      if (itc == missing_by_colony.end()) return;
-      dec_map_value(itc->second, mineral, amount);
-      if (itc->second.empty()) missing_by_colony.erase(itc);
-    };
-
-    auto dec_exportable = [&](Id cid, const std::string& mineral, double amount) {
-      if (amount <= 0.0) return;
-      auto itc = exportable_by_colony.find(cid);
-      if (itc == exportable_by_colony.end()) return;
-      dec_map_value(itc->second, mineral, amount);
-      if (itc->second.empty()) exportable_by_colony.erase(itc);
-    };
-
-    for (Id sid : auto_ships) {
+    for (Id sid : ship_ids) {
       Ship* sh = find_ptr(state_.ships, sid);
       if (!sh) continue;
+      if (!sh->auto_freight) continue;
+      if (sh->auto_explore) continue;   // mutually exclusive; auto-explore handled above
+      if (sh->auto_colonize) continue;  // mutually exclusive; auto-colonize handled above
+      if (sh->auto_salvage) continue;   // mutually exclusive; auto-salvage handled above
+      if (sh->auto_mine) continue;      // mutually exclusive; auto-mine handled above
+      if (sh->auto_tanker) continue;    // mutually exclusive; auto-tanker handled above
       if (!orders_empty(sid)) continue;
       if (sh->system_id == kInvalidId) continue;
+      if (sh->speed_km_s <= 0.0) continue;
+
+      // Avoid fighting the fleet movement logic. Fleets should be controlled by fleet orders.
+      if (fleet_for_ship(sid) != kInvalidId) continue;
 
       const auto* d = find_design(sh->design_id);
       const double cap = d ? std::max(0.0, d->cargo_tons) : 0.0;
-      if (cap <= 1e-9) continue;
+      if (cap < min_tons) continue;
 
-      const double used = cargo_used_tons(*sh);
-      const double free = std::max(0.0, cap - used);
+      eligible_count[sh->faction_id]++;
+    }
 
-      // 1) If we already have cargo, try to deliver it (optionally bundling multiple minerals)
-      //    to a single colony that needs them.
-      bool assigned = false;
-      if (used > 1e-9 && !dests_with_needs.empty()) {
-        std::vector<std::string> cargo_minerals;
-        cargo_minerals.reserve(sh->cargo.size());
-        for (const auto& [m, tons_raw] : sh->cargo) {
-          if (std::max(0.0, tons_raw) > 1e-9) cargo_minerals.push_back(m);
-        }
-        std::sort(cargo_minerals.begin(), cargo_minerals.end());
+    if (!eligible_count.empty()) {
+      std::vector<Id> fids;
+      fids.reserve(eligible_count.size());
+      for (const auto& kv : eligible_count) fids.push_back(kv.first);
+      std::sort(fids.begin(), fids.end());
 
-        struct UnloadChoice {
-          Id dest{kInvalidId};
-          double eff{std::numeric_limits<double>::infinity()};
-          double eta{std::numeric_limits<double>::infinity()};
-          double total{0.0};
-          std::vector<FreightItem> items;
-        } best;
+      // Plan/apply per faction so we coordinate supply (avoid multiple ships "double counting" the same exportable minerals).
+      for (Id fid : fids) {
+        FreightPlannerOptions opt;
+        opt.require_auto_freight_flag = true;
+        opt.require_idle = true;
+        opt.restrict_to_discovered = true;
+        opt.max_ships = std::clamp(eligible_count[fid], 1, 4096);
 
-        for (Id dest_cid : dests_with_needs) {
-          if (dest_cid == kInvalidId) continue;
-          auto it_sys = colony_system.find(dest_cid);
-          auto it_pos = colony_pos.find(dest_cid);
-          if (it_sys == colony_system.end() || it_pos == colony_pos.end()) continue;
+        const FreightPlannerResult plan = compute_freight_plan(*this, fid, opt);
+        if (!plan.ok || plan.assignments.empty()) continue;
 
-          std::vector<FreightItem> items;
-          items.reserve(bundle_multi ? cargo_minerals.size() : 1);
-          double total = 0.0;
-
-          for (const auto& mineral : cargo_minerals) {
-            const double have = [&]() {
-              auto it = sh->cargo.find(mineral);
-              return (it == sh->cargo.end()) ? 0.0 : std::max(0.0, it->second);
-            }();
-            if (have < min_tons) continue;
-
-            const double miss = [&]() {
-              auto itc = missing_by_colony.find(dest_cid);
-              if (itc == missing_by_colony.end()) return 0.0;
-              auto itm = itc->second.find(mineral);
-              if (itm == itc->second.end()) return 0.0;
-              return std::max(0.0, itm->second);
-            }();
-            if (miss < min_tons) continue;
-
-            const double amount = std::min(have, miss);
-            if (amount < min_tons) continue;
-
-            items.push_back(FreightItem{mineral, amount});
-            total += amount;
-
-            if (!bundle_multi) break;
-          }
-
-          if (total < min_tons) continue;
-          const double eta = estimate_eta_days_to_pos(sh->system_id, sh->position_mkm, fid, sh->speed_km_s,
-                                                     it_sys->second, it_pos->second);
-          if (!std::isfinite(eta)) continue;
-
-          const double eff = eta / std::max(1e-9, total);
-          if (best.dest == kInvalidId || eff < best.eff - 1e-9 ||
-              (std::abs(eff - best.eff) <= 1e-9 && (eta < best.eta - 1e-9 ||
-                                                   (std::abs(eta - best.eta) <= 1e-9 &&
-                                                    (total > best.total + 1e-9 ||
-                                                     (std::abs(total - best.total) <= 1e-9 && dest_cid < best.dest)))))) {
-            best.dest = dest_cid;
-            best.eff = eff;
-            best.eta = eta;
-            best.total = total;
-            best.items = std::move(items);
-          }
-        }
-
-        if (best.dest != kInvalidId && !best.items.empty()) {
-          bool ok = true;
-          for (const auto& it : best.items) {
-            ok = ok && issue_unload_mineral(sid, best.dest, it.mineral, it.tons, /*restrict_to_discovered=*/true);
-          }
-          if (!ok) {
-            (void)clear_orders(sid);
-          } else {
-            for (const auto& it : best.items) {
-              dec_missing(best.dest, it.mineral, it.tons);
-            }
-            assigned = true;
-          }
-        }
-      }
-
-      if (assigned) continue;
-
-      // 2) Otherwise, pick a source colony and destination colony, optionally bundling multiple minerals
-      //    that the destination needs in a single trip.
-      if (free < min_tons) continue;
-      if (dests_with_needs.empty()) continue;
-      if (exportable_by_colony.empty()) continue;
-
-      // Candidate source colonies (sorted).
-      std::vector<Id> sources;
-      sources.reserve(exportable_by_colony.size());
-      for (Id cid : colony_ids) {
-        if (exportable_by_colony.find(cid) != exportable_by_colony.end()) sources.push_back(cid);
-      }
-
-      struct LoadChoice {
-        Id source{kInvalidId};
-        Id dest{kInvalidId};
-        double eff{std::numeric_limits<double>::infinity()};
-        double eta_total{std::numeric_limits<double>::infinity()};
-        double total{0.0};
-        std::vector<FreightItem> items;
-      } best;
-
-      for (Id dest_cid : dests_with_needs) {
-        auto it_need_list = need_minerals_by_colony.find(dest_cid);
-        if (it_need_list == need_minerals_by_colony.end()) continue;
-        auto it_dest_sys = colony_system.find(dest_cid);
-        auto it_dest_pos = colony_pos.find(dest_cid);
-        if (it_dest_sys == colony_system.end() || it_dest_pos == colony_pos.end()) continue;
-
-        for (Id src_cid : sources) {
-          if (src_cid == dest_cid) continue;
-          auto it_src_sys = colony_system.find(src_cid);
-          auto it_src_pos = colony_pos.find(src_cid);
-          if (it_src_sys == colony_system.end() || it_src_pos == colony_pos.end()) continue;
-
-          auto it_exp_c = exportable_by_colony.find(src_cid);
-          if (it_exp_c == exportable_by_colony.end()) continue;
-
-          std::vector<FreightItem> items;
-          items.reserve(bundle_multi ? it_need_list->second.size() : 1);
-          double remaining = free;
-          double total = 0.0;
-
-          for (const std::string& mineral : it_need_list->second) {
-            if (remaining < min_tons) break;
-
-            const double miss = [&]() {
-              auto itc = missing_by_colony.find(dest_cid);
-              if (itc == missing_by_colony.end()) return 0.0;
-              auto itm = itc->second.find(mineral);
-              if (itm == itc->second.end()) return 0.0;
-              return std::max(0.0, itm->second);
-            }();
-            if (miss < min_tons) continue;
-
-            auto it_exp = it_exp_c->second.find(mineral);
-            if (it_exp == it_exp_c->second.end()) continue;
-            const double avail = std::max(0.0, it_exp->second);
-            if (avail < min_tons) continue;
-
-            const double take_cap = avail * take_frac;
-            const double amount = std::min({remaining, miss, take_cap});
-            if (amount < min_tons) continue;
-
-            items.push_back(FreightItem{mineral, amount});
-            total += amount;
-            remaining -= amount;
-
-            if (!bundle_multi) break;
-          }
-
-          if (total < min_tons) continue;
-
-          const double eta1 = estimate_eta_days_to_pos(sh->system_id, sh->position_mkm, fid, sh->speed_km_s,
-                                                       it_src_sys->second, it_src_pos->second);
-          if (!std::isfinite(eta1)) continue;
-          const double eta2 = estimate_eta_days_to_pos(it_src_sys->second, it_src_pos->second, fid, sh->speed_km_s,
-                                                       it_dest_sys->second, it_dest_pos->second);
-          if (!std::isfinite(eta2)) continue;
-
-          const double eta_total = eta1 + eta2;
-          const double eff = eta_total / std::max(1e-9, total);
-
-          if (best.source == kInvalidId || eff < best.eff - 1e-9 ||
-              (std::abs(eff - best.eff) <= 1e-9 && (eta_total < best.eta_total - 1e-9 ||
-                                                   (std::abs(eta_total - best.eta_total) <= 1e-9 &&
-                                                    (total > best.total + 1e-9 ||
-                                                     (std::abs(total - best.total) <= 1e-9 &&
-                                                      (dest_cid < best.dest ||
-                                                       (dest_cid == best.dest && src_cid < best.source)))))))) {
-            best.source = src_cid;
-            best.dest = dest_cid;
-            best.eff = eff;
-            best.eta_total = eta_total;
-            best.total = total;
-            best.items = std::move(items);
-          }
-        }
-      }
-
-      if (best.source != kInvalidId && best.dest != kInvalidId && !best.items.empty()) {
-        bool ok = true;
-        for (const auto& it : best.items) {
-          ok = ok && issue_load_mineral(sid, best.source, it.mineral, it.tons, /*restrict_to_discovered=*/true);
-        }
-        for (const auto& it : best.items) {
-          ok = ok && issue_unload_mineral(sid, best.dest, it.mineral, it.tons, /*restrict_to_discovered=*/true);
-        }
-
-        if (!ok) {
-          (void)clear_orders(sid);
-        } else {
-          for (const auto& it : best.items) {
-            dec_exportable(best.source, it.mineral, it.tons);
-            dec_missing(best.dest, it.mineral, it.tons);
-          }
-        }
+        // Idle ships have empty queues, but we still clear defensively to keep behavior consistent.
+        (void)apply_freight_plan(*this, plan, /*clear_existing_orders=*/true);
       }
     }
   }
 
 
-
-  // --- AI empire fleet organization (non-player automation) ---
+// --- AI empire fleet organization (non-player automation) ---
   //
   // Random scenarios can spawn multiple AI-controlled empires.
   // Economic AI keeps their colonies and shipyards progressing, but their
@@ -1671,7 +1338,7 @@ void Simulation::tick_ai() {
       const Colony* capc = find_ptr(state_.colonies, capital_colony);
       if (!capc) continue;
       const Body* capb = find_ptr(state_.bodies, capc->body_id);
-      const System* caps = capb ? find_ptr(state_.systems, capb->system_id) : nullptr;
+      const StarSystem* caps = capb ? find_ptr(state_.systems, capb->system_id) : nullptr;
 
       const Id capital_sys = capb ? capb->system_id : kInvalidId;
       const Id capital_region = caps ? caps->region_id : kInvalidId;
@@ -1931,7 +1598,18 @@ void Simulation::tick_ai() {
       const double max_hp = d ? std::max(0.0, d->max_hp) : std::max(0.0, sh.hp);
       if (max_hp <= 1e-9) return 1.0;
       const double hp = std::clamp(sh.hp, 0.0, max_hp);
-      return std::clamp(hp / max_hp, 0.0, 1.0);
+      const double frac = std::clamp(hp / max_hp, 0.0, 1.0);
+
+      // Fold subsystem integrity into "effective HP" so AI repair heuristics don't
+      // ignore critical engine/weapon/sensor damage (from combat or maintenance).
+      auto clamp01 = [](double x) -> double {
+        if (!std::isfinite(x)) return 1.0;
+        return std::clamp(x, 0.0, 1.0);
+      };
+      const double avg_subsys =
+          0.25 * (clamp01(sh.engines_integrity) + clamp01(sh.weapons_integrity) + clamp01(sh.sensors_integrity) +
+                  clamp01(sh.shields_integrity));
+      return std::clamp(frac * avg_subsys, 0.0, 1.0);
     };
 
     auto ship_missile_ammo_fraction = [&](const Ship& sh) -> double {
@@ -4586,6 +4264,154 @@ void Simulation::tick_ship_maintenance(double dt_days) {
 }
 
 
+
+
+
+
+void Simulation::tick_ship_maintenance_failures() {
+  if (!cfg_.enable_ship_maintenance) return;
+  NEBULA4X_TRACE_SCOPE("tick_ship_maintenance_failures", "sim.maintenance");
+
+  const double start = std::clamp(cfg_.ship_maintenance_breakdown_start_fraction, 0.0, 1.0);
+  const double rate0 = std::max(0.0, cfg_.ship_maintenance_breakdown_rate_per_day_at_zero);
+  if (!(start > 1e-9) || !(rate0 > 1e-12)) return;
+
+  const double exponent = std::max(0.1, cfg_.ship_maintenance_breakdown_exponent);
+
+  double dmg_min = std::clamp(cfg_.ship_maintenance_breakdown_subsystem_damage_min, 0.0, 1.0);
+  double dmg_max = std::clamp(cfg_.ship_maintenance_breakdown_subsystem_damage_max, 0.0, 1.0);
+  if (dmg_max < dmg_min) std::swap(dmg_min, dmg_max);
+  if (!(dmg_max > 1e-12)) return;
+
+  const double dock_range = std::max(0.0, cfg_.docking_range_mkm);
+
+  // Precompute shipyard-bearing colonies per system (used to suppress failures
+  // while docked at a shipyard).
+  std::unordered_map<Id, std::vector<Id>> shipyards_in_system;
+  shipyards_in_system.reserve(state_.systems.size() * 2 + 8);
+
+  for (const auto& [cid, col] : state_.colonies) {
+    const auto it_y = col.installations.find("shipyard");
+    const int yards = (it_y != col.installations.end()) ? it_y->second : 0;
+    if (yards <= 0) continue;
+
+    const Body* body = find_ptr(state_.bodies, col.body_id);
+    if (!body) continue;
+
+    shipyards_in_system[body->system_id].push_back(cid);
+  }
+
+  auto is_docked_at_shipyard = [&](const Ship& ship) -> bool {
+    if (dock_range <= 1e-9) return false;
+    auto it = shipyards_in_system.find(ship.system_id);
+    if (it == shipyards_in_system.end()) return false;
+
+    for (Id cid : it->second) {
+      const Colony* col = find_ptr(state_.colonies, cid);
+      if (!col) continue;
+      if (!are_factions_trade_partners(ship.faction_id, col->faction_id)) continue;
+
+      const Body* body = find_ptr(state_.bodies, col->body_id);
+      if (!body) continue;
+
+      const double dist = (ship.position_mkm - body->position_mkm).length();
+      if (dist <= dock_range + 1e-9) return true;
+    }
+    return false;
+  };
+
+  const auto ship_ids = sorted_keys(state_.ships);
+  const std::uint64_t day = static_cast<std::uint64_t>(state_.date.days_since_epoch());
+
+  auto clamp01 = [](double x) -> double {
+    if (!std::isfinite(x)) return 1.0;
+    return std::clamp(x, 0.0, 1.0);
+  };
+
+  for (Id sid : ship_ids) {
+    Ship* sh = find_ptr(state_.ships, sid);
+    if (!sh) continue;
+    if (sh->hp <= 0.0) continue;
+    if (sh->system_id == kInvalidId) continue;
+
+    const double cond = std::clamp(sh->maintenance_condition, 0.0, 1.0);
+    if (cond >= start - 1e-9) continue;
+
+    // Ships actively docked at a shipyard are assumed to have failures addressed.
+    if (is_docked_at_shipyard(*sh)) continue;
+
+    const double x = (start > 1e-9) ? std::clamp((start - cond) / start, 0.0, 1.0) : std::clamp(1.0 - cond, 0.0, 1.0);
+    if (x <= 1e-9) continue;
+
+    const double rate = rate0 * std::pow(x, exponent);
+    const double p = 1.0 - std::exp(-rate);
+    if (p <= 1e-12) continue;
+
+    // Deterministic per-(ship,day) seed.
+    std::uint64_t seed = static_cast<std::uint64_t>(sid) ^ (day * 0x9e3779b97f4a7c15ULL);
+
+    if (u01(seed) >= p) continue;
+
+    // Choose a subsystem that the design actually has.
+    const ShipDesign* d = find_design(sh->design_id);
+
+    struct Slot {
+      const char* name;
+      double* integrity;
+    };
+    std::vector<Slot> slots;
+    slots.reserve(4);
+
+    if (d) {
+      if (d->speed_km_s > 1e-9) slots.push_back({"Engines", &sh->engines_integrity});
+
+      const bool has_weapons = (d->weapon_damage > 1e-9) || (d->missile_damage > 1e-9);
+      if (has_weapons) slots.push_back({"Weapons", &sh->weapons_integrity});
+
+      if (d->sensor_range_mkm > 1e-9) slots.push_back({"Sensors", &sh->sensors_integrity});
+      if (d->max_shields > 1e-9) slots.push_back({"Shields", &sh->shields_integrity});
+    }
+
+    if (slots.empty()) {
+      // Fallback: treat as a generic failure affecting core systems.
+      slots.push_back({"Systems", &sh->engines_integrity});
+    }
+
+    const int n = static_cast<int>(slots.size());
+    const int idx = std::clamp(static_cast<int>(std::floor(u01(seed) * static_cast<double>(n))), 0, n - 1);
+
+    // Damage scales up as maintenance gets worse.
+    const double severity = std::clamp(0.35 + 0.65 * x, 0.0, 1.0);
+    const double dmg = (dmg_min + (dmg_max - dmg_min) * u01(seed)) * severity;
+
+    Slot& sl = slots[idx];
+    const double before = clamp01(*sl.integrity);
+    const double after = clamp01(before - dmg);
+    *sl.integrity = after;
+
+    // Also nudge maintenance_condition down slightly to reflect cascading issues.
+    // (Keeps the sustainment loop "sticky" at very low readiness.)
+    sh->maintenance_condition = std::clamp(cond - 0.01 * severity, 0.0, 1.0);
+
+    if (is_player_faction(state_, sh->faction_id)) {
+      EventContext ctx;
+      ctx.faction_id = sh->faction_id;
+      ctx.system_id = sh->system_id;
+      ctx.ship_id = sh->id;
+
+      const int pct = static_cast<int>(std::lround(after * 100.0));
+      const int dpct = static_cast<int>(std::lround(std::max(0.0, before - after) * 100.0));
+
+      std::ostringstream ss;
+      ss << "Maintenance failure aboard " << sh->name << ": " << sl.name << " damaged (" << pct << "%, -" << dpct << "%)";
+
+      const EventLevel lvl = (after <= 0.25) ? EventLevel::Warn : EventLevel::Info;
+      push_event(lvl, EventCategory::Shipyard, ss.str(), ctx);
+    }
+  }
+}
+
+
 void Simulation::tick_crew_training(double dt_days) {
   if (dt_days <= 0.0) return;
   if (!cfg_.enable_crew_experience) return;
@@ -4651,6 +4477,29 @@ void Simulation::tick_repairs(double dt_days) {
   const double cost_dur = std::max(0.0, cfg_.repair_duranium_per_hp);
   const double cost_neu = std::max(0.0, cfg_.repair_neutronium_per_hp);
 
+  const double subsys_hp_equiv_per_integrity = std::max(0.0, cfg_.ship_subsystem_repair_hp_equiv_per_integrity);
+  const bool subsys_repairs_enabled = subsys_hp_equiv_per_integrity > 1e-12;
+
+  auto clamp01 = [](double x) -> double {
+    if (!std::isfinite(x)) return 1.0;
+    return std::clamp(x, 0.0, 1.0);
+  };
+
+  auto ship_subsys_deficit_points = [&](const Ship& s) -> double {
+    if (!subsys_repairs_enabled) return 0.0;
+    const double e = clamp01(s.engines_integrity);
+    const double w = clamp01(s.weapons_integrity);
+    const double se = clamp01(s.sensors_integrity);
+    const double sh = clamp01(s.shields_integrity);
+    return std::max(0.0, 1.0 - e) + std::max(0.0, 1.0 - w) + std::max(0.0, 1.0 - se) + std::max(0.0, 1.0 - sh);
+  };
+
+  auto ship_subsys_deficit_hp_equiv = [&](const Ship& s, double max_hp) -> double {
+    if (!subsys_repairs_enabled) return 0.0;
+    if (!(max_hp > 1e-12)) return 0.0;
+    return ship_subsys_deficit_points(s) * max_hp * subsys_hp_equiv_per_integrity;
+  };
+
   // Assign each damaged ship to the *single* best docked shipyard colony (most yards, then closest).
   // This avoids a ship being repaired multiple times in one tick when multiple colonies are within docking range.
   std::unordered_map<Id, std::vector<Id>> ships_by_colony;
@@ -4667,9 +4516,19 @@ void Simulation::tick_repairs(double dt_days) {
     const double max_hp = d ? d->max_hp : ship->hp;
     if (max_hp <= 0.0) continue;
 
-    // Clamp just in case something drifted out of bounds (custom content, etc.).
+    // Clamp just in case something drifted out of bounds (custom content, legacy saves, etc.).
     ship->hp = std::clamp(ship->hp, 0.0, max_hp);
-    if (ship->hp >= max_hp - 1e-9) continue;
+
+    // Clamp subsystem integrity even if repairs are disabled; it keeps things sane for future enabling.
+    ship->engines_integrity = clamp01(ship->engines_integrity);
+    ship->weapons_integrity = clamp01(ship->weapons_integrity);
+    ship->sensors_integrity = clamp01(ship->sensors_integrity);
+    ship->shields_integrity = clamp01(ship->shields_integrity);
+
+    const bool needs_hull = ship->hp < max_hp - 1e-9;
+    const bool needs_subsys = ship_subsys_deficit_hp_equiv(*ship, max_hp) > 1e-9;
+
+    if (!needs_hull && !needs_subsys) continue;
 
     Id best_colony = kInvalidId;
     int best_shipyards = 0;
@@ -4769,7 +4628,7 @@ void Simulation::tick_repairs(double dt_days) {
     });
 
     double remaining = capacity;
-    double applied_total = 0.0;
+    double applied_total_equiv = 0.0;
 
     for (Id sid : list) {
       if (remaining <= 1e-9) break;
@@ -4782,20 +4641,82 @@ void Simulation::tick_repairs(double dt_days) {
       if (max_hp <= 0.0) continue;
 
       ship->hp = std::clamp(ship->hp, 0.0, max_hp);
-      if (ship->hp >= max_hp - 1e-9) continue;
 
-      const double before = ship->hp;
-      const double missing = max_hp - ship->hp;
-      const double apply = std::min(remaining, missing);
-      ship->hp = std::min(max_hp, ship->hp + apply);
+      // Clamp subsystem integrity to keep repair math stable.
+      ship->engines_integrity = clamp01(ship->engines_integrity);
+      ship->weapons_integrity = clamp01(ship->weapons_integrity);
+      ship->sensors_integrity = clamp01(ship->sensors_integrity);
+      ship->shields_integrity = clamp01(ship->shields_integrity);
 
-      const double applied = ship->hp - before;
-      if (applied <= 0.0) continue;
+      const double hull_missing = std::max(0.0, max_hp - ship->hp);
+      const double subsys_def_pts_before = ship_subsys_deficit_points(*ship);
+      const double subsys_missing_equiv = ship_subsys_deficit_hp_equiv(*ship, max_hp);
 
-      remaining -= applied;
-      applied_total += applied;
+      const double total_missing_equiv = hull_missing + subsys_missing_equiv;
+      if (total_missing_equiv <= 1e-9) continue;
 
-      if (before < max_hp - 1e-9 && ship->hp >= max_hp - 1e-9) {
+      const double hp_before = ship->hp;
+
+      const double apply_total = std::min(remaining, total_missing_equiv);
+
+      // Repair hull first.
+      const double apply_hull = std::min(apply_total, hull_missing);
+      if (apply_hull > 0.0) ship->hp = std::min(max_hp, ship->hp + apply_hull);
+
+      // Then apply any remaining capacity to subsystem integrity.
+      double restored_subsys_points = 0.0;
+      const double apply_left_equiv = apply_total - apply_hull;
+      if (subsys_repairs_enabled && apply_left_equiv > 1e-9 && max_hp > 1e-9) {
+        double points = apply_left_equiv / (max_hp * subsys_hp_equiv_per_integrity);
+        if (points > 1e-12) {
+          struct Slot {
+            const char* name;
+            double* integrity;
+          };
+          std::vector<Slot> slots = {{"Engines", &ship->engines_integrity},
+                                     {"Weapons", &ship->weapons_integrity},
+                                     {"Sensors", &ship->sensors_integrity},
+                                     {"Shields", &ship->shields_integrity}};
+
+          // Prioritize the most damaged subsystem(s) first.
+          std::sort(slots.begin(), slots.end(), [&](const Slot& a, const Slot& b) {
+            const double ia = clamp01(*a.integrity);
+            const double ib = clamp01(*b.integrity);
+            if (ia != ib) return ia < ib;
+            return std::strcmp(a.name, b.name) < 0;
+          });
+
+          for (auto& sl : slots) {
+            if (points <= 1e-12) break;
+            double cur = clamp01(*sl.integrity);
+            const double missing = std::max(0.0, 1.0 - cur);
+            if (missing <= 1e-12) {
+              *sl.integrity = cur;
+              continue;
+            }
+            const double restore = std::min(missing, points);
+            cur = std::clamp(cur + restore, 0.0, 1.0);
+            *sl.integrity = cur;
+            points -= restore;
+            restored_subsys_points += restore;
+          }
+        }
+      }
+
+      const double subsys_equiv_used = restored_subsys_points * max_hp * subsys_hp_equiv_per_integrity;
+      const double applied_equiv = std::max(0.0, (ship->hp - hp_before)) + std::max(0.0, subsys_equiv_used);
+
+      if (applied_equiv <= 1e-12) continue;
+
+      remaining -= applied_equiv;
+      applied_total_equiv += applied_equiv;
+
+      const double subsys_def_pts_after = ship_subsys_deficit_points(*ship);
+      const bool fully_repaired =
+          (ship->hp >= max_hp - 1e-9) && (!subsys_repairs_enabled || subsys_def_pts_after <= 1e-9);
+
+      const bool was_damaged = (hp_before < max_hp - 1e-9) || (subsys_def_pts_before > 1e-9);
+      if (was_damaged && fully_repaired) {
         // Log only when the ship is fully repaired to avoid event spam.
         const auto* sys = find_ptr(state_.systems, ship->system_id);
 
@@ -4812,18 +4733,19 @@ void Simulation::tick_repairs(double dt_days) {
       }
     }
 
-    if (applied_total <= 1e-9) continue;
+    if (applied_total_equiv <= 1e-9) continue;
 
-    // Consume repair minerals.
+    // Consume repair minerals (HP-equivalent: hull HP + subsystem integrity repairs).
     if (cost_dur > 1e-12) {
       double& dur = colony->minerals["Duranium"];
-      dur = std::max(0.0, dur - applied_total * cost_dur);
+      dur = std::max(0.0, dur - applied_total_equiv * cost_dur);
     }
     if (cost_neu > 1e-12) {
       double& neu = colony->minerals["Neutronium"];
-      neu = std::max(0.0, neu - applied_total * cost_neu);
+      neu = std::max(0.0, neu - applied_total_equiv * cost_neu);
     }
   }
 }
+
 
 } // namespace nebula4x

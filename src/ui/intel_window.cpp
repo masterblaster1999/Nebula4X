@@ -809,6 +809,13 @@ void draw_intel_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& sele
         if (pred.has_velocity) {
           ImGui::TextDisabled("Est vel: (%.2f, %.2f) mkm/day", pred.velocity_mkm_per_day.x, pred.velocity_mkm_per_day.y);
         }
+        if (sim.cfg().enable_contact_uncertainty) {
+          const double unc_now = sim.contact_uncertainty_radius_mkm(c, static_cast<int>(now));
+          const double unc_last = c.last_seen_position_uncertainty_mkm;
+          if (unc_now > 1e-3 || unc_last > 1e-3) {
+            ImGui::TextDisabled("Uncertainty: ±%.0f mkm (last detect: ±%.0f mkm)", unc_now, unc_last);
+          }
+        }
 
         if (ImGui::Button("View system map")) {
           s.selected_system = c.system_id;

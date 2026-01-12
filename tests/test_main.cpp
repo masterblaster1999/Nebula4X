@@ -64,8 +64,10 @@ int test_crew_experience();
 int test_electronic_warfare();
 int test_fleets();
 int test_ai_economy();
+namespace nebula4x {
 int test_ai_empire_fleet_missions();
 int test_victory();
+}  // namespace nebula4x
 int test_research_planner();
 int test_research_schedule();
 int test_colony_schedule();
@@ -184,8 +186,8 @@ int main(int argc, char** argv) {
       {"spatial_index", test_spatial_index},
       {"random_scenario", test_random_scenario},
       {"ai_economy", test_ai_economy},
-      {"ai_empire_fleet_missions", test_ai_empire_fleet_missions},
-      {"victory", test_victory},
+      {"ai_empire_fleet_missions", nebula4x::test_ai_empire_fleet_missions},
+      {"victory", nebula4x::test_victory},
       {"research_planner", test_research_planner},
       {"research_schedule", test_research_schedule},
       {"colony_schedule", test_colony_schedule},

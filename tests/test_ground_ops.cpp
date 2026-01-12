@@ -35,7 +35,10 @@ int test_ground_ops() {
     N4X_ASSERT(it_tb->second.type == nebula4x::ComponentType::TroopBay);
     N4X_ASSERT(it_tb->second.troop_capacity > 0.0);
 
-    const auto it_design = content.designs.find("escort_delta");
+    // A design that includes at least one troop bay should expose a non-zero derived
+    // troop_capacity. (Escort Delta is a pure combatant and may legitimately have
+    // no troop capacity.)
+    const auto it_design = content.designs.find("troop_transport_mk1");
     N4X_ASSERT(it_design != content.designs.end());
     N4X_ASSERT(it_design->second.troop_capacity >= it_tb->second.troop_capacity - 1e-9);
 

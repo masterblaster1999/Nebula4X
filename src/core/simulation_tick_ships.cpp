@@ -318,6 +318,8 @@ void Simulation::tick_ships(double dt_days) {
       }
 
       base_speed_km_s *= maintenance_speed_mult(*sh);
+      base_speed_km_s *= ship_heat_speed_multiplier(*sh);
+      base_speed_km_s *= ship_subsystem_engine_multiplier(*sh);
 
       const CohortKey key = *key_opt;
       auto it_min = cohort_min_speed_km_s.find(key);
@@ -806,7 +808,7 @@ void Simulation::tick_ships(double dt_days) {
         if (const auto* fac = find_ptr(state_.factions, ship.faction_id)) {
           if (auto contact_it = fac->ship_contacts.find(target_id); contact_it != fac->ship_contacts.end()) {
             const auto& c = contact_it->second;
-            if (c.system_id == ship.system_id && c.prev_seen_day > 0 && c.prev_seen_day < c.last_seen_day) {
+            if (c.system_id == ship.system_id && c.prev_seen_day >= 0 && c.prev_seen_day < c.last_seen_day) {
               const int dt = c.last_seen_day - c.prev_seen_day;
               if (dt > 0) {
                 const Vec2 v_mkm_per_day =
@@ -837,14 +839,16 @@ void Simulation::tick_ships(double dt_days) {
         Vec2 track_v_mkm_per_day{0.0, 0.0};
         bool has_track_v = false;
         int track_age_days = 0;
+        const Contact* track_contact = nullptr;
+        const int now = static_cast<int>(state_.date.days_since_epoch());
         if (const auto* fac = find_ptr(state_.factions, ship.faction_id)) {
           if (auto contact_it = fac->ship_contacts.find(target_id); contact_it != fac->ship_contacts.end()) {
-            const int now = static_cast<int>(state_.date.days_since_epoch());
             const auto pred = predict_contact_position(contact_it->second, now, cfg_.contact_prediction_max_days);
             ord.last_known_position_mkm = pred.predicted_position_mkm;
             track_v_mkm_per_day = pred.velocity_mkm_per_day;
             has_track_v = pred.has_velocity && (std::abs(track_v_mkm_per_day.x) > 1e-9 || std::abs(track_v_mkm_per_day.y) > 1e-9);
             track_age_days = pred.age_days;
+            track_contact = &contact_it->second;
           }
         }
 
@@ -861,6 +865,29 @@ void Simulation::tick_ships(double dt_days) {
               const auto aim = compute_intercept_aim(ship.position_mkm, sp_mkm_per_day, target, track_v_mkm_per_day,
                                                     /*desired_range_mkm=*/0.0, static_cast<double>(lead_cap_i));
               target = aim.aim_position_mkm;
+            }
+          }
+        }
+
+        // Add a deterministic "search" offset within the current contact
+        // uncertainty radius. This prevents perfect tail-chasing of stale
+        // tracks and makes reacquisition depend on sensors + time.
+        if (track_contact && cfg_.enable_contact_uncertainty && cfg_.contact_search_offset_fraction > 1e-9) {
+          const double unc = contact_uncertainty_radius_mkm(*track_contact, now);
+          const double rad = std::max(0.0, unc) * std::max(0.0, cfg_.contact_search_offset_fraction);
+          if (rad > 1e-6) {
+            // Stable pseudo-random point inside a circle (biased toward center).
+            std::uint64_t seed = 0x9e3779b97f4a7c15ULL;
+            seed ^= static_cast<std::uint64_t>(now) + 0x85ebca6b;
+            seed ^= static_cast<std::uint64_t>(ship_id) * 0xc2b2ae3d27d4eb4fULL;
+            seed ^= static_cast<std::uint64_t>(target_id) * 0x165667b19e3779f9ULL;
+            seed = splitmix64(seed);
+            const double ang = u01_from_u64(splitmix64(seed)) * 6.283185307179586;
+            const double u = u01_from_u64(splitmix64(seed ^ 0x27d4eb2f165667c5ULL));
+            const double r = rad * u;
+            const Vec2 off{std::cos(ang) * r, std::sin(ang) * r};
+            if (std::isfinite(off.x) && std::isfinite(off.y)) {
+              target = target + off;
             }
           }
         }
@@ -2587,6 +2614,8 @@ void Simulation::tick_ships(double dt_days) {
     }
 
     effective_speed_km_s *= maintenance_speed_mult(ship);
+    effective_speed_km_s *= ship_heat_speed_multiplier(ship);
+    effective_speed_km_s *= ship_subsystem_engine_multiplier(ship);
 
     // Fleet speed matching: for ships in the same fleet with the same current
     // movement order, cap speed to the slowest ship in that cohort.

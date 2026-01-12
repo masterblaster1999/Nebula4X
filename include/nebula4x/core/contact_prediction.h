@@ -46,7 +46,7 @@ inline ContactPrediction predict_contact_position(const Contact& c, int now_day,
 
   out.predicted_position_mkm = c.last_seen_position_mkm;
 
-  if (c.prev_seen_day > 0 && c.prev_seen_day < c.last_seen_day) {
+  if (c.prev_seen_day >= 0 && c.prev_seen_day < c.last_seen_day) {
     const int dt = (c.last_seen_day - c.prev_seen_day);
     if (dt > 0) {
       const Vec2 v = (c.last_seen_position_mkm - c.prev_seen_position_mkm) * (1.0 / (double)dt);

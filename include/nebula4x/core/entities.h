@@ -354,6 +354,14 @@ double eccm_strength{0.0};
   double shield_hp{0.0};           // shield (max shield points)
   double shield_regen_per_day{0.0}; // shield (regen per day)
 
+  // Thermal / heat model (optional).
+  // Content can assign heat generation, dissipation (cooling), and capacity
+  // to components to model reactors/engines/weapons that run hot as well as
+  // dedicated radiators/heat sinks.
+  double heat_generation_per_day{0.0};
+  double heat_dissipation_per_day{0.0};
+  double heat_capacity{0.0};
+
   // Troop bay (abstract "strength" points).
   double troop_capacity{0.0};
 };
@@ -393,6 +401,14 @@ double eccm_strength{0.0};
   double max_hp{0.0};
   double max_shields{0.0};
   double shield_regen_per_day{0.0};
+
+  // Thermal / heat model (optional).
+  // These are additive bonuses that modify the Simulation's base thermal model
+  // (which derives baseline heat behavior from mass and power budgets).
+  double heat_capacity_bonus{0.0};
+  double heat_generation_bonus_per_day{0.0};
+  double heat_dissipation_bonus_per_day{0.0};
+
     double weapon_damage{0.0};
   double weapon_range_mkm{0.0};
 
@@ -752,6 +768,30 @@ struct Ship {
   // A value < 0 indicates \"uninitialized\" (e.g. loaded from an older save) and
   // will be initialized to the design max when design stats are applied.
   double shields{-1.0};
+
+  // Subsystem integrity (0..1).
+  //
+  // Integrity always affects ship performance via the Simulation::ship_subsystem_*_multiplier
+  // helpers (speed / weapon output / sensor range / shields). Values start at 1.0 and are
+  // reduced by optional mechanics.
+  //
+  // When SimConfig::enable_ship_subsystem_damage is enabled, combat can inflict critical
+  // hits that reduce subsystem integrity. Other systems (e.g. deterministic maintenance
+  // failures) may also reduce integrity when enabled.
+  //
+  // These are intentionally lightweight approximations (not per-component) and are typically
+  // repaired at shipyards (see tick_repairs).
+  double engines_integrity{1.0};
+  double weapons_integrity{1.0};
+  double sensors_integrity{1.0};
+  double shields_integrity{1.0};
+
+  // Thermal / heat state.
+  // Heat is integrated each tick when SimConfig::enable_ship_heat is enabled.
+  // heat_state is a small runtime bucket used to throttle repeated warnings;
+  // it is intentionally not serialized.
+  double heat{0.0};
+  std::uint8_t heat_state{0};
 };
 
 // A destroyed ship may leave a salvageable wreck.
@@ -1056,10 +1096,16 @@ struct Contact {
   // Snapshot at last detection.
   Vec2 last_seen_position_mkm{0.0, 0.0};
 
+  // Estimated 1-sigma position uncertainty (radius) at last detection.
+  //
+  // This is used to render uncertainty rings for stale contacts and to guide
+  // simple search behavior when pursuing a lost contact.
+  double last_seen_position_uncertainty_mkm{0.0};
+
   // Previous snapshot (for simple velocity estimation).
   //
   // Only populated when we have at least two detections in the same system.
-  int prev_seen_day{0};
+  int prev_seen_day{-1};
   Vec2 prev_seen_position_mkm{0.0, 0.0};
   std::string last_seen_name;
   std::string last_seen_design_id;

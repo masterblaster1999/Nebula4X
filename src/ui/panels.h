@@ -21,7 +21,7 @@ void draw_left_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sele
 void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& selected_colony, Id& selected_body);
 
 // Optional windows (toggled via the main menu).
-void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_colony, Id& selected_body);
+void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& selected_colony, Id& selected_body);
 void draw_settings_window(UIState& ui, char* ui_prefs_path, UIPrefActions& actions);
 
 } // namespace nebula4x::ui

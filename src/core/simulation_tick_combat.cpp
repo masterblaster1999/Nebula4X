@@ -40,14 +40,14 @@ static double u01_from_u64(uint64_t x) {
 }
 
 static double clamp01(double x) {
-  if (x < 0.0) return 0.0;
-  if (x > 1.0) return 1.0;
-  return x;
+  if (!std::isfinite(x)) return 0.0;
+  return std::clamp(x, 0.0, 1.0);
 }
 
 } // namespace
 
 void Simulation::tick_combat(double dt_days) {
+  if (!std::isfinite(dt_days)) dt_days = 0.0;
   dt_days = std::clamp(dt_days, 0.0, 10.0);
   NEBULA4X_TRACE_SCOPE("tick_combat", "sim.combat");
   std::unordered_map<Id, double> incoming_damage;
@@ -61,6 +61,11 @@ void Simulation::tick_combat(double dt_days) {
   const bool do_boarding = cfg_.enable_boarding && cfg_.boarding_range_mkm > 1e-9;
 
   auto is_hostile = [&](const Ship& a, const Ship& b) { return are_factions_hostile(a.faction_id, b.faction_id); };
+
+  auto ship_label = [](const Ship& s) -> std::string {
+    if (!s.name.empty()) return s.name;
+    return "Ship " + std::to_string(static_cast<unsigned long long>(s.id));
+  };
 
   const double maint_min_combat = std::clamp(cfg_.ship_maintenance_min_combat_multiplier, 0.0, 1.0);
   auto maintenance_combat_mult = [&](const Ship& s) -> double {
@@ -148,8 +153,16 @@ void Simulation::tick_combat(double dt_days) {
     bool operator==(const DetKey& o) const { return faction_id == o.faction_id && system_id == o.system_id; }
   };
   struct DetKeyHash {
-    size_t operator()(const DetKey& k) const {
-      return std::hash<long long>()((static_cast<long long>(k.faction_id) << 32) ^ static_cast<long long>(k.system_id));
+    size_t operator()(const DetKey& k) const noexcept {
+      // Avoid UB from shifting signed integers; Id is uint64_t.
+      std::uint64_t h = 1469598103934665603ull;
+      auto mix = [&](std::uint64_t v) {
+        h ^= v;
+        h *= 1099511628211ull;
+      };
+      mix(static_cast<std::uint64_t>(k.faction_id));
+      mix(static_cast<std::uint64_t>(k.system_id));
+      return static_cast<size_t>(h);
     }
   };
 
@@ -474,7 +487,10 @@ void Simulation::tick_combat(double dt_days) {
       if (ms.attacker_sensor_mkm_raw <= 1e-9 || ms.attacker_eccm_strength <= 1e-9) {
         if (const auto* sh = find_ptr(state_.ships, ms.attacker_ship_id)) {
           if (const auto* ad = find_design(sh->design_id)) {
-            if (ms.attacker_sensor_mkm_raw <= 1e-9) ms.attacker_sensor_mkm_raw = std::max(0.0, ad->sensor_range_mkm);
+            if (ms.attacker_sensor_mkm_raw <= 1e-9) {
+              ms.attacker_sensor_mkm_raw =
+                  std::max(0.0, sim_sensors::sensor_range_mkm_with_mode(*this, *sh, *ad));
+            }
             if (ms.attacker_eccm_strength <= 1e-9) ms.attacker_eccm_strength = std::max(0.0, ad->eccm_strength);
           }
         }
@@ -715,7 +731,7 @@ void Simulation::tick_combat(double dt_days) {
 
           const double crew_pd_mult = std::max(0.0, 1.0 + crew_grade_bonus(*def));
           const double pd_available = std::max(0.0, dd->point_defense_damage) * maintenance_combat_mult(*def) *
-                                      crew_pd_mult * union_t;
+                                      ship_heat_weapon_output_multiplier(*def) * ship_subsystem_weapon_output_multiplier(*def) * crew_pd_mult * union_t;
           if (pd_available <= 1e-12) continue;
 
           for (const auto& e : entries) {
@@ -830,11 +846,6 @@ void Simulation::tick_combat(double dt_days) {
         erase_salvos.push_back(mid);
       }
     }
-
-    auto ship_label = [](const Ship& s) -> std::string {
-      if (!s.name.empty()) return s.name;
-      return "Ship " + std::to_string(static_cast<unsigned long long>(s.id));
-    };
 
     auto dedupe_factions = [](std::vector<Id>& f) {
       std::sort(f.begin(), f.end());
@@ -966,6 +977,10 @@ void Simulation::tick_combat(double dt_days) {
       if (!p.weapons_online) continue;
     }
 
+    // Subsystem integrity gating: if weapons are catastrophically damaged, skip firing.
+    const double weapon_integrity = ship_subsystem_weapon_output_multiplier(attacker);
+    if (weapon_integrity <= 1e-9) continue;
+
     // --- Orbital bombardment ---
     // If the current order is BombardColony and the target is in range, use
     // this ship's daily weapon fire to damage the colony.
@@ -995,7 +1010,8 @@ void Simulation::tick_combat(double dt_days) {
               if (dist <= ad->weapon_range_mkm + 1e-9) {
                 // Apply damage in the order: ground forces -> installations -> population.
                 // Scale by dt_days so sub-day turn ticks don't amplify bombardment.
-                double remaining = std::max(0.0, ad->weapon_damage * maintenance_combat_mult(attacker) * dt_days);
+                double remaining = std::max(0.0, ad->weapon_damage * maintenance_combat_mult(attacker) *
+                                                 ship_heat_weapon_output_multiplier(attacker) * weapon_integrity * dt_days);
                 double killed_ground = 0.0;
                 double pop_loss_m = 0.0;
                 std::vector<std::pair<std::string, int>> destroyed;
@@ -1222,7 +1238,8 @@ void Simulation::tick_combat(double dt_days) {
             int fired_launchers = launchers;
             if (ammo_cap > 0) fired_launchers = std::min(launchers, attacker.missile_ammo);
 
-            double dmg = std::max(0.0, ad->missile_damage) * maintenance_combat_mult(attacker);
+            double dmg = std::max(0.0, ad->missile_damage) * maintenance_combat_mult(attacker) *
+                         ship_heat_weapon_output_multiplier(attacker) * weapon_integrity;
             if (fired_launchers < launchers) {
               dmg *= static_cast<double>(fired_launchers) / static_cast<double>(launchers);
             }
@@ -1245,7 +1262,8 @@ void Simulation::tick_combat(double dt_days) {
               salvo.range_remaining_mkm = cfg_.missile_range_limits_flight ? std::max(0.0, ad->missile_range_mkm) : 1e30;
               salvo.pos_mkm = attacker.position_mkm;
               salvo.attacker_eccm_strength = std::max(0.0, ad->eccm_strength);
-              salvo.attacker_sensor_mkm_raw = std::max(0.0, ad->sensor_range_mkm);
+              salvo.attacker_sensor_mkm_raw =
+                  std::max(0.0, sim_sensors::sensor_range_mkm_with_mode(*this, attacker, *ad));
               salvo.eta_days_total = eta;
               salvo.eta_days_remaining = eta;
               salvo.launch_pos_mkm = attacker.position_mkm;
@@ -1264,11 +1282,6 @@ void Simulation::tick_combat(double dt_days) {
                 const double mult = std::clamp(1.0 - bonus, 0.25, 3.0);
                 attacker.missile_cooldown_days = base_reload * mult;
               }
-
-              auto ship_label = [](const Ship& s) -> std::string {
-                if (!s.name.empty()) return s.name;
-                return "Ship " + std::to_string(static_cast<unsigned long long>(s.id));
-              };
 
               std::string msg = ship_label(attacker) + " launched missiles at " + ship_label(*tgt) +
                                 " (ETA " + format_duration_days(eta) + ", payload " + fmt1(dmg);
@@ -1364,7 +1377,8 @@ void Simulation::tick_combat(double dt_days) {
       hit *= std::max(0.0, 1.0 + crew_grade_bonus(attacker));
       hit = std::clamp(hit, cfg_.beam_min_hit_chance, 1.0);
 
-      const double dmg = std::max(0.0, ad->weapon_damage) * maintenance_combat_mult(attacker) * dt_days * hit;
+      const double dmg = std::max(0.0, ad->weapon_damage) * maintenance_combat_mult(attacker) *
+                         ship_heat_weapon_output_multiplier(attacker) * weapon_integrity * dt_days * hit;
       if (dmg > 1e-12) {
         incoming_damage[chosen] += dmg;
         attackers_for_target[chosen].push_back(aid);
@@ -1456,10 +1470,122 @@ void Simulation::tick_combat(double dt_days) {
       }
       if (tgt->shields < 0.0) tgt->shields = 0.0;
 
+      const double hull_applied = std::min(std::max(0.0, remaining), std::max(0.0, tgt->hp));
+
       shield_damage[tid] = absorbed;
-      hull_damage[tid] = remaining;
+      hull_damage[tid] = hull_applied;
 
       tgt->hp -= remaining;
+
+      // Subsystem critical hits (optional): hull damage can degrade key systems.
+      if (cfg_.enable_ship_subsystem_damage && hull_applied > 1e-9 && tgt->hp > 0.0) {
+        const auto* d = find_design(tgt->design_id);
+        if (d) {
+          struct Subsys {
+            const char* name;
+            double* integrity;
+          };
+
+          std::vector<Subsys> subs;
+          subs.reserve(4);
+
+          if (d->speed_km_s > 1e-9) subs.push_back({"Engines", &tgt->engines_integrity});
+          const bool has_weapons = (d->weapon_damage > 1e-9 || d->missile_damage > 1e-9 || d->point_defense_damage > 1e-9);
+          if (has_weapons) subs.push_back({"Weapons", &tgt->weapons_integrity});
+          if (d->sensor_range_mkm > 1e-9) subs.push_back({"Sensors", &tgt->sensors_integrity});
+          if (d->max_shields > 1e-9) subs.push_back({"Shields", &tgt->shields_integrity});
+
+          if (!subs.empty()) {
+            const double max_hp = std::max(1e-9, d->max_hp > 1e-9 ? d->max_hp : std::max(1.0, pre_hp[tid]));
+            const double hull_frac = std::clamp(hull_applied / max_hp, 0.0, 10.0);
+
+            const double crits_per_full = std::max(0.0, cfg_.ship_subsystem_crits_per_full_hull_damage);
+            double expected = hull_frac * crits_per_full;
+            if (expected > 0.0) {
+              int n = static_cast<int>(std::floor(expected));
+              const double frac = expected - static_cast<double>(n);
+
+              // Seed based on target id, attacker id (if known), and current day.
+              Id seed_id = kInvalidId;
+              if (auto ita = attackers_for_target.find(tid); ita != attackers_for_target.end() && !ita->second.empty()) {
+                seed_id = *std::min_element(ita->second.begin(), ita->second.end());
+              } else if (auto itc = colony_attackers_for_target.find(tid);
+                         itc != colony_attackers_for_target.end() && !itc->second.empty()) {
+                seed_id = *std::min_element(itc->second.begin(), itc->second.end());
+              }
+
+              std::uint64_t seed = splitmix64(static_cast<std::uint64_t>(state_.date.days_since_epoch()));
+              seed = splitmix64(seed ^ static_cast<std::uint64_t>(tid));
+              seed = splitmix64(seed ^ (static_cast<std::uint64_t>(seed_id) + 0x9E3779B97F4A7C15ULL));
+
+              if (frac > 1e-12) {
+                const double roll = u01_from_u64(splitmix64(seed ^ 0xD1B54A32D192ED03ULL));
+                if (roll < frac) n += 1;
+              }
+
+              const int cap = std::max(0, cfg_.ship_subsystem_max_crits_per_damage_instance);
+              n = std::clamp(n, 0, cap);
+
+              const double loss_min = std::max(0.0, cfg_.ship_subsystem_integrity_loss_min);
+              const double loss_max = std::max(loss_min, cfg_.ship_subsystem_integrity_loss_max);
+
+              auto bucket = [](double x) -> int {
+                if (!std::isfinite(x)) return 0;
+                if (x >= 0.75) return 0;
+                if (x >= 0.50) return 1;
+                if (x >= 0.25) return 2;
+                if (x >= 0.10) return 3;
+                return 4;
+              };
+
+              for (int i = 0; i < n; ++i) {
+                const std::uint64_t s0 = splitmix64(seed + static_cast<std::uint64_t>(i) * 0x9E3779B97F4A7C15ULL);
+                const double choose = u01_from_u64(s0);
+                const int idx = std::clamp(static_cast<int>(choose * static_cast<double>(subs.size())), 0,
+                                           static_cast<int>(subs.size()) - 1);
+
+                const std::uint64_t s1 = splitmix64(s0 ^ 0x94D049BB133111EBULL);
+                const double u = u01_from_u64(s1);
+                const double loss = loss_min + (loss_max - loss_min) * u;
+
+                double before = *subs[idx].integrity;
+                if (!std::isfinite(before)) before = 1.0;
+                before = std::clamp(before, 0.0, 1.0);
+                const double after = std::clamp(before - loss, 0.0, 1.0);
+                *subs[idx].integrity = after;
+
+                const int b0 = bucket(before);
+                const int b1 = bucket(after);
+
+                // Only log when we cross into "critical" or "disabled" territory.
+                if (b1 > b0 && b1 >= 2) {
+                  EventContext ctx;
+                  ctx.faction_id = tgt->faction_id;
+                  ctx.system_id = tgt->system_id;
+                  ctx.ship_id = tid;
+
+                  // Best-effort attacker attribution for the UI.
+                  Id attacker_fid = kInvalidId;
+                  if (seed_id != kInvalidId) {
+                    if (const auto* atk = find_ptr(state_.ships, seed_id)) attacker_fid = atk->faction_id;
+                    if (attacker_fid == kInvalidId) {
+                      if (const auto* col = find_ptr(state_.colonies, seed_id)) attacker_fid = col->faction_id;
+                    }
+                  }
+                  ctx.faction_id2 = attacker_fid;
+
+                  std::string msg = "Critical hit: " + ship_label(*tgt) + " " + subs[idx].name +
+                                    " integrity now " + fmt1(after * 100.0) + "%";
+                  if (b1 >= 4) msg += " (disabled)";
+
+                  push_event(b1 >= 3 ? EventLevel::Warn : EventLevel::Info, EventCategory::Combat, msg, ctx);
+                }
+              }
+            }
+          }
+        }
+      }
+
       if (tgt->hp <= 0.0) destroyed.push_back(tid);
     }
 

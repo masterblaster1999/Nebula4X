@@ -396,6 +396,12 @@ double Simulation::reverse_engineering_points_required_for_component(const std::
 }
 
 
+double Simulation::ship_effective_signature_multiplier(const Ship& ship, const ShipDesign* design) const {
+  if (!design) design = find_design(ship.design_id);
+  return sim_sensors::effective_signature_multiplier(*this, ship, design);
+}
+
+
 bool Simulation::is_ship_docked_at_colony(Id ship_id, Id colony_id) const {
   const auto* ship = find_ptr(state_.ships, ship_id);
   const auto* colony = find_ptr(state_.colonies, colony_id);
@@ -1204,6 +1210,20 @@ DiplomacyStatus Simulation::diplomatic_status(Id from_faction_id, Id to_faction_
   return base;
 }
 
+DiplomacyStatus Simulation::diplomatic_status_base(Id from_faction_id, Id to_faction_id) const {
+  if (from_faction_id == kInvalidId || to_faction_id == kInvalidId) return DiplomacyStatus::Hostile;
+  if (from_faction_id == to_faction_id) return DiplomacyStatus::Friendly;
+
+  const auto* from = find_ptr(state_.factions, from_faction_id);
+  if (!from) return DiplomacyStatus::Hostile;
+
+  DiplomacyStatus base = DiplomacyStatus::Hostile;
+  if (auto it = from->relations.find(to_faction_id); it != from->relations.end()) {
+    base = it->second;
+  }
+  return base;
+}
+
 bool Simulation::are_factions_hostile(Id from_faction_id, Id to_faction_id) const {
   return diplomatic_status(from_faction_id, to_faction_id) == DiplomacyStatus::Hostile;
 }
@@ -1451,7 +1471,7 @@ std::vector<DiplomaticOffer> Simulation::incoming_diplomatic_offers(Id to_factio
 
 Id Simulation::create_diplomatic_offer(Id from_faction_id, Id to_faction_id, TreatyType treaty_type,
                                        int treaty_duration_days, int offer_expires_in_days,
-                                       bool push_event, std::string* error) {
+                                       bool push_event, std::string* error, const std::string& message) {
   if (error) error->clear();
 
   if (from_faction_id == kInvalidId || to_faction_id == kInvalidId) {
@@ -1503,6 +1523,7 @@ Id Simulation::create_diplomatic_offer(Id from_faction_id, Id to_faction_id, Tre
   offer.treaty_duration_days = treaty_duration_days;
   offer.created_day = now_day;
   offer.expire_day = expire_day;
+  offer.message = message;
 
   state_.diplomatic_offers[offer.id] = offer;
 
@@ -1522,6 +1543,17 @@ Id Simulation::create_diplomatic_offer(Id from_faction_id, Id to_faction_id, Tre
 
     if (expire_day >= 0) {
       msg += " [expires in " + std::to_string(std::max(0, expire_day - now_day)) + " days]";
+    }
+
+    if (!offer.message.empty()) {
+      // Keep the log readable; show a short preview of the attached note.
+      std::string preview = offer.message;
+      constexpr std::size_t kMaxPreview = 120;
+      if (preview.size() > kMaxPreview) {
+        preview.resize(kMaxPreview);
+        preview += "...";
+      }
+      msg += " — \"" + preview + "\"";
     }
 
     this->push_event(EventLevel::Info, EventCategory::Diplomacy, std::move(msg), ctx);
@@ -1810,9 +1842,43 @@ bool Simulation::set_diplomatic_status(Id from_faction_id, Id to_faction_id, Dip
         if (it_dst == dst.ship_contacts.end()) {
           dst.ship_contacts[sid] = c;
           merged += 1;
-        } else if (c.last_seen_day > it_dst->second.last_seen_day) {
-          it_dst->second = c;
-          merged += 1;
+        } else {
+          Contact& d = it_dst->second;
+          if (c.last_seen_day > d.last_seen_day) {
+            d = c;
+            merged += 1;
+          } else if (c.last_seen_day == d.last_seen_day) {
+            // If both contacts are from the same day, prefer a more informative track.
+            // Priority:
+            // 1) Has a 2-point track (velocity estimate)
+            // 2) Lower uncertainty at last detection (tighter last-known estimate)
+            const bool c_has_track = (c.prev_seen_day >= 0 && c.prev_seen_day < c.last_seen_day);
+            const bool d_has_track = (d.prev_seen_day >= 0 && d.prev_seen_day < d.last_seen_day);
+
+            bool replace = false;
+            if (c_has_track != d_has_track) {
+              replace = c_has_track;
+            } else {
+              const double cu = c.last_seen_position_uncertainty_mkm;
+              const double du = d.last_seen_position_uncertainty_mkm;
+              if (std::isfinite(cu) && std::isfinite(du)) {
+                // Prefer a strictly smaller positive uncertainty, or prefer a defined
+                // uncertainty over an implicit "unknown" (0).
+                if (cu > 0.0 && du > 0.0) {
+                  replace = (cu < du);
+                } else if (cu > 0.0 && du <= 0.0) {
+                  replace = true;
+                }
+              } else if (std::isfinite(cu) && !std::isfinite(du)) {
+                replace = true;
+              }
+            }
+
+            if (replace) {
+              d = c;
+              merged += 1;
+            }
+          }
         }
       }
     };
@@ -1981,6 +2047,51 @@ std::vector<Contact> Simulation::recent_contacts_in_system(Id viewer_faction_id,
     return a.last_seen_day > b.last_seen_day;
   });
   return out;
+}
+
+double Simulation::contact_uncertainty_radius_mkm(const Contact& c, int now_day) const {
+  if (!cfg_.enable_contact_uncertainty) return 0.0;
+  if (now_day < 0) now_day = 0;
+
+  const int age = std::max(0, now_day - c.last_seen_day);
+
+  double base = c.last_seen_position_uncertainty_mkm;
+  if (!std::isfinite(base) || base < 0.0) base = 0.0;
+
+  // Estimate target speed from the contact track when available; otherwise,
+  // fall back to the last-seen design's nominal speed.
+  double sp_mkm_per_day = 0.0;
+  if (c.prev_seen_day >= 0 && c.prev_seen_day < c.last_seen_day) {
+    const int dt = c.last_seen_day - c.prev_seen_day;
+    if (dt > 0) {
+      const Vec2 v = (c.last_seen_position_mkm - c.prev_seen_position_mkm) * (1.0 / static_cast<double>(dt));
+      if (std::isfinite(v.x) && std::isfinite(v.y)) {
+        sp_mkm_per_day = v.length();
+      }
+    }
+  }
+  if (sp_mkm_per_day <= 1e-12) {
+    if (!c.last_seen_design_id.empty()) {
+      if (const auto* d = find_design(c.last_seen_design_id)) {
+        sp_mkm_per_day = mkm_per_day_from_speed(d->speed_km_s, cfg_.seconds_per_day);
+      }
+    }
+  }
+  if (!std::isfinite(sp_mkm_per_day) || sp_mkm_per_day < 0.0) sp_mkm_per_day = 0.0;
+
+  double growth = std::max(0.0, cfg_.contact_uncertainty_growth_fraction_of_speed) * sp_mkm_per_day;
+  if (!std::isfinite(growth) || growth < 0.0) growth = 0.0;
+  growth = std::max(growth, std::max(0.0, cfg_.contact_uncertainty_growth_min_mkm_per_day));
+
+  double rad = base + growth * static_cast<double>(age);
+  if (!std::isfinite(rad) || rad < 0.0) rad = 0.0;
+
+  const double cap = cfg_.contact_uncertainty_max_mkm;
+  if (std::isfinite(cap) && cap > 0.0) {
+    rad = std::min(rad, cap);
+  }
+
+  return rad;
 }
 
 

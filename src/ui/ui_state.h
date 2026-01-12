@@ -179,6 +179,7 @@ struct UIState {
   bool show_hostile_weapon_ranges{false};
   bool show_contact_markers{true};
   bool show_contact_labels{false};
+  bool show_contact_uncertainty{true};
 
   bool show_minor_bodies{true};
   bool show_minor_body_labels{false};
@@ -188,6 +189,9 @@ struct UIState {
   bool show_galaxy_jump_lines{true};
   bool show_galaxy_unknown_exits{true};
   bool show_galaxy_intel_alerts{true};
+
+  // Logistics overlays.
+  bool show_galaxy_freight_lanes{false};
 
   // Highlight jump-network articulation points ("chokepoint" systems).
   bool show_galaxy_chokepoints{false};
@@ -432,6 +436,7 @@ struct UIState {
   bool design_studio_show_labels{true};
   bool design_studio_show_compare{true};
   bool design_studio_show_power_overlay{true};
+  bool design_studio_show_heat_overlay{false};
 
   // --- Intel (contacts + radar) ---
   bool intel_radar_scanline{true};

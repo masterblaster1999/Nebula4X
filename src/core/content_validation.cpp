@@ -189,6 +189,17 @@ if (!is_non_negative(c.eccm_strength))
       push_error(issues, "component.invalid_shield_regen",
                  join("Component '", key, "' has invalid shield_regen_per_day: ", c.shield_regen_per_day), "component",
                  key);
+    if (!is_non_negative(c.heat_generation_per_day))
+      push_error(issues, "component.invalid_heat_gen",
+                 join("Component '", key, "' has invalid heat_generation_per_day: ", c.heat_generation_per_day),
+                 "component", key);
+    if (!is_non_negative(c.heat_dissipation_per_day))
+      push_error(issues, "component.invalid_heat_diss",
+                 join("Component '", key, "' has invalid heat_dissipation_per_day: ", c.heat_dissipation_per_day),
+                 "component", key);
+    if (!is_non_negative(c.heat_capacity))
+      push_error(issues, "component.invalid_heat_cap",
+                 join("Component '", key, "' has invalid heat_capacity: ", c.heat_capacity), "component", key);
   }
 
   // --- Designs ---
@@ -281,6 +292,17 @@ if (!is_non_negative(d.eccm_strength))
     if (!is_non_negative(d.shield_regen_per_day))
       push_error(issues, "design.invalid_shield_regen",
                  join("Design '", key, "' has invalid shield_regen_per_day: ", d.shield_regen_per_day), "design", key);
+    if (!is_non_negative(d.heat_capacity_bonus))
+      push_error(issues, "design.invalid_heat_cap",
+                 join("Design '", key, "' has invalid heat_capacity_bonus: ", d.heat_capacity_bonus), "design", key);
+    if (!is_non_negative(d.heat_generation_bonus_per_day))
+      push_error(issues, "design.invalid_heat_gen",
+                 join("Design '", key, "' has invalid heat_generation_bonus_per_day: ", d.heat_generation_bonus_per_day),
+                 "design", key);
+    if (!is_non_negative(d.heat_dissipation_bonus_per_day))
+      push_error(issues, "design.invalid_heat_diss",
+                 join("Design '", key, "' has invalid heat_dissipation_bonus_per_day: ", d.heat_dissipation_bonus_per_day),
+                 "design", key);
     if (!is_non_negative(d.weapon_damage))
       push_error(issues, "design.invalid_weapon_damage",
                  join("Design '", key, "' has invalid weapon_damage: ", d.weapon_damage), "design", key);

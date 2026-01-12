@@ -333,7 +333,7 @@ void App::frame() {
   }
 
   // Optional secondary windows (also dockable).
-  if (ui_.show_directory_window) draw_directory_window(sim_, ui_, selected_colony_, selected_body_);
+  if (ui_.show_directory_window) draw_directory_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   if (ui_.show_production_window) draw_production_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   if (ui_.show_economy_window) draw_economy_window(sim_, ui_, selected_colony_, selected_body_);
   if (ui_.show_planner_window) draw_planner_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
@@ -679,6 +679,9 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       if (auto it = obj->find("design_studio_show_power_overlay"); it != obj->end()) {
         ui_.design_studio_show_power_overlay = it->second.bool_value(ui_.design_studio_show_power_overlay);
       }
+      if (auto it = obj->find("design_studio_show_heat_overlay"); it != obj->end()) {
+        ui_.design_studio_show_heat_overlay = it->second.bool_value(ui_.design_studio_show_heat_overlay);
+      }
 
       // Intel view defaults.
       if (auto it = obj->find("intel_radar_scanline"); it != obj->end()) {
@@ -853,6 +856,9 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       if (auto it = obj->find("show_contact_labels"); it != obj->end()) {
         ui_.show_contact_labels = it->second.bool_value(ui_.show_contact_labels);
       }
+      if (auto it = obj->find("show_contact_uncertainty"); it != obj->end()) {
+        ui_.show_contact_uncertainty = it->second.bool_value(ui_.show_contact_uncertainty);
+      }
       if (auto it = obj->find("show_minor_bodies"); it != obj->end()) {
         ui_.show_minor_bodies = it->second.bool_value(ui_.show_minor_bodies);
       }
@@ -870,6 +876,9 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       }
       if (auto it = obj->find("show_galaxy_intel_alerts"); it != obj->end()) {
         ui_.show_galaxy_intel_alerts = it->second.bool_value(ui_.show_galaxy_intel_alerts);
+      }
+      if (auto it = obj->find("show_galaxy_freight_lanes"); it != obj->end()) {
+        ui_.show_galaxy_freight_lanes = it->second.bool_value(ui_.show_galaxy_freight_lanes);
       }
       if (auto it = obj->find("contact_max_age_days"); it != obj->end()) {
         ui_.contact_max_age_days = static_cast<int>(it->second.number_value(ui_.contact_max_age_days));
@@ -1488,6 +1497,7 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     o["design_studio_show_labels"] = ui_.design_studio_show_labels;
     o["design_studio_show_compare"] = ui_.design_studio_show_compare;
     o["design_studio_show_power_overlay"] = ui_.design_studio_show_power_overlay;
+    o["design_studio_show_heat_overlay"] = ui_.design_studio_show_heat_overlay;
 
     // Intel defaults.
     o["intel_radar_scanline"] = ui_.intel_radar_scanline;
@@ -1551,12 +1561,14 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     o["faction_sensor_coverage_max_sources"] = static_cast<double>(ui_.faction_sensor_coverage_max_sources);
     o["show_contact_markers"] = ui_.show_contact_markers;
     o["show_contact_labels"] = ui_.show_contact_labels;
+    o["show_contact_uncertainty"] = ui_.show_contact_uncertainty;
     o["show_minor_bodies"] = ui_.show_minor_bodies;
     o["show_minor_body_labels"] = ui_.show_minor_body_labels;
     o["show_galaxy_labels"] = ui_.show_galaxy_labels;
     o["show_galaxy_jump_lines"] = ui_.show_galaxy_jump_lines;
     o["show_galaxy_unknown_exits"] = ui_.show_galaxy_unknown_exits;
     o["show_galaxy_intel_alerts"] = ui_.show_galaxy_intel_alerts;
+    o["show_galaxy_freight_lanes"] = ui_.show_galaxy_freight_lanes;
     o["contact_max_age_days"] = static_cast<double>(ui_.contact_max_age_days);
 
     // Layout.

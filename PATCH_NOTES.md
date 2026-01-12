@@ -1,3 +1,58 @@
+## r85: Build fix - regression tape timestamp formatting
+
+- Fixed a `-Wformat-truncation` warning (treated as an error when `NEBULA4X_WARNINGS_AS_ERRORS=ON`) in `utc_now_iso8601()`.
+  - Switched from `snprintf` on a small fixed buffer to `strftime` with explicit failure handling.
+
+
+## r84: State Doctor fixes (order validation + save repair)
+
+This round focuses on **fixing validation / auto-repair errors** so saves and State Doctor runs don't accidentally break valid gameplay orders.
+
+- **MineBody order support**
+  - `validate_game_state` now properly validates `MineBody` in both **ship orders** and **order templates**.
+  - `fix_game_state` no longer drops `MineBody` orders as "Unknown order type"; it only removes the order if the referenced body no longer exists.
+
+- **InvestigateAnomaly order support**
+  - `validate_game_state` now validates `InvestigateAnomaly` (anomaly id exists, duration/progress sane).
+  - `fix_game_state` preserves `InvestigateAnomaly` orders and clamps corrupted `duration_days` / `progress_days` values; drops the order only if the anomaly id is invalid/missing.
+
+- **Intel contact sanitization**
+  - `fix_game_state` now clamps invalid `Contact::last_seen_position_uncertainty_mkm` to 0 so FoW intel can't remain in an invalid state.
+
+- **Minor cleanup**
+  - Removed a duplicate `<algorithm>` include from `state_validation.cpp`.
+
+
+## r83: Build fixes (AI escort cargo + combat ship labels)
+
+This round focuses on correcting **real compile-breaking bugs** introduced during recent refactors:
+
+- **AI escort target selection**: fixed a `cargo_used_tons(...)` scope error that prevented compilation.
+  - Added a shared helper in `simulation_tick_ai.cpp`.
+- **Combat critical-hit event text**: fixed a `ship_label(...)` scope error that prevented compilation.
+  - Promoted `ship_label(...)` to the outer `tick_combat()` scope and removed duplicate inner definitions.
+
+
+## r82: Ship Directory overhaul (bulk ship management UI)
+
+This round upgrades the Directory window into a practical **fleet/ship management** surface:
+
+- **New Directory → Ships tab**
+  - Search + filters (faction/system/role, plus quick toggles like idle/damaged/low fuel).
+  - Sortable table with quick-glance **HP / maintenance / heat / fuel** bars.
+  - Per-row **sensor mode (EMCON)** editor.
+  - Hover tooltips show design + auto flags; order-count hover shows a short order preview.
+
+- **Bulk selection + bulk actions**
+  - Checkbox-based multiselect + “select all filtered”.
+  - Bulk: set sensor mode, clear orders, set mission automation (explore/freight/salvage/mine/colonize/tanker/troop), set repair priority.
+  - Skips ships in fleets for mission-automation changes (fleet missions own their movement).
+
+- **Quality-of-life**
+  - Right-click context menu on a ship row: center system map, clear orders, add to bulk selection.
+  - Fog-of-war guardrail: when FoW is enabled, the Ships tab is restricted to the current viewer faction to avoid leaking intel.
+
+
 ## r81: Ground combat overhaul (artillery, breaches, persistent fort damage)
 
 This round deepens ground warfare so that invasions are no longer just a raw troop-count race:
@@ -1283,3 +1338,40 @@ Compatibility:
 
 Compatibility:
 - **Save schema is unchanged** (still v42). New faction fields default to disabled on older saves.
+
+### r50: Fog-of-war contact uncertainty rings + lost-contact search pursuit
+
+- **Contacts now remember an estimated position uncertainty** at the time of the last detection (`last_seen_position_uncertainty_mkm`).
+  - Computed from the *effective detection range margin* (closer detections => tighter uncertainty), with optional inflation from target ECM.
+  - As a contact ages, the uncertainty radius grows based on an estimated target speed (2-point track when available, otherwise design speed).
+- **System map**
+  - Contact markers now show a **predicted position** (constant-velocity extrapolation) and, when enabled, an **uncertainty ring**.
+  - When the predicted and last-seen positions differ, the map draws a faint **track line** and **last-seen marker**.
+  - Adds a new UI toggle: **Uncertainty** (map legend + Settings), persisted to `ui_prefs.json`.
+- **Combat / pursuit**
+  - When pursuing a **lost contact** under fog-of-war, AttackShip orders now apply a **deterministic within-radius search offset** while the contact remains undetected.
+    This avoids perfect tail-chasing and makes reacquisition depend on sensors + time.
+
+Compatibility:
+- **Save schema is unchanged** (still v50). Older saves will simply treat uncertainty as 0 until new detections are made.
+
+### r51: Bugfix - preserve day 0 contact tracks
+
+- **Contacts now use `prev_seen_day = -1` as the "unset" sentinel** (instead of 0), so a valid previous snapshot taken on day 0 is retained and can be used for velocity estimation.
+- **Serialization** now writes the previous snapshot when `prev_seen_day >= 0 && prev_seen_day < last_seen_day`.
+- **State doctor** now sanitizes contact track fields (clamps invalid `prev_seen_day` values and scrubs non-finite `prev_seen_position_mkm`).
+
+Compatibility:
+- **Save schema is unchanged.** Older saves that lack `prev_seen_day` will load it as unset (-1).
+
+### r52: Bugfix - immediate elimination victory + test harness fixes
+
+- **Victory**
+  - Elimination-only victory is now evaluated **immediately at the start of each tick** to prevent "revive before evaluation" edge cases (e.g., colonizing again before the next midnight boundary).
+  - Once a victory is reached, the simulation now **freezes time/processing** (the UI can still inspect the final state).
+- **Tests**
+  - Fixes a linker mismatch in the test runner by properly namespacing `test_victory` / `test_ai_empire_fleet_missions`.
+  - `ground_ops` test now validates troop capacity against a design that actually includes troop bays (`troop_transport_mk1`).
+
+Compatibility:
+- **Save schema is unchanged.**

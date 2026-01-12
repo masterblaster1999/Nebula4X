@@ -1210,15 +1210,44 @@ int test_simulation() {
     const nebula4x::Id a = st.next_id++;
     const nebula4x::Id b = st.next_id++;
     const nebula4x::Id dsys = st.next_id++;
-    st.systems[a] = nebula4x::StarSystem{.id = a, .name = "A"};
-    st.systems[b] = nebula4x::StarSystem{.id = b, .name = "B"};
-    st.systems[dsys] = nebula4x::StarSystem{.id = dsys, .name = "D"};
+    {
+      nebula4x::StarSystem sys;
+      sys.id = a;
+      sys.name = "A";
+      st.systems[a] = sys;
+    }
+    {
+      nebula4x::StarSystem sys;
+      sys.id = b;
+      sys.name = "B";
+      st.systems[b] = sys;
+    }
+    {
+      nebula4x::StarSystem sys;
+      sys.id = dsys;
+      sys.name = "D";
+      st.systems[dsys] = sys;
+    }
 
     auto add_pair = [&](nebula4x::Id sys1, nebula4x::Id sys2, nebula4x::Vec2 p1, nebula4x::Vec2 p2) -> std::pair<nebula4x::Id, nebula4x::Id> {
       const nebula4x::Id j1 = st.next_id++;
       const nebula4x::Id j2 = st.next_id++;
-      st.jump_points[j1] = nebula4x::JumpPoint{.id = j1, .system_id = sys1, .position_mkm = p1, .linked_jump_id = j2};
-      st.jump_points[j2] = nebula4x::JumpPoint{.id = j2, .system_id = sys2, .position_mkm = p2, .linked_jump_id = j1};
+      {
+        nebula4x::JumpPoint jp;
+        jp.id = j1;
+        jp.system_id = sys1;
+        jp.position_mkm = p1;
+        jp.linked_jump_id = j2;
+        st.jump_points[j1] = jp;
+      }
+      {
+        nebula4x::JumpPoint jp;
+        jp.id = j2;
+        jp.system_id = sys2;
+        jp.position_mkm = p2;
+        jp.linked_jump_id = j1;
+        st.jump_points[j2] = jp;
+      }
       st.systems[sys1].jump_points.push_back(j1);
       st.systems[sys2].jump_points.push_back(j2);
       return {j1, j2};
@@ -2598,9 +2627,13 @@ int test_simulation() {
   {
     // Ship design targets (auto-shipyards).
     nebula4x::ContentDB content;
-    content.installations["shipyard"] = nebula4x::InstallationDef{.id = "shipyard",
-                                                                  .name = "Shipyard",
-                                                                  .build_rate_tons_per_day = 50.0};
+    {
+      nebula4x::InstallationDef shipyard;
+      shipyard.id = "shipyard";
+      shipyard.name = "Shipyard";
+      shipyard.build_rate_tons_per_day = 50.0;
+      content.installations["shipyard"] = shipyard;
+    }
 
     nebula4x::ShipDesign d;
     d.id = "test_ship";

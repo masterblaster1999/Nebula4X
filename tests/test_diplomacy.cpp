@@ -484,7 +484,7 @@ int test_diplomacy() {
                                                /*treaty_duration_days=*/180,
                                                /*offer_expires_in_days=*/30,
                                                /*push_event=*/false, &err);
-    N4X_ASSERT(oid != kInvalidId, "Failed to create diplomatic offer: %s", err.c_str());
+    N4X_ASSERT(oid != kInvalidId, std::string("Failed to create diplomatic offer: ") + err);
     N4X_ASSERT(sim.state().diplomatic_offers.size() == 1u, "Offer not stored in state");
 
     // Save/load roundtrip should preserve offers.
@@ -499,7 +499,7 @@ int test_diplomacy() {
 
     // Accept should create a treaty and remove the offer.
     const bool ok = sim.accept_diplomatic_offer(oid, /*push_event=*/false, &err);
-    N4X_ASSERT(ok, "Failed to accept offer: %s", err.c_str());
+    N4X_ASSERT(ok, std::string("Failed to accept offer: ") + err);
     N4X_ASSERT(sim.state().diplomatic_offers.empty(), "Offer not removed after accept");
 
     auto treaties = sim.treaties_between(a.id, b.id);
@@ -511,7 +511,7 @@ int test_diplomacy() {
                                                 /*treaty_duration_days=*/-1,
                                                 /*offer_expires_in_days=*/1,
                                                 /*push_event=*/false, &err);
-    N4X_ASSERT(oid2 != kInvalidId, "Failed to create second offer: %s", err.c_str());
+    N4X_ASSERT(oid2 != kInvalidId, std::string("Failed to create second offer: ") + err);
     sim.advance_days(2);
     N4X_ASSERT(sim.state().diplomatic_offers.find(oid2) == sim.state().diplomatic_offers.end(),
                "Offer did not expire as expected");

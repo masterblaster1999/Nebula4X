@@ -40,10 +40,23 @@ inline double mode_signature_multiplier(const Simulation& sim, SensorMode mode) 
 
 double max_signature_multiplier_for_detection(const Simulation& sim) {
   // Base design signature is validated as <= 1.0 (stealth only reduces).
-  // The only built-in mechanic that can increase signature above 1.0 is
-  // SensorMode::Active.
-  const double a = mode_signature_multiplier(sim, SensorMode::Active);
-  return std::clamp(a, 1.0, 100.0);
+  //
+  // Mechanics that can increase detectability above 1.0:
+  //  - SensorMode::Active (EM signature)
+  //  - Optional thermal bloom from ship heat (if enabled)
+  const double em = mode_signature_multiplier(sim, SensorMode::Active);
+
+  double heat_max = 1.0;
+  if (sim.cfg().enable_ship_heat) {
+    const double per = sim.cfg().ship_heat_signature_multiplier_per_fraction;
+    if (std::isfinite(per) && per > 0.0) {
+      heat_max = sane_multiplier(sim.cfg().ship_heat_signature_multiplier_max, 1.0);
+      heat_max = std::max(1.0, heat_max);
+    }
+  }
+
+  const double max_sig = em * heat_max;
+  return std::clamp(max_sig, 1.0, 100.0);
 }
 
 double effective_signature_multiplier(const Simulation& sim, const Ship& ship, const ShipDesign* design) {
@@ -53,14 +66,18 @@ double effective_signature_multiplier(const Simulation& sim, const Ship& ship, c
   if (!std::isfinite(base)) base = 1.0;
   base = std::clamp(base, 0.0, 1.0);
 
-  // No design or no sensors -> EMCON does not apply.
-  if (!d || d->sensor_range_mkm <= 0.0) return base;
+  // EMCON (sensor mode) only applies to ships with sensors.
+  double emcon = 1.0;
+  if (d && d->sensor_range_mkm > 0.0) {
+    // If sensors are explicitly disabled, treat as "passive" for detectability.
+    const SensorMode mode = ship.power_policy.sensors_enabled ? ship.sensor_mode : SensorMode::Passive;
+    emcon = mode_signature_multiplier(sim, mode);
+  }
 
-  // If sensors are explicitly disabled, treat as "passive" for detectability.
-  const SensorMode mode = ship.power_policy.sensors_enabled ? ship.sensor_mode : SensorMode::Passive;
-  const double mult = mode_signature_multiplier(sim, mode);
+  // Optional thermal bloom from ship heat.
+  const double heat_mult = sim.ship_heat_signature_multiplier(ship);
 
-  double eff = base * mult;
+  double eff = base * emcon * heat_mult;
   if (!std::isfinite(eff)) eff = base;
 
   const double max_sig = max_signature_multiplier_for_detection(sim);
@@ -77,6 +94,8 @@ double sensor_range_mkm_with_mode(const Simulation& sim, const Ship& ship, const
   if (!p.sensors_online) return 0.0;
 
   range *= mode_range_multiplier(sim, ship.sensor_mode);
+  range *= sim.ship_heat_sensor_range_multiplier(ship);
+  range *= sim.ship_subsystem_sensor_range_multiplier(ship);
   if (!std::isfinite(range) || range < 0.0) return 0.0;
   return range;
 }

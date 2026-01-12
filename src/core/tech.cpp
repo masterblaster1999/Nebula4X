@@ -568,6 +568,23 @@ if (const auto* v_eccm = find_key(cj, "eccm_strength")) {
     if (c.shield_regen_per_day <= 0.0) c.shield_regen_per_day = v_sr2->number_value(0.0);
   }
 
+  // Thermal / heat model (optional).
+  if (const auto* v_hg = find_key(cj, "heat_generation_per_day")) c.heat_generation_per_day = v_hg->number_value(0.0);
+  if (const auto* v_hg2 = find_key(cj, "heat_gen")) {
+    if (c.heat_generation_per_day <= 0.0) c.heat_generation_per_day = v_hg2->number_value(0.0);
+  }
+  if (const auto* v_hd = find_key(cj, "heat_dissipation_per_day")) c.heat_dissipation_per_day = v_hd->number_value(0.0);
+  if (const auto* v_hd2 = find_key(cj, "heat_sink_per_day")) {
+    if (c.heat_dissipation_per_day <= 0.0) c.heat_dissipation_per_day = v_hd2->number_value(0.0);
+  }
+  if (const auto* v_hd3 = find_key(cj, "heat_sink")) {
+    if (c.heat_dissipation_per_day <= 0.0) c.heat_dissipation_per_day = v_hd3->number_value(0.0);
+  }
+  if (const auto* v_hc = find_key(cj, "heat_capacity")) c.heat_capacity = v_hc->number_value(0.0);
+  if (const auto* v_hc2 = find_key(cj, "heat_cap")) {
+    if (c.heat_capacity <= 0.0) c.heat_capacity = v_hc2->number_value(0.0);
+  }
+
   return c;
 }
 
@@ -777,6 +794,11 @@ ShipDesign parse_design_def(const json::Object& o,
   double max_shields = 0.0;
   double shield_regen = 0.0;
 
+  // Thermal / heat model (optional).
+  double heat_capacity = 0.0;
+  double heat_gen = 0.0;
+  double heat_diss = 0.0;
+
   // Power budgeting.
   double power_gen = 0.0;
   double power_use_total = 0.0;
@@ -853,6 +875,11 @@ ShipDesign parse_design_def(const json::Object& o,
       max_shields += c.shield_hp;
       shield_regen += c.shield_regen_per_day;
     }
+
+    // Thermal contributions from components.
+    heat_capacity += c.heat_capacity;
+    heat_gen += c.heat_generation_per_day;
+    heat_diss += c.heat_dissipation_per_day;
   }
 
   d.mass_tons = mass;
@@ -892,6 +919,10 @@ ShipDesign parse_design_def(const json::Object& o,
 
   d.max_shields = max_shields;
   d.shield_regen_per_day = shield_regen;
+
+  d.heat_capacity_bonus = std::max(0.0, heat_capacity);
+  d.heat_generation_bonus_per_day = std::max(0.0, heat_gen);
+  d.heat_dissipation_bonus_per_day = std::max(0.0, heat_diss);
 
   // Very rough survivability model for the prototype.
   // (Later you can split this into armor/structure/etc.)

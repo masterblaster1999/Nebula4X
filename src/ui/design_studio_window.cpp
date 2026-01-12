@@ -275,6 +275,14 @@ struct CompDraw {
   double fuel_cap{0.0};
   double fuel_use_per_mkm{0.0};
   double colony_cap{0.0};
+
+  // Heat / stealth / EW
+  double heat_capacity{0.0};
+  double heat_gen_per_day{0.0};
+  double heat_diss_per_day{0.0};
+  double signature_multiplier{1.0};
+  double ecm_strength{0.0};
+  double eccm_strength{0.0};
 };
 
 struct GroupDraw {
@@ -284,7 +292,6 @@ struct GroupDraw {
 };
 
 void draw_power_overlay(ImDrawList* dl, const ImVec2& p0, const ImVec2& p1, const ShipDesign& d) {
-  const float w = std::max(1.0f, p1.x - p0.x);
   const float h = std::max(1.0f, p1.y - p0.y);
 
   const double gen = std::max(0.0, d.power_generation);
@@ -312,6 +319,60 @@ void draw_power_overlay(ImDrawList* dl, const ImVec2& p0, const ImVec2& p1, cons
   } else {
     std::snprintf(buf, sizeof(buf), "Power: %.1f gen / %.1f use (DEFICIT %.1f)", gen, use, use - gen);
   }
+  const ImVec2 ts = ImGui::CalcTextSize(buf);
+  const ImVec2 tp(p0.x + 6.0f, p0.y + (h - ts.y) * 0.5f);
+  dl->AddText(tp, IM_COL32(235, 235, 235, 255), buf);
+}
+
+
+void draw_heat_overlay(ImDrawList* dl, const ImVec2& p0, const ImVec2& p1, const ShipDesign& d, const SimConfig& cfg) {
+  const float h = std::max(1.0f, p1.y - p0.y);
+
+  const ImU32 bg = IM_COL32(25, 25, 28, 200);
+  const ImU32 outline = IM_COL32(0, 0, 0, 180);
+  dl->AddRectFilled(p0, p1, bg, 4.0f);
+  dl->AddRect(p0, p1, outline, 4.0f);
+
+  if (!cfg.enable_ship_heat) {
+    const char* msg = "Heat: (disabled)";
+    const ImVec2 ts = ImGui::CalcTextSize(msg);
+    const ImVec2 tp(p0.x + 6.0f, p0.y + (h - ts.y) * 0.5f);
+    dl->AddText(tp, IM_COL32(235, 235, 235, 255), msg);
+    return;
+  }
+
+  const auto sn = [](double x) -> double { return (std::isfinite(x) && x > 0.0) ? x : 0.0; };
+
+  const double mass = std::max(0.0, d.mass_tons);
+  const double cap = sn(cfg.ship_heat_base_capacity_per_mass_ton) * mass + sn(d.heat_capacity_bonus);
+  const double diss = sn(cfg.ship_heat_base_dissipation_per_mass_ton_per_day) * mass + sn(d.heat_dissipation_bonus_per_day);
+
+  // Estimate heat generation assuming the default power policy (all subsystems enabled, default priorities).
+  const ShipPowerPolicy pol{};
+  const double pgen = std::max(0.0, d.power_generation);
+  const double use_eng = std::max(0.0, d.power_use_engines);
+  const double use_sh = std::max(0.0, d.power_use_shields);
+  const double use_w = std::max(0.0, d.power_use_weapons);
+  const double use_s = std::max(0.0, d.power_use_sensors);
+  const double other_use = std::max(0.0, d.power_use_total - use_eng - use_sh - use_w - use_s);
+
+  const PowerAllocation pa = compute_power_allocation(pgen, use_eng, use_sh, use_w, use_s, pol);
+  const double online_use = other_use + (pa.engines_online ? use_eng : 0.0) + (pa.shields_online ? use_sh : 0.0) +
+                            (pa.weapons_online ? use_w : 0.0) + (pa.sensors_online ? use_s : 0.0);
+
+  const double gen = sn(cfg.ship_heat_generation_per_power_use_per_day) * online_use + sn(d.heat_generation_bonus_per_day);
+  const double net = gen - diss;
+
+  char buf[256];
+  if (!(cap > 1e-9)) {
+    std::snprintf(buf, sizeof(buf), "Heat: (no capacity)");
+  } else if (net <= 1e-6) {
+    std::snprintf(buf, sizeof(buf), "Heat: cap %.0f  |  stable (net %.1f/d)", cap, net);
+  } else {
+    const double days = cap / std::max(1e-9, net);
+    std::snprintf(buf, sizeof(buf), "Heat: cap %.0f  |  net +%.1f/d  (~%.0f d to 100%%)", cap, net, days);
+  }
+
   const ImVec2 ts = ImGui::CalcTextSize(buf);
   const ImVec2 tp(p0.x + 6.0f, p0.y + (h - ts.y) * 0.5f);
   dl->AddText(tp, IM_COL32(235, 235, 235, 255), buf);
@@ -471,6 +532,8 @@ void draw_design_studio_window(Simulation& sim, UIState& ui, Id& selected_ship, 
       ImGui::Checkbox("Compare", &ui.design_studio_show_compare);
       ImGui::SameLine();
       ImGui::Checkbox("Power", &ui.design_studio_show_power_overlay);
+    ImGui::SameLine();
+    ImGui::Checkbox("Heat", &ui.design_studio_show_heat_overlay);
 
       if (ui.design_studio_show_compare) {
         if (compare_id.empty() || std::find(all_ids.begin(), all_ids.end(), compare_id) == all_ids.end()) {
@@ -626,6 +689,12 @@ void draw_design_studio_window(Simulation& sim, UIState& ui, Id& selected_ship, 
               cd.fuel_cap = c.fuel_capacity_tons;
               cd.fuel_use_per_mkm = c.fuel_use_per_mkm;
               cd.colony_cap = c.colony_capacity_millions;
+              cd.heat_capacity = c.heat_capacity;
+              cd.heat_gen_per_day = c.heat_generation_per_day;
+              cd.heat_diss_per_day = c.heat_dissipation_per_day;
+              cd.signature_multiplier = c.signature_multiplier;
+              cd.ecm_strength = c.ecm_strength;
+              cd.eccm_strength = c.eccm_strength;
             } else {
               cd.name = cid;
               cd.type = ComponentType::Unknown;
@@ -773,12 +842,25 @@ void draw_design_studio_window(Simulation& sim, UIState& ui, Id& selected_ship, 
             }
           }
 
-          // Power overlay strip.
-          if (ui.design_studio_show_power_overlay) {
+          // Overlay strips.
+          {
+            float y = canvas_pos.y + 10.0f;
             const float strip_h = 26.0f;
-            const ImVec2 sp0(canvas_pos.x + 10.0f, canvas_pos.y + 10.0f);
-            const ImVec2 sp1(canvas_p1.x - 10.0f, canvas_pos.y + 10.0f + strip_h);
-            draw_power_overlay(dl, sp0, sp1, *design);
+            const float gap = 6.0f;
+
+            if (ui.design_studio_show_power_overlay) {
+              const ImVec2 sp0(canvas_pos.x + 10.0f, y);
+              const ImVec2 sp1(canvas_p1.x - 10.0f, y + strip_h);
+              draw_power_overlay(dl, sp0, sp1, *design);
+              y += strip_h + gap;
+            }
+
+            if (ui.design_studio_show_heat_overlay) {
+              const ImVec2 sp0(canvas_pos.x + 10.0f, y);
+              const ImVec2 sp1(canvas_p1.x - 10.0f, y + strip_h);
+              draw_heat_overlay(dl, sp0, sp1, *design, sim.cfg());
+              y += strip_h + gap;
+            }
           }
 
           // Tooltip for hovered component.
@@ -799,6 +881,17 @@ void draw_design_studio_window(Simulation& sim, UIState& ui, Id& selected_ship, 
             }
             if (hovered_comp_data.shield_hp > 0.0) ImGui::Text("Shield: %.0f", hovered_comp_data.shield_hp);
             if (hovered_comp_data.hp_bonus > 0.0) ImGui::Text("HP bonus: %.0f", hovered_comp_data.hp_bonus);
+            if (hovered_comp_data.heat_capacity > 0.0) ImGui::Text("Heat cap: %.0f", hovered_comp_data.heat_capacity);
+            if (hovered_comp_data.heat_gen_per_day > 0.0 || hovered_comp_data.heat_diss_per_day > 0.0) {
+              ImGui::Text("Heat: +%.1f gen/d  +%.1f diss/d", hovered_comp_data.heat_gen_per_day,
+                          hovered_comp_data.heat_diss_per_day);
+            }
+            if (std::abs(hovered_comp_data.signature_multiplier - 1.0) > 1e-6) {
+              ImGui::Text("Signature mult: x%.2f", hovered_comp_data.signature_multiplier);
+            }
+            if (hovered_comp_data.ecm_strength > 0.0 || hovered_comp_data.eccm_strength > 0.0) {
+              ImGui::Text("EW: ECM %.1f  ECCM %.1f", hovered_comp_data.ecm_strength, hovered_comp_data.eccm_strength);
+            }
             ImGui::TextDisabled("ID: %s", hovered_comp.c_str());
             ImGui::EndTooltip();
           }
@@ -857,6 +950,85 @@ void draw_design_studio_window(Simulation& sim, UIState& ui, Id& selected_ship, 
             ImGui::Text("Shields: %.0f (+%.1f/day)", design->max_shields, design->shield_regen_per_day);
           } else {
             ImGui::TextDisabled("Shields: (none)");
+          }
+
+          ImGui::SeparatorText("Stealth & EW");
+          const double sig_base = std::clamp(std::isfinite(design->signature_multiplier) ? design->signature_multiplier : 1.0, 0.0, 1.0);
+          ImGui::Text("Base signature: %.0f%%", sig_base * 100.0);
+          if (design->ecm_strength > 0.0 || design->eccm_strength > 0.0) {
+            ImGui::Text("EW: ECM %.1f  ECCM %.1f", design->ecm_strength, design->eccm_strength);
+          } else {
+            ImGui::TextDisabled("EW: (none)");
+          }
+          if (sim.cfg().enable_ship_heat && sim.cfg().ship_heat_signature_multiplier_per_fraction > 0.0) {
+            const double per = sim.cfg().ship_heat_signature_multiplier_per_fraction;
+            const double cap_mult = std::max(1.0, sim.cfg().ship_heat_signature_multiplier_max);
+            const double at100 = std::clamp(1.0 + per * 1.0, 1.0, cap_mult);
+            ImGui::TextDisabled("Thermal bloom @100%% heat: x%.2f (cap x%.2f)", at100, cap_mult);
+          } else {
+            ImGui::TextDisabled("Thermal bloom: (off)");
+          }
+
+          ImGui::SeparatorText("Power & Heat");
+          ImGui::Text("Power gen: %.1f", design->power_generation);
+          ImGui::Text("Power use: %.1f", design->power_use_total);
+          ImGui::TextDisabled("Use: Eng %.1f  Shld %.1f  Weap %.1f  Sens %.1f", design->power_use_engines,
+                              design->power_use_shields, design->power_use_weapons, design->power_use_sensors);
+
+          {
+            const ShipPowerPolicy pol{};
+            const PowerAllocation pa =
+                compute_power_allocation(std::max(0.0, design->power_generation), std::max(0.0, design->power_use_engines),
+                                         std::max(0.0, design->power_use_shields), std::max(0.0, design->power_use_weapons),
+                                         std::max(0.0, design->power_use_sensors), pol);
+            if (pa.deficit > 1e-6) {
+              ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Power deficit: -%.1f", pa.deficit);
+            } else {
+              ImGui::TextDisabled("Power headroom: +%.1f", pa.available);
+            }
+
+            if (sim.cfg().enable_ship_heat) {
+              const auto sn = [](double x) -> double { return (std::isfinite(x) && x > 0.0) ? x : 0.0; };
+              const double mass = std::max(0.0, design->mass_tons);
+              const double cap = sn(sim.cfg().ship_heat_base_capacity_per_mass_ton) * mass + sn(design->heat_capacity_bonus);
+              const double diss = sn(sim.cfg().ship_heat_base_dissipation_per_mass_ton_per_day) * mass +
+                                  sn(design->heat_dissipation_bonus_per_day);
+
+              const double use_eng = std::max(0.0, design->power_use_engines);
+              const double use_sh = std::max(0.0, design->power_use_shields);
+              const double use_w = std::max(0.0, design->power_use_weapons);
+              const double use_s = std::max(0.0, design->power_use_sensors);
+              const double other_use = std::max(0.0, design->power_use_total - use_eng - use_sh - use_w - use_s);
+              const double online_use =
+                  other_use + (pa.engines_online ? use_eng : 0.0) + (pa.shields_online ? use_sh : 0.0) +
+                  (pa.weapons_online ? use_w : 0.0) + (pa.sensors_online ? use_s : 0.0);
+
+              const double gen = sn(sim.cfg().ship_heat_generation_per_power_use_per_day) * online_use +
+                                 sn(design->heat_generation_bonus_per_day);
+              const double net = gen - diss;
+
+              if (cap > 1e-9) {
+                if (net > 1e-6) {
+                  ImGui::Text("Heat net: +%.1f/d (cap %.0f)", net, cap);
+                  ImGui::TextDisabled("~%.0f d to 100%% heat (from cold)", cap / std::max(1e-9, net));
+                } else {
+                  ImGui::TextDisabled("Heat stable (net %.1f/d, cap %.0f)", net, cap);
+                }
+              } else {
+                ImGui::TextDisabled("Heat: (no capacity)");
+              }
+            } else {
+              ImGui::TextDisabled("Heat: (disabled)");
+            }
+          }
+
+          ImGui::SeparatorText("Maintenance");
+          if (sim.cfg().enable_ship_maintenance) {
+            const double supplies_per_day =
+                std::max(0.0, design->mass_tons) * std::max(0.0, sim.cfg().ship_maintenance_cost_per_mass_ton_per_day);
+            ImGui::Text("Supplies/day: %.2f", supplies_per_day);
+          } else {
+            ImGui::TextDisabled("Ship maintenance: (disabled)");
           }
 
           if (ui.design_studio_show_compare && !compare_id.empty() && compare_id != selected_id) {

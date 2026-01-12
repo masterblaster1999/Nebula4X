@@ -1,7 +1,6 @@
 #include "nebula4x/core/state_validation.h"
 
 #include <algorithm>
-#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <sstream>
@@ -77,6 +76,7 @@ std::vector<std::string> validate_game_state(const GameState& s, const ContentDB
   auto has_jump = [&](Id id) { return s.jump_points.find(id) != s.jump_points.end(); };
   auto has_ship = [&](Id id) { return s.ships.find(id) != s.ships.end(); };
   auto has_wreck = [&](Id id) { return s.wrecks.find(id) != s.wrecks.end(); };
+  auto has_anomaly = [&](Id id) { return s.anomalies.find(id) != s.anomalies.end(); };
   auto has_colony = [&](Id id) { return s.colonies.find(id) != s.colonies.end(); };
   auto has_faction = [&](Id id) { return s.factions.find(id) != s.factions.end(); };
 
@@ -421,13 +421,13 @@ std::vector<std::string> validate_game_state(const GameState& s, const ContentDB
                 } else if (!has_colony(ord.colony_id)) {
                   push(errors, prefix() + join("UnloadMineral references missing colony_id ", id_u64(ord.colony_id)));
                 }
-                    } else if constexpr (std::is_same_v<T, MineBody>) {
-        if (ord.body_id == kInvalidId) {
-          push(errors, "MineBody order missing body_id");
-        } else if (!has_body(ord.body_id)) {
-          push(errors, "MineBody order references missing body_id=" + std::to_string(ord.body_id));
-        }
-} else if constexpr (std::is_same_v<T, LoadTroops>) {
+              } else if constexpr (std::is_same_v<T, MineBody>) {
+                if (ord.body_id == kInvalidId) {
+                  push(errors, prefix() + "MineBody has invalid body_id");
+                } else if (!has_body(ord.body_id)) {
+                  push(errors, prefix() + join("MineBody references missing body_id ", id_u64(ord.body_id)));
+                }
+              } else if constexpr (std::is_same_v<T, LoadTroops>) {
                 if (ord.colony_id == kInvalidId) {
                   push(errors, prefix() + "LoadTroops has invalid colony_id");
                 } else if (!has_colony(ord.colony_id)) {
@@ -480,6 +480,18 @@ std::vector<std::string> validate_game_state(const GameState& s, const ContentDB
                 }
                 if (!std::isfinite(ord.tons) || ord.tons < 0.0) {
                   push(errors, prefix() + join("SalvageWreck has invalid tons ", ord.tons));
+                }
+              } else if constexpr (std::is_same_v<T, InvestigateAnomaly>) {
+                if (ord.anomaly_id == kInvalidId) {
+                  push(errors, prefix() + "InvestigateAnomaly has invalid anomaly_id");
+                } else if (!has_anomaly(ord.anomaly_id)) {
+                  push(errors, prefix() + join("InvestigateAnomaly references missing anomaly_id ", id_u64(ord.anomaly_id)));
+                }
+                if (ord.duration_days < 0) {
+                  push(errors, prefix() + join("InvestigateAnomaly has invalid duration_days ", ord.duration_days));
+                }
+                if (!std::isfinite(ord.progress_days) || ord.progress_days < 0.0) {
+                  push(errors, prefix() + join("InvestigateAnomaly has invalid progress_days ", ord.progress_days));
                 }
               } else if constexpr (std::is_same_v<T, OrbitBody>) {
                 if (ord.body_id == kInvalidId) {
@@ -621,6 +633,12 @@ std::vector<std::string> validate_game_state(const GameState& s, const ContentDB
               } else if (!has_colony(ord.colony_id)) {
                 push(errors, prefix() + join("UnloadMineral references missing colony_id ", id_u64(ord.colony_id)));
               }
+            } else if constexpr (std::is_same_v<T, MineBody>) {
+              if (ord.body_id == kInvalidId) {
+                push(errors, prefix() + "MineBody has invalid body_id");
+              } else if (!has_body(ord.body_id)) {
+                push(errors, prefix() + join("MineBody references missing body_id ", id_u64(ord.body_id)));
+              }
             } else if constexpr (std::is_same_v<T, LoadTroops>) {
               if (ord.colony_id == kInvalidId) {
                 push(errors, prefix() + "LoadTroops has invalid colony_id");
@@ -674,6 +692,18 @@ std::vector<std::string> validate_game_state(const GameState& s, const ContentDB
               }
               if (!std::isfinite(ord.tons) || ord.tons < 0.0) {
                 push(errors, prefix() + join("SalvageWreck has invalid tons ", ord.tons));
+              }
+            } else if constexpr (std::is_same_v<T, InvestigateAnomaly>) {
+              if (ord.anomaly_id == kInvalidId) {
+                push(errors, prefix() + "InvestigateAnomaly has invalid anomaly_id");
+              } else if (!has_anomaly(ord.anomaly_id)) {
+                push(errors, prefix() + join("InvestigateAnomaly references missing anomaly_id ", id_u64(ord.anomaly_id)));
+              }
+              if (ord.duration_days < 0) {
+                push(errors, prefix() + join("InvestigateAnomaly has invalid duration_days ", ord.duration_days));
+              }
+              if (!std::isfinite(ord.progress_days) || ord.progress_days < 0.0) {
+                push(errors, prefix() + join("InvestigateAnomaly has invalid progress_days ", ord.progress_days));
               }
             } else if constexpr (std::is_same_v<T, OrbitBody>) {
               if (ord.body_id == kInvalidId) {
@@ -956,6 +986,12 @@ std::vector<std::string> validate_game_state(const GameState& s, const ContentDB
              join("Faction ", id_u64(fid), " ('", f.name, "') contact for ship ", id_u64(sid),
                   " references unknown system_id ", id_u64(c.system_id)));
       }
+
+      if (!std::isfinite(c.last_seen_position_uncertainty_mkm) || c.last_seen_position_uncertainty_mkm < 0.0) {
+        push(errors,
+             join("Faction ", id_u64(fid), " ('", f.name, "') contact for ship ", id_u64(sid),
+                  " has invalid last_seen_position_uncertainty_mkm ", c.last_seen_position_uncertainty_mkm));
+      }
     }
 
     if (content) {
@@ -1167,6 +1203,7 @@ FixReport fix_game_state(GameState& s, const ContentDB* content) {
   auto has_jump = [&](Id id) { return s.jump_points.find(id) != s.jump_points.end(); };
   auto has_ship = [&](Id id) { return s.ships.find(id) != s.ships.end(); };
   auto has_wreck = [&](Id id) { return s.wrecks.find(id) != s.wrecks.end(); };
+  auto has_anomaly = [&](Id id) { return s.anomalies.find(id) != s.anomalies.end(); };
   auto has_colony = [&](Id id) { return s.colonies.find(id) != s.colonies.end(); };
   auto has_faction = [&](Id id) { return s.factions.find(id) != s.factions.end(); };
 
@@ -1873,6 +1910,11 @@ FixReport fix_game_state(GameState& s, const ContentDB* content) {
                 keep = false;
                 drop(i, "UnloadMineral invalid colony_id");
               }
+            } else if constexpr (std::is_same_v<T, MineBody>) {
+              if (ord.body_id == kInvalidId || !has_body(ord.body_id)) {
+                keep = false;
+                drop(i, "MineBody invalid body_id");
+              }
             } else if constexpr (std::is_same_v<T, LoadTroops>) {
               if (ord.colony_id == kInvalidId || !has_colony(ord.colony_id)) {
                 keep = false;
@@ -1927,6 +1969,21 @@ FixReport fix_game_state(GameState& s, const ContentDB* content) {
                 note(join("Fix: ", owner, " ", list_name, "[", i, "] SalvageWreck tons clamped ", ord.tons,
                           " -> 0"));
                 ord.tons = 0.0;
+              }
+            } else if constexpr (std::is_same_v<T, InvestigateAnomaly>) {
+              if (ord.anomaly_id == kInvalidId || !has_anomaly(ord.anomaly_id)) {
+                keep = false;
+                drop(i, "InvestigateAnomaly invalid anomaly_id");
+              }
+              if (ord.duration_days < 0) {
+                note(join("Fix: ", owner, " ", list_name, "[", i, "] InvestigateAnomaly duration clamped ",
+                          ord.duration_days, " -> 0"));
+                ord.duration_days = 0;
+              }
+              if (!std::isfinite(ord.progress_days) || ord.progress_days < 0.0) {
+                note(join("Fix: ", owner, " ", list_name, "[", i, "] InvestigateAnomaly progress_days clamped ",
+                          ord.progress_days, " -> 0"));
+                ord.progress_days = 0.0;
               }
             } else if constexpr (std::is_same_v<T, OrbitBody>) {
               if (ord.body_id == kInvalidId || !has_body(ord.body_id)) {
@@ -2075,6 +2132,37 @@ FixReport fix_game_state(GameState& s, const ContentDB* content) {
         note(join("Fix: Faction ", id_u64(fid), " contact.system_id set to ", id_u64(fixed)));
         c.system_id = fixed;
       }
+      if (!std::isfinite(c.last_seen_position_uncertainty_mkm) || c.last_seen_position_uncertainty_mkm < 0.0) {
+        note(join("Fix: Faction ", id_u64(fid), " contact.last_seen_position_uncertainty_mkm clamped ",
+                  c.last_seen_position_uncertainty_mkm, " -> 0"));
+        c.last_seen_position_uncertainty_mkm = 0.0;
+      }
+
+      // Contact track hygiene: prev_seen_day uses -1 as "unset".
+      if (c.last_seen_day < 0) {
+        note(join("Fix: Faction ", id_u64(fid), " contact.last_seen_day clamped ", c.last_seen_day, " -> 0"));
+        c.last_seen_day = 0;
+      }
+
+      if (c.prev_seen_day < -1) {
+        note(join("Fix: Faction ", id_u64(fid), " contact.prev_seen_day clamped ", c.prev_seen_day, " -> -1"));
+        c.prev_seen_day = -1;
+        c.prev_seen_position_mkm = Vec2{0.0, 0.0};
+      }
+
+      // If prev_seen_day is present, it must be strictly older than last_seen_day.
+      if (c.prev_seen_day >= 0 && c.prev_seen_day >= c.last_seen_day) {
+        note(join("Fix: Faction ", id_u64(fid), " contact.prev_seen_day reset (", c.prev_seen_day,
+                  " >= last_seen_day ", c.last_seen_day, ")"));
+        c.prev_seen_day = -1;
+        c.prev_seen_position_mkm = Vec2{0.0, 0.0};
+      }
+
+      if (!std::isfinite(c.prev_seen_position_mkm.x) || !std::isfinite(c.prev_seen_position_mkm.y)) {
+        note(join("Fix: Faction ", id_u64(fid), " contact.prev_seen_position_mkm sanitized"));
+        c.prev_seen_position_mkm = Vec2{0.0, 0.0};
+      }
+
       ++it;
     }
 

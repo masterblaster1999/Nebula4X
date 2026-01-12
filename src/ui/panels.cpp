@@ -159,6 +159,16 @@ const char* diplomacy_status_label(DiplomacyStatus s) {
   return "Hostile";
 }
 
+const char* treaty_type_label(TreatyType t) {
+  switch (t) {
+    case TreatyType::Ceasefire: return "Ceasefire";
+    case TreatyType::NonAggressionPact: return "Non-Aggression Pact";
+    case TreatyType::Alliance: return "Alliance";
+    case TreatyType::TradeAgreement: return "Trade Agreement";
+  }
+  return "Treaty";
+}
+
 // UI combo ordering: Hostile, Neutral, Friendly.
 int diplomacy_status_to_combo_idx(DiplomacyStatus s) {
   switch (s) {
@@ -666,6 +676,30 @@ void draw_left_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sele
     }
   }
 
+  {
+    bool heat = sim.ship_heat_enabled();
+    if (ImGui::Checkbox("Ship heat", &heat)) {
+      sim.set_ship_heat_enabled(heat);
+    }
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip(
+          "Experimental thermal model. Ships accumulate heat based on online power usage and cool over time.\n"
+          "High heat reduces speed/sensors/weapons/shield regen and extreme overheating can damage hull.");
+    }
+  }
+
+  {
+    bool subsys = sim.ship_subsystem_damage_enabled();
+    if (ImGui::Checkbox("Subsystem damage", &subsys)) {
+      sim.set_ship_subsystem_damage_enabled(subsys);
+    }
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip(
+          "Experimental combat critical hits. Hull damage can reduce engines/weapons/sensors/shields integrity.\n"
+          "Integrity reduces performance until repaired at a shipyard.");
+    }
+  }
+
   ImGui::Separator();
   if (ImGui::Button("+1 day")) sim.advance_days(1);
   ImGui::SameLine();
@@ -1059,7 +1093,38 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
             ImGui::TextDisabled("Shields: (none)");
           }
           ImGui::Text("HP: %.0f / %.0f", sh->hp, d->max_hp);
-          if (sim.cfg().enable_ship_maintenance) {
+
+// Subsystem integrity (0..1).
+{
+  auto clamp01 = [](double x) {
+    if (!std::isfinite(x)) return 1.0;
+    return std::clamp(x, 0.0, 1.0);
+  };
+  const double ei = clamp01(sh->engines_integrity);
+  const double wi = clamp01(sh->weapons_integrity);
+  const double si = clamp01(sh->sensors_integrity);
+  const double shi = clamp01(sh->shields_integrity);
+
+  const bool any_damaged =
+      (std::abs(ei - 1.0) > 1e-6) || (std::abs(wi - 1.0) > 1e-6) || (std::abs(si - 1.0) > 1e-6) ||
+      (std::abs(shi - 1.0) > 1e-6);
+
+  if (any_damaged || sim.ship_subsystem_damage_enabled()) {
+    ImGui::Text(
+        "Subsystems: Engines %.0f%% (x%.2f), Weapons %.0f%% (x%.2f), Sensors %.0f%% (x%.2f), Shields %.0f%% (x%.2f)",
+        ei * 100.0, sim.ship_subsystem_engine_multiplier(*sh), wi * 100.0,
+        sim.ship_subsystem_weapon_output_multiplier(*sh), si * 100.0, sim.ship_subsystem_sensor_range_multiplier(*sh),
+        shi * 100.0, sim.ship_subsystem_shield_multiplier(*sh));
+
+    if (!sim.ship_subsystem_damage_enabled()) {
+      ImGui::TextDisabled(
+          "(Combat critical hits disabled; integrity may still be affected by maintenance/repairs.)");
+    }
+  }
+}
+
+if (sim.cfg().enable_ship_maintenance) {
+
             const double m = std::clamp(sh->maintenance_condition, 0.0, 1.0);
             const double min_spd = std::clamp(sim.cfg().ship_maintenance_min_speed_multiplier, 0.0, 1.0);
             const double min_cbt = std::clamp(sim.cfg().ship_maintenance_min_combat_multiplier, 0.0, 1.0);
@@ -1067,6 +1132,21 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
             const double cbt_mult = min_cbt + (1.0 - min_cbt) * m;
 
             ImGui::Text("Maintenance: %.0f%%  (Speed x%.2f, Combat x%.2f)", 100.0 * m, spd_mult, cbt_mult);
+
+
+// Deterministic subsystem malfunctions (optional maintenance extension).
+{
+  const double start = std::clamp(sim.cfg().ship_maintenance_breakdown_start_fraction, 0.0, 1.0);
+  const double rate0 = std::max(0.0, sim.cfg().ship_maintenance_breakdown_rate_per_day_at_zero);
+  if (rate0 > 1e-12 && start > 1e-9 && m + 1e-9 < start) {
+    const double exponent = std::max(0.1, sim.cfg().ship_maintenance_breakdown_exponent);
+    const double x = std::clamp((start - m) / start, 0.0, 1.0);
+    const double rate = rate0 * std::pow(x, exponent);
+    const double p = 1.0 - std::exp(-rate);
+    ImGui::TextDisabled("Breakdown risk: ~%.2f%%/day (when not docked at shipyard)", 100.0 * p);
+  }
+}
+
 
             const std::string& res = sim.cfg().ship_maintenance_resource_id;
             if (!res.empty()) {
@@ -1271,26 +1351,46 @@ void draw_right_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sel
               if (sh->sensor_mode == SensorMode::Passive) mult = sim.cfg().sensor_mode_passive_range_multiplier;
               else if (sh->sensor_mode == SensorMode::Active) mult = sim.cfg().sensor_mode_active_range_multiplier;
               if (!std::isfinite(mult) || mult < 0.0) mult = 0.0;
+
               range_eff = std::max(0.0, d->sensor_range_mkm) * mult;
+              range_eff *= sim.ship_heat_sensor_range_multiplier(*sh);
+              range_eff *= sim.ship_subsystem_sensor_range_multiplier(*sh);
+              if (!std::isfinite(range_eff) || range_eff < 0.0) range_eff = 0.0;
             }
 
-            // Effective signature includes both design stealth and EMCON.
-            double sig_eff = std::clamp(std::isfinite(d->signature_multiplier) ? d->signature_multiplier : 1.0, 0.0, 1.0);
+            const double sig_base =
+                std::clamp(std::isfinite(d->signature_multiplier) ? d->signature_multiplier : 1.0, 0.0, 1.0);
 
+            // Effective signature includes design stealth, EMCON, and (optionally) thermal bloom from heat.
             const SensorMode sig_mode = sh->power_policy.sensors_enabled ? sh->sensor_mode : SensorMode::Passive;
-            double sig_mult = 1.0;
-            if (sig_mode == SensorMode::Passive) sig_mult = sim.cfg().sensor_mode_passive_signature_multiplier;
-            else if (sig_mode == SensorMode::Active) sig_mult = sim.cfg().sensor_mode_active_signature_multiplier;
-            if (!std::isfinite(sig_mult) || sig_mult < 0.0) sig_mult = 0.0;
+            double sig_emcon_mult = 1.0;
+            if (sig_mode == SensorMode::Passive) sig_emcon_mult = sim.cfg().sensor_mode_passive_signature_multiplier;
+            else if (sig_mode == SensorMode::Active) sig_emcon_mult = sim.cfg().sensor_mode_active_signature_multiplier;
+            if (!std::isfinite(sig_emcon_mult) || sig_emcon_mult < 0.0) sig_emcon_mult = 0.0;
 
-            sig_eff *= sig_mult;
-            const double max_sig = std::max(1.0, std::isfinite(sim.cfg().sensor_mode_active_signature_multiplier)
-                                                    ? sim.cfg().sensor_mode_active_signature_multiplier
-                                                    : 1.0);
-            sig_eff = std::clamp(sig_eff, 0.0, max_sig);
+            const double sig_heat_mult = sim.ship_heat_signature_multiplier(*sh);
+            const double sig_eff = sim.ship_effective_signature_multiplier(*sh, d);
 
             ImGui::Text("Sensor: %.0f mkm (effective %.0f mkm)", d->sensor_range_mkm, range_eff);
-            ImGui::Text("Signature: %.0f%% (effective %.0f%%)", d->signature_multiplier * 100.0, sig_eff * 100.0);
+            ImGui::Text("Signature: %.0f%% (effective %.0f%%)", sig_base * 100.0, sig_eff * 100.0);
+
+            if (sim.ship_heat_enabled() && sim.cfg().ship_heat_signature_multiplier_per_fraction > 0.0) {
+              ImGui::TextDisabled("Signature factors: EMCON x%.2f  Thermal x%.2f (heat %.0f%%)",
+                                  sig_emcon_mult, sig_heat_mult, sim.ship_heat_fraction(*sh) * 100.0);
+            } else {
+              ImGui::TextDisabled("Signature factors: EMCON x%.2f", sig_emcon_mult);
+            }
+
+            if (sim.ship_heat_enabled()) {
+              const double cap =
+                  std::max(0.0, sim.cfg().ship_heat_base_capacity_per_mass_ton) * std::max(0.0, sh->mass_tons) +
+                  std::max(0.0, d->heat_capacity_bonus);
+              if (cap > 1e-9) {
+                ImGui::TextDisabled("Heat: %.0f / %.0f (%.0f%%)", sh->heat, cap, sim.ship_heat_fraction(*sh) * 100.0);
+              } else {
+                ImGui::TextDisabled("Heat: (no capacity)");
+              }
+            }
 if (d->ecm_strength > 0.0 || d->eccm_strength > 0.0) {
   ImGui::Text("EW: ECM %.1f  ECCM %.1f", d->ecm_strength, d->eccm_strength);
 } else {
@@ -1304,7 +1404,27 @@ if (d->ecm_strength > 0.0 || d->eccm_strength > 0.0) {
             }
           } else {
             ImGui::Text("Sensor: 0 mkm");
-            ImGui::Text("Signature: %.0f%%", d->signature_multiplier * 100.0);
+            const double sig_base =
+                std::clamp(std::isfinite(d->signature_multiplier) ? d->signature_multiplier : 1.0, 0.0, 1.0);
+            const double sig_heat_mult = sim.ship_heat_signature_multiplier(*sh);
+            const double sig_eff = sim.ship_effective_signature_multiplier(*sh, d);
+            ImGui::Text("Signature: %.0f%% (effective %.0f%%)", sig_base * 100.0, sig_eff * 100.0);
+
+            if (sim.ship_heat_enabled() && sim.cfg().ship_heat_signature_multiplier_per_fraction > 0.0) {
+              ImGui::TextDisabled("Thermal bloom: x%.2f (heat %.0f%%)", sig_heat_mult, sim.ship_heat_fraction(*sh) * 100.0);
+            }
+
+            if (sim.ship_heat_enabled()) {
+              const double cap =
+                  std::max(0.0, sim.cfg().ship_heat_base_capacity_per_mass_ton) * std::max(0.0, sh->mass_tons) +
+                  std::max(0.0, d->heat_capacity_bonus);
+              if (cap > 1e-9) {
+                ImGui::TextDisabled("Heat: %.0f / %.0f (%.0f%%)", sh->heat, cap, sim.ship_heat_fraction(*sh) * 100.0);
+              } else {
+                ImGui::TextDisabled("Heat: (no capacity)");
+              }
+            }
+
             ImGui::TextDisabled("Sensor mode: (no sensors)");
 if (d->ecm_strength > 0.0 || d->eccm_strength > 0.0) {
   ImGui::Text("EW: ECM %.1f  ECCM %.1f", d->ecm_strength, d->eccm_strength);
@@ -6035,38 +6155,361 @@ if (colony->shipyard_queue.empty()) {
 
         ImGui::Spacing();
 
-        const ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingStretchProp;
-        if (ImGui::BeginTable("##diplomacy_table", 3, flags)) {
-          ImGui::TableSetupColumn("Other faction");
-          ImGui::TableSetupColumn("Your stance");
-          ImGui::TableSetupColumn("Their stance");
-          ImGui::TableHeadersRow();
+        // --- Offers ---
+        ImGui::SeparatorText("Diplomatic offers");
+        {
+          static std::string last_offer_error;
 
-          const char* opts[] = {"Hostile", "Neutral", "Friendly"};
+          const auto incoming = sim.incoming_diplomatic_offers(selected_faction_id);
+          if (incoming.empty()) {
+            ImGui::TextDisabled("No incoming offers.");
+          } else {
+            ImGui::Text("Incoming offers (%d)", (int)incoming.size());
+            const ImGuiTableFlags tflags = ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingStretchProp;
+            if (ImGui::BeginTable("##dip_offers_in", 6, tflags)) {
+              ImGui::TableSetupColumn("From", ImGuiTableColumnFlags_None, 0.16f);
+              ImGui::TableSetupColumn("Treaty", ImGuiTableColumnFlags_None, 0.18f);
+              ImGui::TableSetupColumn("Duration", ImGuiTableColumnFlags_None, 0.14f);
+              ImGui::TableSetupColumn("Expires", ImGuiTableColumnFlags_None, 0.14f);
+              ImGui::TableSetupColumn("Message", ImGuiTableColumnFlags_None, 0.26f);
+              ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_None, 0.12f);
+              ImGui::TableHeadersRow();
 
-          for (const auto& [other_id, other_name] : factions) {
-            if (other_id == selected_faction_id) continue;
-            const DiplomacyStatus out_st = sim.diplomatic_status(selected_faction_id, other_id);
-            const DiplomacyStatus in_st = sim.diplomatic_status(other_id, selected_faction_id);
+              const int now_day = static_cast<int>(s.date.days_since_epoch());
+              for (const auto& o : incoming) {
+                const Faction* from = find_ptr(s.factions, o.from_faction_id);
+                const std::string from_name = from ? from->name : std::string("<unknown>");
+                const std::string treaty_name = treaty_type_label(o.treaty_type);
 
-            ImGui::TableNextRow();
-            ImGui::TableSetColumnIndex(0);
-            ImGui::TextUnformatted(other_name.c_str());
+                const bool indefinite = (o.treaty_duration_days < 0);
+                const int expires_in = (o.expire_day <= 0) ? -1 : std::max(0, o.expire_day - now_day);
 
-            ImGui::TableSetColumnIndex(1);
-            int combo_idx = diplomacy_status_to_combo_idx(out_st);
-            const std::string combo_id = "##dip_" + std::to_string(static_cast<unsigned long long>(selected_faction_id)) +
-                                         "_" + std::to_string(static_cast<unsigned long long>(other_id));
-            if (ImGui::Combo(combo_id.c_str(), &combo_idx, opts, IM_ARRAYSIZE(opts))) {
-              sim.set_diplomatic_status(selected_faction_id, other_id, diplomacy_status_from_combo_idx(combo_idx),
-                                        reciprocal, /*push_event=*/true);
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                ImGui::TextUnformatted(from_name.c_str());
+
+                ImGui::TableSetColumnIndex(1);
+                ImGui::TextUnformatted(treaty_name.c_str());
+
+                ImGui::TableSetColumnIndex(2);
+                if (indefinite) {
+                  ImGui::TextUnformatted("Indefinite");
+                } else {
+                  ImGui::Text("%d days", o.treaty_duration_days);
+                }
+
+                ImGui::TableSetColumnIndex(3);
+                if (expires_in < 0) {
+                  ImGui::TextUnformatted("Never");
+                } else {
+                  ImGui::Text("%d days", expires_in);
+                }
+
+                ImGui::TableSetColumnIndex(4);
+                if (o.message.empty()) {
+                  ImGui::TextDisabled("(no message)");
+                } else {
+                  ImGui::TextUnformatted(o.message.c_str());
+                }
+
+                ImGui::TableSetColumnIndex(5);
+                const std::string accept_id = "Accept##offer_" + std::to_string(static_cast<unsigned long long>(o.id));
+                const std::string decline_id = "Decline##offer_" + std::to_string(static_cast<unsigned long long>(o.id));
+                if (ImGui::SmallButton(accept_id.c_str())) {
+                  std::string err;
+                  if (!sim.accept_diplomatic_offer(o.id, /*push_event=*/true, &err)) {
+                    last_offer_error = err.empty() ? "Failed to accept offer." : err;
+                    ImGui::OpenPopup("Diplomacy error##offers");
+                  }
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton(decline_id.c_str())) {
+                  std::string err;
+                  if (!sim.decline_diplomatic_offer(o.id, /*push_event=*/true, &err)) {
+                    last_offer_error = err.empty() ? "Failed to decline offer." : err;
+                    ImGui::OpenPopup("Diplomacy error##offers");
+                  }
+                }
+              }
+
+              ImGui::EndTable();
             }
-
-            ImGui::TableSetColumnIndex(2);
-            ImGui::TextUnformatted(diplomacy_status_label(in_st));
           }
 
-          ImGui::EndTable();
+          // Outgoing offers (for visibility / debugging).
+          {
+            std::vector<DiplomaticOffer> outgoing;
+            outgoing.reserve(s.diplomatic_offers.size());
+            for (const auto& [oid, o] : s.diplomatic_offers) {
+              (void)oid;
+              if (o.from_faction_id == selected_faction_id) outgoing.push_back(o);
+            }
+            std::sort(outgoing.begin(), outgoing.end(), [](const DiplomaticOffer& a, const DiplomaticOffer& b) { return a.id < b.id; });
+
+            if (!outgoing.empty()) {
+              ImGui::Spacing();
+              ImGui::Text("Outgoing offers (%d)", (int)outgoing.size());
+              const ImGuiTableFlags tflags = ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingStretchProp;
+              if (ImGui::BeginTable("##dip_offers_out", 5, tflags)) {
+                ImGui::TableSetupColumn("To", ImGuiTableColumnFlags_None, 0.18f);
+                ImGui::TableSetupColumn("Treaty", ImGuiTableColumnFlags_None, 0.22f);
+                ImGui::TableSetupColumn("Duration", ImGuiTableColumnFlags_None, 0.16f);
+                ImGui::TableSetupColumn("Expires", ImGuiTableColumnFlags_None, 0.16f);
+                ImGui::TableSetupColumn("Message", ImGuiTableColumnFlags_None, 0.28f);
+                ImGui::TableHeadersRow();
+
+                const int now_day = static_cast<int>(s.date.days_since_epoch());
+                for (const auto& o : outgoing) {
+                  const Faction* to = find_ptr(s.factions, o.to_faction_id);
+                  const std::string to_name = to ? to->name : std::string("<unknown>");
+                  const bool indefinite = (o.treaty_duration_days < 0);
+                  const int expires_in = (o.expire_day <= 0) ? -1 : std::max(0, o.expire_day - now_day);
+
+                  ImGui::TableNextRow();
+                  ImGui::TableSetColumnIndex(0);
+                  ImGui::TextUnformatted(to_name.c_str());
+                  ImGui::TableSetColumnIndex(1);
+                  ImGui::TextUnformatted(treaty_type_label(o.treaty_type));
+                  ImGui::TableSetColumnIndex(2);
+                  if (indefinite) {
+                    ImGui::TextUnformatted("Indefinite");
+                  } else {
+                    ImGui::Text("%d days", o.treaty_duration_days);
+                  }
+                  ImGui::TableSetColumnIndex(3);
+                  if (expires_in < 0) {
+                    ImGui::TextUnformatted("Never");
+                  } else {
+                    ImGui::Text("%d days", expires_in);
+                  }
+                  ImGui::TableSetColumnIndex(4);
+                  if (o.message.empty()) {
+                    ImGui::TextDisabled("(no message)");
+                  } else {
+                    ImGui::TextUnformatted(o.message.c_str());
+                  }
+                }
+
+                ImGui::EndTable();
+              }
+            }
+          }
+
+          if (ImGui::BeginPopupModal("Diplomacy error##offers", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::TextUnformatted(last_offer_error.c_str());
+            ImGui::Separator();
+            if (ImGui::Button("OK")) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+          }
+        }
+
+        ImGui::Spacing();
+        ImGui::SeparatorText("Send offer");
+        {
+          static int offer_target_idx = 0;
+          static int offer_type_idx = 0;
+          static bool offer_indefinite = true;
+          static int offer_treaty_days = 180;
+          static bool offer_never_expires = false;
+          static int offer_expires_days = 30;
+          static char offer_message[256] = "";
+          static std::string last_send_error;
+
+          // Build a stable list of possible recipients (exclude self).
+          std::vector<std::pair<Id, std::string>> others;
+          others.reserve(factions.size());
+          for (const auto& p : factions) {
+            if (p.first == selected_faction_id) continue;
+            others.push_back(p);
+          }
+          if (others.empty()) {
+            ImGui::TextDisabled("No other factions to contact.");
+          } else {
+            offer_target_idx = std::clamp(offer_target_idx, 0, (int)others.size() - 1);
+
+            std::vector<const char*> labels;
+            labels.reserve(others.size());
+            for (const auto& p : others) labels.push_back(p.second.c_str());
+            ImGui::Combo("To", &offer_target_idx, labels.data(), (int)labels.size());
+
+            const TreatyType offer_types[] = {TreatyType::Ceasefire, TreatyType::NonAggressionPact, TreatyType::TradeAgreement, TreatyType::Alliance};
+            const char* offer_type_labels[] = {"Ceasefire", "Non-Aggression Pact", "Trade Agreement", "Alliance"};
+            offer_type_idx = std::clamp(offer_type_idx, 0, (int)IM_ARRAYSIZE(offer_types) - 1);
+            ImGui::Combo("Treaty type", &offer_type_idx, offer_type_labels, IM_ARRAYSIZE(offer_type_labels));
+
+            ImGui::Checkbox("Indefinite treaty", &offer_indefinite);
+            if (!offer_indefinite) {
+              offer_treaty_days = std::clamp(offer_treaty_days, 1, 36500);
+              ImGui::InputInt("Treaty duration (days)", &offer_treaty_days);
+              offer_treaty_days = std::clamp(offer_treaty_days, 1, 36500);
+            }
+
+            ImGui::Checkbox("Offer never expires", &offer_never_expires);
+            if (!offer_never_expires) {
+              offer_expires_days = std::clamp(offer_expires_days, 1, 36500);
+              ImGui::InputInt("Offer expires in (days)", &offer_expires_days);
+              offer_expires_days = std::clamp(offer_expires_days, 1, 36500);
+            }
+
+            ImGui::InputTextWithHint("Message", "optional note to include with the offer", offer_message, IM_ARRAYSIZE(offer_message));
+
+            const Id to_id = others[(std::size_t)offer_target_idx].first;
+            if (ImGui::Button("Send offer")) {
+              std::string err;
+              const TreatyType tt = offer_types[offer_type_idx];
+              const int dur = offer_indefinite ? -1 : offer_treaty_days;
+              const int exp = offer_never_expires ? 0 : offer_expires_days;
+              const Id oid = sim.create_diplomatic_offer(selected_faction_id, to_id, tt, dur, exp, /*push_event=*/true, &err,
+                                                        std::string(offer_message));
+              if (oid == kInvalidId) {
+                last_send_error = err.empty() ? "Failed to send offer." : err;
+                ImGui::OpenPopup("Diplomacy error##send_offer");
+              } else {
+                // Keep message around, but show a small confirmation in logs.
+                last_send_error.clear();
+              }
+            }
+            if (ImGui::BeginPopupModal("Diplomacy error##send_offer", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+              ImGui::TextUnformatted(last_send_error.c_str());
+              ImGui::Separator();
+              if (ImGui::Button("OK")) ImGui::CloseCurrentPopup();
+              ImGui::EndPopup();
+            }
+          }
+        }
+
+        // --- Active treaties ---
+        ImGui::Spacing();
+        ImGui::SeparatorText("Active treaties");
+        {
+          std::vector<Treaty> mine;
+          mine.reserve(s.treaties.size());
+          for (const auto& [tid, t] : s.treaties) {
+            (void)tid;
+            if (t.faction_a == selected_faction_id || t.faction_b == selected_faction_id) mine.push_back(t);
+          }
+          std::sort(mine.begin(), mine.end(), [](const Treaty& a, const Treaty& b) { return a.id < b.id; });
+
+          if (mine.empty()) {
+            ImGui::TextDisabled("No active treaties involving this faction.");
+          } else {
+            static std::string last_treaty_error;
+            const ImGuiTableFlags tflags = ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingStretchProp;
+            if (ImGui::BeginTable("##dip_treaties", 5, tflags)) {
+              ImGui::TableSetupColumn("With", ImGuiTableColumnFlags_None, 0.22f);
+              ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_None, 0.22f);
+              ImGui::TableSetupColumn("Start", ImGuiTableColumnFlags_None, 0.18f);
+              ImGui::TableSetupColumn("End", ImGuiTableColumnFlags_None, 0.18f);
+              ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_None, 0.20f);
+              ImGui::TableHeadersRow();
+
+              const int now_day = static_cast<int>(s.date.days_since_epoch());
+              for (const auto& t : mine) {
+                const Id other = (t.faction_a == selected_faction_id) ? t.faction_b : t.faction_a;
+                const Faction* of = find_ptr(s.factions, other);
+                const std::string other_name = of ? of->name : std::string("<unknown>");
+                const bool indefinite = (t.duration_days < 0);
+                const int end_day = indefinite ? -1 : (t.start_day + t.duration_days);
+                const int remaining = indefinite ? -1 : std::max(0, end_day - now_day);
+
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                ImGui::TextUnformatted(other_name.c_str());
+                ImGui::TableSetColumnIndex(1);
+                ImGui::TextUnformatted(treaty_type_label(t.type));
+                ImGui::TableSetColumnIndex(2);
+                ImGui::Text("Day %d", t.start_day);
+                ImGui::TableSetColumnIndex(3);
+                if (indefinite) {
+                  ImGui::TextUnformatted("Indefinite");
+                } else {
+                  ImGui::Text("Day %d (%d left)", end_day, remaining);
+                }
+                ImGui::TableSetColumnIndex(4);
+                const std::string cancel_id = "Cancel##treaty_" + std::to_string(static_cast<unsigned long long>(t.id));
+                if (ImGui::SmallButton(cancel_id.c_str())) {
+                  std::string err;
+                  if (!sim.cancel_treaty(t.id, /*push_event=*/true, &err)) {
+                    last_treaty_error = err.empty() ? "Failed to cancel treaty." : err;
+                    ImGui::OpenPopup("Diplomacy error##treaty");
+                  }
+                }
+              }
+
+              ImGui::EndTable();
+            }
+
+            if (ImGui::BeginPopupModal("Diplomacy error##treaty", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+              ImGui::TextUnformatted(last_treaty_error.c_str());
+              ImGui::Separator();
+              if (ImGui::Button("OK")) ImGui::CloseCurrentPopup();
+              ImGui::EndPopup();
+            }
+          }
+        }
+
+        // --- Stances ---
+        ImGui::Spacing();
+        ImGui::SeparatorText("Stances");
+        {
+          const ImGuiTableFlags tflags = ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingStretchProp;
+          if (ImGui::BeginTable("##diplomacy_table", 3, tflags)) {
+            ImGui::TableSetupColumn("Other faction", ImGuiTableColumnFlags_None, 0.36f);
+            ImGui::TableSetupColumn("Your stance (base)", ImGuiTableColumnFlags_None, 0.38f);
+            ImGui::TableSetupColumn("Their stance (effective)", ImGuiTableColumnFlags_None, 0.26f);
+            ImGui::TableHeadersRow();
+
+            const char* opts[] = {"Hostile", "Neutral", "Friendly"};
+
+            for (const auto& [other_id, other_name] : factions) {
+              if (other_id == selected_faction_id) continue;
+              const DiplomacyStatus out_base = sim.diplomatic_status_base(selected_faction_id, other_id);
+              const DiplomacyStatus out_eff = sim.diplomatic_status(selected_faction_id, other_id);
+              const DiplomacyStatus in_eff = sim.diplomatic_status(other_id, selected_faction_id);
+
+              // Precompute treaty list for tooltip/context.
+              const auto ts = sim.treaties_between(selected_faction_id, other_id);
+              bool has_treaty = !ts.empty();
+
+              ImGui::TableNextRow();
+              ImGui::TableSetColumnIndex(0);
+              ImGui::TextUnformatted(other_name.c_str());
+              if (has_treaty && ImGui::IsItemHovered()) {
+                ImGui::BeginTooltip();
+                ImGui::TextUnformatted("Active treaties:");
+                for (const auto& t : ts) {
+                  const bool indefinite = (t.duration_days < 0);
+                  if (indefinite) {
+                    ImGui::BulletText("%s (indefinite)", treaty_type_label(t.type));
+                  } else {
+                    const int now_day = static_cast<int>(s.date.days_since_epoch());
+                    const int end_day = t.start_day + t.duration_days;
+                    const int remaining = std::max(0, end_day - now_day);
+                    ImGui::BulletText("%s (%d days left)", treaty_type_label(t.type), remaining);
+                  }
+                }
+                ImGui::EndTooltip();
+              }
+
+              ImGui::TableSetColumnIndex(1);
+              int combo_idx = diplomacy_status_to_combo_idx(out_base);
+              const std::string combo_id = "##dip_" + std::to_string(static_cast<unsigned long long>(selected_faction_id)) +
+                                           "_" + std::to_string(static_cast<unsigned long long>(other_id));
+              if (ImGui::Combo(combo_id.c_str(), &combo_idx, opts, IM_ARRAYSIZE(opts))) {
+                sim.set_diplomatic_status(selected_faction_id, other_id, diplomacy_status_from_combo_idx(combo_idx),
+                                          reciprocal, /*push_event=*/true);
+              }
+              if (out_eff != out_base) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("(effective: %s)", diplomacy_status_label(out_eff));
+              }
+
+              ImGui::TableSetColumnIndex(2);
+              ImGui::TextUnformatted(diplomacy_status_label(in_eff));
+            }
+
+            ImGui::EndTable();
+          }
         }
       }
       ImGui::EndTabItem();
@@ -7036,6 +7479,8 @@ void draw_settings_window(UIState& ui, char* ui_prefs_path, UIPrefActions& actio
   ImGui::Checkbox("System: contact markers", &ui.show_contact_markers);
   ImGui::SameLine();
   ImGui::Checkbox("Labels##contacts", &ui.show_contact_labels);
+  ImGui::SameLine();
+  ImGui::Checkbox("Uncertainty##contacts", &ui.show_contact_uncertainty);
   ImGui::Checkbox("System: minor bodies", &ui.show_minor_bodies);
   ImGui::SameLine();
   ImGui::Checkbox("Labels##minor_bodies", &ui.show_minor_body_labels);
@@ -7047,6 +7492,8 @@ void draw_settings_window(UIState& ui, char* ui_prefs_path, UIPrefActions& actio
   ImGui::Checkbox("Unknown exits (unsurveyed / undiscovered)", &ui.show_galaxy_unknown_exits);
   ImGui::SameLine();
   ImGui::Checkbox("Intel alerts", &ui.show_galaxy_intel_alerts);
+  ImGui::Checkbox("Galaxy: freight lanes", &ui.show_galaxy_freight_lanes);
+  ImGui::TextDisabled("Draws current auto-freight routes (cargo orders) for the viewer faction.");
 
   ImGui::SliderInt("Contact max age (days)", &ui.contact_max_age_days, 1, 3650);
   ui.contact_max_age_days = std::clamp(ui.contact_max_age_days, 1, 3650);
@@ -7177,7 +7624,7 @@ void draw_settings_window(UIState& ui, char* ui_prefs_path, UIPrefActions& actio
   ImGui::End();
 }
 
-void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_colony, Id& selected_body) {
+void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& selected_colony, Id& selected_body) {
   auto& s = sim.state();
 
   ImGui::SetNextWindowSize(ImVec2(860, 520), ImGuiCond_FirstUseEver);
@@ -7363,6 +7810,629 @@ void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_colony, Id
 
     ImGui::EndTabItem();
   }
+
+
+  // --- Ships tab ---
+  if (ImGui::BeginTabItem("Ships")) {
+    static char search[128] = "";
+    static int faction_filter_idx = 0; // 0 = All
+    static int system_filter_idx = 0;  // 0 = All
+    static int role_filter_idx = 0;    // 0 = All
+    static bool only_idle = false;
+    static bool only_automated = false;
+    static bool only_damaged = false;
+    static bool only_low_fuel = false;
+    static bool only_overheated = false;
+    static bool only_in_fleet = false;
+
+    // Bulk selection (checkbox-based).
+    static std::unordered_set<Id> bulk_selected;
+    static std::uint64_t bulk_last_state_gen = 0;
+    if (bulk_last_state_gen != sim.state_generation()) {
+      bulk_selected.clear();
+      bulk_last_state_gen = sim.state_generation();
+    }
+
+    const auto factions = sorted_factions(s);
+    const auto systems = sorted_systems(s);
+
+    // Fog-of-war guardrail: don't leak other factions' ships when FoW is enabled.
+    const bool force_viewer_faction =
+        (ui.fog_of_war && ui.viewer_faction_id != kInvalidId);
+
+    ImGui::InputTextWithHint("Search##ship", "name / design / system / fleet", search, IM_ARRAYSIZE(search));
+
+    // Faction filter.
+    Id faction_filter = kInvalidId;
+    {
+      std::vector<const char*> labels;
+      labels.reserve(factions.size() + 1);
+      labels.push_back("All factions");
+      for (const auto& p : factions) labels.push_back(p.second.c_str());
+
+      if (labels.size() > 1) {
+        faction_filter_idx = std::clamp(faction_filter_idx, 0, static_cast<int>(labels.size()) - 1);
+      } else {
+        faction_filter_idx = 0;
+      }
+
+      if (force_viewer_faction) {
+        // Snap to viewer faction and disable the control.
+        int viewer_idx = 0; // All
+        for (int i = 0; i < (int)factions.size(); ++i) {
+          if (factions[(std::size_t)i].first == ui.viewer_faction_id) {
+            viewer_idx = i + 1;
+            break;
+          }
+        }
+        faction_filter_idx = viewer_idx;
+        ImGui::BeginDisabled();
+      }
+
+      ImGui::Combo("Faction##ship", &faction_filter_idx, labels.data(), static_cast<int>(labels.size()));
+
+      if (force_viewer_faction) {
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::TextDisabled("(FoW: limited)");
+      }
+
+      if (faction_filter_idx > 0 && !factions.empty()) {
+        faction_filter = factions[(std::size_t)faction_filter_idx - 1].first;
+      }
+      if (force_viewer_faction) faction_filter = ui.viewer_faction_id;
+    }
+
+    // System filter.
+    Id system_filter = kInvalidId;
+    {
+      std::vector<const char*> labels;
+      labels.reserve(systems.size() + 1);
+      labels.push_back("All systems");
+      for (const auto& p : systems) labels.push_back(p.second.c_str());
+
+      if (labels.size() > 1) {
+        system_filter_idx = std::clamp(system_filter_idx, 0, static_cast<int>(labels.size()) - 1);
+      } else {
+        system_filter_idx = 0;
+      }
+
+      ImGui::Combo("System##ship", &system_filter_idx, labels.data(), static_cast<int>(labels.size()));
+      if (system_filter_idx > 0 && !systems.empty()) {
+        system_filter = systems[(std::size_t)system_filter_idx - 1].first;
+      }
+    }
+
+    // Role filter.
+    ShipRole role_filter = ShipRole::Unknown;
+    {
+      const char* roles[] = {"All roles", "Combatant", "Surveyor", "Freighter", "Unknown"};
+      role_filter_idx = std::clamp(role_filter_idx, 0, (int)IM_ARRAYSIZE(roles) - 1);
+      ImGui::Combo("Role##ship", &role_filter_idx, roles, IM_ARRAYSIZE(roles));
+      switch (role_filter_idx) {
+        case 1: role_filter = ShipRole::Combatant; break;
+        case 2: role_filter = ShipRole::Surveyor; break;
+        case 3: role_filter = ShipRole::Freighter; break;
+        case 4: role_filter = ShipRole::Unknown; break;
+        default: break;
+      }
+    }
+
+    ImGui::Checkbox("Only idle##ship", &only_idle);
+    ImGui::SameLine();
+    ImGui::Checkbox("Only automated##ship", &only_automated);
+    ImGui::SameLine();
+    ImGui::Checkbox("Only damaged##ship", &only_damaged);
+    ImGui::SameLine();
+    ImGui::Checkbox("Only low fuel##ship", &only_low_fuel);
+    ImGui::SameLine();
+    ImGui::Checkbox("Only overheated##ship", &only_overheated);
+    ImGui::SameLine();
+    ImGui::Checkbox("Only in fleet##ship", &only_in_fleet);
+
+    struct ShipRow {
+      Id id{kInvalidId};
+      Id faction_id{kInvalidId};
+      Id system_id{kInvalidId};
+      Id fleet_id{kInvalidId};
+
+      std::string name;
+      std::string faction;
+      std::string system;
+      std::string fleet;
+      std::string design;
+      ShipRole role{ShipRole::Unknown};
+
+      int orders{0};
+      SensorMode sensor_mode{SensorMode::Normal};
+
+      double hp_frac{1.0};
+      double maint{1.0};
+      double heat_frac{0.0};
+      double fuel_frac{-1.0};
+
+      std::string auto_flags;
+      bool automated{false};
+    };
+
+    std::vector<ShipRow> rows;
+    rows.reserve(s.ships.size());
+
+    auto sensor_mode_label = [](SensorMode m) -> const char* {
+      switch (m) {
+        case SensorMode::Passive: return "Passive";
+        case SensorMode::Normal: return "Normal";
+        case SensorMode::Active: return "Active";
+      }
+      return "Normal";
+    };
+
+    const std::string q(search);
+
+    for (Id sid : sorted_keys(s.ships)) {
+      const Ship* sh = find_ptr(s.ships, sid);
+      if (!sh) continue;
+
+      if (faction_filter != kInvalidId && sh->faction_id != faction_filter) continue;
+      if (system_filter != kInvalidId && sh->system_id != system_filter) continue;
+
+      const ShipDesign* d = sim.find_design(sh->design_id);
+      const ShipRole role = d ? d->role : ShipRole::Unknown;
+      if (role_filter_idx != 0 && role != role_filter) continue;
+
+      const StarSystem* sys = find_ptr(s.systems, sh->system_id);
+      const Faction* fac = find_ptr(s.factions, sh->faction_id);
+
+      const Id fleet_id = sim.fleet_for_ship(sh->id);
+      const Fleet* fl = (fleet_id != kInvalidId) ? find_ptr(s.fleets, fleet_id) : nullptr;
+
+      // Orders count (0 for missing record).
+      int orders = 0;
+      if (const ShipOrders* so = find_ptr(s.ship_orders, sh->id)) {
+        orders = (int)so->queue.size();
+      }
+
+      const bool is_idle = (orders == 0);
+      if (only_idle && !is_idle) continue;
+
+      std::string auto_s;
+      if (sh->auto_explore) auto_s += "E";
+      if (sh->auto_freight) auto_s += (auto_s.empty() ? "F" : " F");
+      if (sh->auto_salvage) auto_s += (auto_s.empty() ? "S" : " S");
+      if (sh->auto_mine) auto_s += (auto_s.empty() ? "M" : " M");
+      if (sh->auto_colonize) auto_s += (auto_s.empty() ? "C" : " C");
+      if (sh->auto_tanker) auto_s += (auto_s.empty() ? "T" : " T");
+      if (sh->auto_troop_transport) auto_s += (auto_s.empty() ? "G" : " G");
+      if (sh->auto_refuel) auto_s += (auto_s.empty() ? "Rf" : " Rf");
+      if (sh->auto_repair) auto_s += (auto_s.empty() ? "Rp" : " Rp");
+      if (sh->auto_rearm) auto_s += (auto_s.empty() ? "Ra" : " Ra");
+      const bool automated = !auto_s.empty();
+      if (only_automated && !automated) continue;
+
+      // Condition.
+      double hp_frac = 1.0;
+      if (d && d->max_hp > 1e-9) {
+        hp_frac = std::clamp(sh->hp / d->max_hp, 0.0, 1.0);
+      }
+      const bool damaged = (hp_frac < 0.999);
+      if (only_damaged && !damaged) continue;
+
+      const double maint = std::clamp(sh->maintenance_condition, 0.0, 1.0);
+
+      double fuel_frac = -1.0;
+      if (d && d->fuel_capacity_tons > 1e-9 && sh->fuel_tons >= 0.0) {
+        fuel_frac = std::clamp(sh->fuel_tons / d->fuel_capacity_tons, 0.0, 1.0);
+      }
+      if (only_low_fuel) {
+        if (!(fuel_frac >= 0.0 && fuel_frac < 0.25)) continue;
+      }
+
+      const double heat_frac = std::clamp(sim.ship_heat_fraction(*sh), 0.0, 1.0);
+      if (only_overheated) {
+        if (!(heat_frac > 0.85)) continue;
+      }
+
+      if (only_in_fleet && fleet_id == kInvalidId) continue;
+
+      // Search matches: ship name, design, system, fleet, faction.
+      const std::string sys_name = sys ? sys->name : "?";
+      const std::string fac_name = fac ? fac->name : "?";
+      const std::string fleet_name = fl ? fl->name : std::string("-");
+      const std::string design_name = (d && !d->name.empty()) ? d->name : sh->design_id;
+
+      if (!q.empty()) {
+        if (!case_insensitive_contains(sh->name, q) &&
+            !case_insensitive_contains(design_name, q) &&
+            !case_insensitive_contains(sys_name, q) &&
+            !case_insensitive_contains(fleet_name, q) &&
+            !case_insensitive_contains(fac_name, q)) {
+          continue;
+        }
+      }
+
+      ShipRow r;
+      r.id = sh->id;
+      r.faction_id = sh->faction_id;
+      r.system_id = sh->system_id;
+      r.fleet_id = fleet_id;
+
+      r.name = sh->name;
+      r.faction = fac_name;
+      r.system = sys_name;
+      r.fleet = fleet_name;
+      r.design = design_name;
+      r.role = role;
+
+      r.orders = orders;
+      r.sensor_mode = sh->sensor_mode;
+
+      r.hp_frac = hp_frac;
+      r.maint = maint;
+      r.heat_frac = heat_frac;
+      r.fuel_frac = fuel_frac;
+
+      r.auto_flags = auto_s.empty() ? "-" : auto_s;
+      r.automated = automated;
+
+      rows.push_back(std::move(r));
+    }
+
+    ImGui::Separator();
+    ImGui::TextDisabled("Showing %d ships", (int)rows.size());
+
+    // Bulk actions.
+    {
+      const int sel_count = (int)bulk_selected.size();
+      ImGui::Text("Bulk selection: %d", sel_count);
+      ImGui::SameLine();
+      if (ImGui::SmallButton("Clear##ship_bulk_clear")) {
+        bulk_selected.clear();
+      }
+      ImGui::SameLine();
+      if (ImGui::SmallButton("Select all (filtered)##ship_bulk_all")) {
+        for (const auto& r : rows) bulk_selected.insert(r.id);
+      }
+
+      if (sel_count > 0) {
+        ImGui::Spacing();
+        ImGui::SeparatorText("Bulk actions");
+
+        static int bulk_sensor_mode_idx = 1; // Normal
+        const char* smodes[] = {"Passive", "Normal", "Active"};
+        bulk_sensor_mode_idx = std::clamp(bulk_sensor_mode_idx, 0, (int)IM_ARRAYSIZE(smodes) - 1);
+        ImGui::Combo("Sensor mode##ship_bulk", &bulk_sensor_mode_idx, smodes, IM_ARRAYSIZE(smodes));
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Apply##ship_bulk_sensor_apply")) {
+          const SensorMode mode = (bulk_sensor_mode_idx == 0) ? SensorMode::Passive
+                                  : (bulk_sensor_mode_idx == 2) ? SensorMode::Active
+                                                                : SensorMode::Normal;
+          for (Id sid : bulk_selected) {
+            if (auto* sh = find_ptr(s.ships, sid)) {
+              sh->sensor_mode = mode;
+            }
+          }
+        }
+
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Clear orders##ship_bulk_clear_orders")) {
+          for (Id sid : bulk_selected) {
+            sim.clear_orders(sid);
+          }
+        }
+
+        static int bulk_primary_auto_idx = 0; // 0=None
+        const char* autos[] = {"(no change)", "Disable mission automation", "Auto-explore", "Auto-freight", "Auto-salvage",
+                               "Auto-mine", "Auto-colonize", "Auto-tanker", "Auto-troop transport"};
+        ImGui::Combo("Mission automation##ship_bulk_auto", &bulk_primary_auto_idx, autos, IM_ARRAYSIZE(autos));
+        ImGui::SameLine();
+        static std::string bulk_status;
+        if (ImGui::SmallButton("Apply##ship_bulk_auto_apply")) {
+          int changed = 0;
+          int skipped_fleet = 0;
+          int skipped_cap = 0;
+
+          auto clear_mission_auto = [&](Ship& sh) {
+            sh.auto_explore = false;
+            sh.auto_freight = false;
+            sh.auto_salvage = false;
+            sh.auto_mine = false;
+            sh.auto_colonize = false;
+            sh.auto_tanker = false;
+            sh.auto_troop_transport = false;
+          };
+
+          for (Id sid : bulk_selected) {
+            Ship* sh = find_ptr(s.ships, sid);
+            if (!sh) continue;
+
+            // Respect fleet membership: fleets handle movement/stance.
+            if (sim.fleet_for_ship(sid) != kInvalidId) {
+              skipped_fleet++;
+              continue;
+            }
+
+            const ShipDesign* d = sim.find_design(sh->design_id);
+
+            if (bulk_primary_auto_idx == 0) continue; // no change
+            if (bulk_primary_auto_idx == 1) {
+              clear_mission_auto(*sh);
+              changed++;
+              continue;
+            }
+
+            // Mission automation modes are mutually exclusive.
+            clear_mission_auto(*sh);
+
+            bool ok = true;
+            switch (bulk_primary_auto_idx) {
+              case 2: // explore
+                sh->auto_explore = true;
+                break;
+              case 3: // freight
+                ok = (d && d->cargo_tons > 0.0);
+                if (ok) sh->auto_freight = true;
+                break;
+              case 4: // salvage
+                ok = (d && d->cargo_tons > 0.0);
+                if (ok) sh->auto_salvage = true;
+                break;
+              case 5: // mine
+                ok = (d && d->cargo_tons > 0.0 && d->mining_tons_per_day > 0.0);
+                if (ok) sh->auto_mine = true;
+                break;
+              case 6: // colonize
+                ok = (d && d->colony_capacity_millions > 0.0);
+                if (ok) sh->auto_colonize = true;
+                break;
+              case 7: // tanker
+                ok = (d && d->fuel_capacity_tons > 0.0);
+                if (ok) sh->auto_tanker = true;
+                break;
+              case 8: // troop transport
+                ok = (d && d->troop_capacity > 0.0);
+                if (ok) sh->auto_troop_transport = true;
+                break;
+              default:
+                break;
+            }
+
+            if (!ok) {
+              skipped_cap++;
+              // Leave it as "none" (cleared) to avoid enabling invalid modes.
+              continue;
+            }
+
+            changed++;
+          }
+
+          bulk_status = "Changed " + std::to_string(changed);
+          if (skipped_fleet > 0) bulk_status += " | skipped " + std::to_string(skipped_fleet) + " (in fleet)";
+          if (skipped_cap > 0) bulk_status += " | skipped " + std::to_string(skipped_cap) + " (capability)";
+        }
+        if (!bulk_status.empty()) {
+          ImGui::TextDisabled("%s", bulk_status.c_str());
+        }
+
+        // Repair priority.
+        static int bulk_repair_pri = 1; // Normal
+        const char* pris[] = {"Low", "Normal", "High"};
+        ImGui::Combo("Repair priority##ship_bulk_pri", &bulk_repair_pri, pris, IM_ARRAYSIZE(pris));
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Apply##ship_bulk_pri_apply")) {
+          const RepairPriority rp = (bulk_repair_pri == 0) ? RepairPriority::Low
+                                   : (bulk_repair_pri == 2) ? RepairPriority::High
+                                                            : RepairPriority::Normal;
+          for (Id sid : bulk_selected) {
+            if (auto* sh = find_ptr(s.ships, sid)) sh->repair_priority = rp;
+          }
+        }
+
+        ImGui::TextDisabled("Auto flags legend: E=Explore F=Freight S=Salvage M=Mine C=Colonize T=Tanker G=Troop  Rf=Refuel Rp=Repair Ra=Rearm");
+      } else {
+        ImGui::TextDisabled("Tip: Use the checkboxes to select multiple ships for bulk actions.");
+      }
+    }
+
+    const ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable |
+                                  ImGuiTableFlags_Reorderable | ImGuiTableFlags_Hideable | ImGuiTableFlags_Sortable |
+                                  ImGuiTableFlags_ScrollY | ImGuiTableFlags_ScrollX;
+
+    const ImVec2 avail = ImGui::GetContentRegionAvail();
+    if (ImGui::BeginTable("ship_directory", 13, flags, ImVec2(avail.x, avail.y))) {
+      ImGui::TableSetupScrollFreeze(0, 1);
+
+      ImGui::TableSetupColumn("Sel", ImGuiTableColumnFlags_NoSort | ImGuiTableColumnFlags_WidthFixed, 32.0f, 0);
+      ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_DefaultSort, 0.0f, 1);
+      ImGui::TableSetupColumn("Role", 0, 0.0f, 2);
+      ImGui::TableSetupColumn("Faction", 0, 0.0f, 3);
+      ImGui::TableSetupColumn("System", 0, 0.0f, 4);
+      ImGui::TableSetupColumn("Fleet", 0, 0.0f, 5);
+      ImGui::TableSetupColumn("Orders", ImGuiTableColumnFlags_PreferSortDescending, 0.0f, 6);
+      ImGui::TableSetupColumn("HP", ImGuiTableColumnFlags_PreferSortDescending, 0.0f, 7);
+      ImGui::TableSetupColumn("Maint", ImGuiTableColumnFlags_PreferSortDescending, 0.0f, 8);
+      ImGui::TableSetupColumn("Heat", ImGuiTableColumnFlags_PreferSortDescending, 0.0f, 9);
+      ImGui::TableSetupColumn("Fuel", ImGuiTableColumnFlags_PreferSortDescending, 0.0f, 10);
+      ImGui::TableSetupColumn("Sensors", 0, 0.0f, 11);
+      ImGui::TableSetupColumn("Auto", 0, 0.0f, 12);
+
+      ImGui::TableHeadersRow();
+
+      if (ImGuiTableSortSpecs* sort = ImGui::TableGetSortSpecs()) {
+        if (sort->SpecsDirty && sort->SpecsCount > 0) {
+          const ImGuiTableColumnSortSpecs* spec = &sort->Specs[0];
+          const bool asc = (spec->SortDirection == ImGuiSortDirection_Ascending);
+          auto cmp = [&](const ShipRow& a, const ShipRow& b) {
+            auto lt = [&](auto x, auto y) { return asc ? (x < y) : (x > y); };
+            switch (spec->ColumnUserID) {
+              case 1: return lt(a.name, b.name);
+              case 2: return lt((int)a.role, (int)b.role);
+              case 3: return lt(a.faction, b.faction);
+              case 4: return lt(a.system, b.system);
+              case 5: return lt(a.fleet, b.fleet);
+              case 6: return lt(a.orders, b.orders);
+              case 7: return lt(a.hp_frac, b.hp_frac);
+              case 8: return lt(a.maint, b.maint);
+              case 9: return lt(a.heat_frac, b.heat_frac);
+              case 10: return lt(a.fuel_frac, b.fuel_frac);
+              case 11: return lt((int)a.sensor_mode, (int)b.sensor_mode);
+              case 12: return lt(a.auto_flags, b.auto_flags);
+              default: return lt(a.name, b.name);
+            }
+          };
+          std::stable_sort(rows.begin(), rows.end(), cmp);
+          sort->SpecsDirty = false;
+        }
+      }
+
+      ImGuiListClipper clip;
+      clip.Begin(static_cast<int>(rows.size()));
+      while (clip.Step()) {
+        for (int i = clip.DisplayStart; i < clip.DisplayEnd; ++i) {
+          const ShipRow& r = rows[i];
+          ImGui::TableNextRow();
+
+          ImGui::TableSetColumnIndex(0);
+          ImGui::PushID((void*)(intptr_t)r.id);
+          bool sel = (bulk_selected.find(r.id) != bulk_selected.end());
+          if (ImGui::Checkbox("##sel", &sel)) {
+            if (sel) bulk_selected.insert(r.id);
+            else bulk_selected.erase(r.id);
+          }
+          ImGui::PopID();
+
+          ImGui::TableSetColumnIndex(1);
+          const bool is_sel = (selected_ship == r.id);
+          std::string label = r.name + "##ship_" + std::to_string(static_cast<unsigned long long>(r.id));
+          if (ImGui::Selectable(label.c_str(), is_sel, ImGuiSelectableFlags_SpanAllColumns)) {
+            selected_ship = r.id;
+            if (r.system_id != kInvalidId) {
+              s.selected_system = r.system_id;
+            }
+          }
+          if (ImGui::IsItemHovered()) {
+            ImGui::BeginTooltip();
+            ImGui::Text("%s", r.name.c_str());
+            ImGui::TextDisabled("Design: %s", r.design.c_str());
+            ImGui::TextDisabled("Auto: %s", r.auto_flags.c_str());
+            ImGui::TextDisabled("Sensor mode: %s", sensor_mode_label(r.sensor_mode));
+            ImGui::EndTooltip();
+          }
+
+          // Context menu (right click).
+          if (ImGui::BeginPopupContextItem()) {
+            if (ImGui::MenuItem("Center system map")) {
+              if (r.system_id != kInvalidId) {
+                s.selected_system = r.system_id;
+                ui.request_map_tab = MapTab::System;
+                ui.request_system_map_center = true;
+                ui.request_system_map_center_system_id = r.system_id;
+                if (const Ship* sh = find_ptr(s.ships, r.id)) {
+                  ui.request_system_map_center_x_mkm = sh->position_mkm.x;
+                  ui.request_system_map_center_y_mkm = sh->position_mkm.y;
+                } else {
+                  ui.request_system_map_center_x_mkm = 0.0;
+                  ui.request_system_map_center_y_mkm = 0.0;
+                }
+                ui.request_system_map_center_zoom = 0.0;
+              }
+            }
+            if (ImGui::MenuItem("Clear orders")) {
+              sim.clear_orders(r.id);
+            }
+            if (ImGui::MenuItem("Select (bulk checkbox)")) {
+              bulk_selected.insert(r.id);
+            }
+            ImGui::EndPopup();
+          }
+
+          ImGui::TableSetColumnIndex(2);
+          ImGui::TextUnformatted(ship_role_label(r.role));
+
+          ImGui::TableSetColumnIndex(3);
+          ImGui::TextUnformatted(r.faction.c_str());
+
+          ImGui::TableSetColumnIndex(4);
+          ImGui::TextUnformatted(r.system.c_str());
+
+          ImGui::TableSetColumnIndex(5);
+          if (r.fleet_id != kInvalidId) ImGui::TextUnformatted(r.fleet.c_str());
+          else ImGui::TextDisabled("-");
+
+          ImGui::TableSetColumnIndex(6);
+          if (r.orders > 0) {
+            ImGui::Text("%d", r.orders);
+            if (ImGui::IsItemHovered()) {
+              if (const ShipOrders* so = find_ptr(s.ship_orders, r.id)) {
+                if (!so->queue.empty()) {
+                  ImGui::BeginTooltip();
+                  ImGui::TextUnformatted("Current orders:");
+                  const int max_show = std::min(6, (int)so->queue.size());
+                  for (int oi = 0; oi < max_show; ++oi) {
+                    const std::string os = nebula4x::order_to_string(so->queue[(std::size_t)oi]);
+                    ImGui::BulletText("%s", os.c_str());
+                  }
+                  if ((int)so->queue.size() > max_show) {
+                    ImGui::TextDisabled("... (%d more)", (int)so->queue.size() - max_show);
+                  }
+                  ImGui::EndTooltip();
+                }
+              }
+            }
+          } else {
+            ImGui::TextDisabled("0");
+          }
+
+          auto bar = [&](double frac) {
+            frac = std::clamp(frac, 0.0, 1.0);
+            const std::string pct = format_fixed(frac * 100.0, 0) + "%";
+            ImGui::ProgressBar((float)frac, ImVec2(-1.0f, 0.0f), pct.c_str());
+          };
+
+          ImGui::TableSetColumnIndex(7);
+          bar(r.hp_frac);
+
+          ImGui::TableSetColumnIndex(8);
+          bar(r.maint);
+
+          ImGui::TableSetColumnIndex(9);
+          bar(r.heat_frac);
+
+          ImGui::TableSetColumnIndex(10);
+          if (r.fuel_frac >= 0.0) {
+            bar(r.fuel_frac);
+          } else {
+            ImGui::TextDisabled("-");
+          }
+
+          ImGui::TableSetColumnIndex(11);
+          // Editable per-row sensor mode.
+          if (auto* sh = find_ptr(s.ships, r.id)) {
+            const char* cur = sensor_mode_label(sh->sensor_mode);
+            std::string key = "##sensor_" + std::to_string(static_cast<unsigned long long>(r.id));
+            if (ImGui::BeginCombo(key.c_str(), cur, ImGuiComboFlags_HeightSmall)) {
+              const SensorMode modes[] = {SensorMode::Passive, SensorMode::Normal, SensorMode::Active};
+              for (SensorMode m : modes) {
+                const bool selm = (sh->sensor_mode == m);
+                if (ImGui::Selectable(sensor_mode_label(m), selm)) sh->sensor_mode = m;
+                if (selm) ImGui::SetItemDefaultFocus();
+              }
+              ImGui::EndCombo();
+            }
+          } else {
+            ImGui::TextDisabled("-");
+          }
+
+          ImGui::TableSetColumnIndex(12);
+          ImGui::TextUnformatted(r.auto_flags.c_str());
+        }
+      }
+
+      ImGui::EndTable();
+    }
+
+    ImGui::EndTabItem();
+  }
+
 
   // --- Bodies tab ---
   if (ImGui::BeginTabItem("Bodies")) {

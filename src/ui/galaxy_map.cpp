@@ -537,6 +537,151 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
     }
   }
 
+
+
+  // Auto-freight lane overlay: draws directional cargo routes inferred from ship orders.
+  // This is a strategic debugging/operational lens for seeing where your logistics ships are flowing.
+  if (ui.show_galaxy_freight_lanes) {
+    struct LaneKey {
+      Id a{kInvalidId};
+      Id b{kInvalidId};
+    };
+    struct LaneAgg {
+      int ships{0};
+      double tons{0.0};
+    };
+    struct LaneKeyHash {
+      std::size_t operator()(const LaneKey& k) const noexcept {
+        // Stable-ish mix for Id pairs.
+        const std::size_t h1 = std::hash<Id>{}(k.a);
+        const std::size_t h2 = std::hash<Id>{}(k.b);
+        return h1 ^ (h2 + 0x9e3779b97f4a7c15ULL + (h1 << 6) + (h1 >> 2));
+      }
+    };
+    struct LaneKeyEq {
+      bool operator()(const LaneKey& x, const LaneKey& y) const noexcept { return x.a == y.a && x.b == y.b; }
+    };
+
+    auto colony_system_id = [&](Id colony_id) -> Id {
+      const auto* c = find_ptr(s.colonies, colony_id);
+      if (!c) return kInvalidId;
+      const auto* b = find_ptr(s.bodies, c->body_id);
+      if (!b) return kInvalidId;
+      return b->system_id;
+    };
+
+    auto ship_cargo_used = [&](const Ship& sh) {
+      double used = 0.0;
+      for (const auto& kv : sh.cargo) used += std::max(0.0, kv.second);
+      return used;
+    };
+
+    // Aggregate routes to reduce clutter.
+    std::unordered_map<LaneKey, LaneAgg, LaneKeyHash, LaneKeyEq> lanes;
+    lanes.reserve(128);
+
+    // Default: show viewer faction's logistics when defined; otherwise show everything.
+    const Id lane_faction = viewer_faction_id;
+
+    for (const auto& kv : s.ships) {
+      const Ship& sh = kv.second;
+      if (!sh.auto_freight) continue;
+      if (lane_faction != kInvalidId && sh.faction_id != lane_faction) continue;
+      if (sh.system_id == kInvalidId) continue;
+
+      const auto* so = find_ptr(s.ship_orders, sh.id);
+      if (!so) continue;
+      const bool templ = so->queue.empty() && so->repeat && !so->repeat_template.empty() && so->repeat_count_remaining != 0;
+      const auto& q = templ ? so->repeat_template : so->queue;
+      if (q.empty()) continue;
+
+      Id src_colony = kInvalidId;
+      Id dst_colony = kInvalidId;
+      double load_tons = 0.0;
+      double unload_tons = 0.0;
+
+      for (const auto& ord : q) {
+        if (const auto* lm = std::get_if<nebula4x::LoadMineral>(&ord)) {
+          if (src_colony == kInvalidId) src_colony = lm->colony_id;
+          if (lm->colony_id == src_colony && lm->tons > 0.0) load_tons += lm->tons;
+        }
+        if (const auto* um = std::get_if<nebula4x::UnloadMineral>(&ord)) {
+          if (dst_colony == kInvalidId) dst_colony = um->colony_id;
+          if (um->colony_id == dst_colony && um->tons > 0.0) unload_tons += um->tons;
+        }
+      }
+
+      if (dst_colony == kInvalidId) continue;
+
+      Id src_sys = (src_colony != kInvalidId) ? colony_system_id(src_colony) : sh.system_id;
+      Id dst_sys = colony_system_id(dst_colony);
+      if (src_sys == kInvalidId || dst_sys == kInvalidId) continue;
+      if (src_sys == dst_sys) continue;
+
+      // Respect fog-of-war: only draw lanes where both endpoints are visible.
+      if (!can_show_system(viewer_faction_id, ui.fog_of_war, sim, src_sys)) continue;
+      if (!can_show_system(viewer_faction_id, ui.fog_of_war, sim, dst_sys)) continue;
+
+      double tons = (unload_tons > 1e-6) ? unload_tons : load_tons;
+      if (tons <= 1e-6) tons = ship_cargo_used(sh);
+
+      LaneKey key{src_sys, dst_sys};
+      LaneAgg& agg = lanes[key];
+      agg.ships++;
+      agg.tons += std::max(0.0, tons);
+    }
+
+    if (!lanes.empty()) {
+      // Sort by volume so the busiest lanes get drawn first (and kept when we hit caps).
+      struct LaneItem { LaneKey key; LaneAgg agg; };
+      std::vector<LaneItem> items;
+      items.reserve(lanes.size());
+      for (const auto& kv : lanes) items.push_back(LaneItem{kv.first, kv.second});
+
+      std::sort(items.begin(), items.end(), [](const LaneItem& a, const LaneItem& b) {
+        if (a.agg.tons > b.agg.tons + 1e-6) return true;
+        if (b.agg.tons > a.agg.tons + 1e-6) return false;
+        return a.agg.ships > b.agg.ships;
+      });
+
+      const std::size_t kMaxLanes = 256;
+      if (items.size() > kMaxLanes) items.resize(kMaxLanes);
+
+      const float alpha = std::clamp(ui.map_route_opacity, 0.0f, 1.0f);
+      const ImU32 base = IM_COL32(120, 220, 140, 255);
+      const ImU32 col = modulate_alpha(base, 0.55f * alpha);
+      const ImU32 shadow = modulate_alpha(IM_COL32(0, 0, 0, 200), 0.55f * alpha);
+
+      for (const auto& it : items) {
+        const auto* a_sys = find_ptr(s.systems, it.key.a);
+        const auto* b_sys = find_ptr(s.systems, it.key.b);
+        if (!a_sys || !b_sys) continue;
+
+        const Vec2 a = a_sys->galaxy_pos - world_center;
+        const Vec2 b = b_sys->galaxy_pos - world_center;
+        const ImVec2 pa = to_screen(a, center_px, scale, zoom, pan);
+        const ImVec2 pb = to_screen(b, center_px, scale, zoom, pan);
+
+        // Thickness scales gently with total planned tonnage.
+        const double t = std::max(0.0, it.agg.tons);
+        const float thick = 1.0f + static_cast<float>(std::clamp(std::log10(t + 1.0) * 0.75, 0.0, 4.0));
+
+        draw->AddLine(pa, pb, shadow, thick + 2.0f);
+        draw->AddLine(pa, pb, col, thick);
+        add_arrowhead(draw, pa, pb, col, 8.0f + thick * 2.0f);
+        draw->AddCircleFilled(pb, 3.0f + thick, shadow, 0);
+        draw->AddCircleFilled(pb, 2.25f + thick * 0.75f, col, 0);
+
+        if (zoom >= 0.75f && it.agg.ships > 1) {
+          char buf[32];
+          std::snprintf(buf, sizeof(buf), "%dx", it.agg.ships);
+          const ImVec2 mid{(pa.x + pb.x) * 0.5f, (pa.y + pb.y) * 0.5f};
+          draw->AddText(ImVec2(mid.x + 6.0f, mid.y + 4.0f), shadow, buf);
+          draw->AddText(ImVec2(mid.x + 5.0f, mid.y + 3.0f), col, buf);
+        }
+      }
+    }
+  }
   // Selected ship/fleet travel route overlay (linked elements).
   if (ui.galaxy_map_selected_route) {
     Id route_ship_id = selected_ship;
@@ -1247,7 +1392,8 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   ImGui::Checkbox("Chokepoints (articulation)", &ui.show_galaxy_chokepoints);
   ImGui::Checkbox("Unknown exits hint (unsurveyed / undiscovered)", &ui.show_galaxy_unknown_exits);
   ImGui::Checkbox("Intel alerts", &ui.show_galaxy_intel_alerts);
-
+  ImGui::Checkbox("Freight lanes", &ui.show_galaxy_freight_lanes);
+  ImGui::TextDisabled("Shows current auto-freight cargo routes (viewer faction).");
   ImGui::SeparatorText("Route ruler (hold D)");
   ImGui::TextDisabled("Hold D and left click two systems. D+right click clears.");
   {
