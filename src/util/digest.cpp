@@ -143,9 +143,14 @@ static void hash_order(Digest64& d, const Order& ord) {
           d.add_u64(4);
           d.add_u64(o.body_id);
           d.add_i64(o.duration_days);
+          d.add_double(o.progress_days);
         } else if constexpr (std::is_same_v<T, TravelViaJump>) {
           d.add_u64(5);
           d.add_u64(o.jump_point_id);
+        } else if constexpr (std::is_same_v<T, SurveyJumpPoint>) {
+          d.add_u64(24);
+          d.add_u64(o.jump_point_id);
+          d.add_bool(o.transit_when_done);
         } else if constexpr (std::is_same_v<T, AttackShip>) {
           d.add_u64(6);
           d.add_u64(o.target_ship_id);
@@ -159,6 +164,7 @@ static void hash_order(Digest64& d, const Order& ord) {
         } else if constexpr (std::is_same_v<T, WaitDays>) {
           d.add_u64(7);
           d.add_i64(o.days_remaining);
+          d.add_double(o.progress_days);
         } else if constexpr (std::is_same_v<T, LoadMineral>) {
           d.add_u64(8);
           d.add_u64(o.colony_id);
@@ -391,9 +397,7 @@ static void hash_content_db(Digest64& d, const ContentDB& c) {
   }
 }
 
-static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions& opt) {
-  d.add_string("GameStateDigestV1");
-
+static void hash_game_state_header(Digest64& d, const GameState& s, const DigestOptions& opt) {
   d.add_i64(s.save_version);
   d.add_i64(s.date.days_since_epoch());
   d.add_i64(s.hour_of_day);
@@ -406,7 +410,9 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
   hash_victory_state(d, s.victory_state);
 
   if (opt.include_ui_state) d.add_u64(s.selected_system);
+}
 
+static void hash_game_state_systems(Digest64& d, const GameState& s) {
   // Systems
   d.add_size(s.systems.size());
   for (Id sid : sorted_keys(s.systems)) {
@@ -435,7 +441,9 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
     d.add_size(jumps.size());
     for (Id jid : jumps) d.add_u64(jid);
   }
+}
 
+static void hash_game_state_regions(Digest64& d, const GameState& s) {
   // Regions
   d.add_size(s.regions.size());
   for (Id rid : sorted_keys(s.regions)) {
@@ -452,7 +460,9 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
     d.add_double(r.pirate_suppression);
     d.add_double(r.ruins_density);
   }
+}
 
+static void hash_game_state_bodies(Digest64& d, const GameState& s) {
   // Bodies
   d.add_size(s.bodies.size());
   for (Id bid : sorted_keys(s.bodies)) {
@@ -479,7 +489,9 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
     hash_vec2(d, b.position_mkm);
     hash_string_double_map(d, b.mineral_deposits);
   }
+}
 
+static void hash_game_state_jump_points(Digest64& d, const GameState& s) {
   // Jump points
   d.add_size(s.jump_points.size());
   for (Id jid : sorted_keys(s.jump_points)) {
@@ -490,7 +502,9 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
     hash_vec2(d, jp.position_mkm);
     d.add_u64(jp.linked_jump_id);
   }
+}
 
+static void hash_game_state_ships(Digest64& d, const GameState& s) {
   // Ships
   d.add_size(s.ships.size());
   for (Id shid : sorted_keys(s.ships)) {
@@ -554,7 +568,9 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
     d.add_double(sh.troops);
     d.add_double(sh.colonists_millions);
   }
+}
 
+static void hash_game_state_wrecks(Digest64& d, const GameState& s) {
   // Wrecks
   d.add_size(s.wrecks.size());
   for (Id wid : sorted_keys(s.wrecks)) {
@@ -569,7 +585,9 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
     d.add_string(w.source_design_id);
     d.add_i64(w.created_day);
   }
+}
 
+static void hash_game_state_anomalies(Digest64& d, const GameState& s) {
   // Anomalies
   d.add_size(s.anomalies.size());
   for (Id aid : sorted_keys(s.anomalies)) {
@@ -586,7 +604,9 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
     d.add_u64(a.resolved_by_faction_id);
     d.add_i64(a.resolved_day);
   }
+}
 
+static void hash_game_state_missile_salvos(Digest64& d, const GameState& s) {
   // Missile salvos
   d.add_size(s.missile_salvos.size());
   for (Id mid : sorted_keys(s.missile_salvos)) {
@@ -609,7 +629,9 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
     hash_vec2(d, ms.launch_pos_mkm);
     hash_vec2(d, ms.target_pos_mkm);
   }
+}
 
+static void hash_game_state_colonies(Digest64& d, const GameState& s) {
   // Colonies
   d.add_size(s.colonies.size());
   for (Id cid : sorted_keys(s.colonies)) {
@@ -650,7 +672,9 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
       d.add_bool(io.auto_queued);
     }
   }
+}
 
+static void hash_game_state_factions(Digest64& d, const GameState& s) {
   // Factions
   d.add_size(s.factions.size());
   for (Id fid : sorted_keys(s.factions)) {
@@ -737,7 +761,9 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
       d.add_i64(it == f.pirate_hideout_cooldown_until_day.end() ? 0 : it->second);
     }
   }
+}
 
+static void hash_game_state_treaties(Digest64& d, const GameState& s) {
   // Treaties
   d.add_size(s.treaties.size());
   for (Id tid : sorted_keys(s.treaties)) {
@@ -748,6 +774,10 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
     d.add_enum(t.type);
     d.add_i64(t.start_day);
     d.add_i64(t.duration_days);
+  }
+}
+
+static void hash_game_state_diplomatic_offers(Digest64& d, const GameState& s) {
   // Diplomatic offers
   d.add_size(s.diplomatic_offers.size());
   for (Id oid : sorted_keys(s.diplomatic_offers)) {
@@ -761,9 +791,9 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
     d.add_i64(o.expire_day);
     d.add_string(o.message);
   }
+}
 
-  }
-
+static void hash_game_state_fleets(Digest64& d, const GameState& s) {
   // Fleets
   d.add_size(s.fleets.size());
   for (Id flid : sorted_keys(s.fleets)) {
@@ -778,14 +808,18 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
     d.add_enum(fl.formation);
     d.add_double(fl.formation_spacing_mkm);
   }
+}
 
+static void hash_game_state_custom_designs(Digest64& d, const GameState& s) {
   // Custom designs
   d.add_size(s.custom_designs.size());
   for (const auto& key : sorted_keys(s.custom_designs)) {
     d.add_string(key);
     hash_ship_design(d, s.custom_designs.at(key));
   }
+}
 
+static void hash_game_state_order_templates(Digest64& d, const GameState& s) {
   // Order templates
   d.add_size(s.order_templates.size());
   for (const auto& key : sorted_keys(s.order_templates)) {
@@ -794,7 +828,9 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
     d.add_size(orders.size());
     for (const auto& o : orders) hash_order(d, o);
   }
+}
 
+static void hash_game_state_ship_orders(Digest64& d, const GameState& s) {
   // Ship orders
   d.add_size(s.ship_orders.size());
   for (Id sid : sorted_keys(s.ship_orders)) {
@@ -807,7 +843,9 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
     d.add_size(so.repeat_template.size());
     for (const auto& o : so.repeat_template) hash_order(d, o);
   }
+}
 
+static void hash_game_state_ground_battles(Digest64& d, const GameState& s) {
   // Ground battles
   d.add_size(s.ground_battles.size());
   for (Id cid : sorted_keys(s.ground_battles)) {
@@ -822,31 +860,59 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
     d.add_double(b.fortification_damage_points);
     d.add_i64(b.days_fought);
   }
+}
 
+static void hash_game_state_events(Digest64& d, const GameState& s) {
   // Persistent events
-  if (opt.include_events) {
-    d.add_size(s.events.size());
-    std::vector<const SimEvent*> ev;
-    ev.reserve(s.events.size());
-    for (const auto& e : s.events) ev.push_back(&e);
-    std::sort(ev.begin(), ev.end(), [](const SimEvent* a, const SimEvent* b) {
-      return a->seq < b->seq;
-    });
-    for (const auto* e : ev) {
-      d.add_u64(e->seq);
-      d.add_i64(e->day);
-      d.add_i64(static_cast<std::int64_t>(e->hour));
-      d.add_enum(e->level);
-      d.add_enum(e->category);
-      d.add_u64(e->faction_id);
-      d.add_u64(e->faction_id2);
-      d.add_u64(e->system_id);
-      d.add_u64(e->ship_id);
-      d.add_u64(e->colony_id);
-      d.add_string(e->message);
-    }
+  d.add_size(s.events.size());
+  std::vector<const SimEvent*> ev;
+  ev.reserve(s.events.size());
+  for (const auto& e : s.events) ev.push_back(&e);
+  std::sort(ev.begin(), ev.end(), [](const SimEvent* a, const SimEvent* b) {
+    return a->seq < b->seq;
+  });
+  for (const auto* e : ev) {
+    d.add_u64(e->seq);
+    d.add_i64(e->day);
+    d.add_i64(static_cast<std::int64_t>(e->hour));
+    d.add_enum(e->level);
+    d.add_enum(e->category);
+    d.add_u64(e->faction_id);
+    d.add_u64(e->faction_id2);
+    d.add_u64(e->system_id);
+    d.add_u64(e->ship_id);
+    d.add_u64(e->colony_id);
+    d.add_string(e->message);
   }
 }
+
+static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions& opt) {
+  d.add_string("GameStateDigestV1");
+
+  hash_game_state_header(d, s, opt);
+  hash_game_state_systems(d, s);
+  hash_game_state_regions(d, s);
+  hash_game_state_bodies(d, s);
+  hash_game_state_jump_points(d, s);
+  hash_game_state_ships(d, s);
+  hash_game_state_wrecks(d, s);
+  hash_game_state_anomalies(d, s);
+  hash_game_state_missile_salvos(d, s);
+  hash_game_state_colonies(d, s);
+  hash_game_state_factions(d, s);
+  hash_game_state_treaties(d, s);
+  hash_game_state_diplomatic_offers(d, s);
+  hash_game_state_fleets(d, s);
+  hash_game_state_custom_designs(d, s);
+  hash_game_state_order_templates(d, s);
+  hash_game_state_ship_orders(d, s);
+  hash_game_state_ground_battles(d, s);
+
+  if (opt.include_events) {
+    hash_game_state_events(d, s);
+  }
+}
+
 
 } // namespace
 
@@ -855,6 +921,52 @@ std::uint64_t digest_game_state64(const GameState& state, const DigestOptions& o
   hash_game_state(d, state, opt);
   return d.value();
 }
+
+GameStateDigestReport64 digest_game_state64_report(const GameState& state, const DigestOptions& opt) {
+  GameStateDigestReport64 rep;
+  rep.overall = digest_game_state64(state, opt);
+  rep.parts.reserve(18 + (opt.include_events ? 1 : 0));
+
+  auto add_part = [&](const char* label, std::size_t count, auto fn) {
+    Digest64 d;
+    d.add_string(label);
+    fn(d);
+
+    DigestPart64 p;
+    p.label = label;
+    p.digest = d.value();
+    p.element_count = count;
+    rep.parts.push_back(std::move(p));
+  };
+
+  add_part("header", 1, [&](Digest64& d) { hash_game_state_header(d, state, opt); });
+  add_part("systems", state.systems.size(), [&](Digest64& d) { hash_game_state_systems(d, state); });
+  add_part("regions", state.regions.size(), [&](Digest64& d) { hash_game_state_regions(d, state); });
+  add_part("bodies", state.bodies.size(), [&](Digest64& d) { hash_game_state_bodies(d, state); });
+  add_part("jump_points", state.jump_points.size(), [&](Digest64& d) { hash_game_state_jump_points(d, state); });
+  add_part("ships", state.ships.size(), [&](Digest64& d) { hash_game_state_ships(d, state); });
+  add_part("wrecks", state.wrecks.size(), [&](Digest64& d) { hash_game_state_wrecks(d, state); });
+  add_part("anomalies", state.anomalies.size(), [&](Digest64& d) { hash_game_state_anomalies(d, state); });
+  add_part("missile_salvos", state.missile_salvos.size(), [&](Digest64& d) { hash_game_state_missile_salvos(d, state); });
+  add_part("colonies", state.colonies.size(), [&](Digest64& d) { hash_game_state_colonies(d, state); });
+  add_part("factions", state.factions.size(), [&](Digest64& d) { hash_game_state_factions(d, state); });
+  add_part("treaties", state.treaties.size(), [&](Digest64& d) { hash_game_state_treaties(d, state); });
+  add_part("diplomatic_offers", state.diplomatic_offers.size(), [&](Digest64& d) {
+    hash_game_state_diplomatic_offers(d, state);
+  });
+  add_part("fleets", state.fleets.size(), [&](Digest64& d) { hash_game_state_fleets(d, state); });
+  add_part("custom_designs", state.custom_designs.size(), [&](Digest64& d) { hash_game_state_custom_designs(d, state); });
+  add_part("order_templates", state.order_templates.size(), [&](Digest64& d) { hash_game_state_order_templates(d, state); });
+  add_part("ship_orders", state.ship_orders.size(), [&](Digest64& d) { hash_game_state_ship_orders(d, state); });
+  add_part("ground_battles", state.ground_battles.size(), [&](Digest64& d) { hash_game_state_ground_battles(d, state); });
+
+  if (opt.include_events) {
+    add_part("events", state.events.size(), [&](Digest64& d) { hash_game_state_events(d, state); });
+  }
+
+  return rep;
+}
+
 
 std::uint64_t digest_content_db64(const ContentDB& content) {
   Digest64 d;

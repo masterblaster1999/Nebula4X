@@ -315,6 +315,33 @@ int test_digests() {
   no_events.include_ui_state = true;
   N4X_ASSERT(digest_game_state64(s1, no_events) == digest_game_state64(s4, no_events));
 
+  // Digest breakdown report: overall matches digest_game_state64(), and parts isolate changes.
+  {
+    const auto rep = digest_game_state64_report(s1);
+    N4X_ASSERT(rep.overall == digest_game_state64(s1));
+
+    bool found_ship_orders = false;
+    std::uint64_t ship_orders_digest = 0;
+    for (const auto& p : rep.parts) {
+      if (p.label == "ship_orders") {
+        found_ship_orders = true;
+        ship_orders_digest = p.digest;
+      }
+    }
+    N4X_ASSERT(found_ship_orders);
+
+    // Change only ship orders, and ensure the ship_orders part digest changes.
+    GameState s5 = s1;
+    s5.ship_orders[100].queue.push_back(WaitDays{1});
+    const auto rep2 = digest_game_state64_report(s5);
+
+    std::uint64_t ship_orders_digest2 = 0;
+    for (const auto& p : rep2.parts) {
+      if (p.label == "ship_orders") ship_orders_digest2 = p.digest;
+    }
+    N4X_ASSERT(ship_orders_digest != ship_orders_digest2);
+  }
+
   // --- Timeline export smoke test ---
   TimelineExportOptions topt;
   topt.include_minerals = true;

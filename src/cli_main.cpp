@@ -413,6 +413,7 @@ void print_usage(const char* exe) {
   std::cout << "  --validate-content  Validate content + tech files and exit\n";
   std::cout << "  --validate-save     Validate loaded/new game state and exit\n";
   std::cout << "  --digest         Print stable content/state digests (useful for bug reports)\n";
+  std::cout << "    --digest-breakdown  Print a per-subsystem breakdown of the state digest\n";
   std::cout << "    --digest-no-events  Exclude the persistent SimEvent log from the state digest\n";
   std::cout << "    --digest-no-ui      Exclude UI-only fields (selected system) from the state digest\n";
   std::cout << "  --dump           Print the resulting save JSON to stdout\n";
@@ -952,6 +953,7 @@ int main(int argc, char** argv) {
     const bool print_digests = has_flag(argc, argv, "--digest");
     const bool digest_no_events = has_flag(argc, argv, "--digest-no-events");
     const bool digest_no_ui = has_flag(argc, argv, "--digest-no-ui");
+    const bool digest_breakdown = has_flag(argc, argv, "--digest-breakdown");
 
     nebula4x::TimelineExportOptions timeline_opt;
     timeline_opt.include_minerals = true;
@@ -1983,9 +1985,19 @@ if (duel) {
     if (print_digests) {
       std::ostream& out = script_stdout ? std::cerr : std::cout;
       out << "content_digest " << nebula4x::digest64_to_hex(content_digest) << "\n";
-      out << "state_digest "
-          << nebula4x::digest64_to_hex(nebula4x::digest_game_state64(sim.state(), timeline_opt.digest))
-          << "\n";
+
+      if (digest_breakdown) {
+        const auto rep = nebula4x::digest_game_state64_report(sim.state(), timeline_opt.digest);
+        out << "state_digest " << nebula4x::digest64_to_hex(rep.overall) << "\n";
+        for (const auto& p : rep.parts) {
+          out << "state_part " << p.label << " " << nebula4x::digest64_to_hex(p.digest) << " " << p.element_count
+              << "\n";
+        }
+      } else {
+        out << "state_digest "
+            << nebula4x::digest64_to_hex(nebula4x::digest_game_state64(sim.state(), timeline_opt.digest))
+            << "\n";
+      }
     }
 
     const bool dump_events = has_flag(argc, argv, "--dump-events");

@@ -100,8 +100,18 @@ struct TestCase {
 };
 
 std::string get_env_str(const char* key) {
+#if defined(_MSC_VER)
+  // MSVC warns that getenv() is unsafe. _dupenv_s allocates a copy that we own.
+  char* buf = nullptr;
+  size_t len = 0;
+  if (_dupenv_s(&buf, &len, key) != 0 || !buf) return {};
+  std::string out(buf);
+  std::free(buf);
+  return out;
+#else
   const char* v = std::getenv(key);
   return v ? std::string(v) : std::string{};
+#endif
 }
 
 bool env_flag(const char* key) {

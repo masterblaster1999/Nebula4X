@@ -45,6 +45,11 @@ struct StateDoctorState {
   std::string preview_merge_patch_json;
 
   std::string preview_before_digest_hex;
+  // Digest breakdown (debug helper).
+  bool has_digest_report{false};
+  std::uint64_t digest_report_state_generation{0};
+  nebula4x::GameStateDigestReport64 digest_report;
+
   std::string preview_after_digest_hex;
 
   // Export.
@@ -80,6 +85,14 @@ std::string digest_hex_for_state(const nebula4x::GameState& gs) {
   return nebula4x::digest64_to_hex(nebula4x::digest_game_state64(gs, opt));
 }
 
+nebula4x::GameStateDigestReport64 digest_report_for_state(const nebula4x::GameState& gs) {
+  nebula4x::DigestOptions opt;
+  opt.include_events = false;
+  opt.include_ui_state = false;
+  return nebula4x::digest_game_state64_report(gs, opt);
+}
+
+
 void clear_preview(StateDoctorState& s) {
   s.has_preview = false;
   s.preview_report = {};
@@ -89,6 +102,13 @@ void clear_preview(StateDoctorState& s) {
   s.preview_before_digest_hex.clear();
   s.preview_after_digest_hex.clear();
 }
+
+void clear_digest_report(StateDoctorState& s) {
+  s.has_digest_report = false;
+  s.digest_report_state_generation = 0;
+  s.digest_report = {};
+}
+
 
 void run_validation(nebula4x::Simulation& sim, StateDoctorState& s) {
   s.last_error.clear();
@@ -109,6 +129,25 @@ void run_validation(nebula4x::Simulation& sim, StateDoctorState& s) {
     s.errors.clear();
   }
 }
+
+void run_digest_breakdown(nebula4x::Simulation& sim, StateDoctorState& s) {
+  s.last_error.clear();
+  s.last_status.clear();
+
+  try {
+    s.digest_report = digest_report_for_state(sim.state());
+    s.digest_report_state_generation = sim.state_generation();
+    s.has_digest_report = true;
+
+    s.last_status = "Digest breakdown computed (" + std::to_string(s.digest_report.parts.size()) + " sections).";
+  } catch (const std::exception& e) {
+    s.last_error = e.what();
+    s.last_status.clear();
+    s.has_digest_report = false;
+    s.digest_report = {};
+  }
+}
+
 
 void run_preview_fix(nebula4x::Simulation& sim, StateDoctorState& s) {
   s.last_error.clear();
@@ -149,6 +188,7 @@ void apply_fix(nebula4x::Simulation& sim, StateDoctorState& s) {
     // Replace the live state so the Simulation rebuilds derived caches and the UI
     // clears stale selections (via state_generation).
     sim.load_game(std::move(fixed));
+    clear_digest_report(s);
 
     // Re-validate the now-loaded state.
     run_validation(sim, s);
@@ -181,6 +221,7 @@ void draw_state_doctor_window(Simulation& sim, UIState& ui) {
   // Auto-refresh when the simulation replaces the state (load/new-game/etc).
   if (ui.show_state_doctor_window && s.auto_refresh_on_state_change &&
       s.last_seen_state_generation != sim.state_generation()) {
+    clear_digest_report(s);
     run_validation(sim, s);
   }
 
@@ -200,6 +241,57 @@ void draw_state_doctor_window(Simulation& sim, UIState& ui) {
     ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), "Error: %s", s.last_error.c_str());
   } else if (!s.last_status.empty()) {
     ImGui::TextColored(ImVec4(0.6f, 0.9f, 0.6f, 1), "%s", s.last_status.c_str());
+  }
+
+  ImGui::SeparatorText("Digest breakdown");
+  const bool digest_stale = s.has_digest_report && (s.digest_report_state_generation != sim.state_generation());
+  if (digest_stale) {
+    ImGui::TextColored(ImVec4(1, 0.8f, 0.2f, 1), "Breakdown is stale (state changed). Recompute.");
+  }
+
+  if (ImGui::Button("Compute breakdown")) run_digest_breakdown(sim, s);
+  ImGui::SameLine();
+  ImGui::TextUnformatted("Splits the state digest by subsystem (helps localize mismatches).");
+
+  if (s.has_digest_report && !digest_stale) {
+    const std::string overall_hex = nebula4x::digest64_to_hex(s.digest_report.overall);
+    ImGui::Text("Report overall: %s", overall_hex.c_str());
+
+    const float table_height = std::max(140.0f, ImGui::GetContentRegionAvail().y * 0.18f);
+    const ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable |
+                                  ImGuiTableFlags_ScrollY;
+    if (ImGui::BeginTable("digest_breakdown_table", 3, flags, ImVec2(0, table_height))) {
+      ImGui::TableSetupScrollFreeze(0, 1);
+      ImGui::TableSetupColumn("Part", ImGuiTableColumnFlags_WidthStretch);
+      ImGui::TableSetupColumn("Count", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+      ImGui::TableSetupColumn("Digest", ImGuiTableColumnFlags_WidthFixed, 160.0f);
+      ImGui::TableHeadersRow();
+
+      for (std::size_t i = 0; i < s.digest_report.parts.size(); ++i) {
+        const auto& p = s.digest_report.parts[i];
+        const std::string hex = nebula4x::digest64_to_hex(p.digest);
+
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        ImGui::TextUnformatted(p.label.c_str());
+
+        ImGui::TableNextColumn();
+        ImGui::Text("%llu", static_cast<unsigned long long>(p.element_count));
+
+        ImGui::TableNextColumn();
+        ImGui::PushID(static_cast<int>(i));
+        if (ImGui::Selectable(hex.c_str(), false, ImGuiSelectableFlags_SpanAllColumns)) {
+          ImGui::SetClipboardText(hex.c_str());
+          s.last_status = std::string("Copied digest for ") + p.label + " to clipboard.";
+          s.last_error.clear();
+        }
+        ImGui::PopID();
+      }
+
+      ImGui::EndTable();
+    }
+  } else {
+    ImGui::TextUnformatted("No breakdown computed yet.");
   }
 
   ImGui::SeparatorText("Validate");
