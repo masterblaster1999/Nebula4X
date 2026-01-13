@@ -1,15 +1,21 @@
 #include "ui/shipyard_targets_window.h"
 
 #include <imgui.h>
+#include <misc/cpp/imgui_stdlib.h>
+
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <limits>
 #include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+#include "core/simulation_internal.h"
+#include "nebula4x/util/time.h"
 
 namespace nebula4x::ui {
 
@@ -63,9 +69,9 @@ std::vector<std::pair<Id, std::string>> sorted_factions(const GameState& s) {
 
 std::vector<std::string> sorted_all_design_ids(const Simulation& sim) {
   std::vector<std::string> ids;
-  ids.reserve(sim.content().ship_designs.size() + sim.state().custom_designs.size());
+  ids.reserve(sim.content().designs.size() + sim.state().custom_designs.size());
 
-  for (const auto& [id, d] : sim.content().ship_designs) ids.push_back(id);
+  for (const auto& [id, d] : sim.content().designs) ids.push_back(id);
   for (const auto& [id, d] : sim.state().custom_designs) ids.push_back(id);
 
   std::sort(ids.begin(), ids.end());
@@ -160,11 +166,24 @@ void draw_shipyard_targets_window(Simulation& sim, UIState& ui, Id& selected_shi
     return;
   }
 
+  // Shipyard build rate introspection (used for the per-colony ETA column).
+  double shipyard_base_rate_tons_per_day = 0.0;
+  if (auto it = sim.content().installations.find("shipyard"); it != sim.content().installations.end()) {
+    shipyard_base_rate_tons_per_day = it->second.build_rate_tons_per_day;
+  }
+
+  // Match Simulation's shipyard speed modifiers: tech multipliers + treaty trade bonus.
+  const auto econ_mult = sim_internal::compute_faction_economy_multipliers(sim.content(), *fac);
+  const double trade_mult = sim_internal::trade_agreement_output_multiplier(gs, fac->id);
+  const double shipyard_mult_effective = std::max(0.0, econ_mult.shipyard) * trade_mult;
+
+
   // --- Aggregate shipyard + fleet counts ---
   int shipyard_colonies = 0;
   int shipyard_colonies_enabled = 0;
   int shipyard_installations = 0;
   int total_shipyard_orders = 0;
+  double total_shipyard_tons_remaining = 0.0;
 
   for (const auto& [cid, c] : gs.colonies) {
     if (c.faction_id != st.faction_id) continue;
@@ -175,6 +194,7 @@ void draw_shipyard_targets_window(Simulation& sim, UIState& ui, Id& selected_shi
     shipyard_installations += yards;
     if (c.shipyard_auto_build_enabled) shipyard_colonies_enabled += 1;
     total_shipyard_orders += static_cast<int>(c.shipyard_queue.size());
+    for (const auto& bo : c.shipyard_queue) total_shipyard_tons_remaining += std::max(0.0, bo.tons_remaining);
   }
 
   std::unordered_map<std::string, int> have_by_design;
@@ -202,10 +222,15 @@ void draw_shipyard_targets_window(Simulation& sim, UIState& ui, Id& selected_shi
   }
 
   ImGui::Separator();
-  ImGui::TextDisabled("Shipyards: %d colony(ies), %d installation(s) (%d enabled for auto-build), %d queued order(s).",
-                      shipyard_colonies, shipyard_installations, shipyard_colonies_enabled, total_shipyard_orders);
+  ImGui::TextDisabled(
+      "Shipyards: %d colony(ies), %d installation(s) (%d enabled for auto-build), %d queued order(s), %.0f tons remaining.",
+      shipyard_colonies, shipyard_installations, shipyard_colonies_enabled, total_shipyard_orders, total_shipyard_tons_remaining);
   ImGui::TextDisabled(
       "Auto-build rule: targets count existing ships + manual new-build orders. The simulation auto-enqueues build orders (auto_queued=true) to cover the gap.");
+  if (shipyard_base_rate_tons_per_day > 0.0) {
+    ImGui::TextDisabled("Build rate: %.1f tons/day/yard (effective: %.1f incl. modifiers)", shipyard_base_rate_tons_per_day,
+                        shipyard_base_rate_tons_per_day * shipyard_mult_effective);
+  }
   ImGui::Spacing();
 
   // --- Target convenience actions ---
@@ -380,6 +405,10 @@ void draw_shipyard_targets_window(Simulation& sim, UIState& ui, Id& selected_shi
       std::string name;
       int yards{0};
       int queue_len{0};
+      double queue_tons{0.0};
+      double rate_tons_per_day{0.0};
+      double eta_days{std::numeric_limits<double>::infinity()};
+
       bool auto_enabled{true};
       std::string front_order;
     };
@@ -399,6 +428,11 @@ void draw_shipyard_targets_window(Simulation& sim, UIState& ui, Id& selected_shi
       r.yards = yards;
       r.queue_len = static_cast<int>(c.shipyard_queue.size());
       r.auto_enabled = c.shipyard_auto_build_enabled;
+
+      r.queue_tons = 0.0;
+      for (const auto& bo : c.shipyard_queue) r.queue_tons += std::max(0.0, bo.tons_remaining);
+      r.rate_tons_per_day = shipyard_base_rate_tons_per_day * shipyard_mult_effective * static_cast<double>(yards);
+      r.eta_days = (r.rate_tons_per_day > 0.0) ? (r.queue_tons / r.rate_tons_per_day) : std::numeric_limits<double>::infinity();
 
       if (!c.shipyard_queue.empty()) {
         const auto& bo = c.shipyard_queue.front();
@@ -420,11 +454,13 @@ void draw_shipyard_targets_window(Simulation& sim, UIState& ui, Id& selected_shi
 
     const ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_Resizable |
                                   ImGuiTableFlags_SizingStretchProp;
-    if (ImGui::BeginTable("shipyard_colonies_table", 5, flags)) {
+    if (ImGui::BeginTable("shipyard_colonies_table", 7, flags)) {
       ImGui::TableSetupColumn("Colony", ImGuiTableColumnFlags_WidthStretch);
       ImGui::TableSetupColumn("Shipyards", ImGuiTableColumnFlags_WidthFixed, 70.0f);
       ImGui::TableSetupColumn("Auto", ImGuiTableColumnFlags_WidthFixed, 50.0f);
       ImGui::TableSetupColumn("Queue", ImGuiTableColumnFlags_WidthFixed, 54.0f);
+      ImGui::TableSetupColumn("Tons", ImGuiTableColumnFlags_WidthFixed, 72.0f);
+      ImGui::TableSetupColumn("ETA", ImGuiTableColumnFlags_WidthFixed, 72.0f);
       ImGui::TableSetupColumn("Front order", ImGuiTableColumnFlags_WidthStretch);
       ImGui::TableHeadersRow();
 
@@ -450,6 +486,24 @@ void draw_shipyard_targets_window(Simulation& sim, UIState& ui, Id& selected_shi
 
         ImGui::TableNextColumn();
         ImGui::Text("%d", r.queue_len);
+
+        ImGui::TableNextColumn();
+        if (r.queue_tons <= 1e-9) {
+          ImGui::TextDisabled("-");
+        } else {
+          ImGui::Text("%.0f", r.queue_tons);
+        }
+
+        ImGui::TableNextColumn();
+        if (r.queue_tons <= 1e-9 || !std::isfinite(r.eta_days)) {
+          ImGui::TextDisabled("-");
+        } else {
+          const std::string eta = format_duration_days(r.eta_days);
+          ImGui::TextUnformatted(eta.c_str());
+          if (ImGui::IsItemHovered() && r.rate_tons_per_day > 1e-9) {
+            ImGui::SetTooltip("Rate: %.1f tons/day", r.rate_tons_per_day);
+          }
+        }
 
         ImGui::TableNextColumn();
         if (r.front_order.empty()) ImGui::TextDisabled("-");

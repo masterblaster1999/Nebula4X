@@ -524,6 +524,43 @@ OrderPlan compute_order_plan(const Simulation& sim, Id ship_id, const OrderPlann
           }
         }
       }
+    } else if (std::holds_alternative<InvestigateAnomaly>(ord)) {
+      const auto& o = std::get<InvestigateAnomaly>(ord);
+      const Anomaly* an = find_ptr(st.anomalies, o.anomaly_id);
+      if (!an) {
+        truncate("Invalid anomaly target", false);
+        ok = false;
+      } else if (an->resolved) {
+        // Simulation will just skip this order, so planning treats it as a zero-cost no-op.
+        if (note.empty()) {
+          note = "Anomaly already resolved (order will be skipped)";
+        } else {
+          note += "\nAnomaly already resolved (order will be skipped)";
+        }
+        ok = true;
+      } else {
+        const auto* des = sim.find_design(ship->design_id);
+        if (!des || des->sensor_range_mkm <= 1e-6) {
+          truncate("Cannot investigate anomaly without sensors", false);
+          ok = false;
+        } else if (an->system_id != sys) {
+          // Cross-system travel exists via TravelToSystem + TravelViaJump in simulation,
+          // but the planner models only the ship's current queue, not automatic insertion.
+          truncate("Anomaly is in a different system", false);
+          ok = false;
+        } else {
+          const double investigation_dist = std::max(dock_range, std::max(0.0, des->sensor_range_mkm * 0.5));
+          ok = travel_to_point(an->position_mkm, investigation_dist);
+          if (ok) {
+            int dur = o.duration_days;
+            if (dur == 0) dur = std::max(0, an->investigation_days);
+            const double prog = std::max(0.0, o.progress_days);
+            const double remain = std::max(0.0, static_cast<double>(dur) - prog);
+            dt += remain;
+            t += remain;
+          }
+        }
+      }
     } else if (std::holds_alternative<OrbitBody>(ord)) {
       const auto& o = std::get<OrbitBody>(ord);
       ok = travel_to_body(o.body_id, dock_range);

@@ -1,11 +1,14 @@
 #include "ui/survey_network_window.h"
 
 #include <imgui.h>
+#include <misc/cpp/imgui_stdlib.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <cctype>
 #include <cmath>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -25,6 +28,10 @@ struct SurveyNetworkWindowState {
 
   std::string filter;
   bool filter_case_sensitive{false};
+
+  // Bulk-selection helper (cleared when sim state changes).
+  std::unordered_set<Id> selected_jump_ids;
+  std::uint64_t last_state_generation{0};
 };
 
 SurveyNetworkWindowState& window_state() {
@@ -61,6 +68,12 @@ void draw_survey_network_window(Simulation& sim, UIState& ui, Id& selected_ship,
 
   auto& st = window_state();
   const auto& s = sim.state();
+
+  const std::uint64_t gen = sim.state_generation();
+  if (st.last_state_generation != gen) {
+    st.last_state_generation = gen;
+    st.selected_jump_ids.clear();
+  }
 
   if (st.faction_id == kInvalidId && ui.viewer_faction_id != kInvalidId) {
     st.faction_id = ui.viewer_faction_id;
@@ -256,30 +269,99 @@ void draw_survey_network_window(Simulation& sim, UIState& ui, Id& selected_ship,
   }
   ImGui::TextDisabled("Jump points shown: %d   Unsurveyed: %d   In-progress: %d", (int)rows.size(), unsurveyed, in_progress);
 
+  if (can_issue) {
+    ImGui::Spacing();
+
+    const int sel_count = (int)st.selected_jump_ids.size();
+    ImGui::Text("Bulk selection:");
+    ImGui::SameLine();
+    ImGui::TextDisabled("%d selected", sel_count);
+
+    if (ImGui::SmallButton("Select all shown unsurveyed")) {
+      st.selected_jump_ids.clear();
+      for (const auto& r : rows) {
+        if (!r.surveyed) st.selected_jump_ids.insert(r.jump_id);
+      }
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Clear selection")) {
+      st.selected_jump_ids.clear();
+    }
+
+    if (!st.selected_jump_ids.empty() && fac) {
+      auto issue_selected = [&](bool transit_when_done) {
+        if (st.replace_queue) {
+          if (st.issue_to_fleet && has_fleet) sim.clear_fleet_orders(ui.selected_fleet_id);
+          if (!st.issue_to_fleet && has_ship) sim.clear_orders(selected_ship);
+        }
+        for (const auto& r : rows) {
+          if (r.surveyed) continue;
+          if (st.selected_jump_ids.find(r.jump_id) == st.selected_jump_ids.end()) continue;
+          if (st.issue_to_fleet && has_fleet) {
+            sim.issue_fleet_survey_jump_point(ui.selected_fleet_id, r.jump_id, transit_when_done, ui.fog_of_war);
+          } else if (has_ship) {
+            sim.issue_survey_jump_point(selected_ship, r.jump_id, transit_when_done, ui.fog_of_war);
+          }
+        }
+      };
+
+      ImGui::SameLine();
+      if (ImGui::SmallButton("Queue Survey Selected")) {
+        issue_selected(/*transit_when_done=*/false);
+        st.selected_jump_ids.clear();
+      }
+      ImGui::SameLine();
+      if (ImGui::SmallButton("Queue Survey+Transit Selected")) {
+        issue_selected(/*transit_when_done=*/true);
+        st.selected_jump_ids.clear();
+      }
+      if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Queues a survey order for each selected jump point.\n"
+                          "When '+Transit' is used, the order will transit through the jump after surveying.\n"
+                          "Orders are queued in the current table sort order.");
+      }
+    }
+  }
+
+
   // --- Table ---
-  const ImGuiTableFlags tf = ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_ScrollY;
-  if (ImGui::BeginTable("##survey_table", can_issue ? 6 : 5, tf, ImVec2(0, 0))) {
+  const ImGuiTableFlags tf =
+      ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_ScrollY;
+  if (ImGui::BeginTable("##survey_table", can_issue ? 7 : 5, tf, ImVec2(0, 0))) {
+    if (can_issue) ImGui::TableSetupColumn("Sel", ImGuiTableColumnFlags_WidthFixed, 32.0f);
     ImGui::TableSetupColumn("System", ImGuiTableColumnFlags_WidthStretch, 0.26f);
     ImGui::TableSetupColumn("Jump", ImGuiTableColumnFlags_WidthStretch, 0.20f);
-    ImGui::TableSetupColumn("Surveyed", ImGuiTableColumnFlags_WidthFixed, 0.10f);
+    ImGui::TableSetupColumn("Surveyed", ImGuiTableColumnFlags_WidthFixed, 72.0f);
     ImGui::TableSetupColumn("Progress", ImGuiTableColumnFlags_WidthStretch, 0.18f);
     ImGui::TableSetupColumn("Destination", ImGuiTableColumnFlags_WidthStretch, 0.26f);
-    if (can_issue) ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthFixed, 0.16f);
+    if (can_issue) ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthFixed, 220.0f);
     ImGui::TableHeadersRow();
 
     for (const auto& r : rows) {
       ImGui::TableNextRow();
 
-      ImGui::TableSetColumnIndex(0);
+      if (can_issue) ImGui::PushID((int)r.jump_id);
+
+      int col = 0;
+      if (can_issue) {
+        ImGui::TableSetColumnIndex(col++);
+        bool selected = st.selected_jump_ids.find(r.jump_id) != st.selected_jump_ids.end();
+        if (ImGui::Checkbox("##sel", &selected)) {
+          if (selected) st.selected_jump_ids.insert(r.jump_id);
+          else st.selected_jump_ids.erase(r.jump_id);
+        }
+      }
+
+      ImGui::TableSetColumnIndex(col++);
       ImGui::TextUnformatted(r.system_name.c_str());
 
-      ImGui::TableSetColumnIndex(1);
+      ImGui::TableSetColumnIndex(col++);
       ImGui::TextUnformatted(r.jump_name.c_str());
 
-      ImGui::TableSetColumnIndex(2);
+      ImGui::TableSetColumnIndex(col++);
       ImGui::TextDisabled("%s", r.surveyed ? "Yes" : "No");
 
-      ImGui::TableSetColumnIndex(3);
+      ImGui::TableSetColumnIndex(col++);
       if (r.surveyed) {
         ImGui::TextDisabled("-");
       } else if (timed_surveys && required_points > 1e-9) {
@@ -291,16 +373,14 @@ void draw_survey_network_window(Simulation& sim, UIState& ui, Id& selected_ship,
         ImGui::TextDisabled("(instant)");
       }
 
-      ImGui::TableSetColumnIndex(4);
+      ImGui::TableSetColumnIndex(col++);
       ImGui::TextUnformatted(r.dest_label.c_str());
 
       if (can_issue) {
-        ImGui::TableSetColumnIndex(5);
+        ImGui::TableSetColumnIndex(col++);
 
         bool disable = r.surveyed || !fac;
         if (disable) ImGui::BeginDisabled();
-
-        ImGui::PushID((int)r.jump_id);
 
         if (ImGui::SmallButton("Survey")) {
           if (st.replace_queue) {
@@ -327,10 +407,10 @@ void draw_survey_network_window(Simulation& sim, UIState& ui, Id& selected_ship,
           }
         }
 
-        ImGui::PopID();
-
         if (disable) ImGui::EndDisabled();
       }
+
+      if (can_issue) ImGui::PopID();
     }
 
     ImGui::EndTable();

@@ -135,6 +135,14 @@ int test_anomalies() {
     const auto& w = sim.state().wrecks.begin()->second;
     const double left = w.minerals.contains("Neutronium") ? w.minerals.at("Neutronium") : 0.0;
     N4X_ASSERT(std::abs(left - 20.0) < 1e-6);
+
+    // The overflow is stored as a mineral cache wreck, not a ship hull wreck.
+    // It should not carry source ship/design metadata that could accidentally
+    // enable reverse-engineering when salvaged by another faction.
+    N4X_ASSERT(w.kind == WreckKind::Cache);
+    N4X_ASSERT(w.source_ship_id == kInvalidId);
+    N4X_ASSERT(w.source_faction_id == kInvalidId);
+    N4X_ASSERT(w.source_design_id.empty());
   }
 
   // Hazard: 3 damage should be applied non-lethally to the ship (no shields in this test).

@@ -579,6 +579,7 @@ static void hash_game_state_wrecks(Digest64& d, const GameState& s) {
     d.add_string(w.name);
     d.add_u64(w.system_id);
     hash_vec2(d, w.position_mkm);
+    d.add_u64(static_cast<std::uint64_t>(w.kind));
     hash_string_double_map(d, w.minerals);
     d.add_u64(w.source_ship_id);
     d.add_u64(w.source_faction_id);

@@ -336,6 +336,22 @@ std::vector<std::string> validate_game_state(const GameState& s, const ContentDB
                   "': ", tons));
       }
     }
+    // WreckKind validation.
+    {
+      const int k = static_cast<int>(w.kind);
+      if (k < static_cast<int>(WreckKind::Ship) || k > static_cast<int>(WreckKind::Debris)) {
+        push(errors, join("Wreck ", id_u64(wid), " ('", w.name, "') has invalid kind ", k));
+      }
+    }
+
+    // Cache wrecks (e.g. anomaly overflow caches) are not ship hulls and must
+    // not carry source-ship metadata that could enable reverse engineering.
+    if (w.kind == WreckKind::Cache) {
+      if (w.source_ship_id != kInvalidId || w.source_faction_id != kInvalidId || !w.source_design_id.empty()) {
+        push(errors, join("Wreck ", id_u64(wid), " ('", w.name, "') is kind=cache but has non-empty source metadata"));
+      }
+    }
+
     if (w.created_day < 0) {
       push(errors, join("Wreck ", id_u64(wid), " ('", w.name, "') has negative created_day ", w.created_day));
     }
@@ -383,6 +399,14 @@ std::vector<std::string> validate_game_state(const GameState& s, const ContentDB
                 } else if (!has_jump(ord.jump_point_id)) {
                   push(errors,
                        prefix() + join("TravelViaJump references missing jump_point_id ", id_u64(ord.jump_point_id)));
+                }
+              } else if constexpr (std::is_same_v<T, SurveyJumpPoint>) {
+                if (ord.jump_point_id == kInvalidId) {
+                  push(errors, prefix() + "SurveyJumpPoint has invalid jump_point_id");
+                } else if (!has_jump(ord.jump_point_id)) {
+                  push(errors,
+                       prefix() +
+                           join("SurveyJumpPoint references missing jump_point_id ", id_u64(ord.jump_point_id)));
                 }
               } else if constexpr (std::is_same_v<T, AttackShip>) {
                 if (ord.target_ship_id == kInvalidId) {
@@ -599,6 +623,14 @@ std::vector<std::string> validate_game_state(const GameState& s, const ContentDB
               } else if (!has_jump(ord.jump_point_id)) {
                 push(errors,
                      prefix() + join("TravelViaJump references missing jump_point_id ", id_u64(ord.jump_point_id)));
+              }
+            } else if constexpr (std::is_same_v<T, SurveyJumpPoint>) {
+              if (ord.jump_point_id == kInvalidId) {
+                push(errors, prefix() + "SurveyJumpPoint has invalid jump_point_id");
+              } else if (!has_jump(ord.jump_point_id)) {
+                push(errors,
+                     prefix() +
+                         join("SurveyJumpPoint references missing jump_point_id ", id_u64(ord.jump_point_id)));
               }
             } else if constexpr (std::is_same_v<T, AttackShip>) {
               if (ord.target_ship_id == kInvalidId) {
@@ -1507,6 +1539,35 @@ FixReport fix_game_state(GameState& s, const ContentDB* content) {
         w.name = join("Wreck ", id_u64(wid));
       }
 
+      // Ensure wreck kind is in-range (corrupt/old saves).
+      {
+        const int k = static_cast<int>(w.kind);
+        if (k < static_cast<int>(WreckKind::Ship) || k > static_cast<int>(WreckKind::Debris)) {
+          note(join("Fix: Wreck ", id_u64(wid), " ('", w.name, "') had invalid kind ", k, "; set to ship"));
+          w.kind = WreckKind::Ship;
+        }
+      }
+
+      // Heuristic cleanup for pre-kind saves: anomaly overflow caches were historically stored
+      // as plain wrecks with source metadata pointing at the investigating ship. That could
+      // enable unintended reverse engineering if another faction salvaged the cache.
+      //
+      // If a wreck is (or appears to be) a salvage cache, force kind=Cache and clear source metadata.
+      const bool name_says_cache = (w.name.rfind("Salvage Cache", 0) == 0);
+      const bool should_be_cache = name_says_cache || (w.kind == WreckKind::Cache);
+      if (should_be_cache) {
+        if (w.kind != WreckKind::Cache) {
+          note(join("Fix: Wreck ", id_u64(wid), " ('", w.name, "') looked like a salvage cache; set kind=cache"));
+          w.kind = WreckKind::Cache;
+        }
+        if (w.source_ship_id != kInvalidId || w.source_faction_id != kInvalidId || !w.source_design_id.empty()) {
+          note(join("Fix: Wreck ", id_u64(wid), " ('", w.name, "') is a salvage cache but had source metadata; cleared"));
+          w.source_ship_id = kInvalidId;
+          w.source_faction_id = kInvalidId;
+          w.source_design_id.clear();
+        }
+      }
+
       if (w.created_day <= 0 || w.created_day > now) {
         note(join("Fix: Wreck ", id_u64(wid), " had invalid created_day ", w.created_day, "; set to ", now));
         w.created_day = now;
@@ -1954,6 +2015,11 @@ FixReport fix_game_state(GameState& s, const ContentDB* content) {
               if (ord.jump_point_id == kInvalidId || !has_jump(ord.jump_point_id)) {
                 keep = false;
                 drop(i, "TravelViaJump invalid jump_point_id");
+              }
+            } else if constexpr (std::is_same_v<T, SurveyJumpPoint>) {
+              if (ord.jump_point_id == kInvalidId || !has_jump(ord.jump_point_id)) {
+                keep = false;
+                drop(i, "SurveyJumpPoint invalid jump_point_id");
               }
             } else if constexpr (std::is_same_v<T, AttackShip>) {
               if (ord.target_ship_id == kInvalidId || !has_ship(ord.target_ship_id) ||

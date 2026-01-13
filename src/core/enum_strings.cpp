@@ -26,4 +26,22 @@ BodyType body_type_from_string(const std::string& s) {
   return BodyType::Planet;
 }
 
+
+std::string wreck_kind_to_string(WreckKind k) {
+  switch (k) {
+    case WreckKind::Ship: return "ship";
+    case WreckKind::Cache: return "cache";
+    case WreckKind::Debris: return "debris";
+  }
+  return "ship";
+}
+
+WreckKind wreck_kind_from_string(const std::string& s) {
+  if (s == "ship" || s == "hull") return WreckKind::Ship;
+  if (s == "cache" || s == "salvage_cache" || s == "mineral_cache") return WreckKind::Cache;
+  if (s == "debris" || s == "field") return WreckKind::Debris;
+  // Safe default for unknown strings.
+  return WreckKind::Ship;
+}
+
 } // namespace nebula4x

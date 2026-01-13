@@ -32,6 +32,7 @@ int test_order_planner() {
     d.fuel_capacity_tons = 500.0;
     d.fuel_use_per_mkm = 1.0;
     d.weapon_range_mkm = 50.0;
+    d.sensor_range_mkm = 100.0;
     content.designs[d.id] = d;
   }
 
@@ -154,6 +155,58 @@ int test_order_planner() {
     N4X_ASSERT(plan.steps[0].system_id == 2);
     N4X_ASSERT(approx(plan.steps[0].position_mkm.x, 10.0, 1e-9));
     N4X_ASSERT(approx(plan.steps[0].position_mkm.y, 0.0, 1e-9));
+  }
+
+  // Investigate anomaly: planner should include both travel-to-investigation-range and investigation time.
+  {
+    // Create an anomaly in Sys1.
+    Anomaly an;
+    an.id = 300;
+    an.name = "Test Anomaly";
+    an.kind = "test";
+    an.system_id = 1;
+    an.position_mkm = {200.0, 0.0};
+    an.investigation_days = 5;
+    an.resolved = false;
+    st.anomalies[an.id] = an;
+
+    Ship sh;
+    sh.id = 202;
+    sh.name = "Investigator";
+    sh.faction_id = 1;
+    sh.system_id = 1;
+    sh.design_id = "test_design";
+    sh.position_mkm = {0.0, 0.0};
+    sh.speed_km_s = 1000.0;
+    sh.fuel_tons = 500.0;
+    sh.hp = 100.0;
+    st.ships[sh.id] = sh;
+
+    ShipOrders so;
+    // duration_days == 0: use anomaly default.
+    so.queue.push_back(InvestigateAnomaly{an.id, 0, 0.0});
+    st.ship_orders[sh.id] = so;
+
+    OrderPlannerOptions opts;
+    opts.predict_orbits = false;
+    opts.simulate_refuel = false;
+
+    const OrderPlan plan = compute_order_plan(sim, sh.id, opts);
+    N4X_ASSERT(plan.ok);
+    N4X_ASSERT(plan.steps.size() == 1);
+
+    const PlannedOrderStep& step = plan.steps[0];
+
+    // Need to get within max(dock_range, sensor_range*0.5) = max(3, 50) = 50.
+    // Dist is 200 => cover 150.
+    const double cover_mkm = 150.0;
+    const double mkm_per_day = (1000.0 * 86400.0) / 1.0e6;
+    const double expected_travel_dt = cover_mkm / mkm_per_day;
+    const double expected_total_dt = expected_travel_dt + 5.0;
+
+    N4X_ASSERT(approx(step.delta_days, expected_total_dt, 1e-6));
+    N4X_ASSERT(approx(step.eta_days, expected_total_dt, 1e-6));
+    N4X_ASSERT(approx(step.fuel_after_tons, 350.0, 1e-6));
   }
 
   return 0;

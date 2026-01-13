@@ -1220,6 +1220,7 @@ std::string serialize_game_to_json(const GameState& s) {
     o["name"] = w.name;
     o["system_id"] = static_cast<double>(w.system_id);
     o["position_mkm"] = vec2_to_json(w.position_mkm);
+    if (w.kind != WreckKind::Ship) o["kind"] = wreck_kind_to_string(w.kind);
     o["minerals"] = map_string_double_to_json(w.minerals);
     if (w.source_ship_id != kInvalidId) o["source_ship_id"] = static_cast<double>(w.source_ship_id);
     if (w.source_faction_id != kInvalidId) o["source_faction_id"] = static_cast<double>(w.source_faction_id);
@@ -2065,6 +2066,15 @@ GameState deserialize_game_from_json(const std::string& json_text) {
       w.name = o.at("name").string_value();
       w.system_id = static_cast<Id>(o.at("system_id").int_value(kInvalidId));
       w.position_mkm = vec2_from_json(o.at("position_mkm"));
+      if (auto ik = o.find("kind"); ik != o.end()) {
+        if (ik->second.is_string()) w.kind = wreck_kind_from_string(ik->second.string_value());
+        else if (ik->second.is_number()) {
+          const int kv = static_cast<int>(ik->second.int_value(0));
+          if (kv == 1) w.kind = WreckKind::Cache;
+          else if (kv == 2) w.kind = WreckKind::Debris;
+          else w.kind = WreckKind::Ship;
+        }
+      }
       if (auto im = o.find("minerals"); im != o.end()) w.minerals = map_string_double_from_json(im->second);
       if (auto is = o.find("source_ship_id"); is != o.end()) {
         w.source_ship_id = static_cast<Id>(is->second.int_value(kInvalidId));

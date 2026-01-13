@@ -6640,14 +6640,15 @@ if (colony->shipyard_queue.empty()) {
               ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_None, 0.12f);
               ImGui::TableHeadersRow();
 
-              const std::int64_t now_day = s.date.days_since_epoch();
+              const int now_day = static_cast<int>(s.date.days_since_epoch());
               for (const auto& o : incoming) {
                 const Faction* from = find_ptr(s.factions, o.from_faction_id);
                 const std::string from_name = from ? from->name : std::string("<unknown>");
                 const std::string treaty_name = treaty_type_label(o.treaty_type);
 
                 const bool indefinite = (o.treaty_duration_days < 0);
-                const int expires_in = (o.expire_day <= 0) ? -1 : std::max(0, o.expire_day - now_day);
+                // NOTE: use (std::max)(...) to avoid macro collisions on some platforms (e.g. Windows headers).
+                const int expires_in = (o.expire_day < 0) ? -1 : (std::max)(0, o.expire_day - now_day);
 
                 ImGui::TableNextRow();
                 ImGui::TableSetColumnIndex(0);
@@ -6723,12 +6724,13 @@ if (colony->shipyard_queue.empty()) {
                 ImGui::TableSetupColumn("Message", ImGuiTableColumnFlags_None, 0.28f);
                 ImGui::TableHeadersRow();
 
-                const std::int64_t now_day = s.date.days_since_epoch();
+                const int now_day = static_cast<int>(s.date.days_since_epoch());
                 for (const auto& o : outgoing) {
                   const Faction* to = find_ptr(s.factions, o.to_faction_id);
                   const std::string to_name = to ? to->name : std::string("<unknown>");
                   const bool indefinite = (o.treaty_duration_days < 0);
-                  const int expires_in = (o.expire_day <= 0) ? -1 : std::max(0, o.expire_day - now_day);
+                  // NOTE: use (std::max)(...) to avoid macro collisions on some platforms (e.g. Windows headers).
+                  const int expires_in = (o.expire_day < 0) ? -1 : (std::max)(0, o.expire_day - now_day);
 
                   ImGui::TableNextRow();
                   ImGui::TableSetColumnIndex(0);

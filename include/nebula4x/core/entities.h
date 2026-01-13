@@ -794,6 +794,20 @@ struct Ship {
   std::uint8_t heat_state{0};
 };
 
+// Wreck classification.
+//
+// Most wrecks are created when a ship is destroyed (kind=Ship). Some systems
+// (e.g. exploration anomalies) can also spawn "cache" wrecks that represent
+// abandoned minerals/cargo rather than a derelict hull.
+//
+// This exists primarily so salvage/reverse-engineering rules can distinguish
+// between actual ship hull wrecks and non-ship mineral caches.
+enum class WreckKind : std::uint8_t {
+  Ship = 0,
+  Cache = 1,
+  Debris = 2,
+};
+
 // A destroyed ship may leave a salvageable wreck.
 //
 // Wrecks are intentionally lightweight (a position + a bag of minerals). The
@@ -806,6 +820,9 @@ struct Wreck {
 
   // Position in-system (million km).
   Vec2 position_mkm{0.0, 0.0};
+
+  // Classification of this wreck (ship hull vs mineral cache, etc.).
+  WreckKind kind{WreckKind::Ship};
 
   // Salvageable minerals stored in this wreck (tons keyed by mineral name).
   // Empty means "no salvage".

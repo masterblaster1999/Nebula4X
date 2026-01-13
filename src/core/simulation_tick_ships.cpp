@@ -1429,11 +1429,16 @@ void Simulation::tick_ships(double dt_days) {
 
       const bool salvage_research_enabled = cfg_.enable_salvage_research && cfg_.salvage_research_rp_multiplier > 0.0;
       const bool reverse_engineering_enabled = cfg_.enable_reverse_engineering && cfg_.reverse_engineering_points_per_salvaged_ton > 0.0;
-      const bool can_reverse_engineer_this_wreck = reverse_engineering_enabled && !w->source_design_id.empty() && w->source_faction_id != ship.faction_id;
+      const bool can_reverse_engineer_this_wreck =
+          reverse_engineering_enabled &&
+          w->kind == WreckKind::Ship &&
+          !w->source_design_id.empty() &&
+          w->source_faction_id != ship.faction_id;
 
       auto apply_reverse_engineering = [&](const Wreck& wreck, double points) {
         if (!cfg_.enable_reverse_engineering) return;
         if (points <= 1e-9) return;
+        if (wreck.kind != WreckKind::Ship) return;
         if (wreck.source_design_id.empty()) return;
         if (wreck.source_faction_id == ship.faction_id) return;
 
@@ -1979,10 +1984,15 @@ void Simulation::tick_ships(double dt_days) {
               w.name = anom->name.empty()
                            ? (std::string("Salvage Cache (Anomaly ") + std::to_string(static_cast<int>(anom->id)) + ")")
                            : (std::string("Salvage Cache: ") + anom->name);
+              w.kind = WreckKind::Cache;
               w.minerals = minerals_overflow;
-              w.source_ship_id = ship_id;
-              w.source_faction_id = ship.faction_id;
-              w.source_design_id = ship.design_id;
+
+              // This wreck represents a mineral cache (not a destroyed ship hull).
+              // Clear source metadata so salvaging it cannot accidentally trigger
+              // reverse-engineering of the investigating ship's design.
+              w.source_ship_id = kInvalidId;
+              w.source_faction_id = kInvalidId;
+              w.source_design_id.clear();
               w.created_day = state_.date.days_since_epoch();
               state_.wrecks[wid] = std::move(w);
               cache_wreck_id = wid;

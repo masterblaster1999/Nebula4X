@@ -5,6 +5,9 @@
 
 namespace nebula4x {
 
+template <class>
+inline constexpr bool kAlwaysFalseV = false;
+
 std::string order_to_string(const Order& order) {
   return std::visit(
       [](const auto& o) -> std::string {
@@ -79,6 +82,9 @@ std::string order_to_string(const Order& order) {
           if (!o.mineral.empty()) ss << ", mineral=" << o.mineral;
           if (o.tons > 0.0) ss << ", tons=" << o.tons;
           ss << ")";
+        } else if constexpr (std::is_same_v<T, InvestigateAnomaly>) {
+          ss << "InvestigateAnomaly(anomaly_id=" << o.anomaly_id << ", days=" << o.duration_days
+             << ", progress=" << o.progress_days << ")";
         } else if constexpr (std::is_same_v<T, TransferCargoToShip>) {
           ss << "TransferCargoToShip(target_ship_id=" << o.target_ship_id;
           if (!o.mineral.empty()) ss << ", mineral=" << o.mineral;
@@ -94,6 +100,8 @@ std::string order_to_string(const Order& order) {
           ss << ")";
         } else if constexpr (std::is_same_v<T, ScrapShip>) {
           ss << "ScrapShip(colony_id=" << o.colony_id << ")";
+        } else {
+          static_assert(kAlwaysFalseV<T>, "Unhandled Order variant in order_to_string()");
         }
 
         return ss.str();

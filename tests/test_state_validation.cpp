@@ -109,6 +109,7 @@ int test_state_validation() {
     N4X_ASSERT(st.ships.size() >= 2);
     N4X_ASSERT(!st.colonies.empty());
     N4X_ASSERT(!st.bodies.empty());
+    N4X_ASSERT(!st.jump_points.empty());
 
     auto it = st.ships.begin();
     const auto ship_a = it->first;
@@ -117,6 +118,7 @@ int test_state_validation() {
 
     const auto colony_id = st.colonies.begin()->first;
     const auto body_id = st.bodies.begin()->first;
+    const auto jump_id = st.jump_points.begin()->first;
 
     st.ship_orders[ship_a].queue.clear();
     st.ship_orders[ship_a].queue.push_back(nebula4x::OrbitBody{body_id, 1});
@@ -127,11 +129,12 @@ int test_state_validation() {
     st.ship_orders[ship_a].queue.push_back(
         nebula4x::TransferTroopsToShip{ship_b, 5.0});
     st.ship_orders[ship_a].queue.push_back(nebula4x::EscortShip{ship_b, 1.0, false});
+    st.ship_orders[ship_a].queue.push_back(nebula4x::SurveyJumpPoint{jump_id, false});
     st.ship_orders[ship_a].queue.push_back(nebula4x::ScrapShip{colony_id});
 
     const auto errors = nebula4x::validate_game_state(st, &content);
     if (!errors.empty()) {
-      std::cerr << "Unexpected errors for valid Orbit/Transfer/Escort/FuelTransfer/Scrap orders:\n";
+      std::cerr << "Unexpected errors for valid Orbit/Transfer/Escort/FuelTransfer/Survey/Scrap orders:\n";
       for (const auto& e : errors) std::cerr << "  - " << e << "\n";
       return 1;
     }
@@ -153,6 +156,8 @@ int test_state_validation() {
         nebula4x::TransferTroopsToShip{static_cast<nebula4x::Id>(999999), 1.0});
     st.ship_orders[ship_id].queue.push_back(
         nebula4x::EscortShip{static_cast<nebula4x::Id>(999999), 1.0, false});
+    st.ship_orders[ship_id].queue.push_back(
+        nebula4x::SurveyJumpPoint{static_cast<nebula4x::Id>(999999), false});
     st.ship_orders[ship_id].queue.push_back(nebula4x::ScrapShip{static_cast<nebula4x::Id>(999999)});
 
     const auto errors = nebula4x::validate_game_state(st, &content);
@@ -162,6 +167,7 @@ int test_state_validation() {
     bool has_fuel_transfer_missing_ship = false;
     bool has_troop_transfer_missing_ship = false;
     bool has_escort_missing_ship = false;
+    bool has_survey_missing_jump = false;
     bool has_scrap_missing_colony = false;
     for (const auto& e : errors) {
       if (e.find("OrbitBody references missing body_id") != std::string::npos) has_orbit_missing_body = true;
@@ -173,6 +179,7 @@ int test_state_validation() {
       if (e.find("TransferTroopsToShip references missing target_ship_id") != std::string::npos)
         has_troop_transfer_missing_ship = true;
       if (e.find("EscortShip references missing target_ship_id") != std::string::npos) has_escort_missing_ship = true;
+      if (e.find("SurveyJumpPoint references missing jump_point_id") != std::string::npos) has_survey_missing_jump = true;
       if (e.find("ScrapShip references missing colony_id") != std::string::npos) has_scrap_missing_colony = true;
     }
     N4X_ASSERT(has_orbit_missing_body);
@@ -181,6 +188,7 @@ int test_state_validation() {
     N4X_ASSERT(has_fuel_transfer_missing_ship);
     N4X_ASSERT(has_troop_transfer_missing_ship);
     N4X_ASSERT(has_escort_missing_ship);
+    N4X_ASSERT(has_survey_missing_jump);
     N4X_ASSERT(has_scrap_missing_colony);
   }
 
