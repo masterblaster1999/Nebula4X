@@ -151,6 +151,9 @@ enum class PaletteAction {
   ToggleRegions,
   ToggleAdvisor,
   ToggleColonyProfiles,
+  ToggleShipProfiles,
+  ToggleShipyardTargets,
+  ToggleSurveyNetwork,
   ToggleTimeline,
   ToggleDesignStudio,
   ToggleBalanceLab,
@@ -232,6 +235,15 @@ void activate_palette_item(PaletteItem& item, Simulation& sim, UIState& ui, Id& 
           break;
         case PaletteAction::ToggleColonyProfiles:
           ui.show_colony_profiles_window = !ui.show_colony_profiles_window;
+          break;
+        case PaletteAction::ToggleShipProfiles:
+          ui.show_ship_profiles_window = !ui.show_ship_profiles_window;
+          break;
+        case PaletteAction::ToggleShipyardTargets:
+          ui.show_shipyard_targets_window = !ui.show_shipyard_targets_window;
+          break;
+        case PaletteAction::ToggleSurveyNetwork:
+          ui.show_survey_network_window = !ui.show_survey_network_window;
           break;
         case PaletteAction::ToggleTimeline:
           ui.show_timeline_window = !ui.show_timeline_window;
@@ -564,6 +576,12 @@ void draw_status_bar(Simulation& sim, UIState& ui, HUDState& /*hud*/, Id& select
   }
 
   ImGui::SameLine();
+  if (ImGui::SmallButton("Salvage")) ui.show_salvage_window = true;
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip("Open the Salvage Planner (wreck salvage + delivery preview)");
+  }
+
+  ImGui::SameLine();
   if (ImGui::SmallButton("Sustain")) ui.show_sustainment_window = true;
   if (ImGui::IsItemHovered()) {
     ImGui::SetTooltip("Open the Sustainment Planner (fleet base stockpile targets)");
@@ -576,9 +594,18 @@ void draw_status_bar(Simulation& sim, UIState& ui, HUDState& /*hud*/, Id& select
   }
 
   ImGui::SameLine();
-  if (ImGui::SmallButton("Profiles")) ui.show_colony_profiles_window = true;
+  if (ImGui::SmallButton("Profiles")) ImGui::OpenPopup("profiles_popup");
   if (ImGui::IsItemHovered()) {
-    ImGui::SetTooltip("Open Colony Profiles (automation presets)");
+    ImGui::SetTooltip("Open automation preset windows");
+  }
+  if (ImGui::BeginPopup("profiles_popup")) {
+    if (ImGui::MenuItem("Colony Profiles", "Ctrl+Shift+B", ui.show_colony_profiles_window)) {
+      ui.show_colony_profiles_window = !ui.show_colony_profiles_window;
+    }
+    if (ImGui::MenuItem("Ship Profiles", "Ctrl+Shift+M", ui.show_ship_profiles_window)) {
+      ui.show_ship_profiles_window = !ui.show_ship_profiles_window;
+    }
+    ImGui::EndPopup();
   }
 
   ImGui::SameLine();
@@ -744,6 +771,9 @@ void draw_help_window(UIState& ui) {
   ImGui::BulletText("Ctrl+Shift+D: Time Machine (state history + diffs)");
   ImGui::BulletText("Ctrl+Shift+A: Advisor (issues + quick fixes)");
   ImGui::BulletText("Ctrl+Shift+B: Colony Profiles (automation presets)");
+  ImGui::BulletText("Ctrl+Shift+M: Ship Profiles (automation presets)");
+  ImGui::BulletText("Ctrl+Shift+Y: Shipyard Targets (ship design targets)");
+  ImGui::BulletText("Ctrl+Shift+J: Survey Network (jump point surveys)");
   ImGui::BulletText("Ctrl+Shift+V: Content Validation (validate content bundle errors/warnings)");
   ImGui::BulletText("Ctrl+Shift+K: State Doctor (validate/fix save integrity; preview merge patch)");
   ImGui::BulletText("F1: Toggle this help window");
@@ -850,6 +880,9 @@ void draw_command_palette(Simulation& sim, UIState& ui, HUDState& hud, Id& selec
   add_action("[Action] Toggle Regions (Sectors Overview)", PaletteAction::ToggleRegions);
   add_action("[Action] Toggle Advisor (Issues)", PaletteAction::ToggleAdvisor);
   add_action("[Action] Toggle Colony Profiles (Automation Presets)", PaletteAction::ToggleColonyProfiles);
+  add_action("[Action] Toggle Ship Profiles (Automation Presets)", PaletteAction::ToggleShipProfiles);
+  add_action("[Action] Toggle Shipyard Targets (Design Targets)", PaletteAction::ToggleShipyardTargets);
+  add_action("[Action] Toggle Survey Network (Jump Surveys)", PaletteAction::ToggleSurveyNetwork);
   add_action("[Action] Toggle Timeline window", PaletteAction::ToggleTimeline);
   add_action("[Action] Toggle Design Studio window", PaletteAction::ToggleDesignStudio);
   add_action("[Action] Toggle Balance Lab window", PaletteAction::ToggleBalanceLab);

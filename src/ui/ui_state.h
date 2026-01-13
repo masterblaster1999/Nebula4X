@@ -223,6 +223,7 @@ struct UIState {
   bool show_regions_window{false};
   bool show_freight_window{false};
   bool show_fuel_window{false};
+  bool show_salvage_window{false};
   bool show_sustainment_window{false};
   bool show_troop_window{false};
   bool show_advisor_window{false};
@@ -234,6 +235,9 @@ struct UIState {
   bool show_diplomacy_window{false};
   bool show_victory_window{false};
   bool show_colony_profiles_window{false};
+  bool show_ship_profiles_window{false};
+  bool show_shipyard_targets_window{false};
+  bool show_survey_network_window{false};
   bool show_settings_window{false};
 
   // Debug/tooling windows.

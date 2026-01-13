@@ -23,6 +23,10 @@ std::string order_to_string(const Order& order) {
           ss << "OrbitBody(id=" << o.body_id << ", days=" << o.duration_days << ")";
         } else if constexpr (std::is_same_v<T, TravelViaJump>) {
           ss << "TravelViaJump(jump_id=" << o.jump_point_id << ")";
+        } else if constexpr (std::is_same_v<T, SurveyJumpPoint>) {
+          ss << "SurveyJumpPoint(jump_id=" << o.jump_point_id;
+          if (o.transit_when_done) ss << ", transit_when_done=true";
+          ss << ")";
         } else if constexpr (std::is_same_v<T, AttackShip>) {
           ss << "AttackShip(target_id=" << o.target_ship_id;
           if (o.has_last_known) {

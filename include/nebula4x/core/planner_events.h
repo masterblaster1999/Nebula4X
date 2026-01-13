@@ -64,6 +64,8 @@ struct PlannerEventsOptions {
   bool include_research{true};
   bool include_colonies{true};
   bool include_ground_battles{true};
+  // Include in-flight missile salvos as predicted combat events (impact ETA).
+  bool include_missile_impacts{true};
   bool include_ships{false};
 
   // Ship order extraction options (when include_ships=true).

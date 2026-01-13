@@ -628,6 +628,7 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
     d.add_double(c.garrison_target_strength);
     d.add_double(c.troop_training_queue);
     d.add_double(c.troop_training_auto_queued);
+    d.add_bool(c.shipyard_auto_build_enabled);
 
     d.add_size(c.shipyard_queue.size());
     for (const auto& bo : c.shipyard_queue) {
@@ -635,6 +636,9 @@ static void hash_game_state(Digest64& d, const GameState& s, const DigestOptions
       d.add_double(bo.tons_remaining);
       d.add_u64(bo.refit_ship_id);
       d.add_bool(bo.auto_queued);
+      d.add_string(bo.apply_ship_profile_name);
+      d.add_u64(bo.assign_to_fleet_id);
+      d.add_u64(bo.rally_to_colony_id);
     }
 
     d.add_size(c.construction_queue.size());

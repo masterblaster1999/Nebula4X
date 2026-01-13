@@ -636,6 +636,9 @@ void Simulation::tick_ai() {
   std::unordered_map<Id, std::unordered_set<Id>> reserved_explore_anomaly_targets;
   reserved_explore_anomaly_targets.reserve(faction_ids.size() * 2 + 8);
 
+  std::unordered_map<Id, std::unordered_set<Id>> reserved_explore_wreck_targets;
+  reserved_explore_wreck_targets.reserve(faction_ids.size() * 2 + 8);
+
   // A system-level ETA helper (no specific goal position; just "get into the system").
   auto estimate_eta_days_to_system = [&](Id start_system_id, Vec2 start_pos_mkm, Id fid, double speed_km_s,
                                         Id goal_system_id) -> double {
@@ -730,7 +733,21 @@ void Simulation::tick_ai() {
 
     if (best_survey != kInvalidId) {
       reserved_jumps.insert(best_survey);
-      issue_move_to_point(ship_id, best_survey_pos);
+      // If this exit leads to an undiscovered system, prefer surveying and immediately transiting
+      // to reduce idle re-planning churn.
+      bool transit_when_done = false;
+      if (const JumpPoint* jp = find_ptr(state_.jump_points, best_survey)) {
+        if (const JumpPoint* other = find_ptr(state_.jump_points, jp->linked_jump_id)) {
+          const Id dest_sys = other->system_id;
+          if (dest_sys != kInvalidId) {
+            const bool dest_known = cache ? cache->discovered.contains(dest_sys)
+                                          : is_system_discovered_by_faction(fid, dest_sys);
+            transit_when_done = !dest_known;
+          }
+        }
+      }
+
+      issue_survey_jump_point(ship_id, best_survey, transit_when_done, /*restrict_to_discovered=*/true);
       return true;
     }
 
@@ -2482,12 +2499,108 @@ void Simulation::tick_ai() {
 
         auto& reserved_jumps = reserved_explore_jump_targets[faction_id];
         auto& reserved_frontiers = reserved_explore_frontier_targets[faction_id];
+        auto& reserved_anoms = reserved_explore_anomaly_targets[faction_id];
+        auto& reserved_wrecks = reserved_explore_wreck_targets[faction_id];
 
         std::vector<Id> jps = sys->jump_points;
         std::sort(jps.begin(), jps.end());
 
         const bool survey_first = fl.mission.explore_survey_first;
         const bool allow_transit = fl.mission.explore_allow_transit;
+
+        const bool do_anoms = fl.mission.explore_investigate_anomalies;
+        const bool do_wrecks = fl.mission.explore_salvage_wrecks;
+        const bool survey_transit_when_done = fl.mission.explore_survey_transit_when_done && allow_transit;
+
+        // Optional: opportunistic anomaly investigation / salvage while exploring.
+        // These are only attempted when there are no detected hostiles in the current system
+        // (to avoid luring exploration fleets into ambushes).
+        const bool system_has_hostiles = !detected_hostile_ships_in_system(faction_id, leader->system_id).empty();
+
+        if (!system_has_hostiles) {
+          // (0) Anomalies: if enabled, investigate high-value unresolved anomalies in this system.
+          if (do_anoms) {
+            const ShipDesign* d = find_design(leader->design_id);
+            const double speed_mkm_d = (d && d->speed_km_s > 1e-9)
+                                           ? mkm_per_day_from_speed(d->speed_km_s, cfg_.seconds_per_day)
+                                           : 1.0;
+
+            Id best_anom = kInvalidId;
+            double best_score = -std::numeric_limits<double>::infinity();
+            double best_d2 = std::numeric_limits<double>::infinity();
+
+            for (const auto& [aid, a] : state_.anomalies) {
+              if (aid == kInvalidId) continue;
+              if (a.system_id != leader->system_id) continue;
+              if (a.resolved) continue;
+              if (!is_anomaly_discovered_by_faction(faction_id, aid)) continue;
+              if (reserved_anoms.contains(aid)) continue;
+
+              double minerals_total = 0.0;
+              for (const auto& [_, t] : a.mineral_reward) minerals_total += std::max(0.0, t);
+
+              double value = std::max(0.0, a.research_reward);
+              value += minerals_total * 0.05;  // heuristic: 20t ~ 1 RP
+              if (!a.unlock_component_id.empty()) value += 25.0;
+
+              const double risk = std::clamp(a.hazard_chance, 0.0, 1.0) * std::max(0.0, a.hazard_damage);
+
+              const double d2 = (leader->position_mkm - a.position_mkm).length_squared();
+              const double dist = std::sqrt(std::max(0.0, d2));
+              const double travel_days = dist / std::max(1e-6, speed_mkm_d);
+
+              const double score = value / (1.0 + travel_days) - risk;
+
+              if (best_anom == kInvalidId || score > best_score + 1e-9 ||
+                  (std::abs(score - best_score) <= 1e-9 &&
+                   (d2 + 1e-9 < best_d2 || (std::abs(d2 - best_d2) <= 1e-9 && aid < best_anom)))) {
+                best_anom = aid;
+                best_score = score;
+                best_d2 = d2;
+              }
+            }
+
+            if (best_anom != kInvalidId && fleet_orders_overrideable(fl)) {
+              reserved_anoms.insert(best_anom);
+              clear_fleet_orders(fid);
+              issue_fleet_investigate_anomaly(fid, best_anom, /*restrict_to_discovered=*/true);
+              continue;
+            }
+          }
+
+          // (1) Wreck salvage: if enabled, salvage nearby mineral caches.
+          if (do_wrecks) {
+            Id best_wreck = kInvalidId;
+            double best_d2 = std::numeric_limits<double>::infinity();
+            double best_tons = 0.0;
+
+            for (const auto& [wid, w] : state_.wrecks) {
+              if (wid == kInvalidId) continue;
+              if (w.system_id != leader->system_id) continue;
+              if (reserved_wrecks.contains(wid)) continue;
+
+              double total = 0.0;
+              for (const auto& [_, t] : w.minerals) total += std::max(0.0, t);
+              if (total <= 1e-6) continue;
+
+              const double d2 = (leader->position_mkm - w.position_mkm).length_squared();
+              if (best_wreck == kInvalidId || d2 + 1e-9 < best_d2 ||
+                  (std::abs(d2 - best_d2) <= 1e-9 &&
+                   (total > best_tons + 1e-9 || (std::abs(total - best_tons) <= 1e-9 && wid < best_wreck)))) {
+                best_wreck = wid;
+                best_d2 = d2;
+                best_tons = total;
+              }
+            }
+
+            if (best_wreck != kInvalidId && fleet_orders_overrideable(fl)) {
+              reserved_wrecks.insert(best_wreck);
+              clear_fleet_orders(fid);
+              issue_fleet_salvage_wreck(fid, best_wreck, /*mineral=*/"", /*tons=*/0.0, /*restrict_to_discovered=*/true);
+              continue;
+            }
+          }
+        }
 
         auto pick_transit_jump = [&]() -> Id {
           if (!allow_transit) return kInvalidId;
@@ -2548,14 +2661,26 @@ void Simulation::tick_ai() {
         const Id transit_jump = pick_transit_jump();
         const Id survey_jump = pick_survey_jump();
 
-        auto issue_survey = [&](Id jp_id) {
-          if (jp_id == kInvalidId) return;
+
+        auto jump_leads_to_undiscovered = [&](Id jp_id) -> bool {
           const JumpPoint* jp = find_ptr(state_.jump_points, jp_id);
-          if (!jp) return;
+          if (!jp || jp->linked_jump_id == kInvalidId) return false;
+          const JumpPoint* other = find_ptr(state_.jump_points, jp->linked_jump_id);
+          if (!other) return false;
+          const Id dest_sys = other->system_id;
+          if (dest_sys == kInvalidId) return false;
+          const bool dest_known = cache ? cache->discovered.contains(dest_sys)
+                                        : is_system_discovered_by_faction(faction_id, dest_sys);
+          return !dest_known;
+        };
+
+        auto issue_survey = [&](Id jp_id, bool transit_when_done) {
+          if (jp_id == kInvalidId) return;
           reserved_jumps.insert(jp_id);
           clear_fleet_orders(fid);
-          issue_fleet_move_to_point(fid, jp->position_mkm);
+          issue_fleet_survey_jump_point(fid, jp_id, transit_when_done, /*restrict_to_discovered=*/true);
         };
+
 
         auto issue_transit = [&](Id jp_id) {
           if (jp_id == kInvalidId) return;
@@ -2567,7 +2692,7 @@ void Simulation::tick_ai() {
         // Local system work first.
         if (survey_first) {
           if (survey_jump != kInvalidId) {
-            issue_survey(survey_jump);
+            issue_survey(survey_jump, survey_transit_when_done && jump_leads_to_undiscovered(survey_jump));
             continue;
           }
           if (transit_jump != kInvalidId) {
@@ -2580,7 +2705,7 @@ void Simulation::tick_ai() {
             continue;
           }
           if (survey_jump != kInvalidId) {
-            issue_survey(survey_jump);
+            issue_survey(survey_jump, survey_transit_when_done && jump_leads_to_undiscovered(survey_jump));
             continue;
           }
         }

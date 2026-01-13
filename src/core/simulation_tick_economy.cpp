@@ -17,6 +17,7 @@
 
 #include "nebula4x/core/scenario.h"
 #include "nebula4x/core/ai_economy.h"
+#include "nebula4x/core/ship_profiles.h"
 #include "nebula4x/util/log.h"
 #include "nebula4x/util/trace_events.h"
 #include "nebula4x/util/spatial_index.h"
@@ -577,6 +578,97 @@ void Simulation::tick_shipyards(double dt_days) {
   };
 
 
+  // --- Shipyard completion metadata (QoL) ---
+  //
+  // Shipyard BuildOrders can optionally carry post-completion instructions:
+  //  - apply a ship automation profile
+  //  - assign to a fleet
+  //  - rally to a colony
+  //
+  // This is deliberately lightweight: it piggybacks on the existing build/refit
+  // order pipeline and stays fully backward-compatible in save files.
+  struct ShipyardMetaResult {
+    bool profile_applied{false};
+    bool fleet_assigned{false};
+    bool rally_ordered{false};
+
+    std::string profile_name;
+    std::string fleet_name;
+    std::string rally_colony_name;
+  };
+
+  auto apply_shipyard_metadata = [&](Ship& ship, const BuildOrder& bo, const Colony& source_colony) {
+    ShipyardMetaResult r;
+
+    EventContext ctx;
+    ctx.faction_id = source_colony.faction_id;
+    ctx.system_id = ship.system_id;
+    ctx.ship_id = ship.id;
+    ctx.colony_id = source_colony.id;
+
+    // Apply ship automation profile.
+    if (!bo.apply_ship_profile_name.empty()) {
+      r.profile_name = bo.apply_ship_profile_name;
+      auto* fac = find_ptr(state_.factions, ship.faction_id);
+      if (!fac) {
+        push_event(EventLevel::Warn, EventCategory::Shipyard,
+                  "Shipyard order: could not apply ship profile (missing faction)", ctx);
+      } else {
+        auto itp = fac->ship_profiles.find(bo.apply_ship_profile_name);
+        if (itp == fac->ship_profiles.end()) {
+          push_event(EventLevel::Warn, EventCategory::Shipyard,
+                    "Shipyard order: unknown ship profile '" + bo.apply_ship_profile_name + "'", ctx);
+        } else {
+          apply_ship_profile(ship, itp->second);
+          r.profile_applied = true;
+        }
+      }
+    }
+
+    // Assign to fleet.
+    if (bo.assign_to_fleet_id != kInvalidId) {
+      r.fleet_name = std::to_string(static_cast<unsigned long long>(bo.assign_to_fleet_id));
+      if (const auto* fl = find_ptr(state_.fleets, bo.assign_to_fleet_id)) {
+        if (!fl->name.empty()) r.fleet_name = fl->name;
+      }
+
+      std::string err;
+      if (add_ship_to_fleet(bo.assign_to_fleet_id, ship.id, &err)) {
+        r.fleet_assigned = true;
+      } else {
+        push_event(EventLevel::Warn, EventCategory::Shipyard,
+                  "Shipyard order: could not assign ship to fleet: " + err, ctx);
+      }
+    }
+
+    // Rally (only if fleet assignment was not used successfully).
+    if (!r.fleet_assigned && bo.rally_to_colony_id != kInvalidId) {
+      const auto* rally_colony = find_ptr(state_.colonies, bo.rally_to_colony_id);
+      if (!rally_colony) {
+        push_event(EventLevel::Warn, EventCategory::Shipyard,
+                  "Shipyard order: rally target colony not found", ctx);
+      } else if (rally_colony->body_id == kInvalidId) {
+        push_event(EventLevel::Warn, EventCategory::Shipyard,
+                  "Shipyard order: rally target colony has invalid body_id", ctx);
+      } else if (const auto* rally_body = find_ptr(state_.bodies, rally_colony->body_id); !rally_body) {
+        push_event(EventLevel::Warn, EventCategory::Shipyard,
+                  "Shipyard order: rally target colony body not found", ctx);
+      } else {
+        r.rally_colony_name = rally_colony->name;
+        if (issue_move_to_body(ship.id, rally_body->id, /*restrict_to_discovered=*/true)) {
+          r.rally_ordered = true;
+        } else {
+          push_event(EventLevel::Warn, EventCategory::Shipyard,
+                    "Shipyard order: could not issue rally move order (no known route)", ctx);
+        }
+      }
+    }
+
+    return r;
+  };
+
+
+
   // --- Auto-build ship design targets (auto-shipyards) ---
   //
   // Factions can define desired counts of ship designs to maintain in
@@ -591,17 +683,24 @@ void Simulation::tick_shipyards(double dt_days) {
     if (fac.ship_design_targets.empty()) continue;
 
     // Find all colonies belonging to this faction with at least one shipyard.
-    std::vector<Id> yard_colonies;
-    yard_colonies.reserve(state_.colonies.size());
+    //
+    // Colonies may opt out of the faction-level ship design target auto-builder
+    // via Colony::shipyard_auto_build_enabled. Those shipyards remain fully usable
+    // for manual orders, but will not receive (or keep) auto_queued build orders.
+    std::vector<Id> all_yard_colonies;
+    std::vector<Id> enabled_yard_colonies;
+    all_yard_colonies.reserve(state_.colonies.size());
+    enabled_yard_colonies.reserve(state_.colonies.size());
     for (Id cid2 : sorted_keys(state_.colonies)) {
       const auto& colony = state_.colonies.at(cid2);
       if (colony.faction_id != fid) continue;
       const auto it_yard = colony.installations.find("shipyard");
       const int yards = (it_yard != colony.installations.end()) ? it_yard->second : 0;
       if (yards <= 0) continue;
-      yard_colonies.push_back(cid2);
+      all_yard_colonies.push_back(cid2);
+      if (colony.shipyard_auto_build_enabled) enabled_yard_colonies.push_back(cid2);
     }
-    if (yard_colonies.empty()) continue;
+    if (all_yard_colonies.empty()) continue;
 
     auto target_for = [&](const std::string& design_id) -> int {
       auto it = fac.ship_design_targets.find(design_id);
@@ -620,21 +719,26 @@ void Simulation::tick_shipyards(double dt_days) {
 
     // Remove stale auto orders whose design is no longer targeted (or is invalid/unbuildable),
     // but never cancel an order that has already started construction.
-    for (Id cid2 : yard_colonies) {
+    //
+    // Additionally, colonies that have opted out of auto-build will have any *unstarted*
+    // auto_queued orders canceled here (manual orders are never touched).
+    for (Id cid2 : all_yard_colonies) {
       auto& colony = state_.colonies.at(cid2);
+      const bool allow_auto_here = colony.shipyard_auto_build_enabled;
+
       for (int i = static_cast<int>(colony.shipyard_queue.size()) - 1; i >= 0; --i) {
         const auto& bo = colony.shipyard_queue[static_cast<size_t>(i)];
         if (!bo.auto_queued || bo.is_refit()) continue;
 
         const int t = target_for(bo.design_id);
         const bool design_ok = (find_design(bo.design_id) != nullptr) && is_design_buildable_for_faction(fid, bo.design_id);
-        if (t <= 0 || !design_ok) {
-          if (can_cancel_auto(bo)) {
-            colony.shipyard_queue.erase(colony.shipyard_queue.begin() + i);
-          }
+        const bool should_remove = (!allow_auto_here) || (t <= 0) || (!design_ok);
+        if (should_remove && can_cancel_auto(bo)) {
+          colony.shipyard_queue.erase(colony.shipyard_queue.begin() + i);
         }
       }
     }
+
 
     // Count current ships and pending build orders by design.
     std::unordered_map<std::string, int> have;
@@ -647,7 +751,7 @@ void Simulation::tick_shipyards(double dt_days) {
 
     std::unordered_map<std::string, int> manual_pending;
     std::unordered_map<std::string, int> auto_pending;
-    for (Id cid2 : yard_colonies) {
+    for (Id cid2 : all_yard_colonies) {
       const auto& colony = state_.colonies.at(cid2);
       for (const auto& bo : colony.shipyard_queue) {
         if (bo.is_refit()) continue;
@@ -675,7 +779,7 @@ void Simulation::tick_shipyards(double dt_days) {
     auto pick_best_yard = [&]() -> Id {
       Id best = kInvalidId;
       double best_eta = std::numeric_limits<double>::infinity();
-      for (Id cid2 : yard_colonies) {
+      for (Id cid2 : enabled_yard_colonies) {
         const double eta = yard_eta(cid2);
         if (eta < best_eta - 1e-9 || (std::abs(eta - best_eta) <= 1e-9 && cid2 < best)) {
           best = cid2;
@@ -711,7 +815,7 @@ void Simulation::tick_shipyards(double dt_days) {
       // Trim excess cancelable auto orders.
       int to_remove = std::max(0, cur_auto - required_auto);
       if (to_remove > 0) {
-        for (auto it = yard_colonies.rbegin(); it != yard_colonies.rend() && to_remove > 0; ++it) {
+        for (auto it = all_yard_colonies.rbegin(); it != all_yard_colonies.rend() && to_remove > 0; ++it) {
           auto& colony = state_.colonies.at(*it);
           for (int i = static_cast<int>(colony.shipyard_queue.size()) - 1; i >= 0 && to_remove > 0; --i) {
             const auto& bo = colony.shipyard_queue[static_cast<size_t>(i)];
@@ -982,8 +1086,14 @@ void Simulation::tick_shipyards(double dt_days) {
           }
         }
 
-        const std::string msg =
+        const auto meta = apply_shipyard_metadata(*refit_ship, bo, colony);
+
+        std::string msg =
             "Refit ship " + refit_ship->name + " -> " + target->name + " (" + refit_ship->design_id + ") at " + colony.name;
+        if (meta.profile_applied) msg += " [Profile:" + meta.profile_name + "]";
+        if (meta.fleet_assigned) msg += " [Fleet:" + meta.fleet_name + "]";
+        if (meta.rally_ordered) msg += " [Rally:" + meta.rally_colony_name + "]";
+
         nebula4x::log::info(msg);
         EventContext ctx;
         ctx.faction_id = colony.faction_id;
@@ -1044,7 +1154,16 @@ void Simulation::tick_shipyards(double dt_days) {
       state_.ship_orders[sh.id] = ShipOrders{};
       state_.systems[sh.system_id].ships.push_back(sh.id);
 
-      const std::string msg = "Built ship " + sh.name + " (" + sh.design_id + ") at " + colony.name;
+      ShipyardMetaResult meta;
+      if (auto* built = find_ptr(state_.ships, sh.id)) {
+        meta = apply_shipyard_metadata(*built, bo, colony);
+      }
+
+      std::string msg = "Built ship " + sh.name + " (" + sh.design_id + ") at " + colony.name;
+      if (meta.profile_applied) msg += " [Profile:" + meta.profile_name + "]";
+      if (meta.fleet_assigned) msg += " [Fleet:" + meta.fleet_name + "]";
+      if (meta.rally_ordered) msg += " [Rally:" + meta.rally_colony_name + "]";
+
       nebula4x::log::info(msg);
       EventContext ctx;
       ctx.faction_id = colony.faction_id;

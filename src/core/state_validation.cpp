@@ -800,6 +800,50 @@ std::vector<std::string> validate_game_state(const GameState& s, const ContentDB
                join("Colony ", id_u64(cid), " shipyard_queue[", i, "] references unknown design_id '", bo.design_id,
                     "'"));
         }
+
+        // Optional build/refit metadata references.
+        if (!bo.apply_ship_profile_name.empty()) {
+          const auto itf = s.factions.find(c.faction_id);
+          if (itf == s.factions.end()) {
+            push(errors,
+                 join("Colony ", id_u64(cid), " shipyard_queue[", i,
+                      "] has apply_ship_profile_name but colony faction is missing"));
+          } else if (itf->second.ship_profiles.find(bo.apply_ship_profile_name) == itf->second.ship_profiles.end()) {
+            push(errors,
+                 join("Colony ", id_u64(cid), " shipyard_queue[", i,
+                      "] references unknown ship profile '", bo.apply_ship_profile_name, "'"));
+          }
+        }
+
+        if (bo.assign_to_fleet_id != kInvalidId) {
+          const auto itfl = s.fleets.find(bo.assign_to_fleet_id);
+          if (itfl == s.fleets.end()) {
+            push(errors,
+                 join("Colony ", id_u64(cid), " shipyard_queue[", i,
+                      "] references missing assign_to_fleet_id ", id_u64(bo.assign_to_fleet_id)));
+          } else if (itfl->second.faction_id != kInvalidId && itfl->second.faction_id != c.faction_id) {
+            push(errors,
+                 join("Colony ", id_u64(cid), " shipyard_queue[", i,
+                      "] assign_to_fleet_id ", id_u64(bo.assign_to_fleet_id),
+                      " faction mismatch: fleet faction=", id_u64(itfl->second.faction_id),
+                      " colony faction=", id_u64(c.faction_id)));
+          }
+        }
+
+        if (bo.rally_to_colony_id != kInvalidId) {
+          const auto itc2 = s.colonies.find(bo.rally_to_colony_id);
+          if (itc2 == s.colonies.end()) {
+            push(errors,
+                 join("Colony ", id_u64(cid), " shipyard_queue[", i,
+                      "] references missing rally_to_colony_id ", id_u64(bo.rally_to_colony_id)));
+          } else if (itc2->second.faction_id != kInvalidId && itc2->second.faction_id != c.faction_id) {
+            push(errors,
+                 join("Colony ", id_u64(cid), " shipyard_queue[", i,
+                      "] rally_to_colony_id ", id_u64(bo.rally_to_colony_id),
+                      " faction mismatch: target colony faction=", id_u64(itc2->second.faction_id),
+                      " source colony faction=", id_u64(c.faction_id)));
+          }
+        }
       }
 
       for (std::size_t i = 0; i < c.construction_queue.size(); ++i) {
@@ -1657,7 +1701,7 @@ FixReport fix_game_state(GameState& s, const ContentDB* content) {
 
         // Shipyard queue: drop entries with unknown designs.
         for (std::size_t i = 0; i < c.shipyard_queue.size();) {
-          const auto& bo = c.shipyard_queue[i];
+          auto& bo = c.shipyard_queue[i];
           if (bo.design_id.empty() || !design_exists(s, *content, bo.design_id)) {
             note(join("Fix: Colony ", id_u64(cid), " dropped shipyard_queue entry with unknown design_id '",
                       bo.design_id, "'"));
@@ -1666,10 +1710,44 @@ FixReport fix_game_state(GameState& s, const ContentDB* content) {
           }
           if (!std::isfinite(bo.tons_remaining) || bo.tons_remaining < 0.0) {
             const double old = bo.tons_remaining;
-            c.shipyard_queue[i].tons_remaining = std::max(0.0, std::isfinite(old) ? old : 0.0);
-            note(join("Fix: Colony ", id_u64(cid), " shipyard_queue tons_remaining clamped ", old, " -> ",
-                      c.shipyard_queue[i].tons_remaining));
+            bo.tons_remaining = std::max(0.0, std::isfinite(old) ? old : 0.0);
+            note(join("Fix: Colony ", id_u64(cid), " shipyard_queue tons_remaining clamped ", old, " -> ", bo.tons_remaining));
           }
+
+          // Optional metadata: clear invalid references.
+          if (!bo.apply_ship_profile_name.empty()) {
+            const auto itf = s.factions.find(c.faction_id);
+            const bool ok = (itf != s.factions.end() &&
+                             itf->second.ship_profiles.find(bo.apply_ship_profile_name) != itf->second.ship_profiles.end());
+            if (!ok) {
+              note(join("Fix: Colony ", id_u64(cid), " shipyard_queue cleared unknown ship profile '",
+                        bo.apply_ship_profile_name, "'"));
+              bo.apply_ship_profile_name.clear();
+            }
+          }
+
+          if (bo.assign_to_fleet_id != kInvalidId) {
+            const auto itfl = s.fleets.find(bo.assign_to_fleet_id);
+            const bool ok = (itfl != s.fleets.end() &&
+                             (itfl->second.faction_id == kInvalidId || itfl->second.faction_id == c.faction_id));
+            if (!ok) {
+              note(join("Fix: Colony ", id_u64(cid), " shipyard_queue cleared invalid assign_to_fleet_id ",
+                        id_u64(bo.assign_to_fleet_id)));
+              bo.assign_to_fleet_id = kInvalidId;
+            }
+          }
+
+          if (bo.rally_to_colony_id != kInvalidId) {
+            const auto itc2 = s.colonies.find(bo.rally_to_colony_id);
+            const bool ok = (itc2 != s.colonies.end() &&
+                             (itc2->second.faction_id == kInvalidId || itc2->second.faction_id == c.faction_id));
+            if (!ok) {
+              note(join("Fix: Colony ", id_u64(cid), " shipyard_queue cleared invalid rally_to_colony_id ",
+                        id_u64(bo.rally_to_colony_id)));
+              bo.rally_to_colony_id = kInvalidId;
+            }
+          }
+
           ++i;
         }
 

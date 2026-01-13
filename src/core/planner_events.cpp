@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <iomanip>
 #include <limits>
+#include <sstream>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -340,6 +342,106 @@ PlannerEventsResult compute_planner_events(const Simulation& sim, Id faction_id,
         if (!push_bounded(items, opt, std::move(ev), truncated, trunc_reason)) break;
       }
 
+      if (truncated) break;
+    }
+  }
+
+
+  // --- Missile salvos (optional) ---
+  // Forecast in-flight missile impacts as planner events. This is extremely useful
+  // for time warp decisions during battles.
+  if (opt.include_missile_impacts) {
+    struct Miss {
+      double eta{0.0};
+      Id mid{kInvalidId};
+    };
+
+    auto fmt1 = [](double x) {
+      std::ostringstream ss;
+      ss.setf(std::ios::fixed);
+      ss << std::setprecision(1) << x;
+      return ss.str();
+    };
+
+    auto ship_name_or_id = [&](Id sid) -> std::string {
+      const Ship* sh = find_ptr(sim.state().ships, sid);
+      if (!sh) return "Ship #" + std::to_string(sid);
+      if (!sh->name.empty()) return sh->name;
+      return "Ship #" + std::to_string(sid);
+    };
+
+    std::vector<Miss> mids;
+    mids.reserve(sim.state().missile_salvos.size());
+    for (const auto& [mid, ms] : sim.state().missile_salvos) {
+      if (ms.attacker_faction_id != faction_id && ms.target_faction_id != faction_id) continue;
+      const double eta = std::max(0.0, ms.eta_days_remaining);
+      mids.push_back(Miss{eta, mid});
+    }
+
+    std::sort(mids.begin(), mids.end(), [](const Miss& a, const Miss& b) {
+      if (a.eta < b.eta) return true;
+      if (a.eta > b.eta) return false;
+      return a.mid < b.mid;
+    });
+
+    for (const Miss& m : mids) {
+      const MissileSalvo* ms = find_ptr(sim.state().missile_salvos, m.mid);
+      if (!ms) continue;
+
+      PlannerEvent ev;
+      ev.category = EventCategory::Combat;
+      ev.faction_id = faction_id;
+      ev.system_id = ms->system_id;
+      ev.ship_id = ms->target_ship_id;
+
+      ev.eta_days = m.eta;
+      const auto dh = eta_to_day_hour(sim, ev.eta_days);
+      ev.day = dh.day;
+      ev.hour = dh.hour;
+
+      const bool incoming = (ms->target_faction_id == faction_id);
+      const bool outgoing = (ms->attacker_faction_id == faction_id);
+
+      const std::string tgt = ship_name_or_id(ms->target_ship_id);
+      const std::string atk = ship_name_or_id(ms->attacker_ship_id);
+
+      // Severity heuristic:
+      // - Incoming to our ships: WARN, or ERROR if the *remaining* payload is likely lethal
+      //   versus the ship's current HP+shields. (Point defense may still reduce it.)
+      // - Outgoing salvos: INFO.
+      ev.level = incoming ? EventLevel::Warn : EventLevel::Info;
+
+      if (incoming) {
+        if (const Ship* target = find_ptr(sim.state().ships, ms->target_ship_id)) {
+          const double hp = std::max(0.0, target->hp);
+          const double sh = std::max(0.0, target->shields);
+          if (std::max(0.0, ms->damage) >= hp + sh - 1e-6) {
+            ev.level = EventLevel::Error;
+          }
+        }
+      }
+
+      // Title: keep a consistent prefix so the planner UI can map this to a
+      // precise time-warp stop condition ("Missile impacts").
+      if (incoming && !outgoing) {
+        ev.title = "Incoming missile impact: " + tgt;
+      } else {
+        ev.title = "Missile impact: " + tgt;
+      }
+
+      const double payload0 = (ms->damage_initial > 1e-12) ? ms->damage_initial : std::max(0.0, ms->damage);
+      std::string range_s;
+      if (!std::isfinite(ms->range_remaining_mkm) || ms->range_remaining_mkm > 1e18) {
+        range_s = "inf";
+      } else {
+        range_s = fmt1(std::max(0.0, ms->range_remaining_mkm));
+      }
+
+      ev.detail = "attacker=" + atk + " target=" + tgt + " payload=" + fmt1(payload0) + " remaining=" +
+                  fmt1(std::max(0.0, ms->damage)) + " range_rem=" + range_s +
+                  " eta_total=" + fmt1(std::max(0.0, ms->eta_days_total)) + " mid=" + std::to_string(ms->id);
+
+      if (!push_bounded(items, opt, std::move(ev), truncated, trunc_reason)) break;
       if (truncated) break;
     }
   }

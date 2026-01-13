@@ -628,7 +628,7 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
                 const auto* b = find_ptr(s.bodies, o.body_id);
                 if (!b || b->system_id != sys->id) return std::nullopt;
                 return b->position_mkm;
-              } else if constexpr (std::is_same_v<T, nebula4x::TravelViaJump>) {
+              } else if constexpr (std::is_same_v<T, nebula4x::TravelViaJump> || std::is_same_v<T, nebula4x::SurveyJumpPoint>) {
                 const auto* jp = find_ptr(s.jump_points, o.jump_point_id);
                 if (!jp || jp->system_id != sys->id) return std::nullopt;
                 return jp->position_mkm;
@@ -1211,10 +1211,19 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
 
         // Prefer the closest of (jump, body) if both were in range.
         if (picked_jump != kInvalidId && best_jump_d2 <= best_body_d2) {
+          const bool alt = ImGui::GetIO().KeyAlt;
           if (fleet_mode) {
-            sim.issue_fleet_travel_via_jump(selected_fleet->id, picked_jump);
+            if (alt) {
+              sim.issue_fleet_survey_jump_point(selected_fleet->id, picked_jump, /*transit_when_done=*/false, ui.fog_of_war);
+            } else {
+              sim.issue_fleet_travel_via_jump(selected_fleet->id, picked_jump);
+            }
           } else {
-            sim.issue_travel_via_jump(selected_ship, picked_jump);
+            if (alt) {
+              sim.issue_survey_jump_point(selected_ship, picked_jump, /*transit_when_done=*/false, ui.fog_of_war);
+            } else {
+              sim.issue_travel_via_jump(selected_ship, picked_jump);
+            }
           }
         } else if (picked_body != kInvalidId) {
           // Always select the clicked body (even when ordering).
@@ -1771,6 +1780,25 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
               sim.issue_travel_via_jump(selected_ship, hovered_id);
             }
           }
+
+          if (can_issue_orders && !surveyed) {
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Survey")) {
+              if (fleet_mode) {
+                sim.issue_fleet_survey_jump_point(selected_fleet->id, hovered_id, /*transit_when_done=*/false, ui.fog_of_war);
+              } else if (selected_ship != kInvalidId) {
+                sim.issue_survey_jump_point(selected_ship, hovered_id, /*transit_when_done=*/false, ui.fog_of_war);
+              }
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Survey+Transit")) {
+              if (fleet_mode) {
+                sim.issue_fleet_survey_jump_point(selected_fleet->id, hovered_id, /*transit_when_done=*/true, ui.fog_of_war);
+              } else if (selected_ship != kInvalidId) {
+                sim.issue_survey_jump_point(selected_ship, hovered_id, /*transit_when_done=*/true, ui.fog_of_war);
+              }
+            }
+          }
         }
       }
       ImGui::EndTooltip();
@@ -1931,6 +1959,7 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
   ImGui::BulletText("Click body: move-to-body");
   ImGui::BulletText("Click jump point: travel via jump");
   ImGui::BulletText("Jump points are purple rings");
+  ImGui::BulletText("Alt + click a jump point to Survey it (no transit)");
 
   ImGui::SeparatorText("Map overlays");
   ImGui::Checkbox("Starfield", &ui.system_map_starfield);

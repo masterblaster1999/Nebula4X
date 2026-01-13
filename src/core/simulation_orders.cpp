@@ -498,7 +498,7 @@ bool Simulation::apply_order_template_to_ship_smart(Id ship_id, const std::strin
     } else if (std::holds_alternative<ScrapShip>(ord)) {
       required_system = colony_system(std::get<ScrapShip>(ord).colony_id);
       if (!required_system) return fail("Template ScrapShip references an invalid colony");
-    } else if (std::holds_alternative<AttackShip>(ord)) {
+        } else if (std::holds_alternative<AttackShip>(ord)) {
       required_system = ship_system(std::get<AttackShip>(ord).target_ship_id);
       if (!required_system) return fail("Template AttackShip references an invalid target ship");
     } else if (std::holds_alternative<TransferCargoToShip>(ord)) {
@@ -517,6 +517,14 @@ bool Simulation::apply_order_template_to_ship_smart(Id ship_id, const std::strin
       required_system = jp->system_id;
       if (!required_system || *required_system == kInvalidId) {
         return fail("Template TravelViaJump has an invalid source system");
+      }
+    } else if (std::holds_alternative<SurveyJumpPoint>(ord)) {
+      const Id jid = std::get<SurveyJumpPoint>(ord).jump_point_id;
+      const auto* jp = find_ptr(state_.jump_points, jid);
+      if (!jp) return fail("Template SurveyJumpPoint references an invalid jump point");
+      required_system = jp->system_id;
+      if (!required_system || *required_system == kInvalidId) {
+        return fail("Template SurveyJumpPoint has an invalid source system");
       }
     }
 
@@ -557,6 +565,11 @@ bool Simulation::apply_order_template_to_ship_smart(Id ship_id, const std::strin
       goal_pos_mkm = ship_pos(std::get<TransferFuelToShip>(ord).target_ship_id);
     } else if (std::holds_alternative<TransferTroopsToShip>(ord)) {
       goal_pos_mkm = ship_pos(std::get<TransferTroopsToShip>(ord).target_ship_id);
+    } else if (std::holds_alternative<SurveyJumpPoint>(ord)) {
+      const Id jid = std::get<SurveyJumpPoint>(ord).jump_point_id;
+      if (const auto* jp = find_ptr(state_.jump_points, jid)) {
+        goal_pos_mkm = jp->position_mkm;
+      }
     }
 
     if (required_system) {
@@ -608,6 +621,26 @@ bool Simulation::apply_order_template_to_ship_smart(Id ship_id, const std::strin
       if (!find_ptr(state_.systems, dest->system_id)) return fail("Template TravelViaJump destination system missing");
       nav.system_id = dest->system_id;
       nav.position_mkm = dest->position_mkm;
+    } else if (std::holds_alternative<SurveyJumpPoint>(ord)) {
+      const auto& sj = std::get<SurveyJumpPoint>(ord);
+      const Id jid = sj.jump_point_id;
+      const auto* jp = find_ptr(state_.jump_points, jid);
+      if (!jp) return fail("Template SurveyJumpPoint references an invalid jump point");
+      if (jp->system_id != nav.system_id) {
+        // nav.system_id should already match required_system.
+        return fail("Template SurveyJumpPoint is not in the predicted system after routing");
+      }
+      nav.position_mkm = jp->position_mkm;
+
+      if (sj.transit_when_done) {
+        if (jp->linked_jump_id == kInvalidId) return fail("Template SurveyJumpPoint uses an unlinked jump point");
+        const auto* dest = find_ptr(state_.jump_points, jp->linked_jump_id);
+        if (!dest) return fail("Template SurveyJumpPoint has invalid destination");
+        if (dest->system_id == kInvalidId) return fail("Template SurveyJumpPoint has invalid destination system");
+        if (!find_ptr(state_.systems, dest->system_id)) return fail("Template SurveyJumpPoint destination system missing");
+        nav.system_id = dest->system_id;
+        nav.position_mkm = dest->position_mkm;
+      }
     } else if (std::holds_alternative<AttackShip>(ord)) {
       // Best-effort: update position to the current target snapshot if it's in the same system.
       const Id tid = std::get<AttackShip>(ord).target_ship_id;
@@ -864,6 +897,18 @@ bool Simulation::issue_fleet_travel_via_jump(Id fleet_id, Id jump_point_id) {
   return any;
 }
 
+bool Simulation::issue_fleet_survey_jump_point(Id fleet_id, Id jump_point_id, bool transit_when_done,
+                                              bool restrict_to_discovered) {
+  prune_fleets();
+  const auto* fl = find_ptr(state_.fleets, fleet_id);
+  if (!fl) return false;
+  bool any = false;
+  for (Id sid : fl->ship_ids) {
+    if (issue_survey_jump_point(sid, jump_point_id, transit_when_done, restrict_to_discovered)) any = true;
+  }
+  return any;
+}
+
 bool Simulation::issue_fleet_travel_to_system(Id fleet_id, Id target_system_id, bool restrict_to_discovered) {
   prune_fleets();
   const auto* fl = find_ptr(state_.fleets, fleet_id);
@@ -1105,6 +1150,29 @@ bool Simulation::issue_travel_via_jump(Id ship_id, Id jump_point_id) {
   if (!find_ptr(state_.jump_points, jump_point_id)) return false;
   auto& orders = state_.ship_orders[ship_id];
   orders.queue.push_back(TravelViaJump{jump_point_id});
+  return true;
+}
+
+
+bool Simulation::issue_survey_jump_point(Id ship_id, Id jump_point_id, bool transit_when_done,
+                                        bool restrict_to_discovered) {
+  auto* ship = find_ptr(state_.ships, ship_id);
+  if (!ship) return false;
+
+  const auto* jp = find_ptr(state_.jump_points, jump_point_id);
+  if (!jp) return false;
+  if (jp->system_id == kInvalidId) return false;
+  if (!find_ptr(state_.systems, jp->system_id)) return false;
+
+  // Travel to the jump point's system if needed (goal-aware).
+  if (!issue_travel_to_system(ship_id, jp->system_id, restrict_to_discovered, jp->position_mkm)) return false;
+
+  SurveyJumpPoint ord;
+  ord.jump_point_id = jump_point_id;
+  ord.transit_when_done = transit_when_done;
+
+  auto& orders = state_.ship_orders[ship_id];
+  orders.queue.push_back(std::move(ord));
   return true;
 }
 

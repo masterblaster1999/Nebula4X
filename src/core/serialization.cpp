@@ -439,6 +439,10 @@ Value order_to_json(const Order& order) {
         } else if constexpr (std::is_same_v<T, TravelViaJump>) {
           obj["type"] = std::string("travel_via_jump");
           obj["jump_point_id"] = static_cast<double>(o.jump_point_id);
+        } else if constexpr (std::is_same_v<T, SurveyJumpPoint>) {
+          obj["type"] = std::string("survey_jump_point");
+          obj["jump_point_id"] = static_cast<double>(o.jump_point_id);
+          if (o.transit_when_done) obj["transit_when_done"] = true;
         } else if constexpr (std::is_same_v<T, AttackShip>) {
           obj["type"] = std::string("attack_ship");
           obj["target_ship_id"] = static_cast<double>(o.target_ship_id);
@@ -561,6 +565,12 @@ Order order_from_json(const Value& v) {
     TravelViaJump t;
     t.jump_point_id = static_cast<Id>(o.at("jump_point_id").int_value());
     return t;
+  }
+  if (type == "survey_jump_point") {
+    SurveyJumpPoint sj;
+    sj.jump_point_id = static_cast<Id>(o.at("jump_point_id").int_value());
+    if (auto it = o.find("transit_when_done"); it != o.end()) sj.transit_when_done = it->second.bool_value(false);
+    return sj;
   }
   if (type == "attack_ship") {
     AttackShip a;
@@ -801,6 +811,179 @@ ColonyAutomationProfile colony_automation_profile_from_json_value(const Value& v
 
   return p;
 }
+
+
+Object ship_automation_profile_to_json(const ShipAutomationProfile& p) {
+  Object o;
+
+  // Mission automation flags.
+  if (p.auto_explore) o["auto_explore"] = true;
+  if (p.auto_freight) o["auto_freight"] = true;
+  if (p.auto_troop_transport) o["auto_troop_transport"] = true;
+  if (p.auto_salvage) o["auto_salvage"] = true;
+  if (p.auto_mine) o["auto_mine"] = true;
+  if (p.auto_mine_home_colony_id != kInvalidId) {
+    o["auto_mine_home_colony_id"] = static_cast<double>(p.auto_mine_home_colony_id);
+  }
+  if (!p.auto_mine_mineral.empty()) {
+    o["auto_mine_mineral"] = p.auto_mine_mineral;
+  }
+  if (p.auto_colonize) o["auto_colonize"] = true;
+
+  // Sustainment.
+  if (p.auto_refuel) o["auto_refuel"] = true;
+  if (std::abs(p.auto_refuel_threshold_fraction - 0.25) > 1e-9) {
+    o["auto_refuel_threshold_fraction"] = p.auto_refuel_threshold_fraction;
+  }
+
+  if (p.auto_tanker) o["auto_tanker"] = true;
+  if (std::abs(p.auto_tanker_reserve_fraction - 0.25) > 1e-9) {
+    o["auto_tanker_reserve_fraction"] = p.auto_tanker_reserve_fraction;
+  }
+
+  if (p.auto_repair) o["auto_repair"] = true;
+  if (std::abs(p.auto_repair_threshold_fraction - 0.75) > 1e-9) {
+    o["auto_repair_threshold_fraction"] = p.auto_repair_threshold_fraction;
+  }
+
+  if (p.auto_rearm) o["auto_rearm"] = true;
+  if (std::abs(p.auto_rearm_threshold_fraction - 0.25) > 1e-9) {
+    o["auto_rearm_threshold_fraction"] = p.auto_rearm_threshold_fraction;
+  }
+
+  if (p.repair_priority != RepairPriority::Normal) {
+    o["repair_priority"] = repair_priority_to_string(p.repair_priority);
+  }
+
+  // Runtime power + sensor policy.
+  {
+    const Object pp = ship_power_policy_to_json(p.power_policy);
+    if (!pp.empty()) o["power_policy"] = pp;
+  }
+  if (p.sensor_mode != SensorMode::Normal) {
+    o["sensor_mode"] = sensor_mode_to_string(p.sensor_mode);
+  }
+
+  // Combat doctrine (optional; same encoding as ship serialization).
+  {
+    const auto& doc = p.combat_doctrine;
+    Object dco;
+    bool any = false;
+    if (doc.range_mode != EngagementRangeMode::Auto) {
+      dco["range_mode"] = engagement_range_mode_to_string(doc.range_mode);
+      any = true;
+    }
+    if (doc.range_fraction != 0.9) {
+      dco["range_fraction"] = doc.range_fraction;
+      any = true;
+    }
+    if (doc.min_range_mkm != 0.1) {
+      dco["min_range_mkm"] = doc.min_range_mkm;
+      any = true;
+    }
+    if (doc.custom_range_mkm != 0.0) {
+      dco["custom_range_mkm"] = doc.custom_range_mkm;
+      any = true;
+    }
+    if (doc.kite_if_too_close) {
+      dco["kite_if_too_close"] = true;
+      any = true;
+    }
+    if (doc.kite_deadband_fraction != 0.10) {
+      dco["kite_deadband_fraction"] = doc.kite_deadband_fraction;
+      any = true;
+    }
+    if (any) o["combat_doctrine"] = dco;
+  }
+
+  return o;
+}
+
+ShipAutomationProfile ship_automation_profile_from_json_value(const Value& v) {
+  ShipAutomationProfile p;
+  if (!v.is_object()) return p;
+  const auto& o = v.object();
+
+  // Mission automation flags.
+  if (auto it = o.find("auto_explore"); it != o.end()) p.auto_explore = it->second.bool_value(false);
+  if (auto it = o.find("auto_freight"); it != o.end()) p.auto_freight = it->second.bool_value(false);
+  if (auto it = o.find("auto_troop_transport"); it != o.end()) p.auto_troop_transport = it->second.bool_value(false);
+  if (auto it = o.find("auto_salvage"); it != o.end()) p.auto_salvage = it->second.bool_value(false);
+  if (auto it = o.find("auto_mine"); it != o.end()) p.auto_mine = it->second.bool_value(false);
+  if (auto it = o.find("auto_mine_home_colony_id"); it != o.end()) {
+    p.auto_mine_home_colony_id = static_cast<Id>(it->second.int_value(kInvalidId));
+  }
+  if (auto it = o.find("auto_mine_mineral"); it != o.end()) {
+    p.auto_mine_mineral = it->second.string_value();
+  }
+  if (auto it = o.find("auto_colonize"); it != o.end()) p.auto_colonize = it->second.bool_value(false);
+
+  // Sustainment.
+  if (auto it = o.find("auto_refuel"); it != o.end()) p.auto_refuel = it->second.bool_value(false);
+  if (auto it = o.find("auto_refuel_threshold_fraction"); it != o.end()) {
+    p.auto_refuel_threshold_fraction = it->second.number_value(p.auto_refuel_threshold_fraction);
+  }
+
+  if (auto it = o.find("auto_tanker"); it != o.end()) p.auto_tanker = it->second.bool_value(false);
+  if (auto it = o.find("auto_tanker_reserve_fraction"); it != o.end()) {
+    p.auto_tanker_reserve_fraction = it->second.number_value(p.auto_tanker_reserve_fraction);
+  }
+
+  if (auto it = o.find("auto_repair"); it != o.end()) p.auto_repair = it->second.bool_value(false);
+  if (auto it = o.find("auto_repair_threshold_fraction"); it != o.end()) {
+    p.auto_repair_threshold_fraction = it->second.number_value(p.auto_repair_threshold_fraction);
+  }
+
+  if (auto it = o.find("auto_rearm"); it != o.end()) p.auto_rearm = it->second.bool_value(false);
+  if (auto it = o.find("auto_rearm_threshold_fraction"); it != o.end()) {
+    p.auto_rearm_threshold_fraction = it->second.number_value(p.auto_rearm_threshold_fraction);
+  }
+
+  if (auto it = o.find("repair_priority"); it != o.end()) {
+    p.repair_priority = repair_priority_from_string(it->second.string_value("normal"));
+  }
+
+  // Runtime power + sensor policy.
+  if (auto it = o.find("power_policy"); it != o.end()) {
+    p.power_policy = ship_power_policy_from_json(it->second);
+  }
+  if (auto it = o.find("sensor_mode"); it != o.end()) {
+    p.sensor_mode = sensor_mode_from_string(it->second.string_value("normal"));
+  }
+
+  // Combat doctrine.
+  if (auto it = o.find("combat_doctrine"); it != o.end() && it->second.is_object()) {
+    const auto& dco = it->second.object();
+    if (auto ir = dco.find("range_mode"); ir != dco.end()) {
+      p.combat_doctrine.range_mode = engagement_range_mode_from_string(ir->second.string_value("auto"));
+    }
+    if (auto irf = dco.find("range_fraction"); irf != dco.end()) {
+      p.combat_doctrine.range_fraction = std::clamp(irf->second.number_value(p.combat_doctrine.range_fraction), 0.0, 1.0);
+    }
+    if (auto im = dco.find("min_range_mkm"); im != dco.end()) {
+      p.combat_doctrine.min_range_mkm = std::max(0.0, im->second.number_value(p.combat_doctrine.min_range_mkm));
+    }
+    if (auto ic = dco.find("custom_range_mkm"); ic != dco.end()) {
+      p.combat_doctrine.custom_range_mkm = std::max(0.0, ic->second.number_value(p.combat_doctrine.custom_range_mkm));
+    }
+    if (auto ik = dco.find("kite_if_too_close"); ik != dco.end()) {
+      p.combat_doctrine.kite_if_too_close = ik->second.bool_value(p.combat_doctrine.kite_if_too_close);
+    }
+    if (auto idb = dco.find("kite_deadband_fraction"); idb != dco.end()) {
+      p.combat_doctrine.kite_deadband_fraction = std::clamp(idb->second.number_value(p.combat_doctrine.kite_deadband_fraction), 0.0, 0.90);
+    }
+  }
+
+  // Sanitize new gameplay automation fields for legacy/modded saves.
+  p.auto_refuel_threshold_fraction = std::clamp(p.auto_refuel_threshold_fraction, 0.0, 1.0);
+  p.auto_tanker_reserve_fraction = std::clamp(p.auto_tanker_reserve_fraction, 0.0, 1.0);
+  p.auto_repair_threshold_fraction = std::clamp(p.auto_repair_threshold_fraction, 0.0, 1.0);
+  p.auto_rearm_threshold_fraction = std::clamp(p.auto_rearm_threshold_fraction, 0.0, 1.0);
+  sanitize_power_policy(p.power_policy);
+
+  return p;
+}
+
 
 
 } // namespace
@@ -1129,6 +1312,7 @@ std::string serialize_game_to_json(const GameState& s) {
     if (c.garrison_target_strength > 0.0) o["garrison_target_strength"] = c.garrison_target_strength;
     if (c.troop_training_queue > 0.0) o["troop_training_queue"] = c.troop_training_queue;
     if (c.troop_training_auto_queued > 0.0) o["troop_training_auto_queued"] = c.troop_training_auto_queued;
+    if (!c.shipyard_auto_build_enabled) o["shipyard_auto_build_enabled"] = false;
 
     Array q;
     for (const auto& bo : c.shipyard_queue) {
@@ -1139,6 +1323,18 @@ std::string serialize_game_to_json(const GameState& s) {
         qo["refit_ship_id"] = static_cast<double>(bo.refit_ship_id);
       }
       if (bo.auto_queued) qo["auto_queued"] = true;
+
+      // Optional shipyard order metadata (backward-compatible).
+      if (!bo.apply_ship_profile_name.empty()) {
+        qo["apply_ship_profile_name"] = bo.apply_ship_profile_name;
+      }
+      if (bo.assign_to_fleet_id != kInvalidId) {
+        qo["assign_to_fleet_id"] = static_cast<double>(bo.assign_to_fleet_id);
+      }
+      if (bo.rally_to_colony_id != kInvalidId) {
+        qo["rally_to_colony_id"] = static_cast<double>(bo.rally_to_colony_id);
+      }
+
       q.push_back(qo);
     }
     o["shipyard_queue"] = q;
@@ -1199,6 +1395,17 @@ std::string serialize_game_to_json(const GameState& s) {
         profiles[name] = colony_automation_profile_to_json(itp->second);
       }
       o["colony_profiles"] = profiles;
+    }
+
+    // Ship automation profiles (optional).
+    if (!f.ship_profiles.empty()) {
+      Object profiles;
+      for (const auto& name : sorted_keys(f.ship_profiles)) {
+        const auto itp = f.ship_profiles.find(name);
+        if (itp == f.ship_profiles.end()) continue;
+        profiles[name] = ship_automation_profile_to_json(itp->second);
+      }
+      o["ship_profiles"] = profiles;
     }
 
     // Colony founding defaults (optional).
@@ -1391,6 +1598,9 @@ std::string serialize_game_to_json(const GameState& s) {
       m["escort_last_retarget_day"] = static_cast<double>(f.mission.escort_last_retarget_day);
       m["explore_survey_first"] = f.mission.explore_survey_first;
       m["explore_allow_transit"] = f.mission.explore_allow_transit;
+      m["explore_investigate_anomalies"] = f.mission.explore_investigate_anomalies;
+      m["explore_salvage_wrecks"] = f.mission.explore_salvage_wrecks;
+      m["explore_survey_transit_when_done"] = f.mission.explore_survey_transit_when_done;
 
       m["assault_colony_id"] = static_cast<double>(f.mission.assault_colony_id);
       m["assault_staging_colony_id"] = static_cast<double>(f.mission.assault_staging_colony_id);
@@ -2007,6 +2217,9 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     if (auto it = o.find("troop_training_auto_queued"); it != o.end()) {
       c.troop_training_auto_queued = it->second.number_value(0.0);
     }
+    if (auto it = o.find("shipyard_auto_build_enabled"); it != o.end()) {
+      c.shipyard_auto_build_enabled = it->second.bool_value(true);
+    }
 
     if (auto itq = o.find("shipyard_queue"); itq != o.end()) {
       for (const auto& qv : itq->second.array()) {
@@ -2018,6 +2231,18 @@ GameState deserialize_game_from_json(const std::string& json_text) {
           bo.refit_ship_id = static_cast<Id>(it->second.int_value(kInvalidId));
         }
         if (auto it = qo.find("auto_queued"); it != qo.end()) bo.auto_queued = it->second.bool_value(false);
+
+        // Optional shipyard order metadata (backward-compatible).
+        if (auto it = qo.find("apply_ship_profile_name"); it != qo.end()) {
+          bo.apply_ship_profile_name = it->second.string_value();
+        }
+        if (auto it = qo.find("assign_to_fleet_id"); it != qo.end()) {
+          bo.assign_to_fleet_id = static_cast<Id>(it->second.int_value(kInvalidId));
+        }
+        if (auto it = qo.find("rally_to_colony_id"); it != qo.end()) {
+          bo.rally_to_colony_id = static_cast<Id>(it->second.int_value(kInvalidId));
+        }
+
         c.shipyard_queue.push_back(bo);
       }
     }
@@ -2105,6 +2330,27 @@ GameState deserialize_game_from_json(const std::string& json_text) {
       }
     }
 
+
+
+    // Ship automation profiles (optional).
+    if (auto it = o.find("ship_profiles"); it != o.end()) {
+      if (it->second.is_object()) {
+        for (const auto& [name, pv] : it->second.object()) {
+          if (name.empty()) continue;
+          f.ship_profiles[name] = ship_automation_profile_from_json_value(pv);
+        }
+      } else if (it->second.is_array()) {
+        // Also accept an array-of-objects format:
+        //   [{"name":"Surveyors", "auto_explore": true, ...}, ...]
+        for (const auto& pv : it->second.array()) {
+          if (!pv.is_object()) continue;
+          const auto& po = pv.object();
+          const std::string name = (po.find("name") != po.end()) ? po.at("name").string_value() : std::string();
+          if (name.empty()) continue;
+          f.ship_profiles[name] = ship_automation_profile_from_json_value(pv);
+        }
+      }
+    }
     // Colony founding defaults (optional).
     if (auto it = o.find("auto_apply_colony_founding_profile"); it != o.end()) {
       f.auto_apply_colony_founding_profile = it->second.bool_value(false);
@@ -2502,6 +2748,16 @@ GameState deserialize_game_from_json(const std::string& json_text) {
           }
           if (auto ieat = m.find("explore_allow_transit"); ieat != m.end()) {
             fl.mission.explore_allow_transit = ieat->second.bool_value(fl.mission.explore_allow_transit);
+          }
+
+          if (auto ieia = m.find("explore_investigate_anomalies"); ieia != m.end()) {
+            fl.mission.explore_investigate_anomalies = ieia->second.bool_value(fl.mission.explore_investigate_anomalies);
+          }
+          if (auto iesw = m.find("explore_salvage_wrecks"); iesw != m.end()) {
+            fl.mission.explore_salvage_wrecks = iesw->second.bool_value(fl.mission.explore_salvage_wrecks);
+          }
+          if (auto iest = m.find("explore_survey_transit_when_done"); iest != m.end()) {
+            fl.mission.explore_survey_transit_when_done = iest->second.bool_value(fl.mission.explore_survey_transit_when_done);
           }
 
           if (auto iac = m.find("assault_colony_id"); iac != m.end()) {

@@ -948,6 +948,26 @@ struct BuildOrder {
   // (Only meaningful for new builds; refit orders are always manual.)
   bool auto_queued{false};
 
+  // Optional post-build/refit metadata (QoL).
+  //
+  // These fields allow the player to attach simple instructions to a shipyard
+  // order so that when it completes, the ship is immediately configured and
+  // routed without additional clicking.
+  //
+  // All fields are optional and backward-compatible in save files.
+
+  // If non-empty, apply the named ship automation profile on completion.
+  // This name is a key in Faction::ship_profiles.
+  std::string apply_ship_profile_name;
+
+  // If set, add the built/refit ship to this fleet on completion.
+  // (If the fleet does not exist or is invalid, this is ignored.)
+  Id assign_to_fleet_id{kInvalidId};
+
+  // If set and assign_to_fleet_id is not used successfully, the ship will
+  // receive a rally movement order to the target colony's body.
+  Id rally_to_colony_id{kInvalidId};
+
   bool is_refit() const { return refit_ship_id != kInvalidId; }
 };
 
@@ -1031,6 +1051,12 @@ struct Colony {
   // Shipyard queue (very simplified)
   std::vector<BuildOrder> shipyard_queue;
 
+  // If false, this colony's shipyards will not be used by the faction-level
+  // ship design target auto-build system (Faction::ship_design_targets).
+  //
+  // Note: disabling this does not affect manual shipyard orders.
+  bool shipyard_auto_build_enabled{true};
+
   // Colony construction queue (for building installations)
   std::vector<InstallationBuildOrder> construction_queue;
 };
@@ -1055,6 +1081,49 @@ struct ColonyAutomationProfile {
   double garrison_target_strength{0.0};
 };
 
+
+// A reusable set of ship automation knobs (mission flags + doctrine/power).
+//
+// Like ColonyAutomationProfile, this is a pure QoL/presets feature: profiles can be
+// applied to ships (or batches of ships) to quickly configure common automation
+// settings without hand-editing each ship.
+struct ShipAutomationProfile {
+  // Mission automation flags.
+  bool auto_explore{false};
+  bool auto_freight{false};
+  bool auto_troop_transport{false};
+  bool auto_salvage{false};
+  bool auto_mine{false};
+
+  // Optional: home colony + mineral filter for auto-mine.
+  Id auto_mine_home_colony_id{kInvalidId};
+  std::string auto_mine_mineral;
+
+  bool auto_colonize{false};
+
+  // Sustainment automation.
+  bool auto_refuel{false};
+  double auto_refuel_threshold_fraction{0.25};
+
+  bool auto_tanker{false};
+  double auto_tanker_reserve_fraction{0.25};
+
+  bool auto_repair{false};
+  double auto_repair_threshold_fraction{0.75};
+
+  bool auto_rearm{false};
+  double auto_rearm_threshold_fraction{0.25};
+
+  // Dockyard scheduling priority.
+  RepairPriority repair_priority{RepairPriority::Normal};
+
+  // Runtime power + sensor policy.
+  ShipPowerPolicy power_policy{};
+  SensorMode sensor_mode{SensorMode::Normal};
+
+  // Tactical doctrine for AttackShip positioning.
+  ShipCombatDoctrine combat_doctrine{};
+};
 
 // A persistent ground battle at a colony.
 //
@@ -1161,6 +1230,13 @@ struct Faction {
   // Profiles can be applied to colonies to quickly configure installation
   // targets, mineral reserves/targets, and garrison targets.
   std::unordered_map<std::string, ColonyAutomationProfile> colony_profiles;
+
+  // Player-defined ship automation profiles (presets).
+  //
+  // Profiles can be applied to ships to quickly configure mission automation
+  // flags (explore/freight/mine/etc), sustainment settings, and doctrine/power
+  // policies.
+  std::unordered_map<std::string, ShipAutomationProfile> ship_profiles;
 
   // Colony founding defaults (auto-applied to new colonies).
   //
@@ -1342,6 +1418,19 @@ struct FleetMission {
   // systems (expansion). If false, it will only survey exits in already-
   // discovered systems.
   bool explore_allow_transit{true};
+
+  // If true, investigate discovered unresolved anomalies in explored systems
+  // when the fleet is idle (after exits are surveyed / no frontier work remains).
+  bool explore_investigate_anomalies{true};
+
+  // If true, attempt to salvage nearby wrecks while exploring when the system
+  // has no detected hostiles.
+  bool explore_salvage_wrecks{false};
+
+  // If true and Explore allows transiting, the fleet will use SurveyJumpPoint
+  // with transit_when_done=true for exits that lead to undiscovered systems.
+  // This reduces micromanagement by surveying and immediately transiting.
+  bool explore_survey_transit_when_done{true};
 
   // --- AssaultColony ---
   // High-level automation for planet-taking operations.

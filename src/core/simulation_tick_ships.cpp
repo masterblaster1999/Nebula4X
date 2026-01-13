@@ -606,6 +606,13 @@ void Simulation::tick_ships(double dt_days) {
 
     // Escort ops (follow another friendly ship; can jump across systems).
     bool is_escort_op = false;
+
+    // Jump survey ops (stay at a jump point until it is surveyed).
+    bool is_survey_jump_op = false;
+    SurveyJumpPoint* survey_jump_ord = nullptr;
+    Id survey_jump_id = kInvalidId;
+    bool survey_transit_when_done = false;
+
     bool escort_is_jump_leg = false;
     Id escort_jump_id = kInvalidId;
 
@@ -712,6 +719,19 @@ void Simulation::tick_ships(double dt_days) {
     } else if (std::holds_alternative<TravelViaJump>(q.front())) {
       const Id jump_id = std::get<TravelViaJump>(q.front()).jump_point_id;
       const auto* jp = find_ptr(state_.jump_points, jump_id);
+      if (!jp || jp->system_id != ship.system_id) {
+        q.erase(q.begin());
+        continue;
+      }
+      target = jp->position_mkm;
+    } else if (std::holds_alternative<SurveyJumpPoint>(q.front())) {
+      auto& ord = std::get<SurveyJumpPoint>(q.front());
+      is_survey_jump_op = true;
+      survey_jump_ord = &ord;
+      survey_jump_id = ord.jump_point_id;
+      survey_transit_when_done = ord.transit_when_done;
+
+      const auto* jp = find_ptr(state_.jump_points, survey_jump_id);
       if (!jp || jp->system_id != ship.system_id) {
         q.erase(q.begin());
         continue;
@@ -2521,7 +2541,7 @@ void Simulation::tick_ships(double dt_days) {
       continue;
     }
 
-    if (!is_attack && !is_escort && !is_bombard && !is_jump && !is_cargo_op && !is_salvage_op && !is_investigate_anomaly_op &&
+    if (!is_attack && !is_escort && !is_bombard && !is_jump && !is_survey_jump_op && !is_cargo_op && !is_salvage_op && !is_investigate_anomaly_op &&
         !is_fuel_transfer_op && !is_troop_transfer_op && !is_troop_op && !is_colonist_op && !is_mining_op && !is_body &&
         !is_orbit && !is_scrap && dist <= arrive_eps) {
       q.erase(q.begin());
@@ -2567,6 +2587,30 @@ void Simulation::tick_ships(double dt_days) {
         push_event(EventLevel::Info, EventCategory::Movement, msg, ctx);
       }
     };
+
+    if (is_survey_jump_op && dist <= dock_range) {
+      ship.position_mkm = target;
+
+      const auto* jp = find_ptr(state_.jump_points, survey_jump_id);
+      if (!jp || jp->system_id != ship.system_id) {
+        q.erase(q.begin());
+        continue;
+      }
+
+      // If surveying is configured as instant, mark it now so the order can complete immediately.
+      if (cfg_.jump_survey_points_required <= 1e-9) {
+        survey_jump_point_for_faction(ship.faction_id, survey_jump_id);
+      }
+
+      const bool surveyed = is_jump_point_surveyed_by_faction(ship.faction_id, survey_jump_id);
+      if (surveyed) {
+        if (survey_transit_when_done) {
+          transit_jump(survey_jump_id);
+        }
+        q.erase(q.begin());
+      }
+      continue;
+    }
 
     if (is_jump && dist <= dock_range) {
       ship.position_mkm = target;

@@ -21,9 +21,13 @@
 #include "ui/regions_window.h"
 #include "ui/freight_window.h"
 #include "ui/fuel_window.h"
+#include "ui/salvage_window.h"
 #include "ui/sustainment_window.h"
 #include "ui/advisor_window.h"
 #include "ui/colony_profiles_window.h"
+#include "ui/ship_profiles_window.h"
+#include "ui/shipyard_targets_window.h"
+#include "ui/survey_network_window.h"
 #include "ui/time_warp_window.h"
 #include "ui/production_window.h"
 #include "ui/galaxy_map.h"
@@ -192,6 +196,9 @@ void App::frame() {
       if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_D)) ui_.show_time_machine_window = !ui_.show_time_machine_window;
       if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_A)) ui_.show_advisor_window = !ui_.show_advisor_window;
       if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_B)) ui_.show_colony_profiles_window = !ui_.show_colony_profiles_window;
+      if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_M)) ui_.show_ship_profiles_window = !ui_.show_ship_profiles_window;
+      if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Y)) ui_.show_shipyard_targets_window = !ui_.show_shipyard_targets_window;
+      if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_J)) ui_.show_survey_network_window = !ui_.show_survey_network_window;
       if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_R)) ui_.show_regions_window = !ui_.show_regions_window;
       if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_V)) ui_.show_content_validation_window = !ui_.show_content_validation_window;
       if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_K)) ui_.show_state_doctor_window = !ui_.show_state_doctor_window;
@@ -340,10 +347,14 @@ void App::frame() {
   if (ui_.show_regions_window) draw_regions_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   if (ui_.show_freight_window) draw_freight_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   if (ui_.show_fuel_window) draw_fuel_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  if (ui_.show_salvage_window) draw_salvage_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   if (ui_.show_sustainment_window)
     draw_sustainment_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   if (ui_.show_advisor_window) draw_advisor_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   if (ui_.show_colony_profiles_window) draw_colony_profiles_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  if (ui_.show_ship_profiles_window) draw_ship_profiles_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  if (ui_.show_shipyard_targets_window) draw_shipyard_targets_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  if (ui_.show_survey_network_window) draw_survey_network_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   if (ui_.show_time_warp_window) draw_time_warp_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   if (ui_.show_timeline_window) draw_timeline_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   if (ui_.show_design_studio_window) {

@@ -490,9 +490,13 @@ void draw_main_menu(Simulation& sim, UIState& ui, char* save_path, char* load_pa
       ImGui::MenuItem("Regions (Sectors Overview)", "Ctrl+Shift+R", &ui.show_regions_window);
       ImGui::MenuItem("Freight Planner (Auto-freight Preview)", nullptr, &ui.show_freight_window);
       ImGui::MenuItem("Fuel Planner (Auto-tanker Preview)", nullptr, &ui.show_fuel_window);
+      ImGui::MenuItem("Salvage Planner (Wreck Salvage Runs)", nullptr, &ui.show_salvage_window);
       ImGui::MenuItem("Sustainment Planner (Fleet Base Targets)", nullptr, &ui.show_sustainment_window);
       ImGui::MenuItem("Advisor (Issues)", "Ctrl+Shift+A", &ui.show_advisor_window);
       ImGui::MenuItem("Colony Profiles (Automation Presets)", "Ctrl+Shift+B", &ui.show_colony_profiles_window);
+      ImGui::MenuItem("Ship Profiles (Automation Presets)", "Ctrl+Shift+M", &ui.show_ship_profiles_window);
+      ImGui::MenuItem("Shipyard Targets (Design Targets)", "Ctrl+Shift+Y", &ui.show_shipyard_targets_window);
+      ImGui::MenuItem("Survey Network (Jump Survey)", "Ctrl+Shift+J", &ui.show_survey_network_window);
       ImGui::MenuItem("Time Warp (Until Event)", nullptr, &ui.show_time_warp_window);
       ImGui::MenuItem("Timeline (Event Timeline)", nullptr, &ui.show_timeline_window);
       ImGui::MenuItem("Design Studio (Blueprints)", nullptr, &ui.show_design_studio_window);
@@ -547,11 +551,17 @@ void draw_main_menu(Simulation& sim, UIState& ui, char* save_path, char* load_pa
       if (ImGui::MenuItem("Open Fuel Planner")) {
         ui.show_fuel_window = true;
       }
+      if (ImGui::MenuItem("Open Salvage Planner")) {
+        ui.show_salvage_window = true;
+      }
       if (ImGui::MenuItem("Open Sustainment Planner")) {
         ui.show_sustainment_window = true;
       }
       if (ImGui::MenuItem("Open Colony Profiles")) {
         ui.show_colony_profiles_window = true;
+      }
+      if (ImGui::MenuItem("Open Ship Profiles")) {
+        ui.show_ship_profiles_window = true;
       }
       if (ImGui::MenuItem("Open Time Warp")) {
         ui.show_time_warp_window = true;
@@ -1217,6 +1227,146 @@ if (sim.cfg().enable_ship_maintenance) {
               ImGui::Text("Missile ammo: Unlimited");
             }
           }
+
+
+          // Missile salvos in flight (incoming/outgoing)
+          {
+            struct MissileRow {
+              bool incoming{false};
+              Id mid{kInvalidId};
+              double eta_days{0.0};
+            };
+
+            std::vector<MissileRow> rows;
+            rows.reserve(s.missile_salvos.size());
+
+            int incoming_count = 0;
+            int outgoing_count = 0;
+            double incoming_payload = 0.0;
+            double outgoing_payload = 0.0;
+            double incoming_earliest = 1e30;
+            double outgoing_earliest = 1e30;
+
+            for (const auto& [mid, ms] : s.missile_salvos) {
+              if (ms.target_ship_id == sh->id) {
+                ++incoming_count;
+                incoming_payload += std::max(0.0, ms.damage);
+                const double eta = std::max(0.0, ms.eta_days_remaining);
+                incoming_earliest = std::min(incoming_earliest, eta);
+                rows.push_back(MissileRow{true, mid, eta});
+              }
+              if (ms.attacker_ship_id == sh->id && ms.target_ship_id != sh->id) {
+                ++outgoing_count;
+                outgoing_payload += std::max(0.0, ms.damage);
+                const double eta = std::max(0.0, ms.eta_days_remaining);
+                outgoing_earliest = std::min(outgoing_earliest, eta);
+                rows.push_back(MissileRow{false, mid, eta});
+              }
+            }
+
+            if (incoming_count > 0 || outgoing_count > 0) {
+              ImGui::Spacing();
+              if (ImGui::CollapsingHeader("Missile salvos in flight", ImGuiTreeNodeFlags_DefaultOpen)) {
+                if (incoming_count > 0) {
+                  ImGui::TextColored(ImVec4(1.0f, 0.65f, 0.35f, 1.0f),
+                                    "Incoming: %d  (payload %.1f, earliest ETA %s)", incoming_count, incoming_payload,
+                                    format_duration_days(incoming_earliest).c_str());
+                } else {
+                  ImGui::TextDisabled("Incoming: none");
+                }
+
+                if (outgoing_count > 0) {
+                  ImGui::TextDisabled("Outgoing: %d  (payload %.1f, earliest ETA %s)", outgoing_count, outgoing_payload,
+                                      format_duration_days(outgoing_earliest).c_str());
+                } else {
+                  ImGui::TextDisabled("Outgoing: none");
+                }
+
+                std::sort(rows.begin(), rows.end(), [](const MissileRow& a, const MissileRow& b) {
+                  if (a.eta_days < b.eta_days) return true;
+                  if (a.eta_days > b.eta_days) return false;
+                  if (a.incoming != b.incoming) return a.incoming; // incoming first when equal ETA
+                  return a.mid < b.mid;
+                });
+
+                const ImGuiTableFlags tbl_flags =
+                    ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_Resizable;
+
+                if (ImGui::BeginTable("missile_salvos_table", 6, tbl_flags)) {
+                  ImGui::TableSetupColumn("Dir");
+                  ImGui::TableSetupColumn("Other ship");
+                  ImGui::TableSetupColumn("ETA");
+                  ImGui::TableSetupColumn("Payload");
+                  ImGui::TableSetupColumn("Range");
+                  ImGui::TableSetupColumn("Actions");
+                  ImGui::TableHeadersRow();
+
+                  for (const MissileRow& row : rows) {
+                    const MissileSalvo* ms = find_ptr(s.missile_salvos, row.mid);
+                    if (!ms) continue;
+
+                    const Id other_id = row.incoming ? ms->attacker_ship_id : ms->target_ship_id;
+                    const Ship* other = find_ptr(s.ships, other_id);
+
+                    std::string other_label = other ? other->name : ("Ship #" + std::to_string(other_id));
+                    if (other && other->name.empty()) other_label = "Ship #" + std::to_string(other_id);
+
+                    const double payload0 = (ms->damage_initial > 1e-12) ? ms->damage_initial : std::max(0.0, ms->damage);
+                    const std::string payload_s =
+                        format_fixed(std::max(0.0, ms->damage), 1) + "/" + format_fixed(payload0, 1);
+
+                    std::string range_s;
+                    if (!std::isfinite(ms->range_remaining_mkm) || ms->range_remaining_mkm > 1e18) {
+                      range_s = "inf";
+                    } else {
+                      range_s = format_fixed(std::max(0.0, ms->range_remaining_mkm), 1);
+                    }
+
+                    ImGui::PushID(("ms_" + std::to_string(static_cast<unsigned long long>(row.mid))).c_str());
+
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0);
+                    ImGui::TextUnformatted(row.incoming ? "IN" : "OUT");
+
+                    ImGui::TableSetColumnIndex(1);
+                    ImGui::TextUnformatted(other_label.c_str());
+
+                    ImGui::TableSetColumnIndex(2);
+                    ImGui::TextUnformatted(format_duration_days(row.eta_days).c_str());
+
+                    ImGui::TableSetColumnIndex(3);
+                    ImGui::TextUnformatted(payload_s.c_str());
+
+                    ImGui::TableSetColumnIndex(4);
+                    ImGui::TextUnformatted(range_s.c_str());
+
+                    ImGui::TableSetColumnIndex(5);
+                    if (other && ImGui::SmallButton("Select")) {
+                      selected_ship = other->id;
+                      sim.state().selected_system = other->system_id;
+                    }
+                    if (other) {
+                      ImGui::SameLine();
+                      if (ImGui::SmallButton("Center")) {
+                        sim.state().selected_system = other->system_id;
+                        ui.request_map_tab = MapTab::System;
+
+                        ui.request_system_map_center = true;
+                        ui.request_system_map_center_system_id = other->system_id;
+                        ui.request_system_map_center_x_mkm = other->position_mkm.x;
+                        ui.request_system_map_center_y_mkm = other->position_mkm.y;
+                      }
+                    }
+
+                    ImGui::PopID();
+                  }
+
+                  ImGui::EndTable();
+                }
+              }
+            }
+          }
+
 
           // Power budget + per-ship power policy
           {
@@ -3827,6 +3977,9 @@ const bool can_up = (i > 0);
             
               ImGui::Checkbox("Survey exits before transiting##fleet_mission_explore_survey_first", &fleet_mut->mission.explore_survey_first);
               ImGui::Checkbox("Transit to undiscovered systems##fleet_mission_explore_allow_transit", &fleet_mut->mission.explore_allow_transit);
+              ImGui::Checkbox("Survey+transit frontier exits##fleet_mission_explore_survey_transit", &fleet_mut->mission.explore_survey_transit_when_done);
+              ImGui::Checkbox("Investigate anomalies##fleet_mission_explore_anoms", &fleet_mut->mission.explore_investigate_anomalies);
+              ImGui::Checkbox("Salvage wrecks when safe##fleet_mission_explore_wrecks", &fleet_mut->mission.explore_salvage_wrecks);
             
               ImGui::TextDisabled("Surveys unknown jump points, then transits surveyed exits into undiscovered systems\nwhen enabled. Routes to the best frontier system when idle.");
             }
@@ -4764,6 +4917,139 @@ if (colony->construction_queue.empty()) {
       const std::string row_id = "##construction_row_" + std::to_string(static_cast<unsigned long long>(i));
       ImGui::Selectable((nm + row_id).c_str(), false, ImGuiSelectableFlags_SpanAllColumns);
 
+      // Right-click: edit optional post-build metadata (profile / fleet / rally).
+      if (ImGui::BeginPopupContextItem(("yard_ctx_" + std::to_string(static_cast<unsigned long long>(i))).c_str())) {
+        auto& bo_mut = colony->shipyard_queue[static_cast<std::size_t>(i)];
+
+        Id colony_sys_id = kInvalidId;
+        if (const auto* cb = find_ptr(s.bodies, colony->body_id)) colony_sys_id = cb->system_id;
+
+        ImGui::TextDisabled("Shipyard order metadata");
+        ImGui::Separator();
+
+        if (ImGui::BeginMenu("Apply Ship Profile")) {
+          if (ImGui::MenuItem("<none>", nullptr, bo_mut.apply_ship_profile_name.empty())) {
+            bo_mut.apply_ship_profile_name.clear();
+          }
+
+          if (const auto* fac = find_ptr(s.factions, colony->faction_id)) {
+            std::vector<std::string> names;
+            names.reserve(fac->ship_profiles.size());
+            for (const auto& kv : fac->ship_profiles) names.push_back(kv.first);
+            std::sort(names.begin(), names.end());
+
+            if (names.empty()) {
+              ImGui::TextDisabled("No ship profiles defined.");
+            } else {
+              for (const auto& nm2 : names) {
+                const bool selected = (bo_mut.apply_ship_profile_name == nm2);
+                if (ImGui::MenuItem(nm2.c_str(), nullptr, selected)) bo_mut.apply_ship_profile_name = nm2;
+              }
+            }
+          } else {
+            ImGui::TextDisabled("No faction / no profiles.");
+          }
+
+          ImGui::EndMenu();
+        }
+
+        if (ImGui::BeginMenu("Assign to Fleet")) {
+          if (ImGui::MenuItem("<none>", nullptr, bo_mut.assign_to_fleet_id == kInvalidId)) {
+            bo_mut.assign_to_fleet_id = kInvalidId;
+          }
+
+          std::vector<Id> fleet_ids;
+          fleet_ids.reserve(s.fleets.size());
+          for (const auto& [fid2, fl] : s.fleets) {
+            if (fl.faction_id == colony->faction_id) fleet_ids.push_back(fid2);
+          }
+          std::sort(fleet_ids.begin(), fleet_ids.end());
+
+          if (fleet_ids.empty()) {
+            ImGui::TextDisabled("No fleets.");
+          } else {
+            auto fleet_system = [&](const Fleet& fl) -> Id {
+              if (fl.leader_ship_id != kInvalidId) {
+                if (const auto* sh = find_ptr(s.ships, fl.leader_ship_id)) return sh->system_id;
+              }
+              for (Id sid : fl.ship_ids) {
+                if (const auto* sh = find_ptr(s.ships, sid)) return sh->system_id;
+              }
+              return kInvalidId;
+            };
+
+            for (Id fid2 : fleet_ids) {
+              const auto* fl = find_ptr(s.fleets, fid2);
+              if (!fl) continue;
+
+              std::string label = fl->name.empty()
+                                     ? ("Fleet #" + std::to_string(static_cast<unsigned long long>(fid2)))
+                                     : fl->name;
+              label += "##fleet_pick_" + std::to_string(static_cast<unsigned long long>(fid2));
+
+              const Id fs = fleet_system(*fl);
+              const bool sys_ok = (colony_sys_id == kInvalidId || fs == kInvalidId || fs == colony_sys_id);
+              if (!sys_ok) ImGui::BeginDisabled();
+
+              const bool selected = (bo_mut.assign_to_fleet_id == fid2);
+              if (ImGui::MenuItem(label.c_str(), nullptr, selected)) bo_mut.assign_to_fleet_id = fid2;
+
+              if (!sys_ok) {
+                if (ImGui::IsItemHovered()) {
+                  ImGui::SetTooltip(
+                      "Fleet appears to be in a different system; assignment is disabled for safety.");
+                }
+                ImGui::EndDisabled();
+              }
+            }
+          }
+
+          ImGui::EndMenu();
+        }
+
+        if (ImGui::BeginMenu("Rally to Colony")) {
+          if (ImGui::MenuItem("<none>", nullptr, bo_mut.rally_to_colony_id == kInvalidId)) {
+            bo_mut.rally_to_colony_id = kInvalidId;
+          }
+
+          std::vector<Id> colony_ids;
+          colony_ids.reserve(s.colonies.size());
+          for (const auto& [cid2, c2] : s.colonies) {
+            if (c2.faction_id == colony->faction_id) colony_ids.push_back(cid2);
+          }
+          std::sort(colony_ids.begin(), colony_ids.end());
+
+          if (colony_ids.empty()) {
+            ImGui::TextDisabled("No colonies.");
+          } else {
+            for (Id cid2 : colony_ids) {
+              const auto* c2 = find_ptr(s.colonies, cid2);
+              if (!c2) continue;
+
+              std::string label = c2->name.empty()
+                                     ? ("Colony #" + std::to_string(static_cast<unsigned long long>(cid2)))
+                                     : c2->name;
+              label += "##rally_pick_" + std::to_string(static_cast<unsigned long long>(cid2));
+
+              const bool selected = (bo_mut.rally_to_colony_id == cid2);
+              if (ImGui::MenuItem(label.c_str(), nullptr, selected)) bo_mut.rally_to_colony_id = cid2;
+            }
+          }
+
+          ImGui::EndMenu();
+        }
+
+        ImGui::Separator();
+        ImGui::TextDisabled("Note: Rally is skipped if fleet assignment succeeds.");
+        if (ImGui::MenuItem("Clear all metadata")) {
+          bo_mut.apply_ship_profile_name.clear();
+          bo_mut.assign_to_fleet_id = kInvalidId;
+          bo_mut.rally_to_colony_id = kInvalidId;
+        }
+
+        ImGui::EndPopup();
+      }
+
       if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
         ImGui::SetDragDropPayload("N4X_CONSTRUCTION_ORDER_IDX", &i, sizeof(int));
         ImGui::Text("Move: %s", nm.c_str());
@@ -4946,6 +5232,22 @@ if (colony->construction_queue.empty()) {
             ImGui::TextDisabled("Build costs: (free / not configured)");
           }
 
+          // Auto-shipyard (ship design targets) toggle.
+          {
+            bool auto_enabled = colony->shipyard_auto_build_enabled;
+            if (ImGui::Checkbox("Auto-shipyard enabled (design targets)", &auto_enabled)) {
+              colony->shipyard_auto_build_enabled = auto_enabled;
+            }
+            if (ImGui::IsItemHovered()) {
+              ImGui::SetTooltip(
+                  "When enabled, this colony's shipyards may receive auto-queued build orders to satisfy Shipyard Targets.\n"
+                  "Manual shipyard orders are never affected.");
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Open Targets")) ui.show_shipyard_targets_window = true;
+          }
+          ImGui::Spacing();
+
 const int shipyard_count = it_yard->second;
 const double build_rate_tpd =
     (shipyard_def && shipyard_def->build_rate_tons_per_day > 0.0)
@@ -4990,6 +5292,28 @@ if (colony->shipyard_queue.empty()) {
         nm = "[AUTO] " + nm;
       }
 
+      // Show attached post-build metadata as compact tags in the order label.
+      // (Right-click the row to edit.)
+      if (!bo.apply_ship_profile_name.empty()) {
+        nm += " [P:" + bo.apply_ship_profile_name + "]";
+      }
+      if (bo.assign_to_fleet_id != kInvalidId) {
+        std::string fl_nm =
+            "Fleet #" + std::to_string(static_cast<unsigned long long>(bo.assign_to_fleet_id));
+        if (const auto* fl = find_ptr(s.fleets, bo.assign_to_fleet_id)) {
+          if (!fl->name.empty()) fl_nm = fl->name;
+        }
+        nm += " [F:" + fl_nm + "]";
+      }
+      if (bo.rally_to_colony_id != kInvalidId) {
+        std::string rc_nm =
+            "Colony #" + std::to_string(static_cast<unsigned long long>(bo.rally_to_colony_id));
+        if (const auto* rc = find_ptr(s.colonies, bo.rally_to_colony_id)) {
+          if (!rc->name.empty()) rc_nm = rc->name;
+        }
+        nm += " [R:" + rc_nm + "]";
+      }
+
 
       ImGui::TableNextRow();
 
@@ -4999,6 +5323,139 @@ if (colony->shipyard_queue.empty()) {
       ImGui::TableSetColumnIndex(1);
       const std::string row_id = "##shipyard_row_" + std::to_string(static_cast<unsigned long long>(i));
       ImGui::Selectable((nm + row_id).c_str(), false, ImGuiSelectableFlags_SpanAllColumns);
+
+      // Right-click: edit optional post-build metadata (profile / fleet / rally).
+      if (ImGui::BeginPopupContextItem(("yard_ctx_" + std::to_string(static_cast<unsigned long long>(i))).c_str())) {
+        auto& bo_mut = colony->shipyard_queue[static_cast<std::size_t>(i)];
+
+        Id colony_sys_id = kInvalidId;
+        if (const auto* cb = find_ptr(s.bodies, colony->body_id)) colony_sys_id = cb->system_id;
+
+        ImGui::TextDisabled("Shipyard order metadata");
+        ImGui::Separator();
+
+        if (ImGui::BeginMenu("Apply Ship Profile")) {
+          if (ImGui::MenuItem("<none>", nullptr, bo_mut.apply_ship_profile_name.empty())) {
+            bo_mut.apply_ship_profile_name.clear();
+          }
+
+          if (const auto* fac = find_ptr(s.factions, colony->faction_id)) {
+            std::vector<std::string> names;
+            names.reserve(fac->ship_profiles.size());
+            for (const auto& kv : fac->ship_profiles) names.push_back(kv.first);
+            std::sort(names.begin(), names.end());
+
+            if (names.empty()) {
+              ImGui::TextDisabled("No ship profiles defined.");
+            } else {
+              for (const auto& nm2 : names) {
+                const bool selected = (bo_mut.apply_ship_profile_name == nm2);
+                if (ImGui::MenuItem(nm2.c_str(), nullptr, selected)) bo_mut.apply_ship_profile_name = nm2;
+              }
+            }
+          } else {
+            ImGui::TextDisabled("No faction / no profiles.");
+          }
+
+          ImGui::EndMenu();
+        }
+
+        if (ImGui::BeginMenu("Assign to Fleet")) {
+          if (ImGui::MenuItem("<none>", nullptr, bo_mut.assign_to_fleet_id == kInvalidId)) {
+            bo_mut.assign_to_fleet_id = kInvalidId;
+          }
+
+          std::vector<Id> fleet_ids;
+          fleet_ids.reserve(s.fleets.size());
+          for (const auto& [fid2, fl] : s.fleets) {
+            if (fl.faction_id == colony->faction_id) fleet_ids.push_back(fid2);
+          }
+          std::sort(fleet_ids.begin(), fleet_ids.end());
+
+          if (fleet_ids.empty()) {
+            ImGui::TextDisabled("No fleets.");
+          } else {
+            auto fleet_system = [&](const Fleet& fl) -> Id {
+              if (fl.leader_ship_id != kInvalidId) {
+                if (const auto* sh = find_ptr(s.ships, fl.leader_ship_id)) return sh->system_id;
+              }
+              for (Id sid : fl.ship_ids) {
+                if (const auto* sh = find_ptr(s.ships, sid)) return sh->system_id;
+              }
+              return kInvalidId;
+            };
+
+            for (Id fid2 : fleet_ids) {
+              const auto* fl = find_ptr(s.fleets, fid2);
+              if (!fl) continue;
+
+              std::string label = fl->name.empty()
+                                     ? ("Fleet #" + std::to_string(static_cast<unsigned long long>(fid2)))
+                                     : fl->name;
+              label += "##fleet_pick_" + std::to_string(static_cast<unsigned long long>(fid2));
+
+              const Id fs = fleet_system(*fl);
+              const bool sys_ok = (colony_sys_id == kInvalidId || fs == kInvalidId || fs == colony_sys_id);
+              if (!sys_ok) ImGui::BeginDisabled();
+
+              const bool selected = (bo_mut.assign_to_fleet_id == fid2);
+              if (ImGui::MenuItem(label.c_str(), nullptr, selected)) bo_mut.assign_to_fleet_id = fid2;
+
+              if (!sys_ok) {
+                if (ImGui::IsItemHovered()) {
+                  ImGui::SetTooltip(
+                      "Fleet appears to be in a different system; assignment is disabled for safety.");
+                }
+                ImGui::EndDisabled();
+              }
+            }
+          }
+
+          ImGui::EndMenu();
+        }
+
+        if (ImGui::BeginMenu("Rally to Colony")) {
+          if (ImGui::MenuItem("<none>", nullptr, bo_mut.rally_to_colony_id == kInvalidId)) {
+            bo_mut.rally_to_colony_id = kInvalidId;
+          }
+
+          std::vector<Id> colony_ids;
+          colony_ids.reserve(s.colonies.size());
+          for (const auto& [cid2, c2] : s.colonies) {
+            if (c2.faction_id == colony->faction_id) colony_ids.push_back(cid2);
+          }
+          std::sort(colony_ids.begin(), colony_ids.end());
+
+          if (colony_ids.empty()) {
+            ImGui::TextDisabled("No colonies.");
+          } else {
+            for (Id cid2 : colony_ids) {
+              const auto* c2 = find_ptr(s.colonies, cid2);
+              if (!c2) continue;
+
+              std::string label = c2->name.empty()
+                                     ? ("Colony #" + std::to_string(static_cast<unsigned long long>(cid2)))
+                                     : c2->name;
+              label += "##rally_pick_" + std::to_string(static_cast<unsigned long long>(cid2));
+
+              const bool selected = (bo_mut.rally_to_colony_id == cid2);
+              if (ImGui::MenuItem(label.c_str(), nullptr, selected)) bo_mut.rally_to_colony_id = cid2;
+            }
+          }
+
+          ImGui::EndMenu();
+        }
+
+        ImGui::Separator();
+        ImGui::TextDisabled("Note: Rally is skipped if fleet assignment succeeds.");
+        if (ImGui::MenuItem("Clear all metadata")) {
+          bo_mut.apply_ship_profile_name.clear();
+          bo_mut.assign_to_fleet_id = kInvalidId;
+          bo_mut.rally_to_colony_id = kInvalidId;
+        }
+
+        ImGui::EndPopup();
+      }
 
       if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
         ImGui::SetDragDropPayload("N4X_SHIPYARD_ORDER_IDX", &i, sizeof(int));

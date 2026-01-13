@@ -54,6 +54,23 @@ struct TravelViaJump {
   Id jump_point_id{kInvalidId};
 };
 
+// Move to a jump point and remain in range until it is surveyed by your faction.
+//
+// Notes:
+// - Survey progress is earned by any ship with online sensors while within survey range
+//   of an unsurveyed jump point (see jump survey rules in Simulation::tick_ships).
+// - This order is a UI convenience that causes the ship to stay on-station at the jump
+//   point until the survey completes (or instantly completes when surveying is disabled).
+// - When transit_when_done is true, the ship will immediately transit the jump point
+//   once surveyed (equivalent to enqueueing TravelViaJump next).
+struct SurveyJumpPoint {
+  Id jump_point_id{kInvalidId};
+
+  // When true, transit the jump point once the survey completes.
+  bool transit_when_done{false};
+};
+
+
 // Close and engage a target ship (combat will also happen opportunistically).
 struct AttackShip {
   Id target_ship_id{kInvalidId};
@@ -242,6 +259,7 @@ using Order = std::variant<MoveToPoint,
                            ColonizeBody,
                            OrbitBody,
                            TravelViaJump,
+                           SurveyJumpPoint,
                            AttackShip,
                            EscortShip,
                            WaitDays,

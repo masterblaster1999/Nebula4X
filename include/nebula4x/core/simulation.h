@@ -1343,6 +1343,8 @@ class Simulation {
   bool issue_fleet_orbit_body(Id fleet_id, Id body_id, int duration_days = -1,
                               bool restrict_to_discovered = false);
   bool issue_fleet_travel_via_jump(Id fleet_id, Id jump_point_id);
+  bool issue_fleet_survey_jump_point(Id fleet_id, Id jump_point_id, bool transit_when_done = false,
+                                    bool restrict_to_discovered = false);
   bool issue_fleet_travel_to_system(Id fleet_id, Id target_system_id, bool restrict_to_discovered = false);
   bool issue_fleet_attack_ship(Id fleet_id, Id target_ship_id, bool restrict_to_discovered = false);
   bool issue_fleet_escort_ship(Id fleet_id, Id target_ship_id, double follow_distance_mkm = 1.0,
@@ -1393,6 +1395,8 @@ class Simulation {
   bool issue_orbit_body(Id ship_id, Id body_id, int duration_days = -1, bool restrict_to_discovered = false);
 
   bool issue_travel_via_jump(Id ship_id, Id jump_point_id);
+  bool issue_survey_jump_point(Id ship_id, Id jump_point_id, bool transit_when_done = false,
+                              bool restrict_to_discovered = false);
   // Pathfind through the jump network and enqueue TravelViaJump steps to reach a target system.
   //
   // When restrict_to_discovered is true, pathfinding will only traverse systems the ship's

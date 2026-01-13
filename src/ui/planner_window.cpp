@@ -154,6 +154,16 @@ void start_warp_until_event(const PlannerEvent& ev, Simulation& sim, UIState& ui
 
   if (ev.category == EventCategory::Research) {
     req.stop.message_contains = extract_research_term(ev);
+  } else if (ev.category == EventCategory::Combat) {
+    // If this planner event is about missiles, try to stop on the corresponding
+    // combat log line ("Missile impacts ...") instead of any combat INFO for the
+    // same ship/system.
+    const std::string t = to_lower(ev.title);
+    if (t.find("missile") != std::string::npos) {
+      req.stop.message_contains = "Missile impacts";
+    } else {
+      req.stop.message_contains.clear();
+    }
   } else {
     req.stop.message_contains.clear();
   }
@@ -239,7 +249,7 @@ void jump_to_planner_event(const PlannerEvent& ev,
 bool same_options(const PlannerEventsOptions& a, const PlannerEventsOptions& b) {
   return a.max_days == b.max_days && a.max_items == b.max_items && a.include_research == b.include_research &&
          a.include_colonies == b.include_colonies && a.include_ground_battles == b.include_ground_battles &&
-         a.include_ships == b.include_ships &&
+         a.include_missile_impacts == b.include_missile_impacts && a.include_ships == b.include_ships &&
          a.include_ship_next_step == b.include_ship_next_step &&
          a.include_ship_queue_complete == b.include_ship_queue_complete && a.max_ships == b.max_ships &&
          a.max_orders_per_ship == b.max_orders_per_ship;
@@ -343,9 +353,11 @@ void draw_planner_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& se
   ImGui::SameLine();
   ImGui::Checkbox("Include colonies", &opt.include_colonies);
   ImGui::SameLine();
+  ImGui::Checkbox("Include ships (expensive)", &opt.include_ships);
+
   ImGui::Checkbox("Include ground battles", &opt.include_ground_battles);
   ImGui::SameLine();
-  ImGui::Checkbox("Include ships (expensive)", &opt.include_ships);
+  ImGui::Checkbox("Include missile impacts", &opt.include_missile_impacts);
 
   if (opt.include_ships) {
     ImGui::Indent();

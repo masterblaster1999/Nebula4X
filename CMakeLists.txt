@@ -43,10 +43,12 @@ target_sources(nebula4x_core
     src/core/order_planner.cpp
     src/core/freight_planner.cpp
     src/core/fuel_planner.cpp
+    src/core/salvage_planner.cpp
     src/core/troop_planner.cpp
     src/core/research_schedule.cpp
     src/core/colony_schedule.cpp
     src/core/colony_profiles.cpp
+  src/core/ship_profiles.cpp
     src/core/planner_events.cpp
     src/core/ground_battle_forecast.cpp
     src/core/advisor.cpp
@@ -202,10 +204,14 @@ if(NEBULA4X_BUILD_UI)
     src/ui/regions_window.cpp
     src/ui/freight_window.cpp
     src/ui/fuel_window.cpp
+    src/ui/salvage_window.cpp
     src/ui/sustainment_window.cpp
     src/ui/troop_window.cpp
     src/ui/advisor_window.cpp
     src/ui/colony_profiles_window.cpp
+  src/ui/ship_profiles_window.cpp
+  src/ui/shipyard_targets_window.cpp
+  src/ui/survey_network_window.cpp
     src/ui/time_warp_window.cpp
     src/ui/save_tools_window.cpp
     src/ui/time_machine_window.cpp

@@ -2,6 +2,8 @@
 
 #include "nebula4x/core/simulation.h"
 
+#include "simulation_sensors.h"
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -454,6 +456,71 @@ OrderPlan compute_order_plan(const Simulation& sim, Id ship_id, const OrderPlann
             sys = dest->system_id;
             pos = dest->position_mkm;
             // No time cost to transit in the current simulation model.
+          }
+        }
+      }
+    } else if (std::holds_alternative<SurveyJumpPoint>(ord)) {
+      const auto& o = std::get<SurveyJumpPoint>(ord);
+      ok = travel_to_jump(o.jump_point_id, dock_range);
+      if (ok) {
+        const JumpPoint* jp = find_ptr(st.jump_points, o.jump_point_id);
+        if (!jp) {
+          truncate("SurveyJumpPoint references an invalid jump point", false);
+          ok = false;
+        } else {
+          // Best-effort: estimate survey time from current progress + ship survey rate.
+          const double required_points = sim.cfg().jump_survey_points_required;
+          if (required_points <= 1e-9 || sim.is_jump_point_surveyed_by_faction(ship->faction_id, jp->id)) {
+            // Instant / already surveyed.
+          } else {
+            const auto* fac = find_ptr(st.factions, ship->faction_id);
+            double prog = 0.0;
+            if (fac) {
+              if (auto itp = fac->jump_survey_progress.find(jp->id); itp != fac->jump_survey_progress.end()) {
+                prog = itp->second;
+              }
+            }
+            if (!std::isfinite(prog) || prog < 0.0) prog = 0.0;
+
+            const auto* des = sim.find_design(ship->design_id);
+            if (!des) {
+              truncate("No design data for survey ETA estimate", true);
+            } else {
+              const double env_mult = sim.system_sensor_environment_multiplier(jp->system_id);
+              double sensor_mkm = sim_sensors::sensor_range_mkm_with_mode(sim, *ship, *des);
+              sensor_mkm *= env_mult;
+              const double ref_range = std::max(1e-9, sim.cfg().jump_survey_reference_sensor_range_mkm);
+              const double role_mult = (des->role == ShipRole::Surveyor) ? sim.cfg().jump_survey_strength_multiplier_surveyor
+                                                                         : sim.cfg().jump_survey_strength_multiplier_other;
+              double points_per_day = (sensor_mkm / ref_range) * std::max(0.0, role_mult);
+              const double cap = std::max(0.0, sim.cfg().jump_survey_points_per_day_cap);
+              if (cap > 0.0) points_per_day = std::clamp(points_per_day, 0.0, cap);
+
+              if (points_per_day <= 1e-12) {
+                truncate("Survey rate is zero (no sensors?)", true);
+                indefinite = true;
+              } else {
+                const double remaining = std::max(0.0, required_points - prog);
+                const int days = static_cast<int>(std::ceil(remaining / points_per_day));
+                dt += static_cast<double>(std::max(0, days));
+                t += static_cast<double>(std::max(0, days));
+              }
+            }
+          }
+
+          if (o.transit_when_done) {
+            if (jp->linked_jump_id == kInvalidId) {
+              truncate("SurveyJumpPoint transit_when_done requires a linked jump", false);
+              ok = false;
+            } else if (const JumpPoint* dest = find_ptr(st.jump_points, jp->linked_jump_id)) {
+              sys = dest->system_id;
+              pos = dest->position_mkm;
+            } else {
+              truncate("SurveyJumpPoint has invalid destination", false);
+              ok = false;
+            }
+          } else {
+            pos = jp->position_mkm;
           }
         }
       }
