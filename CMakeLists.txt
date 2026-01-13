@@ -228,6 +228,8 @@ if(NEBULA4X_BUILD_UI)
     src/ui/data_lenses_window.cpp
     src/ui/dashboards_window.cpp
     src/ui/pivot_tables_window.cpp
+    src/ui/ui_forge_window.cpp
+    src/ui/screen_reader.cpp
     src/ui/layout_profiles.cpp
     src/ui/layout_profiles_window.cpp
     src/ui/production_window.cpp
@@ -246,6 +248,11 @@ if(NEBULA4X_BUILD_UI)
     ${imgui_SOURCE_DIR}/backends
   )
   target_link_libraries(nebula4x PRIVATE nebula4x::core imgui_sdlrenderer2)
+
+  if(WIN32)
+    # Screen reader (SAPI COM) uses CoInitializeEx / CLSIDFromProgID.
+    target_link_libraries(nebula4x PRIVATE ole32)
+  endif()
 
   if(SDL2_FOUND)
     target_link_libraries(nebula4x PRIVATE SDL2::SDL2)

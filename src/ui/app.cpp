@@ -16,6 +16,7 @@
 #include "nebula4x/util/file_io.h"
 #include "ui/panels.h"
 #include "ui/new_game_modal.h"
+#include "ui/screen_reader.h"
 #include "ui/economy_window.h"
 #include "ui/planner_window.h"
 #include "ui/regions_window.h"
@@ -50,6 +51,7 @@
 #include "ui/data_lenses_window.h"
 #include "ui/dashboards_window.h"
 #include "ui/pivot_tables_window.h"
+#include "ui/ui_forge_window.h"
 #include "ui/layout_profiles.h"
 #include "ui/layout_profiles_window.h"
 
@@ -183,6 +185,22 @@ void App::frame() {
   // Apply last-frame style overrides so the menu/settings windows reflect them.
   apply_imgui_style_overrides();
 
+  // Keep the in-game screen reader/narration engine in sync with UI prefs.
+  auto sync_screen_reader = [&]() {
+    ScreenReader& sr = ScreenReader::instance();
+    sr.set_enabled(ui_.screen_reader_enabled);
+    sr.set_rate(ui_.screen_reader_rate);
+    sr.set_volume(ui_.screen_reader_volume);
+    sr.set_hover_delay(ui_.screen_reader_hover_delay_sec);
+    sr.set_speak_focus(ui_.screen_reader_speak_focus);
+    sr.set_speak_hover(ui_.screen_reader_speak_hover);
+    sr.set_speak_windows(ui_.screen_reader_speak_windows);
+    sr.set_speak_toasts(ui_.screen_reader_speak_toasts);
+    sr.set_speak_selection(ui_.screen_reader_speak_selection);
+  };
+  sync_screen_reader();
+  ScreenReader::instance().begin_frame();
+
   // --- Global keyboard shortcuts (UI focus) ---
   {
     const ImGuiIO& io = ImGui::GetIO();
@@ -219,6 +237,19 @@ void App::frame() {
       if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_L)) {
         ui_.show_layout_profiles_window = !ui_.show_layout_profiles_window;
       }
+      if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_U)) ui_.show_ui_forge_window = !ui_.show_ui_forge_window;
+
+      // Screen reader / narration.
+      if (io.KeyCtrl && io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_R)) {
+        ui_.screen_reader_enabled = !ui_.screen_reader_enabled;
+        sync_screen_reader();
+        if (ui_.screen_reader_enabled) {
+          ScreenReader::instance().speak("Screen reader enabled", true);
+        }
+      }
+      if (io.KeyCtrl && io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_Period)) {
+        ScreenReader::instance().repeat_last();
+      }
 
       // Save/load.
       if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S)) {
@@ -254,6 +285,9 @@ void App::frame() {
   if (ui_.show_settings_window) {
     draw_settings_window(ui_, ui_prefs_path_, actions);
   }
+
+  // Menu/settings may have modified narration prefs.
+  sync_screen_reader();
 
   // New Game (scenario picker) modal.
   draw_new_game_modal(sim_, ui_);
@@ -293,6 +327,11 @@ void App::frame() {
 
   // Create a fullscreen dockspace so the user can rearrange panels.
   draw_dockspace();
+
+  // Track selection changes for narration.
+  const Id prev_selected_ship = selected_ship_;
+  const Id prev_selected_colony = selected_colony_;
+  const Id prev_selected_body = selected_body_;
 
   // Primary workspace windows (dockable).
   if (ui_.show_controls_window) {
@@ -389,6 +428,12 @@ void App::frame() {
   if (ui_.show_reference_graph_window) draw_reference_graph_window(sim_, ui_);
   if (ui_.show_layout_profiles_window) draw_layout_profiles_window(ui_);
 
+  // UI Forge: user-defined procedural panels (custom dashboards).
+  draw_ui_forge_panel_windows(sim_, ui_);
+  if (ui_.show_ui_forge_window) {
+    draw_ui_forge_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  }
+
   // Help overlay/window.
   draw_help_window(ui_);
 
@@ -435,6 +480,33 @@ void App::frame() {
 
   update_event_toasts(sim_, ui_, hud_);
   draw_event_toasts(sim_, ui_, hud_, selected_ship_, selected_colony_, selected_body_);
+
+  // Narrate selection changes (best-effort).
+  if (ui_.screen_reader_enabled && ui_.screen_reader_speak_selection) {
+    const auto& st = sim_.state();
+
+    auto speak_selected = [&](const std::string& prefix, const std::string& name, Id id) {
+      if (!name.empty()) {
+        ScreenReader::instance().speak(prefix + name, false);
+      } else {
+        ScreenReader::instance().speak(prefix + "#" + std::to_string((unsigned long long)id), false);
+      }
+    };
+
+    if (selected_ship_ != prev_selected_ship && selected_ship_ != kInvalidId) {
+      if (const auto* sh = nebula4x::find_ptr(st.ships, selected_ship_)) {
+        speak_selected("Ship selected: ", sh->name, selected_ship_);
+      }
+    } else if (selected_colony_ != prev_selected_colony && selected_colony_ != kInvalidId) {
+      if (const auto* c = nebula4x::find_ptr(st.colonies, selected_colony_)) {
+        speak_selected("Colony selected: ", c->name, selected_colony_);
+      }
+    } else if (selected_body_ != prev_selected_body && selected_body_ != kInvalidId) {
+      if (const auto* b = nebula4x::find_ptr(st.bodies, selected_body_)) {
+        speak_selected("Body selected: ", b->name, selected_body_);
+      }
+    }
+  }
 }
 
 void App::draw_dockspace() {
@@ -641,6 +713,51 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       if (auto it = obj->find("ui_scale"); it != obj->end()) {
         ui_.ui_scale = static_cast<float>(it->second.number_value(ui_.ui_scale));
         ui_.ui_scale = std::clamp(ui_.ui_scale, 0.65f, 2.5f);
+      }
+
+      // Screen reader / narration (accessibility).
+      if (auto it = obj->find("screen_reader_enabled"); it != obj->end()) {
+        ui_.screen_reader_enabled = it->second.bool_value(ui_.screen_reader_enabled);
+      }
+      if (auto it = obj->find("screen_reader_speak_focus"); it != obj->end()) {
+        ui_.screen_reader_speak_focus = it->second.bool_value(ui_.screen_reader_speak_focus);
+      }
+      if (auto it = obj->find("screen_reader_speak_hover"); it != obj->end()) {
+        ui_.screen_reader_speak_hover = it->second.bool_value(ui_.screen_reader_speak_hover);
+      }
+      if (auto it = obj->find("screen_reader_speak_windows"); it != obj->end()) {
+        ui_.screen_reader_speak_windows = it->second.bool_value(ui_.screen_reader_speak_windows);
+      }
+      if (auto it = obj->find("screen_reader_speak_toasts"); it != obj->end()) {
+        ui_.screen_reader_speak_toasts = it->second.bool_value(ui_.screen_reader_speak_toasts);
+      }
+      if (auto it = obj->find("screen_reader_speak_selection"); it != obj->end()) {
+        ui_.screen_reader_speak_selection = it->second.bool_value(ui_.screen_reader_speak_selection);
+      }
+      if (auto it = obj->find("screen_reader_rate"); it != obj->end()) {
+        ui_.screen_reader_rate = static_cast<float>(it->second.number_value(ui_.screen_reader_rate));
+        ui_.screen_reader_rate = std::clamp(ui_.screen_reader_rate, 0.5f, 2.0f);
+      }
+      if (auto it = obj->find("screen_reader_volume"); it != obj->end()) {
+        ui_.screen_reader_volume = static_cast<float>(it->second.number_value(ui_.screen_reader_volume));
+        ui_.screen_reader_volume = std::clamp(ui_.screen_reader_volume, 0.0f, 1.0f);
+      }
+      if (auto it = obj->find("screen_reader_hover_delay_sec"); it != obj->end()) {
+        ui_.screen_reader_hover_delay_sec = static_cast<float>(it->second.number_value(ui_.screen_reader_hover_delay_sec));
+        ui_.screen_reader_hover_delay_sec = std::clamp(ui_.screen_reader_hover_delay_sec, 0.0f, 5.0f);
+      }
+
+      // UI style preferences (visual presets + density).
+      if (auto it = obj->find("ui_scale_style"); it != obj->end()) {
+        ui_.ui_scale_style = it->second.bool_value(ui_.ui_scale_style);
+      }
+      if (auto it = obj->find("ui_style_preset"); it != obj->end()) {
+        ui_.ui_style_preset = static_cast<int>(it->second.number_value(ui_.ui_style_preset));
+        ui_.ui_style_preset = std::clamp(ui_.ui_style_preset, 0, 4);
+      }
+      if (auto it = obj->find("ui_density"); it != obj->end()) {
+        ui_.ui_density = static_cast<int>(it->second.number_value(ui_.ui_density));
+        ui_.ui_density = std::clamp(ui_.ui_density, 0, 2);
       }
 
       // Toast defaults.
@@ -996,6 +1113,9 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       }
       if (auto it = obj->find("show_pivot_tables_window"); it != obj->end()) {
         ui_.show_pivot_tables_window = it->second.bool_value(ui_.show_pivot_tables_window);
+      }
+      if (auto it = obj->find("show_ui_forge_window"); it != obj->end()) {
+        ui_.show_ui_forge_window = it->second.bool_value(ui_.show_ui_forge_window);
       }
       if (auto it = obj->find("show_status_bar"); it != obj->end()) {
         ui_.show_status_bar = it->second.bool_value(ui_.show_status_bar);
@@ -1452,6 +1572,83 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
           ui_.next_json_pivot_id = std::max<std::uint64_t>(ui_.next_json_pivot_id, max_id + 1);
         }
       }
+
+      // --- Procedural UI: UI Forge (custom panels) ---
+      if (auto it = obj->find("next_ui_forge_panel_id"); it != obj->end()) {
+        ui_.next_ui_forge_panel_id = static_cast<std::uint64_t>(it->second.number_value(ui_.next_ui_forge_panel_id));
+      }
+      if (auto it = obj->find("next_ui_forge_widget_id"); it != obj->end()) {
+        ui_.next_ui_forge_widget_id = static_cast<std::uint64_t>(it->second.number_value(ui_.next_ui_forge_widget_id));
+      }
+      if (auto it = obj->find("ui_forge_panels"); it != obj->end()) {
+        if (it->second.is_array()) {
+          ui_.ui_forge_panels.clear();
+
+          std::uint64_t max_pid = 0;
+          std::uint64_t max_wid = 0;
+
+          for (const auto& pv : it->second.array_items()) {
+            if (!pv.is_object()) continue;
+            UiForgePanelConfig p;
+            const auto& po = pv.object_items();
+
+            if (auto jt = po.find("id"); jt != po.end()) p.id = static_cast<std::uint64_t>(jt->second.number_value(p.id));
+            if (auto jt = po.find("name"); jt != po.end()) p.name = jt->second.string_value(p.name);
+            if (auto jt = po.find("open"); jt != po.end()) p.open = jt->second.bool_value(p.open);
+            if (auto jt = po.find("root_path"); jt != po.end()) p.root_path = jt->second.string_value(p.root_path);
+            if (auto jt = po.find("desired_columns"); jt != po.end()) p.desired_columns = static_cast<int>(jt->second.number_value(p.desired_columns));
+            if (auto jt = po.find("card_width_em"); jt != po.end()) p.card_width_em = static_cast<float>(jt->second.number_value(p.card_width_em));
+
+            // Clamp/normalize.
+            if (p.root_path.empty()) p.root_path = "/";
+            if (!p.root_path.empty() && p.root_path[0] != '/') p.root_path = "/" + p.root_path;
+            p.desired_columns = std::clamp(p.desired_columns, 0, 12);
+            p.card_width_em = std::clamp(p.card_width_em, 10.0f, 60.0f);
+
+            if (auto jt = po.find("widgets"); jt != po.end() && jt->second.is_array()) {
+              for (const auto& wv : jt->second.array_items()) {
+                if (!wv.is_object()) continue;
+                UiForgeWidgetConfig w;
+                const auto& wo = wv.object_items();
+
+                if (auto kt = wo.find("id"); kt != wo.end()) w.id = static_cast<std::uint64_t>(kt->second.number_value(w.id));
+                if (auto kt = wo.find("type"); kt != wo.end()) w.type = static_cast<int>(kt->second.number_value(w.type));
+                if (auto kt = wo.find("label"); kt != wo.end()) w.label = kt->second.string_value(w.label);
+                if (auto kt = wo.find("path"); kt != wo.end()) w.path = kt->second.string_value(w.path);
+                if (auto kt = wo.find("text"); kt != wo.end()) w.text = kt->second.string_value(w.text);
+
+                if (auto kt = wo.find("is_query"); kt != wo.end()) w.is_query = kt->second.bool_value(w.is_query);
+                if (auto kt = wo.find("query_op"); kt != wo.end()) w.query_op = static_cast<int>(kt->second.number_value(w.query_op));
+                if (auto kt = wo.find("track_history"); kt != wo.end()) w.track_history = kt->second.bool_value(w.track_history);
+                if (auto kt = wo.find("show_sparkline"); kt != wo.end()) w.show_sparkline = kt->second.bool_value(w.show_sparkline);
+                if (auto kt = wo.find("history_len"); kt != wo.end()) w.history_len = static_cast<int>(kt->second.number_value(w.history_len));
+                if (auto kt = wo.find("span"); kt != wo.end()) w.span = static_cast<int>(kt->second.number_value(w.span));
+                if (auto kt = wo.find("preview_rows"); kt != wo.end()) w.preview_rows = static_cast<int>(kt->second.number_value(w.preview_rows));
+
+                // Normalize/clamp.
+                w.type = std::clamp(w.type, 0, 3);
+                w.query_op = std::clamp(w.query_op, 0, 4);
+                w.history_len = std::clamp(w.history_len, 2, 4000);
+                w.span = std::clamp(w.span, 1, 12);
+                w.preview_rows = std::clamp(w.preview_rows, 1, 100);
+                if (w.path.empty()) w.path = "/";
+                if (!w.path.empty() && w.path[0] != '/') w.path = "/" + w.path;
+
+                max_wid = std::max(max_wid, w.id);
+                p.widgets.push_back(std::move(w));
+              }
+            }
+
+            max_pid = std::max(max_pid, p.id);
+            ui_.ui_forge_panels.push_back(std::move(p));
+          }
+
+          // Sanitize next ids (prefs might be hand-edited).
+          ui_.next_ui_forge_panel_id = std::max(ui_.next_ui_forge_panel_id, max_pid + 1);
+          ui_.next_ui_forge_widget_id = std::max(ui_.next_ui_forge_widget_id, max_wid + 1);
+        }
+      }
+
     }
     return true;
   } catch (const std::exception& e) {
@@ -1468,7 +1665,7 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     }
 
     nebula4x::json::Object o;
-    o["version"] = 27.0;
+    o["version"] = 29.0;
 
     // Theme.
     o["clear_color"] = color_to_json(ui_.clear_color);
@@ -1491,8 +1688,22 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
 
     // Accessibility / HUD.
     o["ui_scale"] = static_cast<double>(ui_.ui_scale);
+    o["ui_scale_style"] = ui_.ui_scale_style;
+    o["ui_style_preset"] = static_cast<double>(ui_.ui_style_preset);
+    o["ui_density"] = static_cast<double>(ui_.ui_density);
     o["show_event_toasts"] = ui_.show_event_toasts;
     o["event_toast_duration_sec"] = static_cast<double>(ui_.event_toast_duration_sec);
+
+    // Screen reader / narration (accessibility).
+    o["screen_reader_enabled"] = ui_.screen_reader_enabled;
+    o["screen_reader_speak_focus"] = ui_.screen_reader_speak_focus;
+    o["screen_reader_speak_hover"] = ui_.screen_reader_speak_hover;
+    o["screen_reader_speak_windows"] = ui_.screen_reader_speak_windows;
+    o["screen_reader_speak_toasts"] = ui_.screen_reader_speak_toasts;
+    o["screen_reader_speak_selection"] = ui_.screen_reader_speak_selection;
+    o["screen_reader_rate"] = static_cast<double>(ui_.screen_reader_rate);
+    o["screen_reader_volume"] = static_cast<double>(ui_.screen_reader_volume);
+    o["screen_reader_hover_delay_sec"] = static_cast<double>(ui_.screen_reader_hover_delay_sec);
 
     // Timeline view defaults.
     o["timeline_show_minimap"] = ui_.timeline_show_minimap;
@@ -1615,6 +1826,7 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     o["show_data_lenses_window"] = ui_.show_data_lenses_window;
     o["show_dashboards_window"] = ui_.show_dashboards_window;
     o["show_pivot_tables_window"] = ui_.show_pivot_tables_window;
+    o["show_ui_forge_window"] = ui_.show_ui_forge_window;
     o["show_status_bar"] = ui_.show_status_bar;
 
     // OmniSearch (game JSON global search) preferences.
@@ -1761,6 +1973,47 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
       }
       o["json_pivots"] = nebula4x::json::array(std::move(a));
     }
+
+
+    // --- Procedural UI: UI Forge (custom panels) ---
+    o["next_ui_forge_panel_id"] = static_cast<double>(ui_.next_ui_forge_panel_id);
+    o["next_ui_forge_widget_id"] = static_cast<double>(ui_.next_ui_forge_widget_id);
+    {
+      nebula4x::json::Array pa;
+      pa.reserve(ui_.ui_forge_panels.size());
+      for (const auto& p : ui_.ui_forge_panels) {
+        nebula4x::json::Object po;
+        po["id"] = static_cast<double>(p.id);
+        po["name"] = p.name;
+        po["open"] = p.open;
+        po["root_path"] = p.root_path;
+        po["desired_columns"] = static_cast<double>(p.desired_columns);
+        po["card_width_em"] = static_cast<double>(p.card_width_em);
+
+        nebula4x::json::Array wa;
+        wa.reserve(p.widgets.size());
+        for (const auto& w : p.widgets) {
+          nebula4x::json::Object wo;
+          wo["id"] = static_cast<double>(w.id);
+          wo["type"] = static_cast<double>(w.type);
+          wo["label"] = w.label;
+          wo["path"] = w.path;
+          wo["text"] = w.text;
+          wo["is_query"] = w.is_query;
+          wo["query_op"] = static_cast<double>(w.query_op);
+          wo["track_history"] = w.track_history;
+          wo["show_sparkline"] = w.show_sparkline;
+          wo["history_len"] = static_cast<double>(w.history_len);
+          wo["span"] = static_cast<double>(w.span);
+          wo["preview_rows"] = static_cast<double>(w.preview_rows);
+          wa.push_back(nebula4x::json::object(std::move(wo)));
+        }
+        po["widgets"] = nebula4x::json::array(std::move(wa));
+
+        pa.push_back(nebula4x::json::object(std::move(po)));
+      }
+      o["ui_forge_panels"] = nebula4x::json::array(std::move(pa));
+    }
     const std::string text = nebula4x::json::stringify(nebula4x::json::object(std::move(o)), 2);
     nebula4x::write_text_file(path, text);
 
@@ -1814,6 +2067,9 @@ void App::reset_ui_theme_defaults() {
   ui_.map_route_opacity = 1.0f;
 
   ui_.ui_scale = 1.0f;
+  ui_.ui_scale_style = true;
+  ui_.ui_style_preset = 0;
+  ui_.ui_density = 0;
 }
 
 void App::reset_window_layout_defaults() {
@@ -1850,6 +2106,9 @@ void App::reset_window_layout_defaults() {
   ui_.show_dashboards_window = false;
   ui_.show_pivot_tables_window = false;
 
+  ui_.show_ui_forge_window = false;
+  for (auto& p : ui_.ui_forge_panels) p.open = false;
+
   ui_.show_status_bar = true;
   ui_.show_event_toasts = true;
   ui_.event_toast_duration_sec = 6.0f;
@@ -1869,29 +2128,160 @@ void App::reset_window_layout_defaults() {
 }
 
 void App::apply_imgui_style_overrides() {
-  static bool captured = false;
-  static ImVec4 base_window_bg;
-  static ImVec4 base_child_bg;
-  static ImVec4 base_popup_bg;
+  // This function runs every frame and is responsible for keeping the UI style
+  // consistent with the persisted UI preferences (theme preset, density, etc.).
+  //
+  // Important: Dear ImGui style scaling is multiplicative, so we always rebuild
+  // from an unscaled base style to avoid accumulating ScaleAllSizes() calls.
+  if (ImGui::GetCurrentContext() == nullptr) return;
 
-  ImGuiStyle& style = ImGui::GetStyle();
-  if (!captured) {
-    base_window_bg = style.Colors[ImGuiCol_WindowBg];
-    base_child_bg = style.Colors[ImGuiCol_ChildBg];
-    base_popup_bg = style.Colors[ImGuiCol_PopupBg];
-    captured = true;
+  auto clamp_int = [](int v, int lo, int hi) {
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+  };
+
+  // Persisted UI prefs can be edited by hand; keep them within supported ranges.
+  ui_.ui_style_preset = clamp_int(ui_.ui_style_preset, 0, 4);
+  ui_.ui_density = clamp_int(ui_.ui_density, 0, 2);
+
+  static int last_preset = -1;
+  static int last_density = -1;
+  static ImGuiStyle base_style;
+
+  auto apply_nebula_overrides = [](ImGuiStyle& s) {
+    // Sci-fi friendly "Nebula" preset: starts from ImGui Dark and shifts accent
+    // colors toward cyan/teal, with slightly rounder widgets.
+    s.WindowRounding = 6.0f;
+    s.ChildRounding = 6.0f;
+    s.FrameRounding = 4.0f;
+    s.PopupRounding = 6.0f;
+    s.ScrollbarRounding = 6.0f;
+    s.GrabRounding = 4.0f;
+    s.TabRounding = 4.0f;
+
+    ImVec4* c = s.Colors;
+    const ImVec4 accent(0.00f, 0.78f, 0.90f, 1.00f);
+
+    c[ImGuiCol_CheckMark] = accent;
+    c[ImGuiCol_SliderGrab] = ImVec4(accent.x, accent.y, accent.z, 0.75f);
+    c[ImGuiCol_SliderGrabActive] = accent;
+
+    c[ImGuiCol_ButtonHovered] = ImVec4(accent.x, accent.y, accent.z, 0.22f);
+    c[ImGuiCol_ButtonActive] = ImVec4(accent.x, accent.y, accent.z, 0.35f);
+
+    c[ImGuiCol_HeaderHovered] = ImVec4(accent.x, accent.y, accent.z, 0.20f);
+    c[ImGuiCol_HeaderActive] = ImVec4(accent.x, accent.y, accent.z, 0.30f);
+
+    c[ImGuiCol_SeparatorHovered] = ImVec4(accent.x, accent.y, accent.z, 0.35f);
+    c[ImGuiCol_SeparatorActive] = ImVec4(accent.x, accent.y, accent.z, 0.55f);
+
+    c[ImGuiCol_TabHovered] = ImVec4(accent.x, accent.y, accent.z, 0.18f);
+    c[ImGuiCol_TabActive] = ImVec4(accent.x, accent.y, accent.z, 0.28f);
+
+    c[ImGuiCol_NavHighlight] = ImVec4(accent.x, accent.y, accent.z, 0.55f);
+    c[ImGuiCol_TextSelectedBg] = ImVec4(accent.x, accent.y, accent.z, 0.28f);
+    c[ImGuiCol_DockingPreview] = ImVec4(accent.x, accent.y, accent.z, 0.45f);
+  };
+
+  auto apply_high_contrast_overrides = [](ImGuiStyle& s) {
+    // High-contrast preset: prioritize clarity and selection visibility.
+    // This is helpful when streaming/recording or for low-contrast displays.
+    s.WindowRounding = 0.0f;
+    s.ChildRounding = 0.0f;
+    s.FrameRounding = 0.0f;
+    s.PopupRounding = 0.0f;
+    s.ScrollbarRounding = 0.0f;
+    s.GrabRounding = 0.0f;
+    s.TabRounding = 0.0f;
+    s.FrameBorderSize = 1.0f;
+    s.TabBorderSize = 1.0f;
+
+    ImVec4* c = s.Colors;
+    c[ImGuiCol_Text] = ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
+    c[ImGuiCol_TextDisabled] = ImVec4(0.80f, 0.80f, 0.80f, 1.0f);
+
+    // Bright amber highlight for focus/selection.
+    const ImVec4 hi(1.0f, 0.90f, 0.20f, 1.0f);
+
+    c[ImGuiCol_CheckMark] = hi;
+    c[ImGuiCol_SliderGrab] = ImVec4(hi.x, hi.y, hi.z, 0.90f);
+    c[ImGuiCol_SliderGrabActive] = hi;
+
+    c[ImGuiCol_Header] = ImVec4(hi.x, hi.y, hi.z, 0.25f);
+    c[ImGuiCol_HeaderHovered] = ImVec4(hi.x, hi.y, hi.z, 0.35f);
+    c[ImGuiCol_HeaderActive] = ImVec4(hi.x, hi.y, hi.z, 0.55f);
+
+    c[ImGuiCol_ButtonHovered] = ImVec4(hi.x, hi.y, hi.z, 0.25f);
+    c[ImGuiCol_ButtonActive] = ImVec4(hi.x, hi.y, hi.z, 0.40f);
+
+    c[ImGuiCol_NavHighlight] = ImVec4(hi.x, hi.y, hi.z, 0.75f);
+    c[ImGuiCol_TextSelectedBg] = ImVec4(hi.x, hi.y, hi.z, 0.40f);
+    c[ImGuiCol_DockingPreview] = ImVec4(hi.x, hi.y, hi.z, 0.55f);
+
+    // Slightly stronger table separators for scanability.
+    c[ImGuiCol_TableHeaderBg] = ImVec4(0.18f, 0.18f, 0.18f, 1.0f);
+    c[ImGuiCol_TableBorderStrong] = ImVec4(0.55f, 0.55f, 0.55f, 1.0f);
+    c[ImGuiCol_TableBorderLight] = ImVec4(0.35f, 0.35f, 0.35f, 1.0f);
+  };
+
+  auto density_scale = [](int density) {
+    // 0=Comfortable, 1=Compact, 2=Spacious.
+    if (density == 1) return 0.85f;
+    if (density == 2) return 1.15f;
+    return 1.0f;
+  };
+
+  // Rebuild the base style only when the preset/density change.
+  if (last_preset != ui_.ui_style_preset || last_density != ui_.ui_density) {
+    ImGuiStyle s;
+    switch (ui_.ui_style_preset) {
+      case 0: // Dark (default)
+        ImGui::StyleColorsDark(&s);
+        break;
+      case 1: // Light
+        ImGui::StyleColorsLight(&s);
+        break;
+      case 2: // Classic
+        ImGui::StyleColorsClassic(&s);
+        break;
+      case 3: // Nebula
+        ImGui::StyleColorsDark(&s);
+        apply_nebula_overrides(s);
+        break;
+      case 4: // High contrast
+        ImGui::StyleColorsDark(&s);
+        apply_high_contrast_overrides(s);
+        break;
+      default:
+        ImGui::StyleColorsDark(&s);
+        break;
+    }
+
+    const float ds = density_scale(ui_.ui_density);
+    if (ds != 1.0f) s.ScaleAllSizes(ds);
+
+    base_style = s;
+    last_preset = ui_.ui_style_preset;
+    last_density = ui_.ui_density;
   }
 
+  // Start from the base style every frame so scaling does not accumulate.
+  ImGuiStyle& style = ImGui::GetStyle();
+  style = base_style;
+
+  // Optionally scale padding/spacing alongside font scaling.
+  if (ui_.ui_scale_style) {
+    style.ScaleAllSizes(ui_.ui_scale);
+  }
+
+  // Window background override (optional).
   if (ui_.override_window_bg) {
     const ImVec4 c(ui_.window_bg[0], ui_.window_bg[1], ui_.window_bg[2], ui_.window_bg[3]);
     style.Colors[ImGuiCol_WindowBg] = c;
     // Keep child/popup consistent with the override for a cohesive theme.
     style.Colors[ImGuiCol_ChildBg] = c;
     style.Colors[ImGuiCol_PopupBg] = c;
-  } else {
-    style.Colors[ImGuiCol_WindowBg] = base_window_bg;
-    style.Colors[ImGuiCol_ChildBg] = base_child_bg;
-    style.Colors[ImGuiCol_PopupBg] = base_popup_bg;
   }
 }
 

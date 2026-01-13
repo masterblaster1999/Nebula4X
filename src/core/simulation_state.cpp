@@ -415,6 +415,41 @@ void Simulation::discover_system_for_faction(Id faction_id, Id system_id) {
   const std::string msg = fac->name + " discovered system " + sys_name;
   push_event(EventLevel::Info, EventCategory::Exploration, msg, ctx);
 
+  // Journal entry (curated narrative layer).
+  {
+    JournalEntry je;
+    je.category = EventCategory::Exploration;
+    je.system_id = system_id;
+    je.title = "System Discovered: " + sys_name;
+
+    std::ostringstream ss;
+    if (sys) {
+      const int bodies = (int)sys->bodies.size();
+      const int jumps = (int)sys->jump_points.size();
+      ss << "Initial survey complete.";
+      ss << "\nBodies: " << bodies << "   Jump points: " << jumps;
+      ss.setf(std::ios::fixed);
+      ss.precision(2);
+      ss << "\nNebula density: " << std::clamp(sys->nebula_density, 0.0, 1.0);
+
+      if (sys->region_id != kInvalidId) {
+        if (const auto* reg = find_ptr(state_.regions, sys->region_id)) {
+          if (!reg->name.empty()) ss << "\nRegion: " << reg->name;
+          if (!reg->theme.empty()) ss << " (" << reg->theme << ")";
+        }
+      }
+
+      const int now = (int)state_.date.days_since_epoch();
+      if (sys->storm_peak_intensity > 1e-9 && sys->storm_start_day <= now && now < sys->storm_end_day) {
+        ss << "\nNebula storm active.";
+      }
+    } else {
+      ss << "Initial survey complete.";
+    }
+    je.text = ss.str();
+    push_journal_entry(faction_id, std::move(je));
+  }
+
   // Share the discovery with mutual-friendly factions.
   const auto faction_ids = sorted_keys(state_.factions);
   for (Id other_id : faction_ids) {
@@ -437,6 +472,16 @@ void Simulation::discover_system_for_faction(Id faction_id, Id system_id) {
 
     const std::string msg2 = "Intel: " + fac->name + " shared discovery of system " + sys_name;
     push_event(EventLevel::Info, EventCategory::Intel, msg2, ctx2);
+
+    // Journal entry for the receiving faction.
+    {
+      JournalEntry je;
+      je.category = EventCategory::Intel;
+      je.system_id = system_id;
+      je.title = "Intel: New System " + sys_name;
+      je.text = "Shared by " + fac->name + ".";
+      push_journal_entry(other_id, std::move(je));
+    }
   }
 }
 
@@ -468,6 +513,46 @@ void Simulation::discover_anomaly_for_faction(Id faction_id, Id anomaly_id, Id d
   const std::string msg = fac->name + " detected anomaly " + anom_name + " in " + sys_name;
   push_event(EventLevel::Info, EventCategory::Exploration, msg, ctx);
 
+  // Journal entry.
+  {
+    JournalEntry je;
+    je.category = EventCategory::Exploration;
+    je.system_id = anom->system_id;
+    je.ship_id = discovered_by_ship_id;
+    je.anomaly_id = anomaly_id;
+    je.title = "Anomaly Detected: " + anom_name;
+
+    std::ostringstream ss;
+    ss << "System: " << sys_name;
+    if (!anom->kind.empty()) ss << "\nKind: " << anom->kind;
+    ss << "\nInvestigation: " << std::max(1, anom->investigation_days) << " day(s) on-station";
+    if (anom->research_reward > 1e-9) {
+      ss.setf(std::ios::fixed);
+      ss.precision(1);
+      ss << "\nPotential reward: +" << anom->research_reward << " RP";
+    }
+    if (!anom->unlock_component_id.empty()) {
+      ss << "\nPotential unlock: " << anom->unlock_component_id;
+    }
+    if (!anom->mineral_reward.empty()) {
+      double total = 0.0;
+      for (const auto& [_, t] : anom->mineral_reward) total += std::max(0.0, t);
+      if (total > 1e-3) {
+        ss.setf(std::ios::fixed);
+        ss.precision(1);
+        ss << "\nPotential cache: " << total << "t minerals";
+      }
+    }
+    if (anom->hazard_chance > 1e-9 && anom->hazard_damage > 1e-9) {
+      ss.setf(std::ios::fixed);
+      ss.precision(0);
+      ss << "\nHazard risk: " << std::clamp(anom->hazard_chance, 0.0, 1.0) * 100.0 << "%";
+    }
+
+    je.text = ss.str();
+    push_journal_entry(faction_id, std::move(je));
+  }
+
   // Share anomaly intel with mutual-friendly factions.
   const auto faction_ids = sorted_keys(state_.factions);
   for (Id other_id : faction_ids) {
@@ -490,6 +575,16 @@ void Simulation::discover_anomaly_for_faction(Id faction_id, Id anomaly_id, Id d
 
     const std::string msg2 = "Intel: " + fac->name + " shared anomaly location " + anom_name + " in " + sys_name;
     push_event(EventLevel::Info, EventCategory::Intel, msg2, ctx2);
+
+    {
+      JournalEntry je;
+      je.category = EventCategory::Intel;
+      je.system_id = anom->system_id;
+      je.anomaly_id = anomaly_id;
+      je.title = "Intel: Anomaly Located";
+      je.text = fac->name + " reported anomaly '" + anom_name + "' in " + sys_name + ".";
+      push_journal_entry(other_id, std::move(je));
+    }
   }
 }
 
@@ -536,6 +631,16 @@ void Simulation::survey_jump_point_for_faction(Id faction_id, Id jump_point_id) 
   const std::string msg = fac->name + " surveyed jump point " + jp_name + " -> " + dest_name;
   push_event(EventLevel::Info, EventCategory::Exploration, msg, ctx);
 
+  // Journal entry.
+  {
+    JournalEntry je;
+    je.category = EventCategory::Exploration;
+    je.system_id = jp->system_id;
+    je.title = "Jump Surveyed: " + jp_name + " -> " + dest_name;
+    je.text = "Route confirmed for navigation planners.";
+    push_journal_entry(faction_id, std::move(je));
+  }
+
   // Share the survey with mutual-friendly factions.
   const auto faction_ids = sorted_keys(state_.factions);
   for (Id other_id : faction_ids) {
@@ -553,6 +658,15 @@ void Simulation::survey_jump_point_for_faction(Id faction_id, Id jump_point_id) 
 
     const std::string msg2 = "Intel: " + fac->name + " shared jump survey of " + jp_name + " -> " + dest_name;
     push_event(EventLevel::Info, EventCategory::Intel, msg2, ctx2);
+
+    {
+      JournalEntry je;
+      je.category = EventCategory::Intel;
+      je.system_id = jp->system_id;
+      je.title = "Intel: Jump Survey Shared";
+      je.text = fac->name + " shared survey: " + jp_name + " -> " + dest_name;
+      push_journal_entry(other_id, std::move(je));
+    }
   }
 }
 
@@ -647,6 +761,15 @@ void Simulation::load_game(GameState loaded) {
     for (const auto& ev : state_.events) max_seq = std::max(max_seq, ev.seq);
     if (state_.next_event_seq == 0) state_.next_event_seq = 1;
     if (state_.next_event_seq <= max_seq) state_.next_event_seq = max_seq + 1;
+  }
+
+  {
+    std::uint64_t max_seq = 0;
+    for (const auto& [_, fac] : state_.factions) {
+      for (const auto& je : fac.journal) max_seq = std::max(max_seq, je.seq);
+    }
+    if (state_.next_journal_seq == 0) state_.next_journal_seq = 1;
+    if (state_.next_journal_seq <= max_seq) state_.next_journal_seq = max_seq + 1;
   }
 
   if (!state_.custom_designs.empty()) {

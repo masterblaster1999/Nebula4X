@@ -23,6 +23,7 @@ enum class DetailsTab {
   Diplomacy,
   Design,
   Contacts,
+  Journal,
   Log,
 };
 
@@ -146,6 +147,68 @@ struct JsonPivotConfig {
 };
 
 
+
+
+// Procedural UI: UI Forge (custom panels composed of widgets over live game JSON).
+//
+// Goal: let players build small dockable dashboards without writing C++.
+// Panels are persisted in ui_prefs.json.
+struct UiForgeWidgetConfig {
+  std::uint64_t id{0};
+
+  // 0 = KPI (value/query card)
+  // 1 = Text (note card)
+  // 2 = Separator (full-width divider)
+  // 3 = List (array/object preview)
+  int type{0};
+
+  // Card title / label.
+  std::string label;
+
+  // JSON pointer (or query pattern when is_query=true). Used by KPI and List widgets.
+  std::string path;
+
+  // Text content for type==Text.
+  std::string text;
+
+  // Query mode (glob pattern) for KPI widgets.
+  bool is_query{false};
+  // Aggregation op for query mode.
+  //   0=count matches, 1=sum, 2=avg, 3=min, 4=max
+  int query_op{0};
+
+  // KPI history/sparkline.
+  bool track_history{true};
+  bool show_sparkline{true};
+  int history_len{120};
+
+  // Simple layout hint for the responsive grid.
+  // 1 = normal width, 2 = double-width, etc.
+  int span{1};
+
+  // List preview rows.
+  int preview_rows{8};
+};
+
+struct UiForgePanelConfig {
+  std::uint64_t id{0};
+  std::string name;
+
+  // Whether this panel is currently shown as its own window.
+  bool open{false};
+
+  // Root pointer used by the auto-generator.
+  std::string root_path{"/"};
+
+  // Layout knobs.
+  // 0 = auto; otherwise fixed column count.
+  int desired_columns{0};
+  // Base card width in "em" (font-size units). 20em ~= 280px at default font.
+  float card_width_em{20.0f};
+
+  std::vector<UiForgeWidgetConfig> widgets;
+};
+
 // Shared UI toggle/state so multiple panels can respect the same fog-of-war settings.
 // This is intentionally not persisted in saves.
 struct UIState {
@@ -255,6 +318,8 @@ struct UIState {
   bool show_dashboards_window{false};
   bool show_pivot_tables_window{false};
 
+  bool show_ui_forge_window{false};
+
   // --- Procedural UI: JSON Watchboard (pins) ---
   // These are UI preferences persisted in ui_prefs.json.
   std::uint64_t next_json_watch_id{1};
@@ -278,6 +343,13 @@ struct UIState {
   // These are UI preferences persisted in ui_prefs.json.
   std::uint64_t next_json_pivot_id{1};
   std::vector<JsonPivotConfig> json_pivots;
+
+
+  // --- Procedural UI: UI Forge (custom panels over live game JSON) ---
+  // These are UI preferences persisted in ui_prefs.json.
+  std::uint64_t next_ui_forge_panel_id{1};
+  std::uint64_t next_ui_forge_widget_id{1};
+  std::vector<UiForgePanelConfig> ui_forge_panels;
 
   // --- Procedural UI: OmniSearch (global search over live game JSON) ---
   // These are UI preferences persisted in ui_prefs.json.
@@ -398,6 +470,34 @@ struct UIState {
 
   // UI scaling (1.0 = default). This affects readability on high-DPI displays.
   float ui_scale{1.0f};
+
+  // --- Screen reader / narration (accessibility) ---
+  //
+  // This is not a native OS accessibility tree; it's an in-game narration layer
+  // that can speak key UI feedback (toasts, selection changes, focused controls).
+  // These values are persisted in ui_prefs.json.
+  bool screen_reader_enabled{false};
+  bool screen_reader_speak_focus{true};
+  bool screen_reader_speak_hover{false};
+  bool screen_reader_speak_windows{true};
+  bool screen_reader_speak_toasts{true};
+  bool screen_reader_speak_selection{true};
+  float screen_reader_rate{1.0f};               // 0.50 .. 2.00
+  float screen_reader_volume{1.0f};             // 0.00 .. 1.00
+  float screen_reader_hover_delay_sec{0.65f};   // seconds
+
+  // UI style preset (ImGui colors + rounding + chrome).
+  // 0 = Dark (default), 1 = Light, 2 = Classic, 3 = Nebula, 4 = High Contrast
+  int ui_style_preset{0};
+
+  // UI density affects padding/spacing sizing. Useful for data-heavy windows.
+  // 0 = Comfortable (default), 1 = Compact, 2 = Spacious
+  int ui_density{0};
+
+  // When true, scale ImGui style sizes (padding/spacing) along with ui_scale.
+  // When false, only fonts scale.
+  bool ui_scale_style{true};
+
 
   // Docking behavior (ImGui IO config). These are stored in UI prefs.
   bool docking_with_shift{false};

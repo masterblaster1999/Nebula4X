@@ -1797,6 +1797,11 @@ bool move_construction_order(Id colony_id, int from_index, int to_index);
 
   void push_event(EventLevel level, std::string message);
   void push_event(EventLevel level, EventCategory category, std::string message, EventContext ctx = {});
+
+  // Append a narrative journal entry to a faction.
+  //
+  // This is a curated story layer over the raw event log.
+  void push_journal_entry(Id faction_id, JournalEntry entry);
 // --- Jump route planning cache (performance) ---
 // Route planning can be called frequently from the UI (hover previews) and from AI logistics.
 // Cache successful plans for the current simulation day to avoid repeated Dijkstra runs.

@@ -2101,6 +2101,48 @@ void Simulation::tick_ships(double dt_days) {
             ctx.ship_id = ship_id;
             ctx.faction_id = ship.faction_id;
             push_event(EventLevel::Info, EventCategory::Exploration, ss.str(), ctx);
+
+            // Curated journal entry for the investigating faction.
+            {
+              JournalEntry je;
+              je.category = EventCategory::Exploration;
+              je.system_id = ship.system_id;
+              je.ship_id = ship_id;
+              je.anomaly_id = anom ? anom->id : investigate_anom_id;
+              je.title = "Anomaly Resolved: " + nm;
+              std::ostringstream js;
+              js << ss.str();
+
+              // Add a breakdown of mineral rewards (when present) for readability.
+              if (!minerals_loaded.empty() || !minerals_overflow.empty()) {
+                js << "\n\nMinerals:";
+                auto dump_map = [&](const std::unordered_map<std::string, double>& m, const char* label) {
+                  if (m.empty()) return;
+                  js << "\n" << label;
+                  std::vector<std::pair<std::string, double>> items;
+                  items.reserve(m.size());
+                  for (const auto& [k, v] : m) {
+                    if (k.empty() || !(v > 1e-9) || !std::isfinite(v)) continue;
+                    items.emplace_back(k, v);
+                  }
+                  std::sort(items.begin(), items.end(), [](const auto& a, const auto& b) {
+                    if (a.second != b.second) return a.second > b.second;
+                    return a.first < b.first;
+                  });
+                  js.setf(std::ios::fixed);
+                  js.precision(1);
+                  for (const auto& [k, v] : items) {
+                    js << "\n  - " << k << ": " << v << "t";
+                  }
+                };
+                dump_map(minerals_loaded, "Loaded into cargo:");
+                if (cache_wreck_id != kInvalidId) dump_map(minerals_overflow, "Left as salvage cache:");
+                else dump_map(minerals_overflow, cfg_.enable_wrecks ? "Overflow:" : "Lost (no wrecks):");
+              }
+
+              je.text = js.str();
+              push_journal_entry(ship.faction_id, std::move(je));
+            }
           }
 
           q.erase(q.begin());

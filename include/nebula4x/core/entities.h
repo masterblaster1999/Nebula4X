@@ -1198,6 +1198,57 @@ struct Contact {
   Id last_seen_faction_id{kInvalidId};
 };
 
+
+// --- simulation event log / narrative journal (persisted in saves) ---
+
+enum class EventLevel { Info, Warn, Error };
+
+// High-level grouping for persistent simulation events.
+//
+// This is intentionally coarse. The goal is to support basic UI filtering
+// and future structured event handling without committing to a huge taxonomy.
+enum class EventCategory {
+  General,
+  Research,
+  Shipyard,
+  Construction,
+  Movement,
+  Combat,
+  Intel,
+  Exploration,
+  Diplomacy,
+};
+
+// A narrative journal entry for a faction.
+//
+// Journal entries are intended as a curated "story layer" over the raw
+// simulation event log: discoveries, intel, and major outcomes in a form that
+// is easy to read, search, and export.
+struct JournalEntry {
+  // Monotonic entry sequence number within a save.
+  std::uint64_t seq{0};
+
+  // Date::days_since_epoch() at the time the entry was recorded.
+  std::int64_t day{0};
+
+  // Hour-of-day (0..23) for sub-day ticks.
+  int hour{0};
+
+  // Coarse category for filtering.
+  EventCategory category{EventCategory::General};
+
+  std::string title;
+  std::string text;
+
+  // Optional context for UI navigation.
+  Id system_id{kInvalidId};
+  Id ship_id{kInvalidId};
+  Id colony_id{kInvalidId};
+  Id body_id{kInvalidId};
+  Id anomaly_id{kInvalidId};
+  Id wreck_id{kInvalidId};
+};
+
 struct Faction {
   Id id{kInvalidId};
   std::string name;
@@ -1278,6 +1329,12 @@ struct Faction {
   // Unlike systems/jump links, anomalies are discovered via sensor coverage
   // (ships/colonies) and persist once found.
   std::vector<Id> discovered_anomalies;
+
+  // Narrative journal entries for this faction.
+  //
+  // This is a curated story layer over the raw simulation event log: discoveries,
+  // intel, and major outcomes in a form that's easy to read and search.
+  std::vector<JournalEntry> journal;
 
   // Jump point surveys (fog-of-war route knowledge).
   // When fog-of-war is enabled, the UI + route planner will only consider
@@ -1617,24 +1674,6 @@ struct StarSystem {
 
 
 // --- simulation event log (persisted in saves) ---
-
-enum class EventLevel { Info, Warn, Error };
-
-// High-level grouping for persistent simulation events.
-//
-// This is intentionally coarse. The goal is to support basic UI filtering
-// and future structured event handling without committing to a huge taxonomy.
-enum class EventCategory {
-  General,
-  Research,
-  Shipyard,
-  Construction,
-  Movement,
-  Combat,
-  Intel,
-  Exploration,
-  Diplomacy,
-};
 
 struct SimEvent {
   // Monotonic event sequence number within a save.

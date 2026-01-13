@@ -747,6 +747,30 @@ void Simulation::push_event(EventLevel level, EventCategory category, std::strin
   }
 }
 
+void Simulation::push_journal_entry(Id faction_id, JournalEntry entry) {
+  if (faction_id == kInvalidId) return;
+  auto* fac = find_ptr(state_.factions, faction_id);
+  if (!fac) return;
+  if (entry.title.empty() && entry.text.empty()) return;
+
+  entry.seq = (entry.seq == 0) ? state_.next_journal_seq : entry.seq;
+  if (state_.next_journal_seq <= entry.seq) state_.next_journal_seq = entry.seq + 1;
+  if (state_.next_journal_seq == 0) state_.next_journal_seq = 1;
+
+  entry.day = state_.date.days_since_epoch();
+  entry.hour = std::clamp(state_.hour_of_day, 0, 23);
+
+  fac->journal.push_back(std::move(entry));
+
+  // Journal is intended as a readable curated layer, so prune less aggressively.
+  constexpr int kMaxJournalEntries = 2000;
+  if ((int)fac->journal.size() > kMaxJournalEntries + 128) {
+    const std::size_t keep = (std::size_t)kMaxJournalEntries;
+    const std::size_t cut = fac->journal.size() - keep;
+    fac->journal.erase(fac->journal.begin(), fac->journal.begin() + static_cast<std::ptrdiff_t>(cut));
+  }
+}
+
 void Simulation::tick_contacts(double dt_days, bool emit_contact_lost_events) {
   NEBULA4X_TRACE_SCOPE("tick_contacts", "sim.sensors");
   dt_days = std::clamp(dt_days, 0.0, 1.0);

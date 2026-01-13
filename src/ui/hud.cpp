@@ -17,6 +17,8 @@
 #include "nebula4x/util/log.h"
 #include "nebula4x/util/time.h"
 
+#include "ui/screen_reader.h"
+
 namespace nebula4x::ui {
 namespace {
 
@@ -172,6 +174,7 @@ enum class PaletteAction {
   ToggleDataLenses,
   ToggleDashboards,
   TogglePivotTables,
+  ToggleUIForge,
   ToggleLayoutProfiles,
   ToggleStatusBar,
   ToggleFogOfWar,
@@ -298,6 +301,9 @@ void activate_palette_item(PaletteItem& item, Simulation& sim, UIState& ui, Id& 
           break;
         case PaletteAction::TogglePivotTables:
           ui.show_pivot_tables_window = !ui.show_pivot_tables_window;
+          break;
+        case PaletteAction::ToggleUIForge:
+          ui.show_ui_forge_window = !ui.show_ui_forge_window;
           break;
         case PaletteAction::ToggleLayoutProfiles:
           ui.show_layout_profiles_window = !ui.show_layout_profiles_window;
@@ -781,6 +787,7 @@ void draw_help_window(UIState& ui) {
   ImGui::BulletText("Ctrl+O: Load (uses current load path)");
   ImGui::BulletText("Space: Advance +1 day (Shift=+5, Ctrl=+30)");
   ImGui::BulletText("Ctrl+Shift+L: Layout Profiles (switch dock layouts)");
+  ImGui::BulletText("Ctrl+Shift+U: UI Forge (custom panels)");
 
   ImGui::SeparatorText("Window toggles");
   ImGui::BulletText("Drag window tabs to dock/undock and rearrange the workspace");
@@ -901,6 +908,7 @@ void draw_command_palette(Simulation& sim, UIState& ui, HUDState& hud, Id& selec
   add_action("[Action] Toggle Data Lenses window", PaletteAction::ToggleDataLenses);
   add_action("[Action] Toggle Dashboards window", PaletteAction::ToggleDashboards);
   add_action("[Action] Toggle Pivot Tables window", PaletteAction::TogglePivotTables);
+  add_action("[Action] Toggle UI Forge (Custom Panels)", PaletteAction::ToggleUIForge);
   add_action("[Action] Toggle Layout Profiles window", PaletteAction::ToggleLayoutProfiles);
   add_action("[Action] Toggle Status Bar", PaletteAction::ToggleStatusBar);
   add_action("[Action] Toggle Fog of War", PaletteAction::ToggleFogOfWar);
@@ -1087,6 +1095,18 @@ void update_event_toasts(const Simulation& sim, UIState& ui, HUDState& hud) {
       t.message = ev->message;
       t.created_time_s = now;
       hud.toasts.push_back(std::move(t));
+
+      // Optional narration.
+      if (ui.screen_reader_enabled && ui.screen_reader_speak_toasts) {
+        std::string msg = ev->message;
+        if (msg.size() > 240) {
+          msg.resize(237);
+          msg += "...";
+        }
+
+        const char* prefix = (ev->level == EventLevel::Error) ? "Error: " : "Warning: ";
+        ScreenReader::instance().announce_toast(std::string(prefix) + msg);
+      }
     }
 
     hud.last_toast_seq = newest_seq;

@@ -31,6 +31,8 @@
 #include "nebula4x/util/strings.h"
 #include "nebula4x/util/time.h"
 
+#include "ui/screen_reader.h"
+
 namespace nebula4x::ui {
 namespace {
 
@@ -514,6 +516,36 @@ void draw_main_menu(Simulation& sim, UIState& ui, char* save_path, char* load_pa
       ImGui::MenuItem("Data Lenses (Procedural Tables)", nullptr, &ui.show_data_lenses_window);
       ImGui::MenuItem("Dashboards (Procedural Charts)", nullptr, &ui.show_dashboards_window);
       ImGui::MenuItem("Pivot Tables (Procedural Aggregations)", nullptr, &ui.show_pivot_tables_window);
+      if (ImGui::BeginMenu("Custom Panels")) {
+        ImGui::MenuItem("UI Forge (Editor)", "Ctrl+Shift+U", &ui.show_ui_forge_window);
+        ImGui::Separator();
+        if (ui.ui_forge_panels.empty()) {
+          ImGui::TextDisabled("(no custom panels yet)");
+        } else {
+          for (auto& p : ui.ui_forge_panels) {
+            std::string label = p.name.empty() ? ("Panel " + std::to_string(p.id)) : p.name;
+            ImGui::MenuItem(label.c_str(), nullptr, &p.open);
+          }
+        }
+        ImGui::EndMenu();
+      }
+
+      if (ImGui::BeginMenu("Accessibility")) {
+        ImGui::MenuItem("Enable Screen Reader (Narration)", "Ctrl+Alt+R", &ui.screen_reader_enabled);
+        ImGui::Separator();
+        ImGui::MenuItem("Speak Focused Controls", nullptr, &ui.screen_reader_speak_focus);
+        ImGui::MenuItem("Speak Hovered Controls", nullptr, &ui.screen_reader_speak_hover);
+        ImGui::MenuItem("Speak Window Focus", nullptr, &ui.screen_reader_speak_windows);
+        ImGui::MenuItem("Speak Toasts", nullptr, &ui.screen_reader_speak_toasts);
+        ImGui::MenuItem("Speak Selection Changes", nullptr, &ui.screen_reader_speak_selection);
+
+        ImGui::Separator();
+        if (ImGui::MenuItem("Repeat Last", "Ctrl+Alt+.")) {
+          ScreenReader::instance().repeat_last();
+        }
+        ImGui::EndMenu();
+      }
+
       ImGui::MenuItem("Status Bar", nullptr, &ui.show_status_bar);
       ImGui::MenuItem("Event Toasts", nullptr, &ui.show_event_toasts);
       ImGui::Separator();
@@ -610,6 +642,9 @@ void draw_main_menu(Simulation& sim, UIState& ui, char* save_path, char* load_pa
       }
       if (ImGui::MenuItem("Open Pivot Tables (Procedural Aggregations)")) {
         ui.show_pivot_tables_window = true;
+      }
+      if (ImGui::MenuItem("Open UI Forge (Custom Panels)", "Ctrl+Shift+U")) {
+        ui.show_ui_forge_window = true;
       }
       if (ImGui::MenuItem("Layout Profiles", "Ctrl+Shift+L")) {
         ui.show_layout_profiles_window = true;
@@ -7569,6 +7604,143 @@ if (colony->shipyard_queue.empty()) {
       }
     }
 
+    // --- Journal tab (curated narrative) ---
+    {
+      if (ImGui::BeginTabItem("Journal", nullptr, flags_for(DetailsTab::Journal))) {
+        Id viewer_faction_id = selected_faction_id;
+        if (selected_ship != kInvalidId) {
+          if (const auto* sh = find_ptr(s.ships, selected_ship)) viewer_faction_id = sh->faction_id;
+        }
+
+        Faction* viewer = (viewer_faction_id == kInvalidId) ? nullptr : find_ptr(s.factions, viewer_faction_id);
+        if (!viewer) {
+          ImGui::TextDisabled("No faction selected");
+          ImGui::EndTabItem();
+        } else {
+          ImGui::Text("Journal (saved with game)");
+          ImGui::TextDisabled("Entries: %d", (int)viewer->journal.size());
+
+          static int category_idx = 0; // 0=All
+          static int max_show = 250;
+          static char search_buf[128] = "";
+
+          // Category filter.
+          {
+            const char* cats[] = {
+                "All",
+                "General",
+                "Research",
+                "Shipyard",
+                "Construction",
+                "Movement",
+                "Combat",
+                "Intel",
+                "Exploration",
+                "Diplomacy",
+            };
+            ImGui::Combo("Category", &category_idx, cats, IM_ARRAYSIZE(cats));
+          }
+          ImGui::InputText("Search", search_buf, IM_ARRAYSIZE(search_buf));
+          ImGui::InputInt("Show last N", &max_show);
+          max_show = std::clamp(max_show, 10, 5000);
+
+          // Collect visible indices (newest-first) based on filters + limit.
+          std::vector<int> rows;
+          rows.reserve(std::min(max_show, static_cast<int>(viewer->journal.size())));
+          for (int i = (int)viewer->journal.size() - 1; i >= 0 && (int)rows.size() < max_show; --i) {
+            const auto& je = viewer->journal[(std::size_t)i];
+            if (!case_insensitive_contains(je.title + " " + je.text, search_buf)) continue;
+
+            if (category_idx > 0) {
+              static const EventCategory cat_vals[] = {
+                  EventCategory::General,
+                  EventCategory::Research,
+                  EventCategory::Shipyard,
+                  EventCategory::Construction,
+                  EventCategory::Movement,
+                  EventCategory::Combat,
+                  EventCategory::Intel,
+                  EventCategory::Exploration,
+                  EventCategory::Diplomacy,
+              };
+              const int idx = category_idx - 1;
+              if (idx < 0 || idx >= (int)IM_ARRAYSIZE(cat_vals)) continue;
+              if (je.category != cat_vals[idx]) continue;
+            }
+
+            rows.push_back(i);
+          }
+
+          if (ImGui::SmallButton("Copy visible")) {
+            std::string out;
+            out.reserve(rows.size() * 96);
+            for (int idx : rows) {
+              const auto& je = viewer->journal[(std::size_t)idx];
+              const nebula4x::Date d(je.day);
+              const std::string dt = format_datetime(d, je.hour);
+              out += std::string("[") + dt + "] #" +
+                     std::to_string((unsigned long long)je.seq) +
+                     " [" + event_category_label(je.category) + "] " + je.title;
+              out += "\n";
+              if (!je.text.empty()) {
+                out += je.text;
+                out += "\n";
+              }
+              out += "\n";
+            }
+            ImGui::SetClipboardText(out.c_str());
+          }
+
+          ImGui::Separator();
+
+          if (rows.empty()) {
+            ImGui::TextDisabled("(no matching entries)");
+          } else {
+            for (int i : rows) {
+              const auto& je = viewer->journal[(std::size_t)i];
+              const nebula4x::Date d(je.day);
+              const std::string dt = format_datetime(d, je.hour);
+
+              const std::string header = std::string("[") + dt + "] #" +
+                                         std::to_string((unsigned long long)je.seq) +
+                                         " [" + event_category_label(je.category) + "] " + je.title;
+
+              if (ImGui::TreeNode((header + "##journal_" + std::to_string((unsigned long long)je.seq)).c_str())) {
+                if (!je.text.empty()) ImGui::TextWrapped("%s", je.text.c_str());
+
+                // Navigation shortcuts.
+                if (je.system_id != kInvalidId) {
+                  if (ImGui::SmallButton("View system")) s.selected_system = je.system_id;
+                }
+                if (je.ship_id != kInvalidId) {
+                  ImGui::SameLine();
+                  if (ImGui::SmallButton("Select ship")) {
+                    selected_ship = je.ship_id;
+                    ui.selected_fleet_id = sim.fleet_for_ship(je.ship_id);
+                    if (const auto* sh = find_ptr(s.ships, je.ship_id)) s.selected_system = sh->system_id;
+                  }
+                }
+                if (je.colony_id != kInvalidId) {
+                  ImGui::SameLine();
+                  if (ImGui::SmallButton("Select colony")) {
+                    selected_colony = je.colony_id;
+                    if (const auto* c = find_ptr(s.colonies, je.colony_id)) {
+                      selected_body = c->body_id;
+                      if (const auto* b = find_ptr(s.bodies, c->body_id)) s.selected_system = b->system_id;
+                    }
+                  }
+                }
+
+                ImGui::TreePop();
+              }
+            }
+          }
+
+          ImGui::EndTabItem();
+        }
+      }
+    }
+
     // --- Event log tab ---
     {
       const std::uint64_t newest_seq = (s.next_event_seq > 0) ? (s.next_event_seq - 1) : 0;
@@ -7903,191 +8075,356 @@ if (colony->shipyard_queue.empty()) {
 }
 
 void draw_settings_window(UIState& ui, char* ui_prefs_path, UIPrefActions& actions) {
-  ImGui::SetNextWindowSize(ImVec2(520, 520), ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowSize(ImVec2(640, 520), ImGuiCond_FirstUseEver);
   if (!ImGui::Begin("Settings", &ui.show_settings_window)) {
     ImGui::End();
     return;
   }
 
-  ImGui::SeparatorText("Theme & Backgrounds");
-  ImGui::ColorEdit4("Clear background (SDL)", ui.clear_color);
-  ImGui::ColorEdit4("System map background", ui.system_map_bg);
-  ImGui::ColorEdit4("Galaxy map background", ui.galaxy_map_bg);
-  ImGui::Checkbox("Override window background", &ui.override_window_bg);
-  if (ui.override_window_bg) {
-    ImGui::ColorEdit4("Window background", ui.window_bg);
-  }
-  if (ImGui::Button("Reset theme defaults")) {
-    actions.reset_ui_theme = true;
+  // Narration: announce the settings window when it gains focus.
+  ScreenReader::instance().observe_window("Settings");
+
+  if (!ImGui::BeginTabBar("settings_tabs")) {
+    ImGui::End();
+    return;
   }
 
-  ImGui::SeparatorText("Map rendering");
-  ImGui::Checkbox("System: starfield", &ui.system_map_starfield);
-  ImGui::SameLine();
-  ImGui::Checkbox("Galaxy: starfield", &ui.galaxy_map_starfield);
-  ImGui::Checkbox("System: grid", &ui.system_map_grid);
-  ImGui::SameLine();
-  ImGui::Checkbox("Galaxy: grid", &ui.galaxy_map_grid);
-  ImGui::Checkbox("System: order paths", &ui.system_map_order_paths);
-  ImGui::SameLine();
-  ImGui::Checkbox("System: fleet formation preview", &ui.system_map_fleet_formation_preview);
-  ImGui::SameLine();
-  ImGui::Checkbox("Galaxy: selected route", &ui.galaxy_map_selected_route);
-  ImGui::Checkbox("System: follow selected ship", &ui.system_map_follow_selected);
-
-  ImGui::Checkbox("System: weapon range rings (selected)", &ui.show_selected_weapon_range);
-  ImGui::SameLine();
-  ImGui::Checkbox("Fleet", &ui.show_fleet_weapon_ranges);
-  ImGui::SameLine();
-  ImGui::Checkbox("Hostiles", &ui.show_hostile_weapon_ranges);
-
-  ImGui::SeparatorText("Exploration & Intel overlays");
-  ImGui::Checkbox("Selected: sensor range ring", &ui.show_selected_sensor_range);
-  ImGui::Checkbox("System: contact markers", &ui.show_contact_markers);
-  ImGui::SameLine();
-  ImGui::Checkbox("Labels##contacts", &ui.show_contact_labels);
-  ImGui::SameLine();
-  ImGui::Checkbox("Uncertainty##contacts", &ui.show_contact_uncertainty);
-  ImGui::Checkbox("System: minor bodies", &ui.show_minor_bodies);
-  ImGui::SameLine();
-  ImGui::Checkbox("Labels##minor_bodies", &ui.show_minor_body_labels);
-
-  ImGui::Checkbox("Galaxy: labels", &ui.show_galaxy_labels);
-  ImGui::SameLine();
-  ImGui::Checkbox("Jump lines", &ui.show_galaxy_jump_lines);
-  ImGui::SameLine();
-  ImGui::Checkbox("Unknown exits (unsurveyed / undiscovered)", &ui.show_galaxy_unknown_exits);
-  ImGui::SameLine();
-  ImGui::Checkbox("Intel alerts", &ui.show_galaxy_intel_alerts);
-  ImGui::Checkbox("Galaxy: freight lanes", &ui.show_galaxy_freight_lanes);
-  ImGui::TextDisabled("Draws current auto-freight routes (cargo orders) for the viewer faction.");
-
-  ImGui::SliderInt("Contact max age (days)", &ui.contact_max_age_days, 1, 3650);
-  ui.contact_max_age_days = std::clamp(ui.contact_max_age_days, 1, 3650);
-
-  ImGui::SliderFloat("Starfield density", &ui.map_starfield_density, 0.0f, 4.0f, "%.2fx");
-  ui.map_starfield_density = std::clamp(ui.map_starfield_density, 0.0f, 4.0f);
-  ImGui::SliderFloat("Starfield parallax", &ui.map_starfield_parallax, 0.0f, 1.0f, "%.2f");
-  ui.map_starfield_parallax = std::clamp(ui.map_starfield_parallax, 0.0f, 1.0f);
-  ImGui::SliderFloat("Grid opacity", &ui.map_grid_opacity, 0.0f, 1.0f, "%.2f");
-  ui.map_grid_opacity = std::clamp(ui.map_grid_opacity, 0.0f, 1.0f);
-  ImGui::SliderFloat("Route opacity", &ui.map_route_opacity, 0.0f, 1.0f, "%.2f");
-  ui.map_route_opacity = std::clamp(ui.map_route_opacity, 0.0f, 1.0f);
-
-  ImGui::SeparatorText("UI prefs file");
-  ImGui::InputText("Path##ui_prefs_path", ui_prefs_path, 256);
-  ImGui::Checkbox("Autosave on exit", &ui.autosave_ui_prefs);
-  if (ImGui::Button("Load UI prefs")) {
-    actions.load_ui_prefs = true;
-  }
-  ImGui::SameLine();
-  if (ImGui::Button("Save UI prefs")) {
-    actions.save_ui_prefs = true;
-  }
-
-  ImGui::SeparatorText("HUD & Accessibility");
-  ImGui::SliderFloat("UI scale", &ui.ui_scale, 0.65f, 2.5f, "%.2fx");
-  ui.ui_scale = std::clamp(ui.ui_scale, 0.65f, 2.5f);
-  ImGui::Checkbox("Status bar", &ui.show_status_bar);
-  ImGui::Checkbox("Event toasts (warn/error)", &ui.show_event_toasts);
-  if (ui.show_event_toasts) {
-    ImGui::SliderFloat("Toast duration (sec)", &ui.event_toast_duration_sec, 1.0f, 30.0f, "%.0f");
-    ui.event_toast_duration_sec = std::clamp(ui.event_toast_duration_sec, 0.5f, 60.0f);
-  }
-  ImGui::TextDisabled(
-      "Shortcuts: Ctrl+P palette, Ctrl+F search, Ctrl+G entity, Ctrl+Shift+G graph, Ctrl+Shift+A advisor, Ctrl+Shift+B colony profiles, F1 help, Ctrl+S save, Ctrl+O load, Ctrl+0 diplomacy, Ctrl+7 timeline, Ctrl+8 design studio, Ctrl+9 intel, Space +1 day.");
-
-  ImGui::SeparatorText("Timeline");
-  ImGui::Checkbox("Show timeline minimap", &ui.timeline_show_minimap);
-  ImGui::Checkbox("Show timeline grid", &ui.timeline_show_grid);
-  ImGui::Checkbox("Show lane labels", &ui.timeline_show_labels);
-  ImGui::Checkbox("Compact rows", &ui.timeline_compact_rows);
-  ImGui::Checkbox("Follow now by default", &ui.timeline_follow_now);
-  ImGui::SliderFloat("Lane height##timeline", &ui.timeline_lane_height, 18.0f, 56.0f, "%.0f px");
-  ui.timeline_lane_height = std::clamp(ui.timeline_lane_height, 18.0f, 80.0f);
-  ImGui::SliderFloat("Marker size##timeline", &ui.timeline_marker_size, 2.5f, 7.0f, "%.1f px");
-  ui.timeline_marker_size = std::clamp(ui.timeline_marker_size, 2.0f, 12.0f);
-
-  ImGui::SeparatorText("Design Studio");
-  ImGui::Checkbox("Show grid##design_studio", &ui.design_studio_show_grid);
-  ImGui::Checkbox("Show labels##design_studio", &ui.design_studio_show_labels);
-  ImGui::Checkbox("Compare by default##design_studio", &ui.design_studio_show_compare);
-  ImGui::Checkbox("Power overlay##design_studio", &ui.design_studio_show_power_overlay);
-
-  ImGui::SeparatorText("Intel");
-  ImGui::Checkbox("Radar: scanline", &ui.intel_radar_scanline);
-  ImGui::SameLine();
-  ImGui::Checkbox("Grid/range rings", &ui.intel_radar_grid);
-  ImGui::Checkbox("Radar: sensor coverage", &ui.intel_radar_show_sensors);
-  ImGui::SameLine();
-  ImGui::Checkbox("Heat##intel", &ui.intel_radar_sensor_heat);
-  ImGui::Checkbox("Radar: bodies", &ui.intel_radar_show_bodies);
-  ImGui::SameLine();
-  ImGui::Checkbox("Jump points", &ui.intel_radar_show_jump_points);
-  ImGui::Checkbox("Radar: friendlies", &ui.intel_radar_show_friendlies);
-  ImGui::SameLine();
-  ImGui::Checkbox("Hostiles", &ui.intel_radar_show_hostiles);
-  ImGui::SameLine();
-  ImGui::Checkbox("Contacts", &ui.intel_radar_show_contacts);
-  ImGui::Checkbox("Radar: labels", &ui.intel_radar_labels);
-
-  ImGui::SeparatorText("Diplomacy Graph");
-  ImGui::Checkbox("Starfield##dipl", &ui.diplomacy_graph_starfield);
-  ImGui::SameLine();
-  ImGui::Checkbox("Grid##dipl", &ui.diplomacy_graph_grid);
-  ImGui::Checkbox("Labels##dipl", &ui.diplomacy_graph_labels);
-  ImGui::SameLine();
-  ImGui::Checkbox("Arrows##dipl", &ui.diplomacy_graph_arrows);
-  ImGui::Checkbox("Dim non-selected##dipl", &ui.diplomacy_graph_dim_nonfocus);
-  ImGui::Checkbox("Show Hostile##dipl", &ui.diplomacy_graph_show_hostile);
-  ImGui::SameLine();
-  ImGui::Checkbox("Neutral##dipl", &ui.diplomacy_graph_show_neutral);
-  ImGui::SameLine();
-  ImGui::Checkbox("Friendly##dipl", &ui.diplomacy_graph_show_friendly);
-  {
-    const char* layouts[] = {"Radial", "Force", "Circle"};
-    ui.diplomacy_graph_layout = std::clamp(ui.diplomacy_graph_layout, 0, 2);
-    ImGui::Combo("Layout##dipl", &ui.diplomacy_graph_layout, layouts, IM_ARRAYSIZE(layouts));
-  }
-
-  ImGui::SeparatorText("Windows");
-  ImGui::Checkbox("Controls", &ui.show_controls_window);
-  ImGui::Checkbox("Map", &ui.show_map_window);
-  ImGui::Checkbox("Details", &ui.show_details_window);
-  ImGui::Checkbox("Directory", &ui.show_directory_window);
-  ImGui::Checkbox("Production", &ui.show_production_window);
-  ImGui::Checkbox("Economy", &ui.show_economy_window);
-  ImGui::Checkbox("Timeline", &ui.show_timeline_window);
-  ImGui::Checkbox("Design Studio", &ui.show_design_studio_window);
-  ImGui::Checkbox("Balance Lab", &ui.show_balance_lab_window);
-  ImGui::Checkbox("Intel", &ui.show_intel_window);
-  ImGui::Checkbox("Diplomacy Graph", &ui.show_diplomacy_window);
-  ImGui::Checkbox("Victory & Score", &ui.show_victory_window);
-  if (ImGui::Button("Reset window layout")) {
-    actions.reset_window_layout = true;
-  }
-
-  ImGui::SeparatorText("Docking");
-  ImGui::Checkbox("Hold Shift to dock", &ui.docking_with_shift);
-  ImGui::Checkbox("Always show tab bars", &ui.docking_always_tab_bar);
-  ImGui::Checkbox("Transparent docking preview", &ui.docking_transparent_payload);
-  {
-    const char* ini = ImGui::GetIO().IniFilename;
-    ImGui::TextDisabled("Layout file: %s", (ini && ini[0]) ? ini : "(none)");
-  }
-  {
-    ImGui::TextDisabled("Layout profile: %s", ui.layout_profile);
-    ImGui::SameLine();
-    if (ImGui::SmallButton("Manage...")) {
-      ui.show_layout_profiles_window = true;
+  // --- Theme tab ---
+  if (ImGui::BeginTabItem("Theme")) {
+    ImGui::SeparatorText("UI style");
+    {
+      const char* presets[] = {"Dark (default)", "Light", "Classic", "Nebula", "High Contrast"};
+      ui.ui_style_preset = std::clamp(ui.ui_style_preset, 0, (int)IM_ARRAYSIZE(presets) - 1);
+      ImGui::Combo("Preset##ui_style", &ui.ui_style_preset, presets, IM_ARRAYSIZE(presets));
+      if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Select a built-in UI style preset.\n\n- Nebula: dark theme with cyan accents\n- High Contrast: stronger selection/focus highlighting");
+      }
     }
+
+    {
+      const char* density[] = {"Comfortable", "Compact", "Spacious"};
+      ui.ui_density = std::clamp(ui.ui_density, 0, (int)IM_ARRAYSIZE(density) - 1);
+      ImGui::Combo("Density##ui_density", &ui.ui_density, density, IM_ARRAYSIZE(density));
+      if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Controls padding/spacing sizing. Compact is useful for data-heavy windows.");
+      }
+    }
+
+    ImGui::Checkbox("Scale padding/spacing with UI scale", &ui.ui_scale_style);
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip("When enabled, UI scale affects both font size and widget spacing.");
+    }
+
+    ImGui::SeparatorText("Backgrounds");
+    ImGui::ColorEdit4("Clear background (SDL)", ui.clear_color);
+    ImGui::ColorEdit4("System map background", ui.system_map_bg);
+    ImGui::ColorEdit4("Galaxy map background", ui.galaxy_map_bg);
+    ImGui::Checkbox("Override window background", &ui.override_window_bg);
+    if (ui.override_window_bg) {
+      ImGui::ColorEdit4("Window background", ui.window_bg);
+    }
+    if (ImGui::Button("Reset theme defaults")) {
+      actions.reset_ui_theme = true;
+    }
+
+    ImGui::EndTabItem();
   }
 
-  ImGui::SeparatorText("Notes");
-  ImGui::TextWrapped(
-      "Theme/layout settings are stored separately from save-games. Use 'UI Prefs' to persist your UI theme "
-      "(including background colors) and window visibility.");
+  // --- Map tab ---
+  if (ImGui::BeginTabItem("Map")) {
+    ImGui::SeparatorText("Map rendering");
+    ImGui::Checkbox("System: starfield", &ui.system_map_starfield);
+    ImGui::SameLine();
+    ImGui::Checkbox("Galaxy: starfield", &ui.galaxy_map_starfield);
+    ImGui::Checkbox("System: grid", &ui.system_map_grid);
+    ImGui::SameLine();
+    ImGui::Checkbox("Galaxy: grid", &ui.galaxy_map_grid);
+    ImGui::Checkbox("System: order paths", &ui.system_map_order_paths);
+    ImGui::SameLine();
+    ImGui::Checkbox("System: fleet formation preview", &ui.system_map_fleet_formation_preview);
+    ImGui::SameLine();
+    ImGui::Checkbox("Galaxy: selected route", &ui.galaxy_map_selected_route);
+    ImGui::Checkbox("System: follow selected ship", &ui.system_map_follow_selected);
 
+    ImGui::Checkbox("System: weapon range rings (selected)", &ui.show_selected_weapon_range);
+    ImGui::SameLine();
+    ImGui::Checkbox("Fleet", &ui.show_fleet_weapon_ranges);
+    ImGui::SameLine();
+    ImGui::Checkbox("Hostiles", &ui.show_hostile_weapon_ranges);
+
+    ImGui::SeparatorText("Exploration & Intel overlays");
+    ImGui::Checkbox("Selected: sensor range ring", &ui.show_selected_sensor_range);
+    ImGui::Checkbox("System: contact markers", &ui.show_contact_markers);
+    ImGui::SameLine();
+    ImGui::Checkbox("Labels##contacts", &ui.show_contact_labels);
+    ImGui::SameLine();
+    ImGui::Checkbox("Uncertainty##contacts", &ui.show_contact_uncertainty);
+    ImGui::Checkbox("System: minor bodies", &ui.show_minor_bodies);
+    ImGui::SameLine();
+    ImGui::Checkbox("Labels##minor_bodies", &ui.show_minor_body_labels);
+
+    ImGui::Checkbox("Galaxy: labels", &ui.show_galaxy_labels);
+    ImGui::SameLine();
+    ImGui::Checkbox("Jump lines", &ui.show_galaxy_jump_lines);
+    ImGui::SameLine();
+    ImGui::Checkbox("Unknown exits (unsurveyed / undiscovered)", &ui.show_galaxy_unknown_exits);
+    ImGui::SameLine();
+    ImGui::Checkbox("Intel alerts", &ui.show_galaxy_intel_alerts);
+    ImGui::Checkbox("Galaxy: freight lanes", &ui.show_galaxy_freight_lanes);
+    ImGui::TextDisabled("Draws current auto-freight routes (cargo orders) for the viewer faction.");
+
+    ImGui::SliderInt("Contact max age (days)", &ui.contact_max_age_days, 1, 3650);
+    ui.contact_max_age_days = std::clamp(ui.contact_max_age_days, 1, 3650);
+
+    ImGui::SliderFloat("Starfield density", &ui.map_starfield_density, 0.0f, 4.0f, "%.2fx");
+    ui.map_starfield_density = std::clamp(ui.map_starfield_density, 0.0f, 4.0f);
+    ImGui::SliderFloat("Starfield parallax", &ui.map_starfield_parallax, 0.0f, 1.0f, "%.2f");
+    ui.map_starfield_parallax = std::clamp(ui.map_starfield_parallax, 0.0f, 1.0f);
+    ImGui::SliderFloat("Grid opacity", &ui.map_grid_opacity, 0.0f, 1.0f, "%.2f");
+    ui.map_grid_opacity = std::clamp(ui.map_grid_opacity, 0.0f, 1.0f);
+    ImGui::SliderFloat("Route opacity", &ui.map_route_opacity, 0.0f, 1.0f, "%.2f");
+    ui.map_route_opacity = std::clamp(ui.map_route_opacity, 0.0f, 1.0f);
+
+    ImGui::EndTabItem();
+  }
+
+  // --- HUD tab ---
+  if (ImGui::BeginTabItem("HUD")) {
+    ImGui::SeparatorText("HUD & Accessibility");
+    ImGui::SliderFloat("UI scale", &ui.ui_scale, 0.65f, 2.5f, "%.2fx");
+    ui.ui_scale = std::clamp(ui.ui_scale, 0.65f, 2.5f);
+
+    ImGui::Checkbox("Status bar", &ui.show_status_bar);
+    ImGui::Checkbox("Event toasts (warn/error)", &ui.show_event_toasts);
+    if (ui.show_event_toasts) {
+      ImGui::SliderFloat("Toast duration (sec)", &ui.event_toast_duration_sec, 1.0f, 30.0f, "%.0f");
+      ui.event_toast_duration_sec = std::clamp(ui.event_toast_duration_sec, 0.5f, 60.0f);
+    }
+
+    ImGui::SeparatorText("Screen Reader (Narration)");
+    {
+      ScreenReader& sr = ScreenReader::instance();
+
+      ImGui::Checkbox("Enable screen reader narration", &ui.screen_reader_enabled);
+      sr.observe_item("Enable screen reader narration", "Toggles in-game narration using text-to-speech when available. Shortcut: Ctrl+Alt+R");
+
+      if (ui.screen_reader_enabled) {
+        ImGui::Indent();
+        ImGui::Checkbox("Speak focused controls", &ui.screen_reader_speak_focus);
+        sr.observe_item("Speak focused controls", "Announce controls as they receive keyboard navigation focus.");
+        ImGui::Checkbox("Speak hovered controls", &ui.screen_reader_speak_hover);
+        sr.observe_item("Speak hovered controls", "Announce controls under the mouse pointer (after a delay).");
+        ImGui::Checkbox("Speak window focus", &ui.screen_reader_speak_windows);
+        sr.observe_item("Speak window focus", "Announce window titles when they gain focus.");
+        ImGui::Checkbox("Speak toasts", &ui.screen_reader_speak_toasts);
+        sr.observe_item("Speak toasts", "Announce warn/error event toasts.");
+        ImGui::Checkbox("Speak selection changes", &ui.screen_reader_speak_selection);
+        sr.observe_item("Speak selection changes", "Announce when a ship/colony/body selection changes.");
+
+        ImGui::SliderFloat("Voice rate", &ui.screen_reader_rate, 0.5f, 2.0f, "%.2fx");
+        ui.screen_reader_rate = std::clamp(ui.screen_reader_rate, 0.5f, 2.0f);
+        sr.observe_item("Voice rate", "Speech rate multiplier.");
+
+        float vol_pct = ui.screen_reader_volume * 100.0f;
+        if (ImGui::SliderFloat("Voice volume##sr_vol", &vol_pct, 0.0f, 100.0f, "%.0f%%")) {
+          ui.screen_reader_volume = std::clamp(vol_pct / 100.0f, 0.0f, 1.0f);
+        }
+        sr.observe_item("Voice volume##sr_vol", "Speech volume.");
+
+        ImGui::SliderFloat("Hover delay (sec)", &ui.screen_reader_hover_delay_sec, 0.0f, 5.0f, "%.2f");
+        ui.screen_reader_hover_delay_sec = std::clamp(ui.screen_reader_hover_delay_sec, 0.0f, 5.0f);
+        sr.observe_item("Hover delay (sec)", "How long the cursor must hover before narration triggers.");
+
+        static char test_phrase[256] = "Nebula 4X screen reader test.";
+        ImGui::InputText("Test phrase##sr_test", test_phrase, sizeof(test_phrase));
+        sr.observe_item("Test phrase##sr_test", "Type a custom phrase to speak.");
+
+        if (ImGui::Button("Speak test phrase")) {
+          sr.speak(std::string(test_phrase), true);
+        }
+        sr.observe_item("Speak test phrase", "Speak the test phrase immediately.");
+        ImGui::SameLine();
+        if (ImGui::Button("Repeat last")) {
+          sr.repeat_last();
+        }
+        sr.observe_item("Repeat last", "Repeat the last spoken line. Shortcut: Ctrl+Alt+.");
+
+        ImGui::SeparatorText("Spoken history");
+        const auto hist = sr.history_snapshot();
+        ImGui::BeginChild("sr_history", ImVec2(0, 120), true);
+        for (const auto& e : hist) {
+          (void)e;
+          ImGui::TextUnformatted(e.text.c_str());
+        }
+        ImGui::EndChild();
+
+        if (ImGui::Button("Copy history")) {
+          std::string joined;
+          joined.reserve(hist.size() * 32);
+          for (const auto& e : hist) {
+            joined += e.text;
+            joined += "\n";
+          }
+          ImGui::SetClipboardText(joined.c_str());
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Clear history")) {
+          sr.clear_history();
+        }
+
+        ImGui::Unindent();
+      }
+    }
+
+    ImGui::SeparatorText("Shortcuts");
+    ImGui::TextDisabled(
+        "Ctrl+P palette, Ctrl+F search, Ctrl+G entity, Ctrl+Shift+G graph, Ctrl+Shift+A advisor, "
+        "Ctrl+Shift+B colony profiles, F1 help, Ctrl+S save, Ctrl+O load, Ctrl+0 diplomacy, Ctrl+7 timeline, "
+        "Ctrl+8 design studio, Ctrl+9 intel, Space +1 day, Ctrl+Alt+R screen reader, Ctrl+Alt+. repeat last.");
+
+    ImGui::EndTabItem();
+  }
+
+  // --- Timeline tab ---
+  if (ImGui::BeginTabItem("Timeline")) {
+    ImGui::SeparatorText("Timeline");
+    ImGui::Checkbox("Show timeline minimap", &ui.timeline_show_minimap);
+    ImGui::Checkbox("Show timeline grid", &ui.timeline_show_grid);
+    ImGui::Checkbox("Show lane labels", &ui.timeline_show_labels);
+    ImGui::Checkbox("Compact rows", &ui.timeline_compact_rows);
+    ImGui::Checkbox("Follow now by default", &ui.timeline_follow_now);
+    ImGui::SliderFloat("Lane height##timeline", &ui.timeline_lane_height, 18.0f, 56.0f, "%.0f px");
+    ui.timeline_lane_height = std::clamp(ui.timeline_lane_height, 18.0f, 80.0f);
+    ImGui::SliderFloat("Marker size##timeline", &ui.timeline_marker_size, 2.5f, 7.0f, "%.1f px");
+    ui.timeline_marker_size = std::clamp(ui.timeline_marker_size, 2.0f, 12.0f);
+
+    ImGui::EndTabItem();
+  }
+
+  // --- Design tab ---
+  if (ImGui::BeginTabItem("Design")) {
+    ImGui::SeparatorText("Design Studio");
+    ImGui::Checkbox("Show grid##design_studio", &ui.design_studio_show_grid);
+    ImGui::Checkbox("Show labels##design_studio", &ui.design_studio_show_labels);
+    ImGui::Checkbox("Compare by default##design_studio", &ui.design_studio_show_compare);
+    ImGui::Checkbox("Power overlay##design_studio", &ui.design_studio_show_power_overlay);
+    ImGui::Checkbox("Heat overlay##design_studio", &ui.design_studio_show_heat_overlay);
+
+    ImGui::EndTabItem();
+  }
+
+  // --- Intel tab ---
+  if (ImGui::BeginTabItem("Intel")) {
+    ImGui::SeparatorText("Intel");
+    ImGui::Checkbox("Radar: scanline", &ui.intel_radar_scanline);
+    ImGui::SameLine();
+    ImGui::Checkbox("Grid/range rings", &ui.intel_radar_grid);
+    ImGui::Checkbox("Radar: sensor coverage", &ui.intel_radar_show_sensors);
+    ImGui::SameLine();
+    ImGui::Checkbox("Heat##intel", &ui.intel_radar_sensor_heat);
+    ImGui::Checkbox("Radar: bodies", &ui.intel_radar_show_bodies);
+    ImGui::SameLine();
+    ImGui::Checkbox("Jump points", &ui.intel_radar_show_jump_points);
+    ImGui::Checkbox("Radar: friendlies", &ui.intel_radar_show_friendlies);
+    ImGui::SameLine();
+    ImGui::Checkbox("Hostiles", &ui.intel_radar_show_hostiles);
+    ImGui::SameLine();
+    ImGui::Checkbox("Contacts", &ui.intel_radar_show_contacts);
+    ImGui::Checkbox("Radar: labels", &ui.intel_radar_labels);
+
+    ImGui::EndTabItem();
+  }
+
+  // --- Diplomacy tab ---
+  if (ImGui::BeginTabItem("Diplomacy")) {
+    ImGui::SeparatorText("Diplomacy Graph");
+    ImGui::Checkbox("Starfield##dipl", &ui.diplomacy_graph_starfield);
+    ImGui::SameLine();
+    ImGui::Checkbox("Grid##dipl", &ui.diplomacy_graph_grid);
+    ImGui::Checkbox("Labels##dipl", &ui.diplomacy_graph_labels);
+    ImGui::SameLine();
+    ImGui::Checkbox("Arrows##dipl", &ui.diplomacy_graph_arrows);
+    ImGui::Checkbox("Dim non-selected##dipl", &ui.diplomacy_graph_dim_nonfocus);
+    ImGui::Checkbox("Show Hostile##dipl", &ui.diplomacy_graph_show_hostile);
+    ImGui::SameLine();
+    ImGui::Checkbox("Neutral##dipl", &ui.diplomacy_graph_show_neutral);
+    ImGui::SameLine();
+    ImGui::Checkbox("Friendly##dipl", &ui.diplomacy_graph_show_friendly);
+    {
+      const char* layouts[] = {"Radial", "Force", "Circle"};
+      ui.diplomacy_graph_layout = std::clamp(ui.diplomacy_graph_layout, 0, 2);
+      ImGui::Combo("Layout##dipl", &ui.diplomacy_graph_layout, layouts, IM_ARRAYSIZE(layouts));
+    }
+
+    ImGui::EndTabItem();
+  }
+
+  // --- Windows tab ---
+  if (ImGui::BeginTabItem("Windows")) {
+    ImGui::SeparatorText("Windows");
+    ImGui::Checkbox("Controls", &ui.show_controls_window);
+    ImGui::Checkbox("Map", &ui.show_map_window);
+    ImGui::Checkbox("Details", &ui.show_details_window);
+    ImGui::Checkbox("Directory", &ui.show_directory_window);
+    ImGui::Checkbox("Production", &ui.show_production_window);
+    ImGui::Checkbox("Economy", &ui.show_economy_window);
+    ImGui::Checkbox("Timeline", &ui.show_timeline_window);
+    ImGui::Checkbox("Design Studio", &ui.show_design_studio_window);
+    ImGui::Checkbox("Balance Lab", &ui.show_balance_lab_window);
+    ImGui::Checkbox("Intel", &ui.show_intel_window);
+    ImGui::Checkbox("Diplomacy Graph", &ui.show_diplomacy_window);
+    ImGui::Checkbox("Victory & Score", &ui.show_victory_window);
+
+    if (ImGui::Button("Reset window layout")) {
+      actions.reset_window_layout = true;
+    }
+
+    ImGui::EndTabItem();
+  }
+
+  // --- Docking tab ---
+  if (ImGui::BeginTabItem("Docking")) {
+    ImGui::SeparatorText("Docking");
+    ImGui::Checkbox("Hold Shift to dock", &ui.docking_with_shift);
+    ImGui::Checkbox("Always show tab bars", &ui.docking_always_tab_bar);
+    ImGui::Checkbox("Transparent docking preview", &ui.docking_transparent_payload);
+    {
+      const char* ini = ImGui::GetIO().IniFilename;
+      ImGui::TextDisabled("Layout file: %s", (ini && ini[0]) ? ini : "(none)");
+    }
+    {
+      ImGui::TextDisabled("Layout profile: %s", ui.layout_profile);
+      ImGui::SameLine();
+      if (ImGui::SmallButton("Manage...")) {
+        ui.show_layout_profiles_window = true;
+      }
+    }
+
+    ImGui::EndTabItem();
+  }
+
+  // --- Persistence tab ---
+  if (ImGui::BeginTabItem("Persistence")) {
+    ImGui::SeparatorText("UI prefs file");
+    ImGui::InputText("Path##ui_prefs_path", ui_prefs_path, 256);
+    ImGui::Checkbox("Autosave on exit", &ui.autosave_ui_prefs);
+    if (ImGui::Button("Load UI prefs")) {
+      actions.load_ui_prefs = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Save UI prefs")) {
+      actions.save_ui_prefs = true;
+    }
+
+    ImGui::SeparatorText("Notes");
+    ImGui::TextWrapped(
+        "Theme/layout settings are stored separately from save-games. Use 'UI Prefs' to persist your UI theme "
+        "(including background colors) and window visibility.");
+
+    ImGui::EndTabItem();
+  }
+
+  ImGui::EndTabBar();
   ImGui::End();
 }
 

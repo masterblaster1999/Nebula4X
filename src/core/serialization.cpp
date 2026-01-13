@@ -18,7 +18,7 @@ using json::Array;
 using json::Object;
 using json::Value;
 
-constexpr int kCurrentSaveVersion = 50;
+constexpr int kCurrentSaveVersion = 51;
 
 Object ship_power_policy_to_json(const ShipPowerPolicy& p) {
   Object o;
@@ -995,6 +995,7 @@ std::string serialize_game_to_json(const GameState& s) {
   root["hour_of_day"] = static_cast<double>(s.hour_of_day);
   root["next_id"] = static_cast<double>(s.next_id);
   root["next_event_seq"] = static_cast<double>(s.next_event_seq);
+  root["next_journal_seq"] = static_cast<double>(s.next_journal_seq);
   root["selected_system"] = static_cast<double>(s.selected_system);
 
   root["victory_rules"] = victory_rules_to_json(s.victory_rules);
@@ -1444,6 +1445,30 @@ std::string serialize_game_to_json(const GameState& s) {
     for (Id aid : da) discovered_anomalies.push_back(static_cast<double>(aid));
     o["discovered_anomalies"] = discovered_anomalies;
 
+    // Narrative journal (optional).
+    if (!f.journal.empty()) {
+      Array journal;
+      journal.reserve(f.journal.size());
+      for (const auto& je : f.journal) {
+        if (je.title.empty() && je.text.empty()) continue;
+        Object jo;
+        jo["seq"] = static_cast<double>(je.seq);
+        jo["day"] = static_cast<double>(je.day);
+        jo["hour"] = static_cast<double>(je.hour);
+        jo["category"] = std::string(event_category_to_string(je.category));
+        jo["title"] = je.title;
+        jo["text"] = je.text;
+        if (je.system_id != kInvalidId) jo["system_id"] = static_cast<double>(je.system_id);
+        if (je.ship_id != kInvalidId) jo["ship_id"] = static_cast<double>(je.ship_id);
+        if (je.colony_id != kInvalidId) jo["colony_id"] = static_cast<double>(je.colony_id);
+        if (je.body_id != kInvalidId) jo["body_id"] = static_cast<double>(je.body_id);
+        if (je.anomaly_id != kInvalidId) jo["anomaly_id"] = static_cast<double>(je.anomaly_id);
+        if (je.wreck_id != kInvalidId) jo["wreck_id"] = static_cast<double>(je.wreck_id);
+        journal.push_back(jo);
+      }
+      if (!journal.empty()) o["journal"] = journal;
+    }
+
 
     Array surveyed_jump_points;
     const auto sjp = sorted_unique_copy(f.surveyed_jump_points);
@@ -1801,6 +1826,12 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     s.next_event_seq = static_cast<std::uint64_t>(itseq->second.int_value(1));
   }
   if (s.next_event_seq == 0) s.next_event_seq = 1;
+
+  s.next_journal_seq = 1;
+  if (auto itseq = root.find("next_journal_seq"); itseq != root.end()) {
+    s.next_journal_seq = static_cast<std::uint64_t>(itseq->second.int_value(1));
+  }
+  if (s.next_journal_seq == 0) s.next_journal_seq = 1;
 
   s.selected_system = kInvalidId;
   if (auto itsel = root.find("selected_system"); itsel != root.end()) {
@@ -2418,6 +2449,40 @@ GameState deserialize_game_from_json(const std::string& json_text) {
       }
     }
 
+    // Narrative journal (optional).
+    if (auto it = o.find("journal"); it != o.end() && it->second.is_array()) {
+      for (const auto& jv : it->second.array()) {
+        if (!jv.is_object()) continue;
+        const auto& jo = jv.object();
+
+        JournalEntry je;
+        je.seq = static_cast<std::uint64_t>(jo.find("seq") != jo.end() ? jo.at("seq").int_value(0) : 0);
+        je.day = static_cast<std::int64_t>(jo.find("day") != jo.end() ? jo.at("day").int_value(0) : 0);
+        je.hour = (jo.find("hour") != jo.end()) ? (int)jo.at("hour").int_value(0) : 0;
+        je.hour = std::clamp(je.hour, 0, 23);
+        je.category = event_category_from_string(jo.find("category") != jo.end() ? jo.at("category").string_value("general")
+                                                                                   : std::string("general"));
+        je.title = (jo.find("title") != jo.end()) ? jo.at("title").string_value() : std::string();
+        je.text = (jo.find("text") != jo.end()) ? jo.at("text").string_value() : std::string();
+
+        je.system_id = static_cast<Id>(jo.find("system_id") != jo.end() ? jo.at("system_id").int_value(kInvalidId)
+                                                                         : kInvalidId);
+        je.ship_id = static_cast<Id>(jo.find("ship_id") != jo.end() ? jo.at("ship_id").int_value(kInvalidId)
+                                                                     : kInvalidId);
+        je.colony_id = static_cast<Id>(jo.find("colony_id") != jo.end() ? jo.at("colony_id").int_value(kInvalidId)
+                                                                         : kInvalidId);
+        je.body_id = static_cast<Id>(jo.find("body_id") != jo.end() ? jo.at("body_id").int_value(kInvalidId)
+                                                                     : kInvalidId);
+        je.anomaly_id = static_cast<Id>(jo.find("anomaly_id") != jo.end() ? jo.at("anomaly_id").int_value(kInvalidId)
+                                                                           : kInvalidId);
+        je.wreck_id = static_cast<Id>(jo.find("wreck_id") != jo.end() ? jo.at("wreck_id").int_value(kInvalidId)
+                                                                       : kInvalidId);
+
+        if (je.title.empty() && je.text.empty()) continue;
+        f.journal.push_back(std::move(je));
+      }
+    }
+
 
     if (auto it = o.find("surveyed_jump_points"); it != o.end()) {
       for (const auto& jv : it->second.array()) {
@@ -2541,6 +2606,22 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     }
 
     s.factions[f.id] = f;
+  }
+
+  // Normalize journal entry sequence numbers (defensive for edited saves).
+  {
+    std::uint64_t seq_cursor = 0;
+    for (auto& [fid, fac] : s.factions) {
+      (void)fid;
+      for (auto& je : fac.journal) {
+        std::uint64_t wanted_seq = je.seq;
+        if (wanted_seq == 0) wanted_seq = seq_cursor + 1;
+        if (wanted_seq <= seq_cursor) wanted_seq = seq_cursor + 1;
+        je.seq = wanted_seq;
+        seq_cursor = je.seq;
+      }
+    }
+    if (s.next_journal_seq <= seq_cursor) s.next_journal_seq = seq_cursor + 1;
   }
 
   // Backfill anomaly discovery for legacy saves (pre-save_version 48).

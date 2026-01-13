@@ -108,7 +108,8 @@ struct VictoryState {
 // A single save-game state.
 struct GameState {
   // v50: nebula storms (temporary system-level environmental hazards).
-  int save_version{50};
+  // v51: faction narrative journal entries.
+  int save_version{51};
   Date date;
 
   // Hour-of-day within the current Date (0..23).
@@ -122,6 +123,9 @@ struct GameState {
   // Monotonic id for SimEvent::seq.
   // Persisted so that clearing/pruning the event log does not reset the sequence.
   std::uint64_t next_event_seq{1};
+
+  // Monotonic id for JournalEntry::seq.
+  std::uint64_t next_journal_seq{1};
 
   std::unordered_map<Id, StarSystem> systems;
   // Procedural galaxy regions/sectors (optional).
