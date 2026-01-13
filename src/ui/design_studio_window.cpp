@@ -292,6 +292,7 @@ struct GroupDraw {
 };
 
 void draw_power_overlay(ImDrawList* dl, const ImVec2& p0, const ImVec2& p1, const ShipDesign& d) {
+  const float w = std::max(1.0f, p1.x - p0.x);
   const float h = std::max(1.0f, p1.y - p0.y);
 
   const double gen = std::max(0.0, d.power_generation);
@@ -349,14 +350,17 @@ void draw_heat_overlay(ImDrawList* dl, const ImVec2& p0, const ImVec2& p1, const
 
   // Estimate heat generation assuming the default power policy (all subsystems enabled, default priorities).
   const ShipPowerPolicy pol{};
-  const double pgen = std::max(0.0, d.power_generation);
+  const double pgen_total = std::max(0.0, d.power_generation);
   const double use_eng = std::max(0.0, d.power_use_engines);
   const double use_sh = std::max(0.0, d.power_use_shields);
   const double use_w = std::max(0.0, d.power_use_weapons);
   const double use_s = std::max(0.0, d.power_use_sensors);
   const double other_use = std::max(0.0, d.power_use_total - use_eng - use_sh - use_w - use_s);
 
-  const PowerAllocation pa = compute_power_allocation(pgen, use_eng, use_sh, use_w, use_s, pol);
+  // "Other" loads are always on, so subtract them before allocating power to subsystems.
+  const double pgen_for_subsystems = std::max(0.0, pgen_total - other_use);
+
+  const PowerAllocation pa = compute_power_allocation(pgen_for_subsystems, use_eng, use_sh, use_w, use_s, pol);
   const double online_use = other_use + (pa.engines_online ? use_eng : 0.0) + (pa.shields_online ? use_sh : 0.0) +
                             (pa.weapons_online ? use_w : 0.0) + (pa.sensors_online ? use_s : 0.0);
 
@@ -977,14 +981,28 @@ void draw_design_studio_window(Simulation& sim, UIState& ui, Id& selected_ship, 
 
           {
             const ShipPowerPolicy pol{};
-            const PowerAllocation pa =
-                compute_power_allocation(std::max(0.0, design->power_generation), std::max(0.0, design->power_use_engines),
-                                         std::max(0.0, design->power_use_shields), std::max(0.0, design->power_use_weapons),
-                                         std::max(0.0, design->power_use_sensors), pol);
-            if (pa.deficit > 1e-6) {
-              ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Power deficit: -%.1f", pa.deficit);
+
+            const double gen_total = std::max(0.0, design->power_generation);
+            const double use_eng = std::max(0.0, design->power_use_engines);
+            const double use_sh = std::max(0.0, design->power_use_shields);
+            const double use_w = std::max(0.0, design->power_use_weapons);
+            const double use_s = std::max(0.0, design->power_use_sensors);
+            const double use_total = std::max(0.0, design->power_use_total);
+            const double other_use = std::max(0.0, use_total - use_eng - use_sh - use_w - use_s);
+
+            // "Other" loads are always on, so we subtract them before allocating
+            // power to policy-managed subsystems.
+            const double gen_for_subsystems = std::max(0.0, gen_total - other_use);
+
+            const PowerAllocation pa = compute_power_allocation(gen_for_subsystems, use_eng, use_sh, use_w, use_s, pol);
+
+            const double deficit = std::max(0.0, use_total - gen_total);
+            const double headroom = std::max(0.0, gen_total - use_total);
+
+            if (deficit > 1e-6) {
+              ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Power deficit: -%.1f", deficit);
             } else {
-              ImGui::TextDisabled("Power headroom: +%.1f", pa.available);
+              ImGui::TextDisabled("Power headroom: +%.1f", headroom);
             }
 
             if (sim.cfg().enable_ship_heat) {
@@ -994,11 +1012,6 @@ void draw_design_studio_window(Simulation& sim, UIState& ui, Id& selected_ship, 
               const double diss = sn(sim.cfg().ship_heat_base_dissipation_per_mass_ton_per_day) * mass +
                                   sn(design->heat_dissipation_bonus_per_day);
 
-              const double use_eng = std::max(0.0, design->power_use_engines);
-              const double use_sh = std::max(0.0, design->power_use_shields);
-              const double use_w = std::max(0.0, design->power_use_weapons);
-              const double use_s = std::max(0.0, design->power_use_sensors);
-              const double other_use = std::max(0.0, design->power_use_total - use_eng - use_sh - use_w - use_s);
               const double online_use =
                   other_use + (pa.engines_online ? use_eng : 0.0) + (pa.shields_online ? use_sh : 0.0) +
                   (pa.weapons_online ? use_w : 0.0) + (pa.sensors_online ? use_s : 0.0);
@@ -1024,9 +1037,17 @@ void draw_design_studio_window(Simulation& sim, UIState& ui, Id& selected_ship, 
 
           ImGui::SeparatorText("Maintenance");
           if (sim.cfg().enable_ship_maintenance) {
-            const double supplies_per_day =
-                std::max(0.0, design->mass_tons) * std::max(0.0, sim.cfg().ship_maintenance_cost_per_mass_ton_per_day);
-            ImGui::Text("Supplies/day: %.2f", supplies_per_day);
+            const double per_ton = std::max(0.0, sim.cfg().ship_maintenance_tons_per_day_per_mass_ton);
+            const double supplies_per_day = std::max(0.0, design->mass_tons) * per_ton;
+
+            std::string res_name = sim.cfg().ship_maintenance_resource_id;
+            auto it_res = sim.content().resources.find(sim.cfg().ship_maintenance_resource_id);
+            if (it_res != sim.content().resources.end() && !it_res->second.name.empty()) {
+              res_name = it_res->second.name;
+            }
+
+            ImGui::Text("Supplies/day: %.3f t (%s)", supplies_per_day, res_name.c_str());
+            ImGui::TextDisabled("Rate: %.6f t per mass ton per day", per_ton);
           } else {
             ImGui::TextDisabled("Ship maintenance: (disabled)");
           }

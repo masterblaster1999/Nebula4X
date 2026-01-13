@@ -216,6 +216,10 @@ struct GraphState {
   std::string new_treaty_error{};
   std::string last_treaty_error;
 
+  // Offer UI state.
+  int new_offer_expires_days{30};
+  std::string offer_error{};
+
   void ensure_defaults(const Simulation& sim) {
     const auto& s = sim.state();
     if (s.factions.empty()) {

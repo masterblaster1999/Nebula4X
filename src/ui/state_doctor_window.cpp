@@ -22,6 +22,16 @@ namespace nebula4x::ui {
 
 namespace {
 
+void safe_copy_cstr(char* dst, std::size_t dst_size, const char* src) {
+  if (!dst || dst_size == 0) return;
+#if defined(_MSC_VER)
+  strncpy_s(dst, dst_size, src, _TRUNCATE);
+#else
+  std::strncpy(dst, src, dst_size - 1);
+  dst[dst_size - 1] = '\0';
+#endif
+}
+
 struct StateDoctorState {
   bool initialized{false};
 
@@ -208,8 +218,8 @@ void apply_fix(nebula4x::Simulation& sim, StateDoctorState& s) {
 void draw_state_doctor_window(Simulation& sim, UIState& ui) {
   auto& s = st();
   if (!s.initialized) {
-    std::strncpy(s.export_fixed_path, "fixed_save.json", sizeof(s.export_fixed_path) - 1);
-    std::strncpy(s.export_patch_path, "fix_merge_patch.json", sizeof(s.export_patch_path) - 1);
+    safe_copy_cstr(s.export_fixed_path, sizeof(s.export_fixed_path), "fixed_save.json");
+    safe_copy_cstr(s.export_patch_path, sizeof(s.export_patch_path), "fix_merge_patch.json");
     s.initialized = true;
   }
 

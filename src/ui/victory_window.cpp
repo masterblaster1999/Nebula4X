@@ -28,7 +28,7 @@ const char* faction_control_label(FactionControl c) {
   switch (c) {
     case FactionControl::Player:
       return "Player";
-    case FactionControl::AI_Empire:
+    case FactionControl::AI_Explorer:
       return "AI";
     case FactionControl::AI_Pirate:
       return "Pirate";
