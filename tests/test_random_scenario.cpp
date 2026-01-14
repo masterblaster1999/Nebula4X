@@ -139,6 +139,38 @@ int test_random_scenario() {
   N4X_ASSERT(!s1.ships.empty());
   N4X_ASSERT(!s1.jump_points.empty());
 
+  // Independent outposts are enabled by default and should create at least one
+  // AI_Passive minor faction with seeded colonies.
+  nebula4x::Id indep_id = nebula4x::kInvalidId;
+  for (const auto& [fid, f] : s1.factions) {
+    (void)fid;
+    if (f.control == nebula4x::FactionControl::AI_Passive && f.name == "Independent Worlds") {
+      indep_id = fid;
+      break;
+    }
+  }
+  N4X_ASSERT(indep_id != nebula4x::kInvalidId);
+  bool has_indep_colony = false;
+  for (const auto& [cid, c] : s1.colonies) {
+    (void)cid;
+    if (c.faction_id == indep_id) {
+      has_indep_colony = true;
+      break;
+    }
+  }
+  N4X_ASSERT(has_indep_colony);
+
+  // Config toggle: disable independents.
+  nebula4x::RandomScenarioConfig noind;
+  noind.seed = seed;
+  noind.num_systems = n;
+  noind.enable_independents = false;
+  const auto s_noind = nebula4x::make_random_scenario(noind);
+  for (const auto& [fid, f] : s_noind.factions) {
+    (void)fid;
+    N4X_ASSERT(!(f.control == nebula4x::FactionControl::AI_Passive && f.name == "Independent Worlds"));
+  }
+
   // Regions invariants (enabled by default in RandomScenarioConfig).
   N4X_ASSERT(!s1.regions.empty());
   {

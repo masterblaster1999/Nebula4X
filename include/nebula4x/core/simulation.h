@@ -438,6 +438,36 @@ double ship_maintenance_breakdown_subsystem_damage_max{0.20};
   // >1.0 => anomalies are easier to discover (recommended for early-game).
   double anomaly_detection_range_multiplier{3.0};
 
+  // --- Procedural exploration leads (anomaly chains) ---
+  //
+  // When enabled, resolving an anomaly can reveal a follow-up lead:
+  //  - a star chart that reveals nearby systems/jump routes,
+  //  - a new anomaly site spawned elsewhere, or
+  //  - a hidden salvage cache.
+  //
+  // These leads are designed to create emergent exploration arcs without a
+  // full quest/contract UI layer.
+  bool enable_anomaly_leads{true};
+
+  // Base probability in [0,1] that a resolved anomaly generates a lead.
+  double anomaly_lead_base_chance{0.22};
+
+  // Maximum depth of generated lead chains. Scenario/static anomalies start at 0.
+  int anomaly_lead_max_depth{2};
+
+  // Cap the total number of generated anomalies (lead_depth > 0) across the save.
+  int anomaly_lead_max_total_generated{48};
+
+  // When a lead points to another system, prefer targets within this hop window
+  // (computed over the jump network). 0 disables hop filtering.
+  int anomaly_lead_min_hops{1};
+  int anomaly_lead_max_hops{4};
+
+  // Lead type mix (when a lead triggers).
+  // Remaining probability goes to a follow-up anomaly site.
+  double anomaly_lead_star_chart_chance{0.30};
+  double anomaly_lead_hidden_cache_chance{0.18};
+
   // --- Intel / contact prediction ---
   //
   // When a contact is lost (fog-of-war), the simulation may extrapolate
@@ -715,6 +745,37 @@ double ship_maintenance_breakdown_subsystem_damage_max{0.20};
   // Atmosphere change (atm) per terraforming point per day.
   double terraforming_atm_per_point_day{0.001};
 
+  // Optional operational mineral costs per terraforming point.
+  //
+  // When enabled (>0), terraforming is scaled down to the maximum affordable
+  // amount for the day, and the corresponding minerals are consumed from the
+  // colony stockpile.
+  //
+  // This mirrors troop training costs and makes long-term terraforming projects
+  // naturally interact with logistics/industry without hard-coding special-case
+  // installations.
+  double terraforming_duranium_per_point{0.0};
+  double terraforming_neutronium_per_point{0.0};
+
+  // Optional: scale terraforming effectiveness based on body mass.
+  //
+  // Small bodies are generally easier to terraform than large ones. When
+  // enabled, the temperature/atmosphere deltas per point are multiplied by:
+  //   scale = 1 / max(terraforming_min_mass_earths, mass_earths)^exponent
+  //
+  // Bodies without mass metadata (mass_earths <= 0) are treated as mass=1.
+  bool terraforming_scale_with_body_mass{true};
+  double terraforming_min_mass_earths{0.10};
+  double terraforming_mass_scaling_exponent{1.0};
+
+  // When true and both temperature+atmosphere targets are set, terraforming
+  // points are treated as a shared budget that must be split between the two
+  // axes.
+  //
+  // This avoids an implicit "double benefit" where a single point would
+  // simultaneously advance both temperature and atmospheric pressure.
+  bool terraforming_split_points_between_axes{true};
+
   // When within these tolerances of the target, terraforming is considered complete.
   double terraforming_temp_tolerance_k{0.5};
   double terraforming_atm_tolerance{0.01};
@@ -866,6 +927,42 @@ double ship_maintenance_breakdown_subsystem_damage_max{0.20};
   // by a player faction. (Contacts are still revealed via the existing
   // detection/intel event system.)
   bool pirate_raid_log_event{false};
+
+
+  // --- Civilian trade convoys (procedural shipping traffic) ---
+  //
+  // This is an ambient simulation layer that makes the sector feel "alive":
+  // neutral civilian freighters will travel along the busiest interstellar
+  // trade lanes, creating organic piracy targets and visible traffic.
+  //
+  // Civilian convoys are owned by a dedicated AI_Passive faction, have their
+  // movement/fuel abstracted (no fuel burn), and are excluded from victory.
+  bool enable_civilian_trade_convoys{true};
+
+  // Hard cap on the number of active civilian convoy ships.
+  int civilian_trade_convoy_max_ships{18};
+
+  // Minimum number of convoys to maintain once at least one trade lane exists.
+  int civilian_trade_convoy_min_ships{2};
+
+  // Target convoy count scales with sqrt(total trade volume):
+  //   target = round(sqrt(total_volume) * civilian_trade_convoy_target_sqrt_mult)
+  double civilian_trade_convoy_target_sqrt_mult{0.30};
+
+  // Max number of new convoys spawned per day while approaching the target.
+  int civilian_trade_convoy_max_spawn_per_day{2};
+
+  // Consider only the top N trade lanes (by volume) when spawning convoys.
+  int civilian_trade_convoy_consider_top_lanes{16};
+
+  // Wait time at each endpoint before heading back (adds variation and reduces
+  // "clumping" at jump points). Actual wait = base + [0, jitter].
+  int civilian_trade_convoy_endpoint_wait_days_base{1};
+  int civilian_trade_convoy_endpoint_wait_days_jitter{3};
+
+  // How full civilian convoy cargo holds should be (0..1). Cargo is purely
+  // cosmetic / salvageable and does not directly transfer colony minerals.
+  double civilian_trade_convoy_cargo_fill_fraction{0.80};
 
 
   // --- Pirate hideouts (persistent pirate bases) ---
@@ -1748,6 +1845,20 @@ bool move_construction_order(Id colony_id, int from_index, int to_index);
 
 
 
+
+  // --- Intel route reveal (state mutation) ---
+  //
+  // Adds the given systems/jump-points to a faction's discovered/surveyed lists
+  // without emitting per-item events/journal entries.
+  //
+  // Intended for "intel" rewards (e.g. recovered star charts / anomaly clue chains)
+  // where spamming a large number of discovery events would be noisy.
+  //
+  // NOTE: This invalidates the jump-route cache.
+  void reveal_route_intel_for_faction(Id faction_id,
+                                     const std::vector<Id>& systems,
+                                     const std::vector<Id>& jump_points);
+
   // Player design creation. Designs are stored in GameState::custom_designs and are saved.
   bool upsert_custom_design(ShipDesign design, std::string* error = nullptr);
 
@@ -1763,6 +1874,7 @@ bool move_construction_order(Id colony_id, int from_index, int to_index);
   void tick_shipyards(double dt_days);
   void tick_construction(double dt_days);
   void tick_ai();
+  void tick_civilian_trade_convoys();
   void tick_piracy_suppression();
   void tick_pirate_raids();
   void tick_nebula_storms();
@@ -1784,6 +1896,7 @@ bool move_construction_order(Id colony_id, int from_index, int to_index);
   void tick_repairs(double dt_days);
 
   void discover_system_for_faction(Id faction_id, Id system_id);
+
   void discover_anomaly_for_faction(Id faction_id, Id anomaly_id, Id discovered_by_ship_id = kInvalidId);
   void survey_jump_point_for_faction(Id faction_id, Id jump_point_id);
 

@@ -56,6 +56,7 @@ GameState make_sol_scenario() {
     s.factions[pirates] = f;
   }
 
+
   // --- Systems ---
   const Id sol = allocate_id(s);
   {
@@ -821,6 +822,9 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
   const bool pirates_enabled = cfg.enable_pirates;
   const double pirate_strength = std::max(0.0, cfg.pirate_strength);
 
+  const bool independents_enabled = cfg.enable_independents;
+  const int independent_outposts_cfg = cfg.num_independent_outposts;
+
   if (num_systems < 1) num_systems = 1;
   // Keep things reasonably small so the prototype UI stays responsive.
   if (num_systems > 64) num_systems = 64;
@@ -848,6 +852,17 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
     f.control = FactionControl::AI_Pirate;
     f.research_points = 0.0;
     s.factions[pirates] = f;
+  }
+
+  Id independents = kInvalidId;
+  if (independents_enabled && independent_outposts_cfg != 0) {
+    independents = allocate_id(s);
+    Faction f;
+    f.id = independents;
+    f.name = "Independent Worlds";
+    f.control = FactionControl::AI_Passive;
+    f.research_points = 0.0;
+    s.factions[independents] = f;
   }
 
   // --- Helpers ---
@@ -1903,6 +1918,7 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
   used_faction_names.reserve(8 + empire_idxs.size());
   used_faction_names.insert(s.factions.at(terrans).name);
   if (pirates != kInvalidId) used_faction_names.insert(s.factions.at(pirates).name);
+  if (independents != kInvalidId) used_faction_names.insert(s.factions.at(independents).name);
 
   static const std::array<const char*, 10> kGovTypes = {
       "Republic", "Union", "Directorate", "League", "Collective",
@@ -2057,10 +2073,20 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
     }
   }
 
+  // Independents are neutral by default.
+  if (independents != kInvalidId) {
+    for (Id fid : civilized) {
+      set_mutual_relation(independents, fid, DiplomacyStatus::Neutral);
+    }
+  }
+
   // Pirates are hostile to everyone (and vice versa).
   if (pirates != kInvalidId) {
     for (Id fid : civilized) {
       set_mutual_relation(pirates, fid, DiplomacyStatus::Hostile);
+    }
+    if (independents != kInvalidId) {
+      set_mutual_relation(pirates, independents, DiplomacyStatus::Hostile);
     }
   }
 
@@ -3478,6 +3504,355 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
     };
     s.colonies[c.id] = c;
   }
+
+  // --- Independent outposts ---
+  //
+  // Procedurally place a handful of neutral independent colonies across the map.
+  // These act as additional markets and industrial specializations for the trade
+  // network (smelters, refineries, processing plants, freeports), making the
+  // galaxy feel less empty without requiring bespoke quest content.
+  if (independents != kInvalidId) {
+    // Helper: unique colony naming (deterministic).
+    auto colony_name_exists = [&](const std::string& n) {
+      for (const auto& [_, c] : s.colonies) {
+        if (c.name == n) return true;
+      }
+      return false;
+    };
+
+    auto make_unique_colony_name = [&](const std::string& base) {
+      if (!colony_name_exists(base)) return base;
+      for (int i = 2; i < 2000; ++i) {
+        std::string n = base + " (" + std::to_string(i) + ")";
+        if (!colony_name_exists(n)) return n;
+      }
+      return base;
+    };
+
+    // Reserve start systems (player, pirates, major empires) so independents feel
+    // like "third-party" actors rather than clutter inside capitals.
+    std::unordered_set<Id> reserved_systems;
+    reserved_systems.reserve(4 + empires.size());
+    reserved_systems.insert(home_system);
+    if (pirate_system != kInvalidId) reserved_systems.insert(pirate_system);
+    for (const auto& es : empires) reserved_systems.insert(es.system_id);
+
+    // Track already-colonized bodies so we don't double-place colonies.
+    std::unordered_set<Id> taken_bodies;
+    taken_bodies.reserve(s.colonies.size() + 16);
+    for (const auto& [_, c] : s.colonies) taken_bodies.insert(c.body_id);
+
+    // Galaxy center + max radius for a mild "centrality" heuristic.
+    Vec2 center{0.0, 0.0};
+    for (const auto& si : systems) center += si.galaxy_pos;
+    if (!systems.empty()) center = center * (1.0 / static_cast<double>(systems.size()));
+    double max_r = 1.0;
+    for (const auto& si : systems) max_r = std::max(max_r, (si.galaxy_pos - center).length());
+
+    int max_degree = 1;
+    for (const auto& si : systems) {
+      auto it = s.systems.find(si.id);
+      if (it == s.systems.end()) continue;
+      max_degree = std::max(max_degree, static_cast<int>(it->second.jump_points.size()));
+    }
+
+    struct Cand {
+      int idx{0};
+      double w{1.0};
+    };
+
+    std::vector<Cand> cands;
+    cands.reserve(systems.size());
+    for (int i = 0; i < static_cast<int>(systems.size()); ++i) {
+      const SysInfo& si = systems[static_cast<std::size_t>(i)];
+      if (reserved_systems.count(si.id)) continue;
+
+      const int deg = static_cast<int>(s.systems[si.id].jump_points.size());
+      const double deg01 = std::clamp(static_cast<double>(deg) / static_cast<double>(max_degree), 0.0, 1.0);
+      const double dist = (si.galaxy_pos - center).length();
+      const double central01 = 1.0 - std::clamp(dist / max_r, 0.0, 1.0);
+
+      // Prefer hubs / more connected systems, with a small centrality bonus.
+      double w = 0.25 + 0.75 * std::clamp(0.6 * deg01 + 0.4 * central01, 0.0, 1.0);
+
+      // Region bias: richer + less pirate-ridden space attracts more independent settlers.
+      if (si.region_id != kInvalidId) {
+        auto it = s.regions.find(si.region_id);
+        if (it != s.regions.end()) {
+          const Region& r = it->second;
+          w *= std::clamp(0.95 + 0.12 * (r.mineral_richness_mult - 1.0) + 0.08 * (r.volatile_richness_mult - 1.0) -
+                              0.25 * r.pirate_risk,
+                          0.50, 1.50);
+        }
+      }
+
+      // Small jitter so equally-weighted systems don't always win.
+      w *= 0.85 + 0.30 * rand_unit(rng);
+      cands.push_back({i, std::max(0.01, w)});
+    }
+
+    int want = independent_outposts_cfg;
+    if (want < 0) {
+      // Auto scale: small maps get 0..1, larger maps get more.
+      if (num_systems <= 3) want = 0;
+      else want = std::clamp(num_systems / 4, 1, 12);
+    }
+
+    want = std::clamp(want, 0, static_cast<int>(cands.size()));
+
+    std::vector<Id> outpost_systems;
+    outpost_systems.reserve(static_cast<std::size_t>(want));
+
+    auto take_weighted = [&](std::vector<Cand>& v) -> int {
+      double total = 0.0;
+      for (const auto& c : v) total += std::max(0.0, c.w);
+      if (total <= 1e-12) return 0;
+
+      double x = rand_real(rng, 0.0, total);
+      for (int i = 0; i < static_cast<int>(v.size()); ++i) {
+        x -= std::max(0.0, v[static_cast<std::size_t>(i)].w);
+        if (x <= 0.0) return i;
+      }
+      return static_cast<int>(v.size()) - 1;
+    };
+
+    auto is_colonizable_body = [&](Id bid) {
+      const auto* b = find_ptr(s.bodies, bid);
+      if (!b) return false;
+      return (b->type == BodyType::Planet || b->type == BodyType::Moon || b->type == BodyType::Asteroid);
+    };
+
+    auto habitability_est = [&](const Body& b) {
+      if (b.terraforming_complete) return 1.0;
+      const double ideal_t = (b.terraforming_target_temp_k > 0.0) ? b.terraforming_target_temp_k : 288.0;
+      const double ideal_a = (b.terraforming_target_atm > 0.0) ? b.terraforming_target_atm : 1.0;
+
+      const double dt = std::fabs(b.surface_temp_k - ideal_t);
+      const double da = std::fabs(b.atmosphere_atm - ideal_a);
+
+      auto band = [&](double d, double tol) {
+        if (!(tol > 1e-9)) return (d <= 1e-9) ? 1.0 : 0.0;
+        return std::clamp(1.0 - (d / tol), 0.0, 1.0);
+      };
+
+      const double tf = band(dt, 50.0);
+      const double af = band(da, 0.5);
+      return std::clamp(tf * af, 0.0, 1.0);
+    };
+
+    for (int k = 0; k < want; ++k) {
+      if (cands.empty()) break;
+      const int sel = take_weighted(cands);
+      const SysInfo si = systems[static_cast<std::size_t>(cands[static_cast<std::size_t>(sel)].idx)];
+      cands.erase(cands.begin() + sel);
+
+      // Choose a colonizable body in the system.
+      Id body_id = kInvalidId;
+      if (si.preferred_colony_body != kInvalidId && is_colonizable_body(si.preferred_colony_body) &&
+          !taken_bodies.count(si.preferred_colony_body)) {
+        body_id = si.preferred_colony_body;
+      } else {
+        std::vector<Id> candidates;
+        candidates.reserve(s.systems[si.id].bodies.size());
+        for (Id bid : s.systems[si.id].bodies) {
+          if (!is_colonizable_body(bid)) continue;
+          if (taken_bodies.count(bid)) continue;
+          candidates.push_back(bid);
+        }
+        if (!candidates.empty()) {
+          const int pick = rand_int(rng, 0, static_cast<int>(candidates.size()) - 1);
+          body_id = candidates[static_cast<std::size_t>(pick)];
+        }
+      }
+      if (body_id == kInvalidId) continue;
+      taken_bodies.insert(body_id);
+
+      // Region traits (if enabled) influence what type of outpost spawns.
+      double mineral_mult = 1.0;
+      double volatile_mult = 1.0;
+      double ruins = 0.0;
+      double pirate_risk = 0.0;
+      if (si.region_id != kInvalidId) {
+        if (auto it = s.regions.find(si.region_id); it != s.regions.end()) {
+          mineral_mult = it->second.mineral_richness_mult;
+          volatile_mult = it->second.volatile_richness_mult;
+          ruins = it->second.ruins_density;
+          pirate_risk = it->second.pirate_risk;
+        }
+      }
+
+      const int deg = static_cast<int>(s.systems[si.id].jump_points.size());
+      const double hub01 = std::clamp(static_cast<double>(deg) / static_cast<double>(max_degree), 0.0, 1.0);
+
+      // Outpost profile: 0=Mining, 1=Refinery, 2=Smelter, 3=Processor, 4=Arsenal, 5=Freeport, 6=Enclave
+      const auto pick_profile = [&]() {
+        const double w_mine = std::max(0.05, 0.60 * mineral_mult);
+        const double w_ref = std::max(0.05, 0.50 * volatile_mult);
+        const double w_smelter = std::max(0.05, 0.40 * mineral_mult);
+        const double w_proc = std::max(0.05, 0.40 * mineral_mult);
+        const double w_ars = std::max(0.05, 0.25 + 0.95 * pirate_risk);
+        const double w_free = std::max(0.05, 0.35 + 0.80 * hub01);
+        const double w_enclave = std::max(0.05, 0.20 + 0.85 * ruins);
+
+        const double total = w_mine + w_ref + w_smelter + w_proc + w_ars + w_free + w_enclave;
+        double x = rand_real(rng, 0.0, total);
+        if ((x -= w_mine) <= 0.0) return 0;
+        if ((x -= w_ref) <= 0.0) return 1;
+        if ((x -= w_smelter) <= 0.0) return 2;
+        if ((x -= w_proc) <= 0.0) return 3;
+        if ((x -= w_ars) <= 0.0) return 4;
+        if ((x -= w_free) <= 0.0) return 5;
+        return 6;
+      };
+
+      const int profile = pick_profile();
+
+      std::string suffix;
+      double pop = 100.0;
+      int mines = 0;
+      int refineries = 0;
+      int smelters = 0;
+      int processors = 0;
+      int munitions = 0;
+      int labs = 0;
+      int factories = 0;
+      int forts = 0;
+
+      switch (profile) {
+        case 0: // Mining camp
+          suffix = "Mining Camp";
+          pop = rand_real(rng, 40.0, 220.0);
+          mines = rand_int(rng, 18, 42);
+          factories = rand_int(rng, 0, 2);
+          forts = (pirate_risk > 0.55) ? rand_int(rng, 1, 2) : 0;
+          break;
+        case 1: // Refinery
+          suffix = "Refinery";
+          pop = rand_real(rng, 80.0, 320.0);
+          mines = rand_int(rng, 12, 28);
+          refineries = rand_int(rng, 4, 10);
+          factories = rand_int(rng, 1, 3);
+          forts = (pirate_risk > 0.45) ? rand_int(rng, 1, 3) : 0;
+          break;
+        case 2: // Smelter
+          suffix = "Smelter Works";
+          pop = rand_real(rng, 70.0, 260.0);
+          mines = rand_int(rng, 12, 26);
+          smelters = rand_int(rng, 3, 8);
+          factories = rand_int(rng, 1, 3);
+          forts = (pirate_risk > 0.45) ? rand_int(rng, 1, 3) : 0;
+          break;
+        case 3: // Processor
+          suffix = "Processing Plant";
+          pop = rand_real(rng, 70.0, 260.0);
+          mines = rand_int(rng, 12, 26);
+          processors = rand_int(rng, 3, 8);
+          factories = rand_int(rng, 1, 3);
+          forts = (pirate_risk > 0.45) ? rand_int(rng, 1, 3) : 0;
+          break;
+        case 4: // Arsenal
+          suffix = "Arsenal";
+          pop = rand_real(rng, 120.0, 450.0);
+          mines = rand_int(rng, 14, 30);
+          refineries = rand_int(rng, 2, 6);
+          smelters = rand_int(rng, 1, 3);
+          processors = rand_int(rng, 1, 3);
+          munitions = rand_int(rng, 2, 5);
+          factories = rand_int(rng, 2, 4);
+          forts = rand_int(rng, 2, 5);
+          break;
+        case 5: // Freeport / trade hub
+          suffix = "Freeport";
+          pop = rand_real(rng, 250.0, 850.0);
+          mines = rand_int(rng, 10, 24);
+          refineries = rand_int(rng, 2, 6);
+          smelters = rand_int(rng, 2, 6);
+          processors = rand_int(rng, 2, 6);
+          munitions = rand_int(rng, 1, 3);
+          labs = rand_int(rng, 1, 4);
+          factories = rand_int(rng, 2, 6);
+          forts = (pirate_risk > 0.35) ? rand_int(rng, 1, 4) : rand_int(rng, 0, 2);
+          break;
+        default: // Research enclave
+          suffix = "Enclave";
+          pop = rand_real(rng, 60.0, 260.0);
+          mines = rand_int(rng, 8, 18);
+          labs = rand_int(rng, 6, 16);
+          processors = rand_int(rng, 1, 3);
+          factories = rand_int(rng, 0, 2);
+          forts = (pirate_risk > 0.55) ? rand_int(rng, 1, 3) : rand_int(rng, 0, 2);
+          break;
+      }
+
+      mines = std::max(0, mines);
+      refineries = std::max(0, refineries);
+      smelters = std::max(0, smelters);
+      processors = std::max(0, processors);
+      munitions = std::max(0, munitions);
+      labs = std::max(0, labs);
+      factories = std::max(0, factories);
+      forts = std::clamp(std::max(0, forts), 0, 8);
+
+      Colony c;
+      c.id = allocate_id(s);
+      c.faction_id = independents;
+      c.body_id = body_id;
+      c.population_millions = pop;
+
+      c.name = make_unique_colony_name(si.name + " " + suffix);
+
+      // Starting stockpiles to avoid immediate industry stalls.
+      c.minerals = {
+          {"Duranium", rand_real(rng, 800.0, 3500.0) + pop * 2.0},
+          {"Neutronium", rand_real(rng, 80.0, 500.0) + pop * 0.15},
+          {"Fuel", rand_real(rng, 1500.0, 7000.0) + pop * 4.0},
+          {"Munitions", rand_real(rng, 80.0, 350.0) + pop * 0.20},
+      };
+
+      // Core industrial specialization. (Only add ids that exist in the default blueprint pack.)
+      if (mines > 0) c.installations["automated_mine"] = mines;
+      if (factories > 0) c.installations["construction_factory"] = factories;
+      if (refineries > 0) c.installations["fuel_refinery"] = refineries;
+      if (smelters > 0) c.installations["metal_smelter"] = smelters;
+      if (processors > 0) c.installations["mineral_processor"] = processors;
+      if (munitions > 0) c.installations["munitions_factory"] = munitions;
+      if (labs > 0) c.installations["research_lab"] = labs;
+
+      // A little sensor coverage so these don't feel like invisible "numbers".
+      c.installations["sensor_station"] = 1;
+
+      // Defensive flavor in riskier space.
+      if (forts > 0) c.installations["planetary_fortress"] = forts;
+
+      // Habitability support: if the world is hostile, seed enough Infrastructure to prevent
+      // immediate population collapse under the colony habitability rules.
+      if (auto* b = find_ptr(s.bodies, body_id)) {
+        // Fill missing environment values defensively.
+        if ((b->type == BodyType::Planet || b->type == BodyType::Moon) && b->surface_temp_k <= 0.0) b->surface_temp_k = 288.0;
+        if ((b->type == BodyType::Planet || b->type == BodyType::Moon) && b->atmosphere_atm <= 0.0) b->atmosphere_atm = 1.0;
+
+        const double hab = habitability_est(*b);
+        const double req = pop * std::clamp(1.0 - hab, 0.0, 1.0);
+        if (req > 1e-6) {
+          // The default content pack's Infrastructure provides 100M habitation capacity.
+          // Add a small safety margin (+1) to avoid edge-case rounding issues.
+          const int infra = std::max(1, static_cast<int>(std::ceil(req / 100.0)) + 1);
+          c.installations["infrastructure"] += infra;
+        }
+      }
+
+      s.colonies[c.id] = c;
+      outpost_systems.push_back(si.id);
+    }
+
+    // Independents know their own outpost systems (mostly for UI scoreboards / fog-of-war consistency).
+    if (!outpost_systems.empty()) {
+      std::sort(outpost_systems.begin(), outpost_systems.end());
+      outpost_systems.erase(std::unique(outpost_systems.begin(), outpost_systems.end()), outpost_systems.end());
+      s.factions[independents].discovered_systems = outpost_systems;
+    }
+  }
+
 
   auto add_ship = [&](Id faction_id, Id system_id, const Vec2& pos, const std::string& name,
                       const std::string& design_id) {

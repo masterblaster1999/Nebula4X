@@ -121,5 +121,84 @@ int test_ground_ops() {
     N4X_ASSERT(after.atmosphere_atm <= 0.52 + 1e-6);
   }
 
+  // --- Simulation: terraforming operational mineral costs should throttle output ---
+  {
+    nebula4x::ContentDB content = nebula4x::load_content_db_from_file(
+        "data/blueprints/starting_blueprints.json");
+
+    nebula4x::SimConfig cfg;
+    cfg.terraforming_duranium_per_point = 1.0;
+    cfg.terraforming_neutronium_per_point = 0.0;
+    cfg.terraforming_split_points_between_axes = true;
+
+    nebula4x::Simulation sim(std::move(content), cfg);
+
+    const auto earth_id = find_colony_id(sim.state(), "Earth");
+    N4X_ASSERT(earth_id != nebula4x::kInvalidId);
+
+    nebula4x::Colony& earth = sim.state().colonies[earth_id];
+    earth.installations["terraforming_plant"] += 1;
+
+    const nebula4x::Id body_id = earth.body_id;
+    nebula4x::Body& body = sim.state().bodies[body_id];
+
+    body.surface_temp_k = 250.0;
+    body.atmosphere_atm = 0.5;
+
+    // Only adjust temperature in this test so point-splitting can't affect the expected delta.
+    N4X_ASSERT(sim.set_terraforming_target(body_id, 252.0, 0.0));
+
+    // Not enough Duranium for a full day of terraforming.
+    // 1 plant => 8 pts/day; with 1 Duranium per point, we'd need 8 Duranium/day.
+    earth.minerals["Duranium"] = 4.0;
+
+    const double t0 = body.surface_temp_k;
+
+    sim.advance_days(1);
+
+    const nebula4x::Body& after = sim.state().bodies[body_id];
+    const nebula4x::Colony& after_col = sim.state().colonies[earth_id];
+
+    // Affordable points = 4 => deltaT = 4 * 0.1 = 0.4K.
+    N4X_ASSERT(std::abs(after.surface_temp_k - (t0 + 0.4)) <= 1e-6);
+    N4X_ASSERT(after_col.minerals.at("Duranium") <= 1e-6);
+  }
+
+  // --- Simulation: terraforming mass scaling should make small bodies easier ---
+  {
+    nebula4x::ContentDB content = nebula4x::load_content_db_from_file(
+        "data/blueprints/starting_blueprints.json");
+
+    nebula4x::SimConfig cfg;
+    cfg.terraforming_scale_with_body_mass = true;
+    cfg.terraforming_min_mass_earths = 0.10;
+    cfg.terraforming_mass_scaling_exponent = 1.0;
+    cfg.terraforming_split_points_between_axes = true;
+
+    nebula4x::Simulation sim(std::move(content), cfg);
+
+    const auto earth_id = find_colony_id(sim.state(), "Earth");
+    N4X_ASSERT(earth_id != nebula4x::kInvalidId);
+
+    nebula4x::Colony& earth = sim.state().colonies[earth_id];
+    earth.installations["terraforming_plant"] += 1;
+
+    const nebula4x::Id body_id = earth.body_id;
+    nebula4x::Body& body = sim.state().bodies[body_id];
+
+    // Fake a small body.
+    body.mass_earths = 0.10;
+    body.surface_temp_k = 250.0;
+    body.atmosphere_atm = 0.5;
+
+    N4X_ASSERT(sim.set_terraforming_target(body_id, 255.0, 0.0));
+
+    // With mass scaling: scale = 1 / 0.1 = 10; dT_per_point = 1.0 K.
+    // 1 plant => 8 pts/day => max delta = 8K/day, so we should hit the 5K target in a single day.
+    sim.advance_days(1);
+    const nebula4x::Body& after = sim.state().bodies[body_id];
+    N4X_ASSERT(std::abs(after.surface_temp_k - 255.0) <= 1e-6);
+  }
+
   return 0;
 }

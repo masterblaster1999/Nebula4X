@@ -483,7 +483,41 @@ void Simulation::discover_system_for_faction(Id faction_id, Id system_id) {
       push_journal_entry(other_id, std::move(je));
     }
   }
+
 }
+
+void Simulation::reveal_route_intel_for_faction(Id faction_id,
+                                               const std::vector<Id>& systems,
+                                               const std::vector<Id>& jump_points) {
+  auto* fac = find_ptr(state_.factions, faction_id);
+  if (!fac) return;
+
+  bool changed = false;
+
+  for (Id sid : systems) {
+    if (sid == kInvalidId) continue;
+    if (!find_ptr(state_.systems, sid)) continue;
+    if (std::find(fac->discovered_systems.begin(), fac->discovered_systems.end(), sid) != fac->discovered_systems.end())
+      continue;
+    fac->discovered_systems.push_back(sid);
+    changed = true;
+  }
+
+  for (Id jid : jump_points) {
+    if (jid == kInvalidId) continue;
+    if (!find_ptr(state_.jump_points, jid)) continue;
+    if (std::find(fac->surveyed_jump_points.begin(), fac->surveyed_jump_points.end(), jid) !=
+        fac->surveyed_jump_points.end())
+      continue;
+    fac->surveyed_jump_points.push_back(jid);
+    // If we were mid-survey, the intel overrides it.
+    fac->jump_survey_progress.erase(jid);
+    changed = true;
+  }
+
+  if (changed) invalidate_jump_route_cache();
+}
+
 
 
 void Simulation::discover_anomaly_for_faction(Id faction_id, Id anomaly_id, Id discovered_by_ship_id) {

@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "nebula4x/core/research_planner.h"
+#include "nebula4x/core/trade_network.h"
 #include "nebula4x/util/sorted_keys.h"
 #include "nebula4x/util/strings.h"
 
@@ -1646,6 +1647,143 @@ void draw_economy_window(Simulation& sim, UIState& ui, Id& selected_colony, Id& 
         ImGui::EndChild();
         ImGui::EndTabItem();
       }
+    }
+
+    // --- Trade ---
+    if (ImGui::BeginTabItem("Trade")) {
+      ImGui::SeparatorText("Procedural trade network");
+      ImGui::TextDisabled(
+          "This is an informational overlay that estimates a civilian interstellar economy\n"
+          "from system resources, region themes, and colony industry. It will later feed\n"
+          "piracy/blockade and trade-agreement mechanics.");
+
+      static int max_lanes = 220;
+      static float dist_exp = 1.35f;
+      static bool include_uncolonized = true;
+      static bool include_colony = true;
+
+      ImGui::SliderInt("Max lanes", &max_lanes, 20, 600);
+      ImGui::SliderFloat("Distance exponent", &dist_exp, 0.6f, 2.4f, "%.2f");
+      ImGui::Checkbox("Include uncolonized markets", &include_uncolonized);
+      ImGui::SameLine();
+      ImGui::Checkbox("Include colony industry", &include_colony);
+
+      TradeNetworkOptions opt;
+      opt.max_lanes = max_lanes;
+      opt.distance_exponent = dist_exp;
+      opt.include_uncolonized_markets = include_uncolonized;
+      opt.include_colony_contributions = include_colony;
+
+      const TradeNetwork net = compute_trade_network(sim, opt);
+
+      // --- Markets table ---
+      {
+        ImGui::SeparatorText("Markets");
+        struct Row {
+          Id sid{kInvalidId};
+          double market{0.0};
+          double hub{0.0};
+          TradeGoodKind exp{TradeGoodKind::RawMetals};
+          TradeGoodKind imp{TradeGoodKind::RawMetals};
+        };
+
+        std::vector<Row> rows;
+        rows.reserve(net.nodes.size());
+        for (const auto& n : net.nodes) {
+          rows.push_back(Row{n.system_id, n.market_size, n.hub_score, n.primary_export, n.primary_import});
+        }
+
+        std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) {
+          if (a.market > b.market + 1e-12) return true;
+          if (b.market > a.market + 1e-12) return false;
+          if (a.hub > b.hub + 1e-12) return true;
+          if (b.hub > a.hub + 1e-12) return false;
+          return a.sid < b.sid;
+        });
+
+        if (ImGui::BeginTable("##trade_markets", 5,
+                              ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY,
+                              ImVec2(0, ImGui::GetTextLineHeightWithSpacing() * 14))) {
+          ImGui::TableSetupColumn("System", ImGuiTableColumnFlags_WidthStretch);
+          ImGui::TableSetupColumn("Market", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+          ImGui::TableSetupColumn("Hub", ImGuiTableColumnFlags_WidthFixed, 60.0f);
+          ImGui::TableSetupColumn("Primary export", ImGuiTableColumnFlags_WidthStretch);
+          ImGui::TableSetupColumn("Primary import", ImGuiTableColumnFlags_WidthStretch);
+          ImGui::TableHeadersRow();
+
+          for (const auto& r : rows) {
+            const auto* sys = find_ptr(s.systems, r.sid);
+            if (!sys) continue;
+
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            if (ImGui::SmallButton((std::string("Select##trade_sys_") + std::to_string((unsigned long long)r.sid)).c_str())) {
+              s.selected_system = r.sid;
+              ui.request_map_tab = MapTab::Galaxy;
+            }
+            ImGui::SameLine();
+            ImGui::TextUnformatted(sys->name.c_str());
+
+            ImGui::TableSetColumnIndex(1);
+            ImGui::Text("%.2f", r.market);
+
+            ImGui::TableSetColumnIndex(2);
+            ImGui::Text("%.2f", r.hub);
+
+            ImGui::TableSetColumnIndex(3);
+            ImGui::TextUnformatted(trade_good_kind_label(r.exp));
+
+            ImGui::TableSetColumnIndex(4);
+            ImGui::TextUnformatted(trade_good_kind_label(r.imp));
+          }
+
+          ImGui::EndTable();
+        }
+      }
+
+      // --- Lanes table ---
+      {
+        ImGui::SeparatorText("Top trade lanes");
+        if (ImGui::BeginTable("##trade_lanes", 5,
+                              ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY,
+                              ImVec2(0, ImGui::GetTextLineHeightWithSpacing() * 12))) {
+          ImGui::TableSetupColumn("From", ImGuiTableColumnFlags_WidthStretch);
+          ImGui::TableSetupColumn("To", ImGuiTableColumnFlags_WidthStretch);
+          ImGui::TableSetupColumn("Volume", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+          ImGui::TableSetupColumn("Dominant good", ImGuiTableColumnFlags_WidthStretch);
+          ImGui::TableSetupColumn("Also", ImGuiTableColumnFlags_WidthStretch);
+          ImGui::TableHeadersRow();
+
+          for (const auto& lane : net.lanes) {
+            const auto* a = find_ptr(s.systems, lane.from_system_id);
+            const auto* b = find_ptr(s.systems, lane.to_system_id);
+            if (!a || !b) continue;
+
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::TextUnformatted(a->name.c_str());
+            ImGui::TableSetColumnIndex(1);
+            ImGui::TextUnformatted(b->name.c_str());
+            ImGui::TableSetColumnIndex(2);
+            ImGui::Text("%.2f", lane.total_volume);
+            ImGui::TableSetColumnIndex(3);
+            const TradeGoodKind dom = lane.top_flows.empty() ? TradeGoodKind::RawMetals : lane.top_flows.front().good;
+            ImGui::TextUnformatted(trade_good_kind_label(dom));
+            ImGui::TableSetColumnIndex(4);
+            std::string also;
+            for (std::size_t i = 1; i < lane.top_flows.size(); ++i) {
+              if (i > 1) also += ", ";
+              also += trade_good_kind_label(lane.top_flows[i].good);
+            }
+            if (also.empty()) also = "-";
+            ImGui::TextUnformatted(also.c_str());
+          }
+
+          ImGui::EndTable();
+        }
+      }
+
+      ImGui::EndTabItem();
     }
 
     // --- Tech Tree ---

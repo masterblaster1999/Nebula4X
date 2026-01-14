@@ -24,6 +24,7 @@
 #include <string>
 #include <type_traits>
 #include <unordered_set>
+#include <unordered_map>
 #include <variant>
 #include <vector>
 
@@ -95,6 +96,176 @@ Vec2 to_world(const ImVec2& screen_px, const ImVec2& center_px, double scale_px_
   const double y = (screen_px.y - center_px.y) / (scale_px_per_mkm * zoom) - pan_mkm.y;
   return Vec2{x, y};
 }
+
+
+struct HeatmapSource {
+  Vec2 pos_mkm{0.0, 0.0};
+  double range_mkm{0.0};
+  float weight{1.0f}; // 0..1 multiplier (used for threat weighting)
+};
+
+void draw_heatmap(ImDrawList* draw,
+                  const ImVec2& origin,
+                  const ImVec2& avail,
+                  const ImVec2& center_px,
+                  double scale_px_per_mkm,
+                  double zoom,
+                  const Vec2& pan_mkm,
+                  int cells_x,
+                  int cells_y,
+                  const std::vector<HeatmapSource>& sources,
+                  ImU32 base_col,
+                  float opacity) {
+  if (!draw) return;
+  if (opacity <= 0.0f) return;
+  if (cells_x <= 0 || cells_y <= 0) return;
+  if (sources.empty()) return;
+
+  const float cw = avail.x / static_cast<float>(cells_x);
+  const float ch = avail.y / static_cast<float>(cells_y);
+
+  const ImVec2 clip_p1(origin.x + avail.x, origin.y + avail.y);
+  ImGui::PushClipRect(origin, clip_p1, true);
+
+  for (int y = 0; y < cells_y; ++y) {
+    const float y0 = origin.y + static_cast<float>(y) * ch;
+    const float y1 = y0 + ch + 0.5f; // slight overlap to avoid gaps
+    const float cy = y0 + ch * 0.5f;
+
+    for (int x = 0; x < cells_x; ++x) {
+      const float x0 = origin.x + static_cast<float>(x) * cw;
+      const float x1 = x0 + cw + 0.5f;
+      const float cx = x0 + cw * 0.5f;
+
+      const Vec2 w = to_world(ImVec2(cx, cy), center_px, scale_px_per_mkm, zoom, pan_mkm);
+
+      float best = 0.0f;
+      for (const auto& src : sources) {
+        if (src.range_mkm <= 1e-6) continue;
+
+        const double dx = w.x - src.pos_mkm.x;
+        const double dy = w.y - src.pos_mkm.y;
+        const double r = src.range_mkm;
+        const double r2 = r * r;
+        const double d2 = dx * dx + dy * dy;
+        if (d2 >= r2) continue;
+
+        const double d = std::sqrt(std::max(0.0, d2));
+        float v = static_cast<float>(1.0 - (d / r));
+        v *= std::clamp(src.weight, 0.0f, 1.0f);
+        if (v > best) best = v;
+      }
+
+      if (best <= 0.0f) continue;
+
+      // Make the center a bit more readable without needing high resolution.
+      best = std::pow(best, 0.75f);
+
+      const float a = std::clamp(opacity * best, 0.0f, 1.0f);
+      if (a <= 0.001f) continue;
+
+      draw->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), modulate_alpha(base_col, a));
+    }
+  }
+
+  ImGui::PopClipRect();
+}
+
+
+double sim_time_days(const GameState& s) {
+  const double day = static_cast<double>(s.date.days_since_epoch());
+  const double frac = static_cast<double>(std::clamp(s.hour_of_day, 0, 23)) / 24.0;
+  return day + frac;
+}
+
+// Predict body positions at an arbitrary time t (days since epoch), without mutating sim state.
+// Mirrors Simulation::recompute_body_positions (core).
+std::unordered_map<Id, Vec2> predict_body_positions_at_time(const GameState& s, const StarSystem& sys, double t_days) {
+  std::unordered_map<Id, Vec2> cache;
+  cache.reserve(sys.bodies.size() * 2 + 8);
+
+  std::unordered_set<Id> visiting;
+  visiting.reserve(sys.bodies.size() * 2 + 8);
+
+  const auto compute_pos = [&](Id id, const auto& self) -> Vec2 {
+    if (id == kInvalidId) return {0.0, 0.0};
+
+    if (auto it = cache.find(id); it != cache.end()) return it->second;
+
+    const Body* b = find_ptr(s.bodies, id);
+    if (!b) return {0.0, 0.0};
+
+    // Break accidental cycles gracefully (treat as orbiting system origin).
+    if (!visiting.insert(id).second) {
+      cache[id] = {0.0, 0.0};
+      return {0.0, 0.0};
+    }
+
+    // Orbit center: either system origin or a parent body's position at time t.
+    Vec2 center{0.0, 0.0};
+    if (b->parent_body_id != kInvalidId && b->parent_body_id != id) {
+      const Body* parent = find_ptr(s.bodies, b->parent_body_id);
+      if (parent && parent->system_id == b->system_id) {
+        center = self(b->parent_body_id, self);
+      }
+    }
+
+    Vec2 pos = center;
+    if (b->orbit_radius_mkm > 1e-9) {
+      const double a = std::max(0.0, b->orbit_radius_mkm);
+      const double e = std::clamp(b->orbit_eccentricity, 0.0, 0.999999);
+      const double period = std::max(1.0, b->orbit_period_days);
+
+      // Mean anomaly advances linearly with time.
+      double M = b->orbit_phase_radians + kTwoPi * (t_days / period);
+      // Wrap for numerical stability.
+      M = std::fmod(M, kTwoPi);
+      if (M < 0.0) M += kTwoPi;
+
+      // Solve Kepler's equation: M = E - e sin(E) for eccentric anomaly E.
+      double E = (e < 0.8) ? M : (kTwoPi * 0.5); // start at pi for high-e orbits
+      for (int it = 0; it < 12; ++it) {
+        const double sE = std::sin(E);
+        const double cE = std::cos(E);
+        const double f = (E - e * sE) - M;
+        const double fp = 1.0 - e * cE;
+        if (std::fabs(fp) < 1e-12) break;
+        E -= (f / fp);
+        if (std::fabs(f) < 1e-10) break;
+      }
+
+      const double sE = std::sin(E);
+      const double cE = std::cos(E);
+      const double bsemi = a * std::sqrt(std::max(0.0, 1.0 - e * e));
+      const double x = a * (cE - e);
+      const double y = bsemi * sE;
+
+      const double w = b->orbit_arg_periapsis_radians;
+      const double cw = std::cos(w);
+      const double sw = std::sin(w);
+      const double rx = x * cw - y * sw;
+      const double ry = x * sw + y * cw;
+
+      pos = center + Vec2{rx, ry};
+    }
+
+    cache[id] = pos;
+    visiting.erase(id);
+    return pos;
+  };
+
+  // Ensure we compute at least all bodies in this system.
+  for (Id bid : sys.bodies) {
+    if (bid == kInvalidId) continue;
+    const Body* b = find_ptr(s.bodies, bid);
+    if (!b) continue;
+    if (b->system_id != sys.id) continue;
+    (void)compute_pos(bid, compute_pos);
+  }
+
+  return cache;
+}
+
 
 // When measuring distances with the map ruler we want the endpoints to "snap" to
 // nearby entities so players can easily measure ship-to-planet, jump-to-planet, etc.
@@ -196,6 +367,88 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
   }
 
 
+  // --- Heatmap sources (computed once per frame) ---
+  ui.system_map_heatmap_opacity = std::clamp(ui.system_map_heatmap_opacity, 0.0f, 1.0f);
+  ui.system_map_heatmap_resolution = std::clamp(ui.system_map_heatmap_resolution, 16, 200);
+
+  // Sensor sources cache (for coverage rings + heatmap).
+  std::vector<sim_sensors::SensorSource> sensor_sources;
+  double sensor_coverage_sig = 1.0;
+  double sensor_coverage_sig_max = 1.0;
+  if ((ui.show_faction_sensor_coverage || ui.system_map_sensor_heatmap) && viewer_faction_id != kInvalidId) {
+    sensor_sources = sim_sensors::gather_sensor_sources(sim, viewer_faction_id, sys->id);
+
+    // Sort by range so large fields are processed first (nicer alpha blending & early-outs).
+    std::sort(sensor_sources.begin(), sensor_sources.end(),
+              [](const sim_sensors::SensorSource& a, const sim_sensors::SensorSource& b) {
+                return a.range_mkm > b.range_mkm;
+              });
+
+    sensor_coverage_sig_max = std::max(0.05, sim_sensors::max_signature_multiplier_for_detection(sim));
+    sensor_coverage_sig = std::clamp<double>(static_cast<double>(ui.faction_sensor_coverage_signature), 0.05,
+                                             sensor_coverage_sig_max);
+
+    // Keep UI state clamped so it persists cleanly.
+    ui.faction_sensor_coverage_signature = static_cast<float>(sensor_coverage_sig);
+  }
+
+  int sensor_sources_drawn = 0;
+
+  // Hostile threat sources for the tactical threat heatmap.
+  std::vector<HeatmapSource> threat_sources;
+  if (ui.system_map_threat_heatmap && viewer_faction_id != kInvalidId) {
+    std::vector<Id> hostile_ids;
+    hostile_ids.reserve(sys->ships.size());
+
+    if (ui.fog_of_war) {
+      hostile_ids = detected_hostiles;
+    } else {
+      for (Id sid : sys->ships) {
+        const Ship* sh = find_ptr(s.ships, sid);
+        if (!sh) continue;
+        if (sh->faction_id == viewer_faction_id) continue;
+        const DiplomacyStatus ds = sim.diplomatic_status(viewer_faction_id, sh->faction_id);
+        if (ds != DiplomacyStatus::Hostile) continue;
+        hostile_ids.push_back(sid);
+      }
+    }
+
+    std::vector<HeatmapSource> raw;
+    raw.reserve(hostile_ids.size());
+
+    double max_w = 0.0;
+    for (Id sid : hostile_ids) {
+      const Ship* sh = find_ptr(s.ships, sid);
+      if (!sh) continue;
+      const ShipDesign* d = sim.find_design(sh->design_id);
+      if (!d) continue;
+
+      const double r = std::max(d->weapon_range_mkm, d->missile_range_mkm);
+      if (r <= 1e-6) continue;
+
+      double w = std::max(0.0, d->weapon_damage + d->missile_damage);
+      if (w <= 1e-6) w = 1.0;
+
+      HeatmapSource src;
+      src.pos_mkm = sh->position_mkm;
+      src.range_mkm = r;
+      src.weight = static_cast<float>(w);
+      raw.push_back(src);
+
+      max_w = std::max(max_w, w);
+    }
+
+    if (!raw.empty()) {
+      max_w = std::max(1.0, max_w);
+      threat_sources = raw;
+      for (auto& src : threat_sources) {
+        const double w = std::max(0.0, static_cast<double>(src.weight));
+        src.weight = static_cast<float>(std::sqrt(w / max_w));
+      }
+    }
+  }
+
+
   // Selected fleet member cache (for highlighting / fleet orders).
   std::unordered_set<Id> selected_fleet_members;
   const Fleet* selected_fleet = nullptr;
@@ -272,6 +525,26 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
       ui.system_map_show_minimap = !ui.system_map_show_minimap;
       minimap_enabled = ui.system_map_show_minimap;
     }
+    if (ImGui::IsKeyPressed(ImGuiKey_T)) {
+      ui.system_map_time_preview = !ui.system_map_time_preview;
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_H)) {
+      if (ImGui::GetIO().KeyShift) {
+        ui.system_map_sensor_heatmap = !ui.system_map_sensor_heatmap;
+      } else {
+        ui.system_map_threat_heatmap = !ui.system_map_threat_heatmap;
+      }
+    }
+
+    const float tstep = ImGui::GetIO().KeyShift ? 10.0f : 1.0f;
+    if (ImGui::IsKeyPressed(ImGuiKey_LeftBracket)) {
+      ui.system_map_time_preview_days =
+          std::clamp(ui.system_map_time_preview_days - tstep, -365.0f, 365.0f);
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_RightBracket)) {
+      ui.system_map_time_preview_days =
+          std::clamp(ui.system_map_time_preview_days + tstep, -365.0f, 365.0f);
+    }
   }
 
   const bool over_minimap = minimap_enabled && mouse_in_rect && point_in_rect(mouse, mm_p0, mm_p1);
@@ -344,6 +617,43 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
     }
   }
 
+
+  // --- Time preview (planning overlay) ---
+  // A non-simulative UI-only overlay that shows where bodies will be along their
+  // orbits, and where ships will drift based on their current velocity, at a
+  // configurable offset from the current in-game time.
+  const bool time_preview_enabled = ui.system_map_time_preview;
+  const double time_preview_days =
+      std::clamp<double>(static_cast<double>(ui.system_map_time_preview_days), -365.0, 365.0);
+  ui.system_map_time_preview_days = static_cast<float>(time_preview_days);
+
+  const bool time_preview_active = time_preview_enabled && (std::fabs(time_preview_days) > 1e-6);
+  const double t_now_days = sim_time_days(s);
+
+  std::unordered_map<Id, Vec2> body_pos_future;
+  std::vector<std::unordered_map<Id, Vec2>> body_pos_trail;
+  int body_trail_steps = 0;
+
+  if (time_preview_active) {
+    body_pos_future = predict_body_positions_at_time(s, *sys, t_now_days + time_preview_days);
+
+    if (ui.system_map_time_preview_trails && std::fabs(time_preview_days) > 0.25) {
+      const double abs_d = std::fabs(time_preview_days);
+      body_trail_steps = 16;
+      if (abs_d > 30.0) body_trail_steps = 32;
+      if (abs_d > 180.0) body_trail_steps = 48;
+      if (abs_d > 365.0) body_trail_steps = 64; // (clamped above, but harmless)
+
+      body_pos_trail.reserve(static_cast<std::size_t>(body_trail_steps) + 1);
+      for (int i = 0; i <= body_trail_steps; ++i) {
+        const double a = (body_trail_steps > 0) ? (static_cast<double>(i) / static_cast<double>(body_trail_steps))
+                                                : 1.0;
+        const double t = t_now_days + time_preview_days * a;
+        body_pos_trail.emplace_back(predict_body_positions_at_time(s, *sys, t));
+      }
+    }
+  }
+
   // --- Map ruler (hold D) ---
   // This is intentionally a temporary "mode" activated by holding a key so it doesn't
   // interfere with the normal left-click order workflow.
@@ -410,6 +720,36 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
     draw_starfield(draw, origin, avail, bg, pan_px_x, pan_px_y,
                    hash_u32(static_cast<std::uint32_t>(sys->id) ^ 0xA3C59AC3u), sf);
 
+    // Tactical heatmaps: coarse raster overlays for coverage/threat fields.
+    // Drawn after the starfield but before the grid so the grid remains readable.
+    if ((ui.system_map_sensor_heatmap || ui.system_map_threat_heatmap) && ui.system_map_heatmap_opacity > 0.0f) {
+      const int cells_x = std::clamp(ui.system_map_heatmap_resolution, 16, 200);
+      const float aspect = (avail.x > 1.0f) ? (avail.y / avail.x) : 1.0f;
+      const int cells_y = std::clamp(static_cast<int>(std::round(static_cast<float>(cells_x) * aspect)), 8, 200);
+
+      if (ui.system_map_sensor_heatmap && viewer_faction_id != kInvalidId && !sensor_sources.empty()) {
+        std::vector<HeatmapSource> srcs;
+        srcs.reserve(sensor_sources.size());
+        for (const auto& ssrc : sensor_sources) {
+          const double r = ssrc.range_mkm * sensor_coverage_sig;
+          if (r <= 1e-6) continue;
+          HeatmapSource hs;
+          hs.pos_mkm = ssrc.pos_mkm;
+          hs.range_mkm = r;
+          hs.weight = 1.0f;
+          srcs.push_back(hs);
+        }
+
+        draw_heatmap(draw, origin, avail, center, scale, zoom, pan, cells_x, cells_y, srcs,
+                     IM_COL32(0, 170, 255, 255), ui.system_map_heatmap_opacity * 0.65f);
+      }
+
+      if (ui.system_map_threat_heatmap && viewer_faction_id != kInvalidId && !threat_sources.empty()) {
+        draw_heatmap(draw, origin, avail, center, scale, zoom, pan, cells_x, cells_y, threat_sources,
+                     IM_COL32(255, 90, 90, 255), ui.system_map_heatmap_opacity * 0.75f);
+      }
+    }
+
     GridStyle gs;
     gs.enabled = ui.system_map_grid;
     gs.desired_minor_px = 90.0f;
@@ -460,6 +800,18 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
         }
       }
     }
+    // Time preview badge (top-left).
+    if (time_preview_enabled) {
+      const int dd = static_cast<int>(std::round(time_preview_days));
+      // Show the absolute target date (for the integer day offset).
+      const std::string target_dt =
+          nebula4x::format_datetime(s.date.days_since_epoch() + static_cast<std::int64_t>(dd), s.hour_of_day);
+
+      char buf[196];
+      std::snprintf(buf, sizeof(buf), "Time preview %+dd  (%s)  [T]", dd, target_dt.c_str());
+      draw->AddText(ImVec2(origin.x + 8.0f, origin.y + 44.0f), IM_COL32(190, 210, 255, 210), buf);
+    }
+
   }
 
   // Axes (when grid is disabled).
@@ -544,6 +896,52 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
       case BodyType::Asteroid: r = 2.5f; break;
       case BodyType::Comet: r = 3.0f; break;
       default: r = 5.0f; break;
+    }
+
+    // Time preview overlay (planning): future orbital position + swept trail.
+    if (time_preview_active) {
+      auto itf = body_pos_future.find(bid);
+      if (itf != body_pos_future.end()) {
+        const Vec2 future_w = itf->second;
+        const ImVec2 pf = to_screen(future_w, center, scale, zoom, pan);
+
+        const float dx = pf.x - p.x;
+        const float dy = pf.y - p.y;
+        const float d2 = dx * dx + dy * dy;
+        const bool moved = d2 > 4.0f; // > ~2px
+
+        const ImU32 base = color_body(b->type);
+
+        if (ui.system_map_time_preview_trails && !body_pos_trail.empty()) {
+          const ImU32 col_trail = modulate_alpha(base, 0.18f);
+
+          ImVec2 prev = p;
+          if (auto it0 = body_pos_trail.front().find(bid); it0 != body_pos_trail.front().end()) {
+            prev = to_screen(it0->second, center, scale, zoom, pan);
+          }
+
+          for (const auto& sample : body_pos_trail) {
+            auto it = sample.find(bid);
+            if (it == sample.end()) continue;
+            const ImVec2 pt = to_screen(it->second, center, scale, zoom, pan);
+            draw->AddLine(prev, pt, col_trail, 1.0f);
+            prev = pt;
+          }
+        }
+
+        if (ui.system_map_time_preview_vectors && moved) {
+          const ImU32 col_vec = modulate_alpha(base, 0.35f);
+          draw->AddLine(p, pf, col_vec, 1.0f);
+          add_arrowhead(draw, p, pf, col_vec, 7.0f);
+        }
+
+        // Ghost marker at the preview time.
+        if (moved) {
+          const ImU32 col_ghost = modulate_alpha(base, 0.60f);
+          draw->AddCircle(pf, r + 2.0f, col_ghost, 0, 1.75f);
+          draw->AddCircleFilled(pf, std::max(1.0f, r * 0.25f), modulate_alpha(base, 0.14f), 0);
+        }
+      }
     }
 
     // Simple glow / style hints (purely visual).
@@ -698,26 +1096,7 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
   }
 
   // Optional: sensor coverage overlay for the viewer faction.
-  std::vector<sim_sensors::SensorSource> sensor_sources;
-  int sensor_sources_drawn = 0;
-  double sensor_coverage_sig = 1.0;
-  double sensor_coverage_sig_max = 1.0;
-  if (ui.show_faction_sensor_coverage && viewer_faction_id != kInvalidId) {
-    sensor_sources = sim_sensors::gather_sensor_sources(sim, viewer_faction_id, sys->id);
-
-    // Sort by range so large rings are drawn first (nicer alpha blending).
-    std::sort(sensor_sources.begin(), sensor_sources.end(),
-              [](const sim_sensors::SensorSource& a, const sim_sensors::SensorSource& b) {
-                return a.range_mkm > b.range_mkm;
-              });
-
-    sensor_coverage_sig_max = std::max(0.05, sim_sensors::max_signature_multiplier_for_detection(sim));
-    sensor_coverage_sig = std::clamp<double>(static_cast<double>(ui.faction_sensor_coverage_signature), 0.05,
-                                             sensor_coverage_sig_max);
-
-    // Keep UI state clamped so it persists cleanly.
-    ui.faction_sensor_coverage_signature = static_cast<float>(sensor_coverage_sig);
-
+  if (ui.show_faction_sensor_coverage && viewer_faction_id != kInvalidId && !sensor_sources.empty()) {
     const int max_draw = std::clamp(ui.faction_sensor_coverage_max_sources, 1, 4096);
     ui.faction_sensor_coverage_max_sources = max_draw;
 
@@ -772,6 +1151,54 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
     const bool is_selected = (selected_ship == sid);
     const bool is_fleet_member = (!selected_fleet_members.empty() && selected_fleet_members.count(sid));
     const bool is_hostile = (viewer_faction_id != kInvalidId && ds == DiplomacyStatus::Hostile);
+
+    // Time preview overlay (planning): inertial projection (based on current velocity).
+    const bool show_time_preview_ship =
+        time_preview_active &&
+        (ui.system_map_time_preview_all_ships || is_selected ||
+         (selected_fleet != nullptr && selected_fleet->leader_ship_id == sid));
+
+    if (show_time_preview_ship) {
+      const Vec2 future_w = sh->position_mkm + sh->velocity_mkm_per_day * time_preview_days;
+      const ImVec2 pf = to_screen(future_w, center, scale, zoom, pan);
+
+      const float dx = pf.x - p.x;
+      const float dy = pf.y - p.y;
+      const float d2 = dx * dx + dy * dy;
+      const bool moved = d2 > 4.0f; // > ~2px
+
+      ImU32 preview_col = color_faction(sh->faction_id);
+      if (viewer_faction_id != kInvalidId) {
+        if (ds == DiplomacyStatus::Friendly) {
+          preview_col = IM_COL32(120, 255, 180, 255);
+        } else if (ds == DiplomacyStatus::Hostile) {
+          preview_col = IM_COL32(255, 120, 90, 255);
+        }
+      }
+
+      if (ui.system_map_time_preview_vectors && moved) {
+        const ImU32 col_vec = modulate_alpha(preview_col, 0.35f);
+        draw->AddLine(p, pf, col_vec, 1.0f);
+        add_arrowhead(draw, p, pf, col_vec, 7.0f);
+      }
+
+      if (ui.system_map_time_preview_trails && moved) {
+        const ImU32 col_dot = modulate_alpha(preview_col, 0.20f);
+        // Three "breadcrumb" dots along the projected vector.
+        for (int i = 1; i <= 3; ++i) {
+          const float t = static_cast<float>(i) / 4.0f;
+          const ImVec2 pt(p.x + dx * t, p.y + dy * t);
+          draw->AddCircleFilled(pt, 1.6f, col_dot, 0);
+        }
+      }
+
+      // Ghost marker at preview time.
+      if (moved) {
+        const ImU32 col_ghost = modulate_alpha(preview_col, 0.55f);
+        draw->AddCircle(pf, 6.0f, col_ghost, 0, 1.5f);
+        draw->AddCircleFilled(pf, 2.0f, modulate_alpha(preview_col, 0.12f), 0);
+      }
+    }
 
     // Weapon range rings (optional tactical overlay).
     if (d && d->weapon_range_mkm > 0.0) {
@@ -1880,6 +2307,19 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
         col = IM_COL32(245, 245, 245, 255);
       }
       draw->AddCircleFilled(p, r, col, 0);
+      // Time preview ghost (future body position).
+      if (time_preview_active) {
+        if (auto itf = body_pos_future.find(bid); itf != body_pos_future.end()) {
+          ImVec2 pf = world_to_minimap_px(mm, itf->second);
+          pf = clamp_to_rect(pf, mm_p0, mm_p1);
+          const float dx = pf.x - p.x;
+          const float dy = pf.y - p.y;
+          if ((dx * dx + dy * dy) > 1.0f) {
+            draw->AddCircle(pf, r + 1.2f, modulate_alpha(col, 0.75f), 0, 1.1f);
+          }
+        }
+      }
+
     }
 
     // Jump points.
@@ -1910,6 +2350,23 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
       ImU32 col = modulate_alpha(color_faction(sh->faction_id), 0.85f);
       if (sid == selected_ship) col = IM_COL32(245, 245, 245, 255);
       draw->AddCircleFilled(p, r, col, 0);
+
+      // Time preview ghost (future ship position). By default this is only drawn
+      // for the selected ship / fleet leader unless "All ships" is enabled.
+      if (time_preview_active) {
+        const bool show_time_preview_ship = (ui.system_map_time_preview_all_ships || sid == selected_ship ||
+                                             (selected_fleet != nullptr && selected_fleet->leader_ship_id == sid));
+        if (show_time_preview_ship) {
+          const Vec2 future_w = sh->position_mkm + sh->velocity_mkm_per_day * time_preview_days;
+          ImVec2 pf = world_to_minimap_px(mm, future_w);
+          pf = clamp_to_rect(pf, mm_p0, mm_p1);
+          const float dx = pf.x - p.x;
+          const float dy = pf.y - p.y;
+          if ((dx * dx + dy * dy) > 1.0f) {
+            draw->AddCircle(pf, r + 1.4f, modulate_alpha(col, 0.70f), 0, 1.0f);
+          }
+        }
+      }
     }
 
     // Recent-contact markers (optional).
@@ -1952,6 +2409,8 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
   ImGui::BulletText("Minimap (M): click/drag to pan");
   ImGui::BulletText("Hold D + drag: ruler (distance + ETA)");
   ImGui::BulletText("R: reset view, F: follow selected");
+  ImGui::BulletText("T: time preview, [ / ]: adjust days (Shift = 10d)");
+  ImGui::BulletText("H: threat heatmap, Shift+H: sensor heatmap");
   ImGui::BulletText("Left click: issue order to ship (Shift queues)");
   ImGui::BulletText("Right click: select ship/body (no orders)");
   ImGui::BulletText("Alt+Left click body: colonize (colony ship required)");
@@ -1982,6 +2441,33 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
     const Vec2 w = to_world(mouse, center, scale, zoom, pan);
     ImGui::TextDisabled("Cursor: %.1f, %.1f mkm", w.x, w.y);
     ImGui::TextDisabled("Zoom: %.2fx", zoom);
+  ImGui::SeparatorText("Time preview (T)");
+  ImGui::Checkbox("Enable##timeprev", &ui.system_map_time_preview);
+  ImGui::SameLine();
+  ImGui::Checkbox("Vectors##timeprev", &ui.system_map_time_preview_vectors);
+  ImGui::SameLine();
+  ImGui::Checkbox("Trails##timeprev", &ui.system_map_time_preview_trails);
+  ImGui::Checkbox("All ships##timeprev", &ui.system_map_time_preview_all_ships);
+
+  ImGui::SliderFloat("Days##timeprev", &ui.system_map_time_preview_days, -365.0f, 365.0f, "%.0f");
+
+  if (ImGui::SmallButton("Now##timeprev")) ui.system_map_time_preview_days = 0.0f;
+  ImGui::SameLine();
+  if (ImGui::SmallButton("+7##timeprev")) ui.system_map_time_preview_days = 7.0f;
+  ImGui::SameLine();
+  if (ImGui::SmallButton("+30##timeprev")) ui.system_map_time_preview_days = 30.0f;
+  ImGui::SameLine();
+  if (ImGui::SmallButton("+180##timeprev")) ui.system_map_time_preview_days = 180.0f;
+
+  {
+    const int dd = static_cast<int>(std::round(ui.system_map_time_preview_days));
+    ImGui::TextDisabled("Target: %s",
+                        nebula4x::format_datetime(s.date.days_since_epoch() + static_cast<std::int64_t>(dd),
+                                                  s.hour_of_day)
+                            .c_str());
+    ImGui::TextDisabled("Bodies: Kepler orbit prediction. Ships: inertial extrapolation.");
+  }
+
   }
 
   ImGui::SeparatorText("Ruler (hold D)");
@@ -2049,6 +2535,37 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
       ImGui::TextDisabled("Select a ship to define view faction");
     }
   }
+  ImGui::SeparatorText("Heatmaps (H)");
+  ImGui::Checkbox("Threat##heatmap", &ui.system_map_threat_heatmap);
+  ImGui::SameLine();
+  ImGui::Checkbox("Sensor##heatmap", &ui.system_map_sensor_heatmap);
+
+  ui.system_map_heatmap_opacity = std::clamp(ui.system_map_heatmap_opacity, 0.0f, 1.0f);
+  ui.system_map_heatmap_resolution = std::clamp(ui.system_map_heatmap_resolution, 16, 200);
+
+  ImGui::SliderFloat("Opacity##heatmap", &ui.system_map_heatmap_opacity, 0.0f, 1.0f, "%.2f");
+  ImGui::SliderInt("Resolution##heatmap", &ui.system_map_heatmap_resolution, 16, 160);
+
+  {
+    const int cells_x = std::clamp(ui.system_map_heatmap_resolution, 16, 200);
+    const float aspect = (avail.x > 1.0f) ? (avail.y / avail.x) : 1.0f;
+    const int cells_y = std::clamp(static_cast<int>(std::round(static_cast<float>(cells_x) * aspect)), 8, 200);
+    ImGui::TextDisabled("Cells: %dx%d", cells_x, cells_y);
+  }
+
+  if ((ui.system_map_sensor_heatmap || ui.system_map_threat_heatmap) && viewer_faction_id == kInvalidId) {
+    ImGui::TextDisabled("Select a ship to define view faction");
+  } else {
+    if (ui.system_map_sensor_heatmap) {
+      ImGui::TextDisabled("Sensor sources: %d  (sig %.2f)",
+                          static_cast<int>(sensor_sources.size()),
+                          sensor_coverage_sig);
+    }
+    if (ui.system_map_threat_heatmap) {
+      ImGui::TextDisabled("Threat sources: %d", static_cast<int>(threat_sources.size()));
+    }
+  }
+
   ImGui::Checkbox("Weapon range (selected)", &ui.show_selected_weapon_range);
   ImGui::SameLine();
   ImGui::Checkbox("Fleet", &ui.show_fleet_weapon_ranges);

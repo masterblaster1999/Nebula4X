@@ -48,6 +48,460 @@ static double u01_from_u64(std::uint64_t x) {
   return static_cast<double>(v) * (1.0 / 9007199254740992.0); // 2^53
 }
 
+
+
+// --- Procedural exploration leads (anomaly chains) ---------------------------------
+//
+// The base game already supports anomalies with rewards and hazards. This layer
+// adds *procedural follow-up leads* that can be generated when an anomaly is
+// resolved, creating lightweight exploration arcs:
+//   - star charts that reveal a short jump-route to a new system,
+//   - signal traces that spawn a new anomaly site elsewhere,
+//   - hidden caches that spawn a salvageable wreck.
+//
+// These are intentionally "low UI" (events + journal) and do not require a
+// dedicated quest screen.
+
+struct HashRng {
+  std::uint64_t s{0};
+  explicit HashRng(std::uint64_t seed) : s(seed) {}
+
+  std::uint64_t next_u64() {
+    s = splitmix64(s);
+    return s;
+  }
+
+  double next_u01() { return u01_from_u64(next_u64()); }
+
+  double range(double lo, double hi) {
+    if (!(hi > lo)) return lo;
+    return lo + (hi - lo) * next_u01();
+  }
+
+  int range_int(int lo, int hi_inclusive) {
+    if (hi_inclusive <= lo) return lo;
+    const int span = hi_inclusive - lo + 1;
+    const double u = next_u01();
+    int v = lo + static_cast<int>(u * static_cast<double>(span));
+    if (v > hi_inclusive) v = hi_inclusive;
+    return v;
+  }
+};
+
+enum class LeadKind : std::uint8_t {
+  None = 0,
+  StarChart = 1,
+  FollowUpAnomaly = 2,
+  HiddenCache = 3,
+};
+
+struct LeadOutcome {
+  LeadKind kind{LeadKind::None};
+  Id target_system_id{kInvalidId};
+  Id spawned_anomaly_id{kInvalidId};
+  Id spawned_wreck_id{kInvalidId};
+  int hops{0};
+  bool revealed_route{false};     // discovery/survey lists were updated
+  bool revealed_new_system{false}; // target system was previously undiscovered
+};
+
+static std::unordered_map<Id, int> compute_system_hops(const GameState& s, Id start_system_id) {
+  std::unordered_map<Id, int> dist;
+  if (start_system_id == kInvalidId) return dist;
+  if (!find_ptr(s.systems, start_system_id)) return dist;
+
+  // Build a stable system adjacency list from jump links.
+  std::unordered_map<Id, std::vector<Id>> adj;
+  adj.reserve(s.systems.size() * 2);
+
+  for (Id jid : sorted_keys(s.jump_points)) {
+    const auto* jp = find_ptr(s.jump_points, jid);
+    if (!jp) continue;
+    if (jp->linked_jump_id == kInvalidId) continue;
+    const auto* lnk = find_ptr(s.jump_points, jp->linked_jump_id);
+    if (!lnk) continue;
+    const Id a = jp->system_id;
+    const Id b = lnk->system_id;
+    if (a == kInvalidId || b == kInvalidId || a == b) continue;
+    adj[a].push_back(b);
+    adj[b].push_back(a);
+  }
+
+  for (auto& [_, v] : adj) {
+    std::sort(v.begin(), v.end());
+    v.erase(std::unique(v.begin(), v.end()), v.end());
+  }
+
+  std::vector<Id> q;
+  q.reserve(s.systems.size());
+  dist[start_system_id] = 0;
+  q.push_back(start_system_id);
+
+  for (std::size_t i = 0; i < q.size(); ++i) {
+    const Id cur = q[i];
+    const int d = dist[cur];
+    auto it = adj.find(cur);
+    if (it == adj.end()) continue;
+    for (Id nxt : it->second) {
+      if (dist.find(nxt) != dist.end()) continue;
+      dist[nxt] = d + 1;
+      q.push_back(nxt);
+    }
+  }
+
+  return dist;
+}
+
+static Vec2 pick_site_position_mkm(const GameState& s, Id system_id, HashRng& rng) {
+  const auto* sys = find_ptr(s.systems, system_id);
+  if (!sys) return Vec2{0.0, 0.0};
+
+  Vec2 base{0.0, 0.0};
+  if (!sys->jump_points.empty()) {
+    std::vector<Id> jps = sys->jump_points;
+    std::sort(jps.begin(), jps.end());
+    const int idx = rng.range_int(0, static_cast<int>(jps.size()) - 1);
+    if (const auto* jp = find_ptr(s.jump_points, jps[static_cast<std::size_t>(idx)])) base = jp->position_mkm;
+  }
+
+  const double ang = rng.range(0.0, 6.2831853071795864769);
+  const double r = rng.range(25.0, 140.0);
+  return base + Vec2{std::cos(ang) * r, std::sin(ang) * r};
+}
+
+static std::unordered_map<std::string, double> generate_mineral_bundle(HashRng& rng, double scale) {
+  static const char* pool[] = {"Duranium", "Neutronium", "Sorium", "Corbomite", "Tritanium"};
+  constexpr int n = static_cast<int>(sizeof(pool) / sizeof(pool[0]));
+
+  std::unordered_map<std::string, double> out;
+  const int picks = rng.range_int(1, 3);
+  for (int i = 0; i < picks; ++i) {
+    const int idx = rng.range_int(0, n - 1);
+    const double amt = std::max(0.0, scale) * rng.range(18.0, 95.0);
+    out[pool[idx]] += amt;
+  }
+
+  // Prune tiny entries.
+  for (auto it = out.begin(); it != out.end();) {
+    if (!(it->second > 1e-6) || !std::isfinite(it->second)) it = out.erase(it);
+    else ++it;
+  }
+  return out;
+}
+
+static std::string pick_unlock_component_id(const ContentDB& content, const Faction& fac, HashRng& rng) {
+  if (content.components.empty()) return {};
+
+  std::unordered_set<std::string> unlocked;
+  unlocked.reserve(fac.unlocked_components.size() * 2 + 8);
+  for (const auto& cid : fac.unlocked_components) unlocked.insert(cid);
+
+  std::vector<std::string> candidates;
+  candidates.reserve(content.components.size());
+  for (const auto& [cid, def] : content.components) {
+    if (cid.empty()) continue;
+    if (unlocked.count(cid)) continue;
+    candidates.push_back(cid);
+  }
+  if (candidates.empty()) return {};
+
+  std::sort(candidates.begin(), candidates.end());
+  const int idx = rng.range_int(0, static_cast<int>(candidates.size()) - 1);
+  return candidates[static_cast<std::size_t>(idx)];
+}
+
+static Id pick_weighted_system(HashRng& rng,
+                               const std::vector<Id>& candidates,
+                               const GameState& s,
+                               Id origin_system_id,
+                               const std::unordered_map<Id, int>& hops,
+                               double max_dist,
+                               LeadKind kind) {
+  const auto* origin = find_ptr(s.systems, origin_system_id);
+  if (!origin) return kInvalidId;
+
+  double total_w = 0.0;
+  std::vector<double> weights;
+  weights.reserve(candidates.size());
+
+  for (Id sid : candidates) {
+    const auto* sys = find_ptr(s.systems, sid);
+    if (!sys) {
+      weights.push_back(0.0);
+      continue;
+    }
+    const auto* reg = (sys->region_id != kInvalidId) ? find_ptr(s.regions, sys->region_id) : nullptr;
+    const double ruins = reg ? std::clamp(reg->ruins_density, 0.0, 1.0) : 0.0;
+    const double pirate = reg ? std::clamp(reg->pirate_risk, 0.0, 1.0) : 0.0;
+    const double salvage_mult = reg ? std::max(0.0, reg->salvage_richness_mult) : 1.0;
+
+    const double d = (sys->galaxy_pos - origin->galaxy_pos).length();
+    const double dn = (max_dist > 1e-9) ? std::clamp(d / max_dist, 0.0, 1.0) : 0.0;
+
+    int hop = 0;
+    if (auto it = hops.find(sid); it != hops.end()) hop = std::max(0, it->second);
+    const double hn = std::clamp(static_cast<double>(hop) / 6.0, 0.0, 1.0);
+
+    // Base desirability: prefer "interesting" regions and a little distance.
+    double w = 0.25 + 1.10 * ruins + 0.20 * std::clamp(salvage_mult - 1.0, -1.0, 1.0) +
+               0.25 * dn + 0.15 * hn;
+
+    if (kind == LeadKind::HiddenCache) {
+      // Caches skew toward pirate/salvage-rich regions.
+      w *= (0.70 + 0.90 * pirate) * (0.75 + 0.50 * salvage_mult);
+    } else if (kind == LeadKind::StarChart) {
+      // Charts skew a bit farther out.
+      w *= (0.75 + 0.65 * dn + 0.35 * hn) * (0.85 + 0.20 * salvage_mult);
+    } else {
+      // Follow-up anomalies skew toward ruins.
+      w *= (0.80 + 0.90 * ruins) * (0.90 + 0.15 * salvage_mult);
+    }
+
+    if (!std::isfinite(w) || w < 0.0) w = 0.0;
+    weights.push_back(w);
+    total_w += w;
+  }
+
+  if (!(total_w > 1e-12)) {
+    // Fall back to deterministic selection.
+    return !candidates.empty() ? candidates.front() : kInvalidId;
+  }
+
+  double r = rng.next_u01() * total_w;
+  for (std::size_t i = 0; i < candidates.size(); ++i) {
+    r -= weights[i];
+    if (r <= 0.0) return candidates[i];
+  }
+  return candidates.back();
+}
+
+static LeadOutcome maybe_spawn_anomaly_lead(Simulation& sim, const Ship& resolver, const Anomaly& resolved) {
+  LeadOutcome out;
+  const auto& cfg = sim.cfg();
+  if (!cfg.enable_anomaly_leads) return out;
+
+  if (resolved.resolved_by_faction_id == kInvalidId) return out;
+
+  // Cap chain depth.
+  if (cfg.anomaly_lead_max_depth >= 0 && resolved.lead_depth >= cfg.anomaly_lead_max_depth) return out;
+
+  GameState& s = sim.state();
+  auto* fac = find_ptr(s.factions, resolver.faction_id);
+  if (!fac) return out;
+
+  // Don't generate if the galaxy has nowhere to point.
+  if (s.systems.size() < 2) return out;
+
+  // Global cap on generated anomalies.
+  if (cfg.anomaly_lead_max_total_generated > 0) {
+    int generated = 0;
+    for (const auto& [_, a] : s.anomalies) {
+      if (a.lead_depth > 0) ++generated;
+    }
+    if (generated >= cfg.anomaly_lead_max_total_generated) return out;
+  }
+
+  // Deterministic seed based on the resolved anomaly + resolver identity.
+  std::uint64_t seed = 0x6d0f27bd9c2b3f61ULL;
+  seed ^= static_cast<std::uint64_t>(resolved.id) * 0x9e3779b97f4a7c15ULL;
+  seed ^= static_cast<std::uint64_t>(resolver.id) * 0xbf58476d1ce4e5b9ULL;
+  seed ^= static_cast<std::uint64_t>(resolver.faction_id) * 0x94d049bb133111ebULL;
+  seed ^= static_cast<std::uint64_t>(resolved.resolved_day) * 0x2545f4914f6cdd1dULL;
+  HashRng rng(splitmix64(seed));
+
+  // Trigger probability: base + small bonuses for "richer" anomalies.
+  double p = std::clamp(cfg.anomaly_lead_base_chance, 0.0, 1.0);
+  if (resolved.research_reward > 1e-9) p += 0.03;
+  if (!resolved.unlock_component_id.empty()) p += 0.05;
+  if (!resolved.mineral_reward.empty()) p += 0.03;
+  if (resolved.hazard_chance > 1e-9) p += 0.02;
+  p = std::clamp(p, 0.0, 0.95);
+
+  if (rng.next_u01() >= p) return out;
+
+  // Determine lead type.
+  const double p_star = std::clamp(cfg.anomaly_lead_star_chart_chance, 0.0, 1.0);
+  const double p_cache = std::clamp(cfg.anomaly_lead_hidden_cache_chance, 0.0, 1.0);
+  double r = rng.next_u01();
+
+  LeadKind kind = LeadKind::FollowUpAnomaly;
+  if (r < p_star) kind = LeadKind::StarChart;
+  else if (r < p_star + p_cache) kind = LeadKind::HiddenCache;
+
+  // Precompute hop distances and max galaxy distance for weighting.
+  const auto hop_map = compute_system_hops(s, resolver.system_id);
+  const auto* origin_sys = find_ptr(s.systems, resolver.system_id);
+  if (!origin_sys) return out;
+
+  double max_dist = 0.0;
+  for (Id sid : sorted_keys(s.systems)) {
+    if (sid == resolver.system_id) continue;
+    if (const auto* sys = find_ptr(s.systems, sid)) {
+      max_dist = std::max(max_dist, (sys->galaxy_pos - origin_sys->galaxy_pos).length());
+    }
+  }
+
+  const bool use_hop_filter = (cfg.anomaly_lead_min_hops > 0 || cfg.anomaly_lead_max_hops > 0);
+  const int min_h = std::max(0, cfg.anomaly_lead_min_hops);
+  const int max_h = (cfg.anomaly_lead_max_hops > 0) ? std::max(min_h, cfg.anomaly_lead_max_hops) : 9999;
+
+  auto build_candidates = [&](bool prefer_undiscovered, bool hop_filter) -> std::vector<Id> {
+    std::vector<Id> cand;
+    cand.reserve(s.systems.size());
+    for (Id sid : sorted_keys(s.systems)) {
+      if (sid == resolver.system_id) continue;
+      if (!find_ptr(s.systems, sid)) continue;
+
+      const bool discovered = (std::find(fac->discovered_systems.begin(), fac->discovered_systems.end(), sid) !=
+                               fac->discovered_systems.end());
+
+      if (prefer_undiscovered && discovered) continue;
+      if (!prefer_undiscovered && !discovered) continue;
+
+      if (hop_filter) {
+        auto it = hop_map.find(sid);
+        if (it == hop_map.end()) continue;
+        const int h = std::max(0, it->second);
+        if (h < min_h || h > max_h) continue;
+      }
+
+      cand.push_back(sid);
+    }
+    return cand;
+  };
+
+  // Candidate selection strategy:
+  //   StarChart: prefer undiscovered systems in hop window, else relax.
+  //   FollowUp/Cache: prefer discovered systems in hop window, else relax.
+  std::vector<Id> candidates;
+  if (kind == LeadKind::StarChart) {
+    candidates = build_candidates(/*prefer_undiscovered=*/true, /*hop_filter=*/use_hop_filter);
+    if (candidates.empty()) candidates = build_candidates(/*prefer_undiscovered=*/true, /*hop_filter=*/false);
+    if (candidates.empty()) candidates = build_candidates(/*prefer_undiscovered=*/false, /*hop_filter=*/use_hop_filter);
+    if (candidates.empty()) candidates = build_candidates(/*prefer_undiscovered=*/false, /*hop_filter=*/false);
+  } else {
+    candidates = build_candidates(/*prefer_undiscovered=*/false, /*hop_filter=*/use_hop_filter);
+    if (candidates.empty()) candidates = build_candidates(/*prefer_undiscovered=*/false, /*hop_filter=*/false);
+    if (candidates.empty()) candidates = build_candidates(/*prefer_undiscovered=*/true, /*hop_filter=*/use_hop_filter);
+    if (candidates.empty()) candidates = build_candidates(/*prefer_undiscovered=*/true, /*hop_filter=*/false);
+  }
+
+  if (candidates.empty()) return out;
+
+  // Try a few times in case we pick an unreachable target in a disconnected galaxy.
+  for (int attempt = 0; attempt < 5 && !candidates.empty(); ++attempt) {
+    std::sort(candidates.begin(), candidates.end());
+    candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
+
+    const Id target = pick_weighted_system(rng, candidates, s, resolver.system_id, hop_map, max_dist, kind);
+    if (target == kInvalidId) return out;
+
+    const auto plan = sim.plan_jump_route_from_pos(resolver.system_id, resolver.position_mkm, resolver.faction_id,
+                                                   std::max(1e-9, resolver.speed_km_s), target,
+                                                   /*restrict_to_discovered=*/false);
+    if (!plan.has_value()) {
+      // Remove and retry.
+      candidates.erase(std::remove(candidates.begin(), candidates.end(), target), candidates.end());
+      continue;
+    }
+
+    out.kind = kind;
+    out.target_system_id = target;
+    out.hops = std::max(0, static_cast<int>(plan->jump_ids.size()));
+
+    const bool target_discovered =
+        (std::find(fac->discovered_systems.begin(), fac->discovered_systems.end(), target) != fac->discovered_systems.end());
+    out.revealed_new_system = !target_discovered;
+
+    // Reveal route intel if needed: charts always, other leads only when the target is undiscovered.
+    const bool reveal = (kind == LeadKind::StarChart) || !target_discovered;
+    if (reveal) {
+      sim.reveal_route_intel_for_faction(resolver.faction_id, plan->systems, plan->jump_ids);
+      out.revealed_route = true;
+    }
+
+    // Spawn the follow-up site.
+    if (kind == LeadKind::HiddenCache) {
+      if (!cfg.enable_wrecks) return out; // can't realize this lead type.
+
+      Wreck w;
+      w.id = allocate_id(s);
+      w.system_id = target;
+      w.position_mkm = pick_site_position_mkm(s, target, rng);
+      w.kind = WreckKind::Cache;
+      w.created_day = static_cast<int>(s.date.days_since_epoch());
+      w.name = "Hidden Cache";
+
+      // Cache size scales a bit with hop distance.
+      const double scale = 1.0 + 0.20 * std::min(6, out.hops);
+      w.minerals = generate_mineral_bundle(rng, /*scale=*/2.2 * scale);
+
+      // Make sure it's worth a trip.
+      double total = 0.0;
+      for (const auto& [_, t] : w.minerals) total += std::max(0.0, t);
+      if (!(total > 1e-3)) w.minerals["Duranium"] = 80.0 * scale;
+
+      const Id new_wreck_id = w.id;
+      s.wrecks.emplace(new_wreck_id, std::move(w));
+      out.spawned_wreck_id = new_wreck_id;
+      return out;
+    }
+
+    // Follow-up anomaly site.
+    {
+      Anomaly a;
+      a.id = allocate_id(s);
+      a.system_id = target;
+      a.position_mkm = pick_site_position_mkm(s, target, rng);
+
+      const int depth = std::max(0, resolved.lead_depth + 1);
+      a.origin_anomaly_id = resolved.id;
+      a.lead_depth = depth;
+
+      // Kind/name are lightweight narrative tags; keep short for UI.
+      const double t = rng.next_u01();
+      if (kind == LeadKind::StarChart) {
+        a.kind = (t < 0.55) ? "ruins" : ((t < 0.80) ? "artifact" : "signal");
+        a.name = "Charted Site";
+      } else {
+        a.kind = (t < 0.45) ? "signal" : ((t < 0.75) ? "ruins" : "phenomenon");
+        a.name = "Signal Trace";
+      }
+
+      // Investigation time and rewards scale gently by hops/depth.
+      a.investigation_days = std::max(1, 3 + rng.range_int(0, 6) + depth);
+      const double hop_scale = 1.0 + 0.12 * std::min(6, out.hops);
+      const double depth_scale = 1.0 + 0.10 * std::max(0, depth - 1);
+      a.research_reward = std::max(0.0, rng.range(10.0, 55.0) * hop_scale * depth_scale);
+
+      // Optional mineral reward.
+      if (rng.next_u01() < 0.55) {
+        a.mineral_reward = generate_mineral_bundle(rng, /*scale=*/1.3 * hop_scale);
+      }
+
+      // Optional component unlock (rarer for deeper chains).
+      if (rng.next_u01() < (0.28 / std::max(1, depth))) {
+        a.unlock_component_id = pick_unlock_component_id(sim.content(), *fac, rng);
+      }
+
+      // Small hazard risk (non-lethal).
+      if (rng.next_u01() < 0.55) {
+        a.hazard_chance = rng.range(0.10, 0.35);
+        a.hazard_damage = rng.range(0.5, 4.5) * hop_scale;
+      }
+
+      s.anomalies[a.id] = a;
+      // Mark as known to the resolving faction (intel from the original anomaly).
+      push_unique(fac->discovered_anomalies, a.id);
+      out.spawned_anomaly_id = a.id;
+    }
+
+    return out;
+  }
+
+  return out;
+}
+
 } // namespace
 
 void Simulation::tick_ships(double dt_days) {
@@ -2145,6 +2599,98 @@ void Simulation::tick_ships(double dt_days) {
             }
           }
 
+          // Procedural exploration lead (optional follow-up site / chart / cache).
+          {
+            const LeadOutcome lead = maybe_spawn_anomaly_lead(*this, ship, *anom);
+            if (lead.kind != LeadKind::None && lead.target_system_id != kInvalidId) {
+              const auto* tgt = find_ptr(state_.systems, lead.target_system_id);
+              const std::string tgt_name = (tgt && !tgt->name.empty()) ? tgt->name : std::string("(unknown)");
+
+              std::ostringstream ls;
+              ls.setf(std::ios::fixed);
+              ls.precision(1);
+
+              if (lead.kind == LeadKind::StarChart) {
+                ls << "Star chart recovered: route to " << tgt_name;
+              } else if (lead.kind == LeadKind::HiddenCache) {
+                ls << "Coordinates recovered: hidden cache in " << tgt_name;
+              } else {
+                ls << "Signal lead recovered: follow-up site in " << tgt_name;
+              }
+
+              if (lead.hops > 0) ls << " (" << lead.hops << " hop" << (lead.hops == 1 ? "" : "s") << ")";
+              if (lead.revealed_new_system) ls << "; new system revealed";
+              else if (lead.revealed_route) ls << "; route intel updated";
+
+              EventContext lctx;
+              lctx.faction_id = ship.faction_id;
+              lctx.ship_id = ship_id;
+              lctx.system_id = lead.target_system_id;
+              push_event(EventLevel::Info, EventCategory::Exploration, ls.str(), lctx);
+
+              // Curated journal entry.
+              JournalEntry lje;
+              lje.category = EventCategory::Exploration;
+              lje.system_id = lead.target_system_id;
+              lje.ship_id = ship_id;
+              if (lead.spawned_anomaly_id != kInvalidId) lje.anomaly_id = lead.spawned_anomaly_id;
+              if (lead.spawned_wreck_id != kInvalidId) lje.wreck_id = lead.spawned_wreck_id;
+
+              const std::string kind_name = (lead.kind == LeadKind::StarChart)
+                                                ? "Star Chart"
+                                                : (lead.kind == LeadKind::HiddenCache) ? "Hidden Cache"
+                                                                                       : "Signal Trace";
+              lje.title = "Exploration Lead: " + kind_name;
+
+              std::ostringstream jt;
+              std::string source_nm;
+              if (!anom->name.empty()) source_nm = anom->name;
+              else source_nm = "Anomaly #" + std::to_string(anom->id);
+              jt << "Source anomaly: " << source_nm;
+              jt << "\nTarget system: " << tgt_name;
+              if (lead.hops > 0) jt << " (" << lead.hops << " hop" << (lead.hops == 1 ? "" : "s") << ")";
+              if (lead.revealed_new_system) jt << "\nIntel: new system revealed via recovered chart.";
+              else if (lead.revealed_route) jt << "\nIntel: navigation route updated via recovered coordinates.";
+
+              if (lead.spawned_anomaly_id != kInvalidId) {
+                if (const auto* la = find_ptr(state_.anomalies, lead.spawned_anomaly_id)) {
+                  const std::string ln = !la->name.empty() ? la->name : std::string("(unnamed anomaly)");
+                  jt << "\n\nSite: " << ln;
+                  if (!la->kind.empty()) jt << "\nKind: " << la->kind;
+                  jt << "\nInvestigation: " << std::max(1, la->investigation_days) << " day(s) on-station";
+                  if (la->research_reward > 1e-9) {
+                    jt.setf(std::ios::fixed);
+                    jt.precision(1);
+                    jt << "\nPotential reward: +" << la->research_reward << " RP";
+                  }
+                  if (!la->unlock_component_id.empty()) jt << "\nPotential unlock: " << la->unlock_component_id;
+                  if (!la->mineral_reward.empty()) {
+                    double total = 0.0;
+                    for (const auto& [_, t] : la->mineral_reward) total += std::max(0.0, t);
+                    if (total > 1e-3) {
+                      jt.setf(std::ios::fixed);
+                      jt.precision(1);
+                      jt << "\nPotential cache: " << total << "t minerals";
+                    }
+                  }
+                }
+              }
+
+              if (lead.spawned_wreck_id != kInvalidId) {
+                if (const auto* w = find_ptr(state_.wrecks, lead.spawned_wreck_id)) {
+                  double total = 0.0;
+                  for (const auto& [_, t] : w->minerals) total += std::max(0.0, t);
+                  jt.setf(std::ios::fixed);
+                  jt.precision(1);
+                  jt << "\n\nCache minerals (estimated): " << total << "t";
+                }
+              }
+
+              lje.text = jt.str();
+              push_journal_entry(ship.faction_id, std::move(lje));
+            }
+          }
+
           q.erase(q.begin());
         }
       } else {
@@ -2628,6 +3174,10 @@ void Simulation::tick_ships(double dt_days) {
       discover_system_for_faction(ship.faction_id, new_sys);
 
       {
+        const auto* fac = find_ptr(state_.factions, ship.faction_id);
+        const bool suppress_movement_event = (fac && fac->control == FactionControl::AI_Passive);
+        if (suppress_movement_event) return;
+
         const auto* sys_new = find_ptr(state_.systems, new_sys);
         const std::string dest_name = sys_new ? sys_new->name : std::string("(unknown)");
         const std::string msg = "Ship " + ship.name + " transited jump point " + jp->name + " -> " + dest_name;
@@ -2740,7 +3290,11 @@ void Simulation::tick_ships(double dt_days) {
 
     const double fuel_cap = sd ? std::max(0.0, sd->fuel_capacity_tons) : 0.0;
     const double fuel_use = sd ? std::max(0.0, sd->fuel_use_per_mkm) : 0.0;
-    const bool uses_fuel = (fuel_use > 0.0);
+    // Civilian / ambient ships (AI_Passive) abstract fuel usage to avoid
+    // requiring a full civilian-economy refuel loop.
+    const auto* fac = find_ptr(state_.factions, ship.faction_id);
+    const bool is_civilian = (fac && fac->control == FactionControl::AI_Passive);
+    const bool uses_fuel = (fuel_use > 0.0) && !is_civilian;
     if (uses_fuel) {
       // Be defensive for older saves/custom content that may not have been initialized yet.
       if (ship.fuel_tons < 0.0) ship.fuel_tons = fuel_cap;

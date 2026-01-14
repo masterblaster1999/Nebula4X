@@ -1,3 +1,104 @@
+## r92: Procedural anomaly leads (exploration chains + star charts + hidden caches)
+
+- **Exploration**: resolving an anomaly can now (optionally) generate a **procedural lead** that forms a lightweight exploration chain:
+  - **Star chart**: reveals a short jump-route to a new system (adds discovered systems + surveyed jumps as intel, without event spam).
+  - **Signal trace**: spawns a **follow-up anomaly site** in another system, with scaled rewards/hazards.
+  - **Hidden cache**: spawns a salvageable **Cache wreck** with minerals (risk/reward exploration hook).
+- **Persistence**: anomalies gained new metadata so lead chains are trackable/savable:
+  - `origin_anomaly_id` (parent anomaly id)
+  - `lead_depth` (0 for scenario/static anomalies; increases for generated follow-ups)
+- **Config**: added `enable_anomaly_leads` and several tuning knobs to `SimConfig` (probabilities, caps, hop window).
+- **UI**: journal entries that reference anomalies/wrecks now include quick **Center anomaly / Center wreck** buttons (system map).
+
+Notes:
+- Lead generation is deterministic per resolved anomaly + resolver identity and capped by depth/total-generated limits for balance.
+
+
+## r91: Procedural independent outposts (minor neutral markets)
+
+- **Scenario**: random galaxy generator now seeds a neutral **Independent Worlds** faction (AI_Passive) with procedurally placed **outposts**.
+  - Outposts are biased toward **hub systems** (jump-point degree and centrality).
+  - Each outpost is assigned a **specialization profile** (Mining / Refinery / Smelter / Processing / Arsenal / Freeport / Enclave) that determines starting population, industry mix, and defenses.
+  - Automatically provisions **infrastructure** to cover habitability shortfalls so hostile-body outposts remain stable under the habitability model.
+- **Diplomacy**: Independents default to **Neutral** with civilized factions; **Hostile** with pirates.
+- **Config**: added `enable_independents` and `num_independent_outposts` to `RandomScenarioConfig` (default enabled, auto-count).
+- **Tests**: extended random scenario test to assert independents exist by default and can be disabled.
+
+Notes:
+- Independents are AI_Passive (no scripted expansion) but their colonies participate in the economy and trade network, creating more markets for trade lanes and civilian convoys.
+
+
+## r90: Procedural civilian trade convoys (ambient shipping + piracy targets)
+
+- **Simulation**: added an ambient **civilian shipping** layer that materializes the trade network as actual NPC freighters.
+  - Spawns a neutral **Merchant Guild** faction (AI_Passive) on-demand.
+  - Each day, computes top trade lanes and maintains a target number of looping **convoy ships** across the jump network.
+  - Convoys are unarmed freighters that can be intercepted by pirates (their value also feeds into pirate raid target selection).
+- **Performance/sanity**
+  - AI_Passive ships are treated as **ambient**: they no longer consume fuel, rearm, refuel, repair, or maintenance supplies from colonies.
+  - AI_Passive ship jump transits no longer spam the global event log.
+- **Victory**: AI_Passive factions are excluded from victory eligibility so neutral ambient factions don't block elimination wins.
+- **Bugfix**: fixed missing `burn` (fuel-use) variables in several automation lambdas (`auto_rearm`, `auto_repair`, `auto_colonize`) that could prevent compilation.
+
+
+## r89: Procedural interstellar trade network (markets + lanes)
+
+- **Core**: new deterministic **procedural trade network** generator.
+  - Each star system is assigned a coarse **market profile** (market size + hub score) from:
+    - Jump-network topology ("hubness")
+    - Region modifiers (richness, pirate risk, ruins density)
+    - Local resource deposits (metals/minerals/volatiles/exotics)
+    - Optional colony industry (installation inputs/outputs + population baseline demand)
+  - Builds a directed set of **trade lanes** across the jump network (shortest-path cost), with a dominant commodity per lane.
+- **Galaxy map**
+  - New toggles: **Trade lanes** + **Trade hubs** (legend + Settings), persisted in `ui_prefs.json`.
+  - Trade lanes are color-coded by dominant good category and scale thickness by relative volume.
+  - Hovering a system shows **trade imports/exports** in the tooltip when the overlay is enabled.
+- **Economy window**
+  - New **Trade** tab showing ranked **markets** and **top lanes**, plus tunable parameters (max lanes, distance exponent, include-uncolonized, include-colony).
+
+Notes:
+- This patch is primarily **informational/strategic** (no resources are teleported). It is designed as a future hook for piracy, blockades, and diplomatic trade agreements.
+
+
+## r88: System map tactical heatmaps (sensor coverage + hostile threat)
+
+- **System Map**: added new **Heatmaps** tactical overlays (legend section + hotkeys).
+  - **Threat heatmap** (`H`): a coarse raster that summarizes **known hostile weapon/missile reach**.
+    - Weighted by each ship’s offensive power (weapon + missile damage) so “more dangerous” ships read hotter.
+  - **Sensor heatmap** (`Shift+H`): a coarse raster that summarizes **viewer-faction sensor coverage**.
+    - Uses the same **target signature** multiplier as the existing sensor coverage rings.
+  - Heatmaps are drawn **behind the grid** and **behind markers/icons**, so they act as a planning backdrop rather than UI clutter.
+- **UI prefs**: heatmap toggles, opacity, and resolution persist in `ui_prefs.json`.
+
+Notes:
+- Under **fog-of-war**, the threat heatmap uses **detected hostiles**; with FoW off, it uses **all hostile ships** in-system.
+- Heatmaps are sampled in **screen space** (resolution = approximate cells across width). Higher resolution is sharper but slower.
+
+
+
+## r87: Galaxy map fuel-range overlay + auto-refuel reachability guard
+
+- **Galaxy Map**: new **Fuel range** overlay (toggle `F` or legend checkbox).
+  - Draws a ring on star systems reachable by the selected ship (or fleet with `Ctrl`) with **current fuel** (green) or **full tanks** (yellow).
+  - Hover route preview now includes a quick **fuel estimate** and warns when fuel is insufficient.
+- **Automation**: `auto_refuel` will now skip colonies that the ship cannot reach with its current fuel (prevents stranding / negative-fuel edge cases).
+- **Tests**: added a regression test ensuring auto-refuel prefers reachable colonies.
+
+
+
+## r86: System map time preview overlay (orbit forecast + ship drift projection)
+
+- **System Map** gained a new **Time preview (planning)** overlay:
+  - Predicts **future body positions** using the same Kepler orbit parameters as the simulation (UI-only, does not mutate state).
+  - Extrapolates **ship motion** using the last-tick **velocity vector** (inertial projection).
+  - Optional **vectors** (now→future arrows) and **trails** (swept paths / breadcrumbs).
+  - Minimap shows the same ghost markers so you can plan at any zoom level.
+- **Controls**: `T` toggles, `[`/`]` adjusts days (`Shift` = 10d).
+- **UI prefs**: time preview settings persist in `ui_prefs.json`.
+
+
+
 ## r85: Build fix - regression tape timestamp formatting
 
 - Fixed a `-Wformat-truncation` warning (treated as an error when `NEBULA4X_WARNINGS_AS_ERRORS=ON`) in `utc_now_iso8601()`.
@@ -1372,6 +1473,36 @@ Compatibility:
 - **Tests**
   - Fixes a linker mismatch in the test runner by properly namespacing `test_victory` / `test_ai_empire_fleet_missions`.
   - `ground_ops` test now validates troop capacity against a design that actually includes troop bays (`troop_transport_mk1`).
+
+Compatibility:
+- **Save schema is unchanged.**
+
+### r53: Planetary point defense batteries
+
+- **Installations** can now define **point-defense (anti-missile) stats** via `point_defense_damage` and `point_defense_range_mkm`.
+  - Blueprint parsing and content validation include the new fields.
+- Added a new installation: **Point Defense Battery** (unlocked by **Planetary Defense Forces / ground_forces_1**).
+- **Combat**: colonies now contribute to in-system **missile interception** when friendly ships are under attack nearby.
+  - Interceptions are aggregated into a new Combat event: "Colony point defense at X intercepted Y missile payload".
+- **UI**: the colony Installation list is sorted and now shows per-installation tags (Sensor / Weapon / PD).
+- **Tests**: adds `planetary_point_defense` regression test.
+
+Compatibility:
+- **Save schema is unchanged.**
+
+### r54: Terraforming realism pass (shared-axis budget + optional mineral costs + mass scaling)
+
+- **Terraforming points are now treated as a shared budget across axes** when both temperature and atmosphere targets are set.
+  - Previously, a single point implicitly advanced **both** temperature and atmosphere at full strength (an accidental "double benefit").
+  - The new model splits points between temperature and atmosphere based on the remaining work on each axis.
+  - The legacy behavior can be restored by setting `SimConfig::terraforming_split_points_between_axes = false`.
+- **Optional operational mineral costs for terraforming** (mirrors troop training costs):
+  - `SimConfig::terraforming_duranium_per_point`
+  - `SimConfig::terraforming_neutronium_per_point`
+  - When enabled (>0), terraforming is automatically scaled down to the maximum affordable amount for the day and consumes minerals from the colony stockpile.
+- **Optional body-mass scaling** to make small bodies easier (and large bodies harder) to terraform:
+  - Controlled by `SimConfig::terraforming_scale_with_body_mass`, `terraforming_min_mass_earths`, and `terraforming_mass_scaling_exponent`.
+- **Tests**: extends `ground_ops` to cover mineral-throttled terraforming and mass scaling.
 
 Compatibility:
 - **Save schema is unchanged.**

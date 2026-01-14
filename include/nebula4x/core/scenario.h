@@ -125,6 +125,23 @@ struct RandomScenarioConfig {
   // Values > 1.0 spawn more starting pirate raiders.
   double pirate_strength{1.0};
 
+
+  // --- Independent minor factions / outposts ---
+  //
+  // When enabled, the generator will seed a small number of neutral
+  // independent colonies (trade stations, mining camps, freeports).
+  //
+  // These are intended to make the early/mid game feel less empty: they
+  // create additional markets for the procedural trade network and produce
+  // more interesting civilian convoy traffic.
+  bool enable_independents{true};
+
+  // How many independent outposts to place.
+  //
+  // -1 => auto scale with num_systems.
+  //  0 => none (even if enable_independents is true).
+  int num_independent_outposts{-1};
+
   // If true, clamp the player's home system nebula density low so early UI
   // readability and sensor ranges aren't immediately crushed.
   bool ensure_clear_home{true};

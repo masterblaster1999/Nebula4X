@@ -18,7 +18,45 @@ using json::Array;
 using json::Object;
 using json::Value;
 
-constexpr int kCurrentSaveVersion = 51;
+constexpr int kCurrentSaveVersion = 52;
+
+
+std::string contract_kind_to_string(ContractKind k) {
+  switch (k) {
+    case ContractKind::InvestigateAnomaly: return "investigate_anomaly";
+    case ContractKind::SalvageWreck: return "salvage_wreck";
+    case ContractKind::SurveyJumpPoint: return "survey_jump_point";
+  }
+  return "investigate_anomaly";
+}
+
+ContractKind contract_kind_from_string(const std::string& s) {
+  if (s == "investigate_anomaly" || s == "anomaly") return ContractKind::InvestigateAnomaly;
+  if (s == "salvage_wreck" || s == "wreck" || s == "salvage") return ContractKind::SalvageWreck;
+  if (s == "survey_jump_point" || s == "jump_point" || s == "survey") return ContractKind::SurveyJumpPoint;
+  return ContractKind::InvestigateAnomaly;
+}
+
+std::string contract_status_to_string(ContractStatus st) {
+  switch (st) {
+    case ContractStatus::Offered: return "offered";
+    case ContractStatus::Accepted: return "accepted";
+    case ContractStatus::Completed: return "completed";
+    case ContractStatus::Expired: return "expired";
+    case ContractStatus::Failed: return "failed";
+  }
+  return "offered";
+}
+
+ContractStatus contract_status_from_string(const std::string& s) {
+  if (s == "offered") return ContractStatus::Offered;
+  if (s == "accepted") return ContractStatus::Accepted;
+  if (s == "completed") return ContractStatus::Completed;
+  if (s == "expired") return ContractStatus::Expired;
+  if (s == "failed") return ContractStatus::Failed;
+  return ContractStatus::Offered;
+}
+
 
 Object ship_power_policy_to_json(const ShipPowerPolicy& p) {
   Object o;
@@ -1248,6 +1286,8 @@ std::string serialize_game_to_json(const GameState& s) {
     if (!a.mineral_reward.empty()) o["mineral_reward"] = map_string_double_to_json(a.mineral_reward);
     if (a.hazard_chance > 1e-12) o["hazard_chance"] = a.hazard_chance;
     if (a.hazard_damage > 1e-12) o["hazard_damage"] = a.hazard_damage;
+    if (a.origin_anomaly_id != kInvalidId) o["origin_anomaly_id"] = static_cast<double>(a.origin_anomaly_id);
+    if (a.lead_depth != 0) o["lead_depth"] = static_cast<double>(a.lead_depth);
     if (a.resolved) o["resolved"] = true;
     if (a.resolved_by_faction_id != kInvalidId) {
       o["resolved_by_faction_id"] = static_cast<double>(a.resolved_by_faction_id);
@@ -1256,6 +1296,33 @@ std::string serialize_game_to_json(const GameState& s) {
     anomalies.push_back(o);
   }
   root["anomalies"] = anomalies;
+
+  // Contracts.
+  Array contracts;
+  contracts.reserve(s.contracts.size());
+  for (Id id : sorted_keys(s.contracts)) {
+    const auto& c = s.contracts.at(id);
+    Object o;
+    o["id"] = static_cast<double>(id);
+    if (!c.name.empty()) o["name"] = c.name;
+    if (c.kind != ContractKind::InvestigateAnomaly) o["kind"] = contract_kind_to_string(c.kind);
+    if (c.status != ContractStatus::Offered) o["status"] = contract_status_to_string(c.status);
+    if (c.issuer_faction_id != kInvalidId) o["issuer_faction_id"] = static_cast<double>(c.issuer_faction_id);
+    if (c.assignee_faction_id != kInvalidId) o["assignee_faction_id"] = static_cast<double>(c.assignee_faction_id);
+    if (c.system_id != kInvalidId) o["system_id"] = static_cast<double>(c.system_id);
+    if (c.target_id != kInvalidId) o["target_id"] = static_cast<double>(c.target_id);
+    if (c.assigned_ship_id != kInvalidId) o["assigned_ship_id"] = static_cast<double>(c.assigned_ship_id);
+    if (c.assigned_fleet_id != kInvalidId) o["assigned_fleet_id"] = static_cast<double>(c.assigned_fleet_id);
+    if (c.offered_day != 0) o["offered_day"] = static_cast<double>(c.offered_day);
+    if (c.expires_day != 0) o["expires_day"] = static_cast<double>(c.expires_day);
+    if (c.accepted_day != 0) o["accepted_day"] = static_cast<double>(c.accepted_day);
+    if (c.resolved_day != 0) o["resolved_day"] = static_cast<double>(c.resolved_day);
+    if (std::abs(c.reward_research_points) > 1e-12) o["reward_research_points"] = c.reward_research_points;
+    if (c.hops_estimate != 0) o["hops_estimate"] = static_cast<double>(c.hops_estimate);
+    if (c.risk_estimate > 1e-12) o["risk_estimate"] = c.risk_estimate;
+    contracts.push_back(o);
+  }
+  root["contracts"] = contracts;
 
   // Missile salvos.
   Array missile_salvos;
@@ -2140,6 +2207,8 @@ GameState deserialize_game_from_json(const std::string& json_text) {
         if (auto itm = o.find("mineral_reward"); itm != o.end()) a.mineral_reward = map_string_double_from_json(itm->second);
         if (auto ithc = o.find("hazard_chance"); ithc != o.end()) a.hazard_chance = std::clamp(ithc->second.number_value(0.0), 0.0, 1.0);
         if (auto ithd = o.find("hazard_damage"); ithd != o.end()) a.hazard_damage = std::max(0.0, ithd->second.number_value(0.0));
+        if (auto ito = o.find("origin_anomaly_id"); ito != o.end()) a.origin_anomaly_id = static_cast<Id>(ito->second.int_value(kInvalidId));
+        if (auto itld = o.find("lead_depth"); itld != o.end()) a.lead_depth = static_cast<int>(itld->second.int_value(0));
         // Prune invalid mineral entries.
         for (auto itmr = a.mineral_reward.begin(); itmr != a.mineral_reward.end();) {
           const double v = itmr->second;
@@ -2152,10 +2221,77 @@ GameState deserialize_game_from_json(const std::string& json_text) {
         }
         if (auto itrd = o.find("resolved_day"); itrd != o.end()) a.resolved_day = static_cast<std::int64_t>(itrd->second.int_value(0));
         if (a.investigation_days < 0) a.investigation_days = 0;
+        if (a.lead_depth < 0) a.lead_depth = 0;
         s.anomalies[a.id] = std::move(a);
       }
     }
   }
+
+  // Contracts (optional in older saves).
+  if (auto it = root.find("contracts"); it != root.end()) {
+    if (!it->second.is_array()) {
+      log::warn("Save load: 'contracts' is not an array; ignoring");
+    } else {
+      for (const auto& cv : it->second.array()) {
+        if (!cv.is_object()) continue;
+        const auto& o = cv.object();
+        Contract c;
+        c.id = static_cast<Id>(o.at("id").int_value(kInvalidId));
+        if (c.id == kInvalidId) continue;
+        if (auto itn = o.find("name"); itn != o.end()) c.name = itn->second.string_value();
+        if (auto itk = o.find("kind"); itk != o.end()) {
+          if (itk->second.is_string()) c.kind = contract_kind_from_string(itk->second.string_value());
+          else if (itk->second.is_number()) {
+            const int kv = static_cast<int>(itk->second.int_value(0));
+            if (kv == 1) c.kind = ContractKind::SalvageWreck;
+            else if (kv == 2) c.kind = ContractKind::SurveyJumpPoint;
+            else c.kind = ContractKind::InvestigateAnomaly;
+          }
+        }
+        if (auto its = o.find("status"); its != o.end()) {
+          if (its->second.is_string()) c.status = contract_status_from_string(its->second.string_value());
+          else if (its->second.is_number()) {
+            const int sv = static_cast<int>(its->second.int_value(0));
+            if (sv == 1) c.status = ContractStatus::Accepted;
+            else if (sv == 2) c.status = ContractStatus::Completed;
+            else if (sv == 3) c.status = ContractStatus::Expired;
+            else if (sv == 4) c.status = ContractStatus::Failed;
+            else c.status = ContractStatus::Offered;
+          }
+        }
+        if (auto itf = o.find("issuer_faction_id"); itf != o.end()) {
+          c.issuer_faction_id = static_cast<Id>(itf->second.int_value(kInvalidId));
+        }
+        if (auto itf = o.find("assignee_faction_id"); itf != o.end()) {
+          c.assignee_faction_id = static_cast<Id>(itf->second.int_value(kInvalidId));
+        }
+        if (auto itsys = o.find("system_id"); itsys != o.end()) {
+          c.system_id = static_cast<Id>(itsys->second.int_value(kInvalidId));
+        }
+        if (auto itt = o.find("target_id"); itt != o.end()) {
+          c.target_id = static_cast<Id>(itt->second.int_value(kInvalidId));
+        }
+        if (auto itsh = o.find("assigned_ship_id"); itsh != o.end()) {
+          c.assigned_ship_id = static_cast<Id>(itsh->second.int_value(kInvalidId));
+        }
+        if (auto itfl = o.find("assigned_fleet_id"); itfl != o.end()) {
+          c.assigned_fleet_id = static_cast<Id>(itfl->second.int_value(kInvalidId));
+        }
+        if (auto itd = o.find("offered_day"); itd != o.end()) c.offered_day = static_cast<std::int64_t>(itd->second.int_value(0));
+        if (auto itd = o.find("expires_day"); itd != o.end()) c.expires_day = static_cast<std::int64_t>(itd->second.int_value(0));
+        if (auto itd = o.find("accepted_day"); itd != o.end()) c.accepted_day = static_cast<std::int64_t>(itd->second.int_value(0));
+        if (auto itd = o.find("resolved_day"); itd != o.end()) c.resolved_day = static_cast<std::int64_t>(itd->second.int_value(0));
+        if (auto itr = o.find("reward_research_points"); itr != o.end()) {
+          c.reward_research_points = std::max(0.0, itr->second.number_value(0.0));
+        }
+        if (auto ith = o.find("hops_estimate"); ith != o.end()) c.hops_estimate = static_cast<int>(ith->second.int_value(0));
+        if (auto itr = o.find("risk_estimate"); itr != o.end()) c.risk_estimate = std::max(0.0, itr->second.number_value(0.0));
+        if (c.hops_estimate < 0) c.hops_estimate = 0;
+        s.contracts[c.id] = std::move(c);
+      }
+    }
+  }
+
 
 
   // Missile salvos (optional).
@@ -3210,6 +3346,7 @@ GameState deserialize_game_from_json(const std::string& json_text) {
   for (auto& [id, _] : s.regions) bump(id);
   for (auto& [id, _] : s.wrecks) bump(id);
   for (auto& [id, _] : s.anomalies) bump(id);
+  for (auto& [id, _] : s.contracts) bump(id);
   for (auto& [id, _] : s.missile_salvos) bump(id);
   for (auto& [id, _] : s.treaties) bump(id);
   if (s.next_id <= max_id) s.next_id = max_id + 1;

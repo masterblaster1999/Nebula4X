@@ -43,6 +43,7 @@ target_sources(nebula4x_core
     src/core/order_planner.cpp
     src/core/freight_planner.cpp
     src/core/fuel_planner.cpp
+    src/core/trade_network.cpp
     src/core/salvage_planner.cpp
     src/core/troop_planner.cpp
     src/core/research_schedule.cpp
@@ -305,6 +306,7 @@ if(NEBULA4X_BUILD_TESTS)
     tests/test_sensor_coverage.cpp
     tests/test_swept_contacts.cpp
     tests/test_freight_planner.cpp
+    tests/test_trade_network.cpp
     tests/test_fuel_planner.cpp
     tests/test_mineral_deposits.cpp
     tests/test_mobile_mining.cpp
@@ -345,6 +347,7 @@ if(NEBULA4X_BUILD_TESTS)
     tests/test_state_export.cpp
     tests/test_fleets.cpp
     tests/test_combat_events.cpp
+    tests/test_planetary_point_defense.cpp
     tests/test_shields.cpp
     tests/test_turn_ticks.cpp
     tests/test_population_growth.cpp
@@ -356,6 +359,7 @@ if(NEBULA4X_BUILD_TESTS)
     tests/test_anomaly_discovery.cpp
     tests/test_missile_components.cpp
     tests/test_auto_tanker.cpp
+  tests/test_auto_refuel.cpp
     tests/test_ship_repairs.cpp
   tests/test_crew_experience.cpp
   tests/test_electronic_warfare.cpp

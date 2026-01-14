@@ -535,6 +535,17 @@ struct InstallationDef {
   double weapon_damage{0.0};
   double weapon_range_mkm{0.0};
 
+  // Optional: point defense (anti-missile) platform.
+  //
+  // If both values are > 0, colonies that have this installation will
+  // automatically contribute to point defense interception against missile
+  // salvos transiting within point_defense_range_mkm of the colony body.
+  //
+  // Damage is expressed in the same abstract units as ShipDesign::point_defense_damage
+  // ("damage per day") and is applied continuously during missile flight.
+  double point_defense_damage{0.0};
+  double point_defense_range_mkm{0.0};
+
   // Only used by research labs.
   double research_points_per_day{0.0};
 
@@ -879,9 +890,83 @@ struct Anomaly {
   double hazard_chance{0.0};
   double hazard_damage{0.0};
 
+  // Procedural "lead" metadata (exploration chains).
+  //
+  // When enabled (see SimConfig::enable_anomaly_leads), resolving an anomaly can
+  // spawn follow-up leads (new anomaly sites / caches) that form a lightweight
+  // exploration chain.
+  //
+  // origin_anomaly_id points to the *parent* anomaly that generated this one.
+  // lead_depth is 0 for scenario/static anomalies, and increments for generated
+  // follow-ups. This lets the simulation cap chain depth for balance.
+  Id origin_anomaly_id{kInvalidId};
+  int lead_depth{0};
+
   bool resolved{false};
   Id resolved_by_faction_id{kInvalidId};
   std::int64_t resolved_day{0};
+};
+
+// Procedural contracts / missions.
+//
+// Contracts are lightweight, faction-scoped tasks that can be offered/accepted and later
+// resolved by player or AI actions. They are persisted in saves, but (for now) are not
+// required for core simulation correctness.
+//
+// A Contract references a target entity by id. Interpretation depends on kind:
+// - InvestigateAnomaly: target_id is an Anomaly id.
+// - SalvageWreck: target_id is a Wreck id.
+// - SurveyJumpPoint: target_id is a JumpPoint id.
+enum class ContractKind : std::uint8_t {
+  InvestigateAnomaly = 0,
+  SalvageWreck = 1,
+  SurveyJumpPoint = 2,
+};
+
+enum class ContractStatus : std::uint8_t {
+  Offered = 0,
+  Accepted = 1,
+  Completed = 2,
+  Expired = 3,
+  Failed = 4,
+};
+
+struct Contract {
+  Id id{kInvalidId};
+  std::string name;
+
+  ContractKind kind{ContractKind::InvestigateAnomaly};
+  ContractStatus status{ContractStatus::Offered};
+
+  // Faction that issued the contract (e.g. local government, megacorp, etc.).
+  // In the current prototype this typically matches assignee_faction_id.
+  Id issuer_faction_id{kInvalidId};
+
+  // Faction that may accept/fulfill the contract.
+  Id assignee_faction_id{kInvalidId};
+
+  // System the contract takes place in (for UI + routing convenience).
+  Id system_id{kInvalidId};
+
+  // Target entity id. Interpretation depends on kind.
+  Id target_id{kInvalidId};
+
+  // Optional assignment (UI convenience).
+  Id assigned_ship_id{kInvalidId};
+  Id assigned_fleet_id{kInvalidId};
+
+  // Lifecycle (Date::days_since_epoch).
+  std::int64_t offered_day{0};
+  std::int64_t expires_day{0};
+  std::int64_t accepted_day{0};
+  std::int64_t resolved_day{0};
+
+  // Reward for completion.
+  double reward_research_points{0.0};
+
+  // Procedural metadata used for sorting/preview (optional).
+  int hops_estimate{0};
+  double risk_estimate{0.0};
 };
 
 // Missile salvos (prototype).

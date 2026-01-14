@@ -12,6 +12,7 @@
 #include <cmath>
 #include <limits>
 #include <optional>
+#include <utility>
 #include <string>
 #include <type_traits>
 #include <unordered_map>
@@ -21,6 +22,8 @@
 
 #include "nebula4x/util/log.h"
 #include "nebula4x/util/time.h"
+
+#include "nebula4x/core/trade_network.h"
 
 namespace nebula4x::ui {
 namespace {
@@ -157,6 +160,9 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   std::vector<SysView> visible;
   visible.reserve(s.systems.size());
 
+  // Lazily computed procedural trade overlay cache.
+  std::optional<TradeNetwork> trade_net;
+
   for (const auto& [id, sys] : s.systems) {
     if (ui.fog_of_war) {
       if (!can_show_system(viewer_faction_id, ui.fog_of_war, sim, id)) continue;
@@ -237,6 +243,9 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
     if (ImGui::IsKeyPressed(ImGuiKey_M)) {
       ui.galaxy_map_show_minimap = !ui.galaxy_map_show_minimap;
       minimap_enabled = ui.galaxy_map_show_minimap;
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_F)) {
+      ui.galaxy_map_fuel_range = !ui.galaxy_map_fuel_range;
     }
   }
 
@@ -682,6 +691,91 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
       }
     }
   }
+
+  // Procedural interstellar trade overlay.
+  //
+  // This draws a *civilian* trade network inferred from system resources,
+  // region themes, jump-network topology, and (optionally) colony industry.
+  // The intent is to give players strategic context and to provide a future hook
+  // for piracy/blockade mechanics.
+  if (ui.show_galaxy_trade_lanes || ui.show_galaxy_trade_hubs) {
+    // Lazily compute once per frame if the overlay is enabled.
+    TradeNetworkOptions topt;
+    topt.max_lanes = 220;
+    topt.include_uncolonized_markets = true;
+    topt.include_colony_contributions = true;
+
+    trade_net = compute_trade_network(sim, topt);
+
+    auto kind_col = [&](TradeGoodKind k, float alpha) {
+      alpha = std::clamp(alpha, 0.0f, 1.0f);
+      ImU32 c = IM_COL32(220, 200, 120, 255);
+      switch (k) {
+        case TradeGoodKind::RawMetals: c = IM_COL32(110, 210, 255, 255); break;
+        case TradeGoodKind::RawMinerals: c = IM_COL32(120, 255, 150, 255); break;
+        case TradeGoodKind::Volatiles: c = IM_COL32(255, 200, 100, 255); break;
+        case TradeGoodKind::Exotics: c = IM_COL32(220, 130, 255, 255); break;
+        case TradeGoodKind::ProcessedMetals: c = IM_COL32(210, 210, 210, 255); break;
+        case TradeGoodKind::ProcessedMinerals: c = IM_COL32(180, 220, 190, 255); break;
+        case TradeGoodKind::Fuel: c = IM_COL32(255, 230, 80, 255); break;
+        case TradeGoodKind::Munitions: c = IM_COL32(255, 120, 120, 255); break;
+        default: break;
+      }
+      return modulate_alpha(c, alpha);
+    };
+
+    const float alpha = std::clamp(ui.map_route_opacity, 0.0f, 1.0f);
+    const ImU32 shadow = modulate_alpha(IM_COL32(0, 0, 0, 200), 0.55f * alpha);
+
+    if (ui.show_galaxy_trade_lanes) {
+      for (const auto& lane : trade_net->lanes) {
+        if (lane.from_system_id == kInvalidId || lane.to_system_id == kInvalidId) continue;
+        if (lane.from_system_id == lane.to_system_id) continue;
+
+        // Respect fog-of-war: only draw lanes where both endpoints are visible.
+        if (!can_show_system(viewer_faction_id, ui.fog_of_war, sim, lane.from_system_id)) continue;
+        if (!can_show_system(viewer_faction_id, ui.fog_of_war, sim, lane.to_system_id)) continue;
+
+        const auto* a_sys = find_ptr(s.systems, lane.from_system_id);
+        const auto* b_sys = find_ptr(s.systems, lane.to_system_id);
+        if (!a_sys || !b_sys) continue;
+
+        const Vec2 a = a_sys->galaxy_pos - world_center;
+        const Vec2 b = b_sys->galaxy_pos - world_center;
+        const ImVec2 pa = to_screen(a, center_px, scale, zoom, pan);
+        const ImVec2 pb = to_screen(b, center_px, scale, zoom, pan);
+
+        const double v = std::max(0.0, lane.total_volume);
+        const float thick = 1.0f + static_cast<float>(std::clamp(std::log10(v + 1.0) * 0.70, 0.0, 4.5));
+        const TradeGoodKind dom = lane.top_flows.empty() ? TradeGoodKind::RawMetals : lane.top_flows.front().good;
+        const ImU32 col = kind_col(dom, 0.40f * alpha);
+
+        draw->AddLine(pa, pb, shadow, thick + 2.0f);
+        draw->AddLine(pa, pb, col, thick);
+        add_arrowhead(draw, pa, pb, col, 8.0f + thick * 2.0f);
+        draw->AddCircleFilled(pb, 3.0f + thick, shadow, 0);
+        draw->AddCircleFilled(pb, 2.25f + thick * 0.75f, col, 0);
+      }
+    }
+
+    if (ui.show_galaxy_trade_hubs && zoom >= 0.50f) {
+      for (const auto& node : trade_net->nodes) {
+        if (node.system_id == kInvalidId) continue;
+        if (!can_show_system(viewer_faction_id, ui.fog_of_war, sim, node.system_id)) continue;
+        const auto* sys = find_ptr(s.systems, node.system_id);
+        if (!sys) continue;
+
+        const Vec2 p = sys->galaxy_pos - world_center;
+        const ImVec2 pp = to_screen(p, center_px, scale, zoom, pan);
+
+        const float r = 4.0f + static_cast<float>(std::clamp(node.market_size, 0.0, 2.5)) * 4.0f;
+        const float a = 0.20f + 0.45f * static_cast<float>(std::clamp(node.hub_score, 0.0, 1.0));
+        const ImU32 col = kind_col(node.primary_export, a * alpha);
+        draw->AddCircle(pp, r, shadow, 0, 3.0f);
+        draw->AddCircle(pp, r, col, 0, 1.5f);
+      }
+    }
+  }
   // Selected ship/fleet travel route overlay (linked elements).
   if (ui.galaxy_map_selected_route) {
     Id route_ship_id = selected_ship;
@@ -1029,6 +1123,88 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
     }
   }
 
+
+  // Fuel-range overlay for selected ship/fleet (optional).
+  struct FuelRangeOverlay {
+    bool enabled{false};
+    bool fleet_mode{false};
+    Id ship_id{kInvalidId};
+    Id fleet_id{kInvalidId};
+    double range_now_mkm{0.0};
+    double range_full_mkm{0.0};
+  };
+
+  FuelRangeOverlay fuel_overlay;
+  if (ui.galaxy_map_fuel_range && (selected_ship != kInvalidId || selected_fleet != nullptr)) {
+    fuel_overlay.enabled = true;
+    fuel_overlay.fleet_mode = (selected_fleet != nullptr) && (selected_ship == kInvalidId || ImGui::GetIO().KeyCtrl);
+
+    auto ship_ranges = [&](Id ship_id) -> std::optional<std::pair<double, double>> {
+      const auto* sh = find_ptr(s.ships, ship_id);
+      if (!sh) {
+        return std::nullopt;
+      }
+      const auto* d = sim.find_design(sh->design_id);
+      if (!d) {
+        return std::nullopt;
+      }
+
+      const double cap = std::max(0.0, d->fuel_capacity_tons);
+      const double burn = std::max(0.0, d->fuel_use_per_mkm);
+      if (burn <= 0.0) {
+        // No fuel burn model => treat as infinite range (still constrained by jump-network visibility).
+        const double inf = std::numeric_limits<double>::infinity();
+        return std::pair<double, double>{inf, inf};
+      }
+      if (cap <= 0.0) {
+        return std::pair<double, double>{0.0, 0.0};
+      }
+
+      double fuel = sh->fuel_tons;
+      if (!std::isfinite(fuel) || fuel < 0.0) {
+        fuel = cap;
+      }
+      fuel = std::clamp(fuel, 0.0, cap);
+      return std::pair<double, double>{fuel / burn, cap / burn};
+    };
+
+    if (fuel_overlay.fleet_mode) {
+      fuel_overlay.fleet_id = selected_fleet->id;
+
+      double min_now = std::numeric_limits<double>::infinity();
+      double min_full = std::numeric_limits<double>::infinity();
+      bool any = false;
+      for (Id ship_id : selected_fleet->ship_ids) {
+        auto r = ship_ranges(ship_id);
+        if (!r) {
+          // Missing ship or design; be conservative.
+          min_now = 0.0;
+          min_full = 0.0;
+          any = true;
+          continue;
+        }
+        any = true;
+        min_now = std::min(min_now, r->first);
+        min_full = std::min(min_full, r->second);
+      }
+      if (!any) {
+        fuel_overlay.enabled = false;
+      } else {
+        fuel_overlay.range_now_mkm = min_now;
+        fuel_overlay.range_full_mkm = min_full;
+      }
+    } else {
+      fuel_overlay.ship_id = selected_ship;
+      auto r = ship_ranges(selected_ship);
+      if (!r) {
+        fuel_overlay.enabled = false;
+      } else {
+        fuel_overlay.range_now_mkm = r->first;
+        fuel_overlay.range_full_mkm = r->second;
+      }
+    }
+  }
+
   // Draw nodes.
   for (const auto& n : nodes) {
     const bool is_selected = (s.selected_system == n.id);
@@ -1110,6 +1286,26 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
         const ImU32 col1 = modulate_alpha(IM_COL32(255, 180, 120, 255), a * 0.45f);
         draw->AddCircle(n.p, r, col0, 0, 2.0f);
         draw->AddCircle(n.p, r + 3.0f, col1, 0, 1.0f);
+      }
+    }
+
+    // Fuel range reachability overlay ring (selected ship/fleet).
+    if (fuel_overlay.enabled) {
+      const bool restrict = ui.fog_of_war;
+      std::optional<JumpRoutePlan> plan;
+      if (fuel_overlay.fleet_mode) {
+        plan = sim.plan_jump_route_for_fleet(fuel_overlay.fleet_id, n.id, restrict, false);
+      } else {
+        plan = sim.plan_jump_route_for_ship(fuel_overlay.ship_id, n.id, restrict, false);
+      }
+      if (plan) {
+        const double d_mkm = plan->distance_mkm;
+        const float r = base_r + 12.0f;
+        if (d_mkm <= fuel_overlay.range_now_mkm + 1e-6) {
+          draw->AddCircle(n.p, r, IM_COL32(90, 255, 150, 200), 0, 2.0f);
+        } else if (d_mkm <= fuel_overlay.range_full_mkm + 1e-6) {
+          draw->AddCircle(n.p, r, IM_COL32(255, 220, 90, 200), 0, 2.0f);
+        }
       }
     }
 
@@ -1265,6 +1461,53 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
         }
       }
 
+      if (trade_net && (ui.show_galaxy_trade_lanes || ui.show_galaxy_trade_hubs)) {
+        const TradeNode* tnode = nullptr;
+        for (const auto& n : trade_net->nodes) {
+          if (n.system_id == sys->id) {
+            tnode = &n;
+            break;
+          }
+        }
+        if (tnode) {
+          auto top_balance = [&](bool want_export) {
+            std::array<int, kTradeGoodKindCount> idxs{};
+            for (int i = 0; i < kTradeGoodKindCount; ++i) idxs[i] = i;
+            std::sort(idxs.begin(), idxs.end(), [&](int a, int b) {
+              const double va = tnode->balance[a];
+              const double vb = tnode->balance[b];
+              if (want_export) {
+                if (va > vb + 1e-12) return true;
+                if (vb > va + 1e-12) return false;
+              } else {
+                if (-va > -vb + 1e-12) return true;
+                if (-vb > -va + 1e-12) return false;
+              }
+              return a < b;
+            });
+            std::string out;
+            int shown = 0;
+            for (int k : idxs) {
+              const double v = tnode->balance[k];
+              if (want_export && v <= 1e-6) continue;
+              if (!want_export && v >= -1e-6) continue;
+              if (shown > 0) out += ", ";
+              out += trade_good_kind_label(static_cast<TradeGoodKind>(k));
+              ++shown;
+              if (shown >= 2) break;
+            }
+            if (out.empty()) out = want_export ? "None" : "None";
+            return out;
+          };
+
+          ImGui::Separator();
+          ImGui::Text("Trade market");
+          ImGui::TextDisabled("Market size: %.2f  |  Hub: %.2f", tnode->market_size, tnode->hub_score);
+          ImGui::Text("Exports: %s", top_balance(true).c_str());
+          ImGui::Text("Imports: %s", top_balance(false).c_str());
+        }
+      }
+
       if (ImGui::SmallButton("Select")) {
         s.selected_system = hovered_system;
       }
@@ -1312,6 +1555,101 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
           ImGui::Text("ETA: %.1f days", preview_route->eta_days);
         } else {
           ImGui::TextDisabled("ETA: n/a");
+        }
+
+        // Fuel estimate (simple: fuel burn is proportional to jump-route distance).
+        // Note: the Shift "queued" preview starts after the current queued jump chain;
+        // we do not currently project fuel burn for the queued segment.
+        const double preview_dist_mkm = preview_route->distance_mkm;
+        if (preview_dist_mkm > 0.0) {
+          if (!preview_is_fleet && selected_ship != kInvalidId) {
+            if (const auto* sh = find_ptr(s.ships, selected_ship)) {
+              if (const auto* d = sim.find_design(sh->design_id)) {
+                const double cap = std::max(0.0, d->fuel_capacity_tons);
+                const double burn = std::max(0.0, d->fuel_use_per_mkm);
+                if (cap > 0.0 && burn > 0.0) {
+                  double fuel = sh->fuel_tons;
+                  if (!std::isfinite(fuel) || fuel < 0.0) {
+                    fuel = cap;
+                  }
+                  fuel = std::clamp(fuel, 0.0, cap);
+
+                  const double need = preview_dist_mkm * burn;
+                  ImGui::Text("Fuel: %.1f / %.1f t", fuel, cap);
+                  ImGui::Text("Fuel needed: %.1f t", need);
+                  if (!preview_from_queue) {
+                    const double rem = fuel - need;
+                    if (rem >= -1e-6) {
+                      ImGui::TextDisabled("On arrival: %.1f t", rem);
+                    } else {
+                      ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f),
+                                         "INSUFFICIENT FUEL (short %.1f t)", -rem);
+                    }
+                  } else {
+                    ImGui::TextDisabled("Fuel check doesn't project queued fuel burn.");
+                  }
+                }
+              }
+            }
+          } else if (preview_is_fleet && selected_fleet != nullptr) {
+            int total = (int)selected_fleet->ship_ids.size();
+            int ok = 0;
+            int unknown = 0;
+            double worst_short = 0.0;
+            double min_remaining = std::numeric_limits<double>::infinity();
+
+            for (Id ship_id : selected_fleet->ship_ids) {
+              const auto* sh = find_ptr(s.ships, ship_id);
+              if (!sh) {
+                unknown++;
+                continue;
+              }
+              const auto* d = sim.find_design(sh->design_id);
+              if (!d) {
+                unknown++;
+                continue;
+              }
+              const double cap = std::max(0.0, d->fuel_capacity_tons);
+              const double burn = std::max(0.0, d->fuel_use_per_mkm);
+              if (cap <= 0.0 || burn <= 0.0) {
+                ok++;
+                continue;
+              }
+
+              double fuel = sh->fuel_tons;
+              if (!std::isfinite(fuel) || fuel < 0.0) {
+                fuel = cap;
+              }
+              fuel = std::clamp(fuel, 0.0, cap);
+
+              const double need = preview_dist_mkm * burn;
+              const double rem = fuel - need;
+              min_remaining = std::min(min_remaining, rem);
+              if (rem >= -1e-6) {
+                ok++;
+              } else {
+                worst_short = std::max(worst_short, -rem);
+              }
+            }
+
+            ImGui::Text("Fleet fuel: %d/%d ships OK", ok, total);
+            if (unknown > 0) {
+              ImGui::TextDisabled("%d ships: unknown fuel model", unknown);
+            }
+
+            if (!preview_from_queue && unknown == 0) {
+              if (ok == total) {
+                if (std::isfinite(min_remaining)) {
+                  ImGui::TextDisabled("Worst arrival fuel: %.1f t", min_remaining);
+                }
+              } else {
+                ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f),
+                                   "%d ships will run out of fuel (worst short %.1f t)", total - ok, worst_short);
+              }
+            } else if (preview_from_queue) {
+              ImGui::TextDisabled("Fuel check doesn't project queued fuel burn.");
+            }
+          }
         }
 
         std::string route;
@@ -1386,6 +1724,15 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   ImGui::Checkbox("Grid", &ui.galaxy_map_grid);
   ImGui::Checkbox("Minimap (M)", &ui.galaxy_map_show_minimap);
   ImGui::Checkbox("Selected travel route", &ui.galaxy_map_selected_route);
+  {
+    const bool have_nav_ref = (selected_ship != kInvalidId) || (selected_fleet != nullptr);
+    ImGui::BeginDisabled(!have_nav_ref);
+    ImGui::Checkbox("Fuel range (F)", &ui.galaxy_map_fuel_range);
+    ImGui::EndDisabled();
+    if (ui.galaxy_map_fuel_range) {
+      ImGui::TextDisabled("Green: reachable now. Yellow: reachable on full tanks.");
+    }
+  }
   ImGui::Checkbox("Fog of war", &ui.fog_of_war);
   ImGui::Checkbox("Labels", &ui.show_galaxy_labels);
   ImGui::Checkbox("Jump links", &ui.show_galaxy_jump_lines);
@@ -1394,6 +1741,10 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   ImGui::Checkbox("Intel alerts", &ui.show_galaxy_intel_alerts);
   ImGui::Checkbox("Freight lanes", &ui.show_galaxy_freight_lanes);
   ImGui::TextDisabled("Shows current auto-freight cargo routes (viewer faction).");
+  ImGui::Checkbox("Trade lanes", &ui.show_galaxy_trade_lanes);
+  ImGui::SameLine();
+  ImGui::Checkbox("Hubs##trade", &ui.show_galaxy_trade_hubs);
+  ImGui::TextDisabled("Procedural civilian trade lanes. Color indicates the dominant commodity.");
   ImGui::SeparatorText("Route ruler (hold D)");
   ImGui::TextDisabled("Hold D and left click two systems. D+right click clears.");
   {

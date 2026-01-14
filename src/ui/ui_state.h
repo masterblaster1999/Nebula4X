@@ -256,6 +256,10 @@ struct UIState {
   // Logistics overlays.
   bool show_galaxy_freight_lanes{false};
 
+  // Procedural interstellar economy overlays.
+  bool show_galaxy_trade_lanes{false};
+  bool show_galaxy_trade_hubs{false};
+
   // Highlight jump-network articulation points ("chokepoint" systems).
   bool show_galaxy_chokepoints{false};
 
@@ -586,10 +590,34 @@ struct UIState {
   bool system_map_missile_salvos{false};
   bool system_map_follow_selected{false};
   bool system_map_show_minimap{true};
+  // --- System map planning / time preview ---
+  // When enabled, the System Map draws a non-simulative "future overlay" that
+  // predicts orbital positions for bodies and extrapolates ship motion from the
+  // last-tick velocity vector. This is purely a UI planning tool.
+  bool system_map_time_preview{false};
+  // Relative offset from the current in-game time (days). Can be negative.
+  float system_map_time_preview_days{30.0f};
+  // Draw now->future connector arrows (bodies/ships).
+  bool system_map_time_preview_vectors{true};
+  // When false, only the selected ship / fleet leader gets a motion overlay.
+  bool system_map_time_preview_all_ships{false};
+  // Draw swept trails between now and the preview time.
+  bool system_map_time_preview_trails{true};
+
+  // --- System map heatmaps ---
+  // Optional raster overlays that summarize "coverage" fields without drawing
+  // hundreds of individual circles. These are UI-only preferences.
+  bool system_map_sensor_heatmap{false};
+  bool system_map_threat_heatmap{false};
+  // Global opacity multiplier for heatmaps (0..1).
+  float system_map_heatmap_opacity{0.35f};
+  // Approximate number of cells across the map width (higher = sharper, slower).
+  int system_map_heatmap_resolution{64};
 
   bool galaxy_map_starfield{true};
   bool galaxy_map_grid{false};
   bool galaxy_map_selected_route{true};
+  bool galaxy_map_fuel_range{false};
   bool galaxy_map_show_minimap{true};
 
   // Shared tuning knobs.

@@ -20,6 +20,7 @@
 #include "nebula4x/core/fuel_planner.h"
 #include "nebula4x/core/freight_planner.h"
 #include "nebula4x/core/ground_battle_forecast.h"
+#include "nebula4x/core/trade_network.h"
 #include "nebula4x/core/troop_planner.h"
 #include "nebula4x/util/log.h"
 #include "nebula4x/util/trace_events.h"
@@ -122,7 +123,8 @@ void Simulation::tick_ai() {
 
     const ShipDesign* d = find_design(ship->design_id);
     if (!d) return false;
-    const double cap = std::max(0.0, d->fuel_capacity_tons);
+	    const double burn = std::max(0.0, d->fuel_use_per_mkm);
+	    const double cap = std::max(0.0, d->fuel_capacity_tons);
     if (cap <= 1e-9) return false;
 
     if (ship->fuel_tons < 0.0) ship->fuel_tons = cap;
@@ -160,9 +162,20 @@ void Simulation::tick_ai() {
       if (!b) continue;
       if (b->system_id == kInvalidId) continue;
 
-      const double eta = estimate_eta_days_to_pos(ship->system_id, ship->position_mkm, ship->faction_id,
-                                                  ship->speed_km_s, b->system_id, b->position_mkm);
+
+      auto plan_opt = plan_jump_route_cached(ship->system_id, ship->position_mkm, ship->faction_id,
+                                            ship->speed_km_s, b->system_id, true, b->position_mkm);
+      if (!plan_opt) continue;
+      const double eta = plan_opt->total_eta_days;
       if (!std::isfinite(eta)) continue;
+
+      // Fuel reachability check: avoid routing to a refuel colony we cannot reach.
+      if (burn > 0.0) {
+        const double fuel_needed = plan_opt->total_distance_mkm * burn;
+        if (ship->fuel_tons + 1e-6 < fuel_needed) {
+          continue;
+        }
+      }
 
       const double fuel_avail = [&]() {
         if (auto it = c->minerals.find("Fuel"); it != c->minerals.end()) return std::max(0.0, it->second);
@@ -224,6 +237,7 @@ void Simulation::tick_ai() {
 
     const ShipDesign* d = find_design(ship->design_id);
     if (!d) return false;
+	    const double burn = std::max(0.0, d->fuel_use_per_mkm);
     const int cap = std::max(0, d->missile_ammo_capacity);
     if (cap <= 0) return false;
 
@@ -276,9 +290,20 @@ void Simulation::tick_ai() {
       if (!b) continue;
       if (b->system_id == kInvalidId) continue;
 
-      const double eta = estimate_eta_days_to_pos(ship->system_id, ship->position_mkm, ship->faction_id,
-                                                  ship->speed_km_s, b->system_id, b->position_mkm);
+
+      auto plan_opt = plan_jump_route_cached(ship->system_id, ship->position_mkm, ship->faction_id,
+                                            ship->speed_km_s, b->system_id, true, b->position_mkm);
+      if (!plan_opt) continue;
+      const double eta = plan_opt->total_eta_days;
       if (!std::isfinite(eta)) continue;
+
+      // Fuel reachability check: avoid routing to a refuel colony we cannot reach.
+      if (burn > 0.0) {
+        const double fuel_needed = plan_opt->total_distance_mkm * burn;
+        if (ship->fuel_tons + 1e-6 < fuel_needed) {
+          continue;
+        }
+      }
 
       const double mun_avail = [&]() {
         if (auto it = c->minerals.find(kMunitionsKey); it != c->minerals.end()) return std::max(0.0, it->second);
@@ -341,6 +366,7 @@ void Simulation::tick_ai() {
 
     const ShipDesign* d = find_design(ship->design_id);
     if (!d) return false;
+    const double burn = std::max(0.0, d->fuel_use_per_mkm);
     const double max_hp = std::max(0.0, d->max_hp);
     if (max_hp <= 1e-9) return false;
 
@@ -390,9 +416,20 @@ void Simulation::tick_ai() {
       if (b->system_id == kInvalidId) continue;
       if (!find_ptr(state_.systems, b->system_id)) continue;
 
-      const double eta = estimate_eta_days_to_pos(ship->system_id, ship->position_mkm, ship->faction_id,
-                                                  ship->speed_km_s, b->system_id, b->position_mkm);
+
+      auto plan_opt = plan_jump_route_cached(ship->system_id, ship->position_mkm, ship->faction_id,
+                                            ship->speed_km_s, b->system_id, true, b->position_mkm);
+      if (!plan_opt) continue;
+      const double eta = plan_opt->total_eta_days;
       if (!std::isfinite(eta)) continue;
+
+      // Fuel reachability check: avoid routing to a refuel colony we cannot reach.
+      if (burn > 0.0) {
+        const double fuel_needed = plan_opt->total_distance_mkm * burn;
+        if (ship->fuel_tons + 1e-6 < fuel_needed) {
+          continue;
+        }
+      }
 
       // Roughly estimate total time as travel ETA plus repair time at that colony.
       // Note: repair mineral availability is handled by tick_repairs(); we ignore it here.
@@ -488,6 +525,7 @@ void Simulation::tick_ai() {
 
     const ShipDesign* d = find_design(ship->design_id);
     if (!d) return false;
+    const double burn = std::max(0.0, d->fuel_use_per_mkm);
     if (d->colony_capacity_millions <= 0.0) return false;
 
     auto& reserved = reserved_colonize_targets[ship->faction_id];
@@ -514,9 +552,20 @@ void Simulation::tick_ai() {
       // Skip targets that are both extremely hostile and resource-poor.
       if (hab < 0.05 && mineral_score < 2.0) continue;  // <~ 100 total deposit
 
-      const double eta = estimate_eta_days_to_pos(ship->system_id, ship->position_mkm, ship->faction_id,
-                                                  ship->speed_km_s, b->system_id, b->position_mkm);
+
+      auto plan_opt = plan_jump_route_cached(ship->system_id, ship->position_mkm, ship->faction_id,
+                                            ship->speed_km_s, b->system_id, true, b->position_mkm);
+      if (!plan_opt) continue;
+      const double eta = plan_opt->total_eta_days;
       if (!std::isfinite(eta)) continue;
+
+      // Fuel reachability check: avoid routing to a refuel colony we cannot reach.
+      if (burn > 0.0) {
+        const double fuel_needed = plan_opt->total_distance_mkm * burn;
+        if (ship->fuel_tons + 1e-6 < fuel_needed) {
+          continue;
+        }
+      }
 
       // Score blend:
       // - Habitability dominates for population-friendly worlds.
@@ -3354,6 +3403,11 @@ void Simulation::tick_ai() {
     }
   }
 
+  // Ambient civilian shipping (procedural convoys). This runs after AI planning
+  // so civilian traffic reacts to newly founded colonies, and before piracy
+  // suppression/raids so pirates have fresh targets.
+  tick_civilian_trade_convoys();
+
   // Update region piracy suppression after AI planning, so newly assigned patrol
   // missions take effect immediately for the raid weighting below.
   tick_piracy_suppression();
@@ -3560,6 +3614,251 @@ void Simulation::tick_ai() {
     }
   }
 
+}
+
+
+void Simulation::tick_civilian_trade_convoys() {
+  if (!cfg_.enable_civilian_trade_convoys) return;
+  NEBULA4X_TRACE_SCOPE("tick_civilian_trade_convoys", "sim.civilian_trade_convoys");
+
+  const int max_ships = std::max(0, cfg_.civilian_trade_convoy_max_ships);
+  if (max_ships <= 0) return;
+
+  // --- Find or create the neutral merchant faction ---
+  constexpr const char* kMerchantFactionName = "Merchant Guild";
+  Id merchant_fid = kInvalidId;
+  for (const auto& [fid, f] : state_.factions) {
+    if (f.control == FactionControl::AI_Passive && f.name == kMerchantFactionName) {
+      merchant_fid = fid;
+      break;
+    }
+  }
+
+  if (merchant_fid == kInvalidId) {
+    // Snapshot current faction ids before inserting (unordered_map may rehash).
+    const auto other_fids = sorted_keys(state_.factions);
+
+    Faction mf;
+    mf.id = allocate_id(state_);
+    mf.name = kMerchantFactionName;
+    mf.control = FactionControl::AI_Passive;
+
+    // Default relations are Hostile (for backward compatibility). Override to
+    // neutral with non-pirate factions so the guild can exist without being
+    // immediately attacked. Keep pirates hostile.
+    for (Id ofid : other_fids) {
+      const auto* of = find_ptr(state_.factions, ofid);
+      if (!of) continue;
+      const DiplomacyStatus st = (of->control == FactionControl::AI_Pirate) ? DiplomacyStatus::Hostile
+                                                                            : DiplomacyStatus::Neutral;
+      mf.relations[ofid] = st;
+    }
+
+    state_.factions[mf.id] = mf;
+    merchant_fid = mf.id;
+
+    // Mirror relations on the existing factions.
+    for (Id ofid : other_fids) {
+      auto* of = find_ptr(state_.factions, ofid);
+      if (!of) continue;
+      const DiplomacyStatus st = (of->control == FactionControl::AI_Pirate) ? DiplomacyStatus::Hostile
+                                                                            : DiplomacyStatus::Neutral;
+      of->relations[merchant_fid] = st;
+    }
+  }
+
+  // --- Determine how many convoys to maintain ---
+  int current = 0;
+  for (const auto& [sid, sh] : state_.ships) {
+    (void)sid;
+    if (sh.hp <= 0.0) continue;
+    if (sh.faction_id == merchant_fid) current++;
+  }
+
+  // Compute trade lanes and scale the convoy target to trade activity.
+  TradeNetworkOptions opt;
+  opt.include_uncolonized_markets = false;
+  opt.max_lanes = std::max(1, cfg_.civilian_trade_convoy_consider_top_lanes);
+  opt.max_goods_per_lane = 3;
+
+  const TradeNetwork net = compute_trade_network(*this, opt);
+  if (net.lanes.empty()) return;
+
+  double total_vol = 0.0;
+  for (const auto& l : net.lanes) total_vol += std::max(0.0, l.total_volume);
+  if (!(total_vol > 1e-9)) return;
+
+  int target = static_cast<int>(std::llround(std::sqrt(total_vol) * cfg_.civilian_trade_convoy_target_sqrt_mult));
+  target = std::clamp(target, std::max(0, cfg_.civilian_trade_convoy_min_ships), max_ships);
+
+  if (current >= target) return;
+
+  const int max_spawn = std::max(0, cfg_.civilian_trade_convoy_max_spawn_per_day);
+  const int spawn_n = std::min({target - current, max_spawn, max_ships - current});
+  if (spawn_n <= 0) return;
+
+  // Precompute a "hub" body position per system for more natural spawns.
+  std::unordered_map<Id, Vec2> hub_pos;
+  hub_pos.reserve(state_.systems.size() * 2 + 8);
+  std::unordered_map<Id, double> hub_pop;
+  hub_pop.reserve(state_.systems.size() * 2 + 8);
+
+  for (const auto& [cid, c] : state_.colonies) {
+    (void)cid;
+    const Body* b = find_ptr(state_.bodies, c.body_id);
+    if (!b) continue;
+    const Id sys = b->system_id;
+    if (sys == kInvalidId) continue;
+    const double p = std::max(0.0, c.population_millions);
+    auto it = hub_pop.find(sys);
+    if (it == hub_pop.end() || p > it->second + 1e-9) {
+      hub_pop[sys] = p;
+      hub_pos[sys] = b->position_mkm;
+    }
+  }
+
+  auto good_to_resource = [](TradeGoodKind g) -> std::string {
+    switch (g) {
+      case TradeGoodKind::RawMetals:        return "Duranium";
+      case TradeGoodKind::ProcessedMetals:  return "Metals";
+      case TradeGoodKind::RawMinerals:      return "Mercassium";
+      case TradeGoodKind::ProcessedMinerals:return "Minerals";
+      case TradeGoodKind::Volatiles:        return "Sorium";
+      case TradeGoodKind::Fuel:             return "Fuel";
+      case TradeGoodKind::Munitions:        return "Munitions";
+      case TradeGoodKind::Exotics:          return "Corbomite";
+      default:                              return std::string();
+    }
+  };
+
+  // Candidate civilian freighter designs (content ids). Use whichever exist.
+  std::vector<std::string> design_pool;
+  for (const char* id : {"freighter_beta", "freighter_alpha_ion", "freighter_alpha"}) {
+    if (find_design(id)) design_pool.push_back(id);
+  }
+  if (design_pool.empty()) return;
+
+  // Deterministic daily seed.
+  std::uint64_t rng = static_cast<std::uint64_t>(state_.date.days_since_epoch());
+  rng ^= static_cast<std::uint64_t>(merchant_fid) * 0x9e3779b97f4a7c15ULL;
+
+  // Copy lanes into a local working list for weighted sampling without
+  // replacement (helps spread convoys across multiple corridors).
+  struct LanePick { Id from; Id to; double w; std::vector<TradeGoodFlow> flows; };
+  std::vector<LanePick> lanes;
+  lanes.reserve(net.lanes.size());
+  for (const auto& l : net.lanes) {
+    if (!(l.total_volume > 1e-9)) continue;
+    lanes.push_back({l.from_system_id, l.to_system_id, std::max(0.0, l.total_volume), l.top_flows});
+  }
+  if (lanes.empty()) return;
+
+  auto remove_ship = [&](Id ship_id) {
+    auto it = state_.ships.find(ship_id);
+    if (it == state_.ships.end()) return;
+    const Id sys_id = it->second.system_id;
+    if (sys_id != kInvalidId) {
+      auto it_sys = state_.systems.find(sys_id);
+      if (it_sys != state_.systems.end()) {
+        auto& vec = it_sys->second.ships;
+        vec.erase(std::remove(vec.begin(), vec.end(), ship_id), vec.end());
+      }
+    }
+    state_.ships.erase(it);
+    state_.ship_orders.erase(ship_id);
+  };
+
+  auto pick_weighted_lane_index = [&](std::uint64_t& s) -> int {
+    double sum = 0.0;
+    for (const auto& l : lanes) sum += l.w;
+    if (!(sum > 1e-12)) return -1;
+    const double r = u01(s) * sum;
+    double acc = 0.0;
+    for (int i = 0; i < static_cast<int>(lanes.size()); ++i) {
+      acc += lanes[i].w;
+      if (r <= acc + 1e-12) return i;
+    }
+    return static_cast<int>(lanes.size()) - 1;
+  };
+
+  for (int i = 0; i < spawn_n; ++i) {
+    if (lanes.empty()) break;
+    const int idx = pick_weighted_lane_index(rng);
+    if (idx < 0 || idx >= static_cast<int>(lanes.size())) break;
+
+    const LanePick lp = lanes[idx];
+    lanes.erase(lanes.begin() + idx);
+
+    if (lp.from == kInvalidId || lp.to == kInvalidId) continue;
+    if (lp.from == lp.to) continue;
+    if (!state_.systems.contains(lp.from) || !state_.systems.contains(lp.to)) continue;
+
+    const int d = static_cast<int>(std::floor(u01(rng) * static_cast<double>(design_pool.size())));
+    const std::string design_id = design_pool[std::clamp(d, 0, static_cast<int>(design_pool.size()) - 1)];
+    const ShipDesign* sd = find_design(design_id);
+    if (!sd) continue;
+
+    // Spawn near the primary colony in the origin system (if any), otherwise at
+    // the system origin.
+    Vec2 anchor{0.0, 0.0};
+    if (auto it = hub_pos.find(lp.from); it != hub_pos.end()) anchor = it->second;
+    const double ang = u01(rng) * kTwoPi;
+    const double rad = 0.15 + 0.25 * u01(rng); // mkm offset from anchor
+    const Vec2 spawn_pos{anchor.x + std::cos(ang) * rad, anchor.y + std::sin(ang) * rad};
+
+    Ship sh;
+    sh.id = allocate_id(state_);
+    sh.faction_id = merchant_fid;
+    sh.system_id = lp.from;
+    sh.name = "Merchant Convoy " + std::to_string(static_cast<unsigned long long>(sh.id));
+    sh.position_mkm = spawn_pos;
+    sh.design_id = design_id;
+    sh.sensor_mode = SensorMode::Passive;
+
+    // Cosmetic cargo (also provides salvage if the convoy is destroyed).
+    const double fill = std::clamp(cfg_.civilian_trade_convoy_cargo_fill_fraction, 0.0, 1.0);
+    const double cap = std::max(0.0, sd->cargo_tons);
+    const double load = cap * fill;
+    if (load > 1e-6 && !lp.flows.empty()) {
+      const int n = std::min(3, static_cast<int>(lp.flows.size()));
+      double sum_share = 0.0;
+      for (int j = 0; j < n; ++j) sum_share += std::max(0.0, lp.flows[j].volume);
+      if (!(sum_share > 1e-9)) sum_share = 1.0;
+
+      for (int j = 0; j < n; ++j) {
+        const auto res = good_to_resource(lp.flows[j].good);
+        if (res.empty()) continue;
+        const double part = load * (std::max(0.0, lp.flows[j].volume) / sum_share);
+        if (part > 1e-9) sh.cargo[res] += part;
+      }
+    }
+
+    // Insert into state.
+    state_.ships[sh.id] = sh;
+    state_.ship_orders[sh.id] = ShipOrders{};
+    state_.systems.at(lp.from).ships.push_back(sh.id);
+    apply_design_stats_to_ship(state_.ships.at(sh.id));
+
+    // Build a simple loop: from -> to -> wait -> back -> wait, repeat forever.
+    const int wait_base = std::max(0, cfg_.civilian_trade_convoy_endpoint_wait_days_base);
+    const int wait_jit = std::max(0, cfg_.civilian_trade_convoy_endpoint_wait_days_jitter);
+    const int wait_a = wait_base + static_cast<int>(std::floor(u01(rng) * (wait_jit + 1)));
+    const int wait_b = wait_base + static_cast<int>(std::floor(u01(rng) * (wait_jit + 1)));
+
+    if (!issue_travel_to_system(sh.id, lp.to, /*restrict_to_discovered=*/false)) {
+      remove_ship(sh.id);
+      continue;
+    }
+    if (wait_a > 0) state_.ship_orders[sh.id].queue.push_back(WaitDays{.days_remaining = wait_a});
+
+    if (!issue_travel_to_system(sh.id, lp.from, /*restrict_to_discovered=*/false)) {
+      remove_ship(sh.id);
+      continue;
+    }
+    if (wait_b > 0) state_.ship_orders[sh.id].queue.push_back(WaitDays{.days_remaining = wait_b});
+
+    enable_order_repeat(sh.id, -1);
+  }
 }
 
 
@@ -4132,6 +4431,15 @@ void Simulation::tick_refuel() {
   const double dock_range = std::max(arrive_eps, cfg_.docking_range_mkm);
 
   for (auto& [sid, ship] : state_.ships) {
+    (void)sid;
+
+    // Ambient/passive civilian ships (e.g. neutral merchant convoys) are
+    // intentionally abstracted and do not pull supplies from colonies.
+    if (const auto* fac = find_ptr(state_.factions, ship.faction_id);
+        fac && fac->control == FactionControl::AI_Passive) {
+      continue;
+    }
+
     const ShipDesign* d = find_design(ship.design_id);
     if (!d) continue;
 
@@ -4200,6 +4508,16 @@ void Simulation::tick_rearm() {
 
   for (auto& [sid, ship] : state_.ships) {
     (void)sid;
+
+    // Ambient/passive civilian ships (e.g. neutral merchant convoys) are
+    // intentionally abstracted and do not participate in the maintenance supply
+    // loop. This avoids draining player stockpiles and keeps the civilian layer
+    // lightweight.
+    if (const auto* fac = find_ptr(state_.factions, ship.faction_id);
+        fac && fac->control == FactionControl::AI_Passive) {
+      continue;
+    }
+
     const ShipDesign* d = find_design(ship.design_id);
     if (!d) continue;
 
@@ -4306,6 +4624,15 @@ void Simulation::tick_ship_maintenance(double dt_days) {
     (void)sid;
     const ShipDesign* d = find_design(ship.design_id);
     if (!d) continue;
+
+    // Ambient/passive civilian ships (e.g. neutral merchant convoys) are
+    // intentionally abstracted and do not participate in the maintenance supply
+    // loop. This avoids draining player stockpiles and keeps the civilian layer
+    // lightweight.
+    if (const auto* fac = find_ptr(state_.factions, ship.faction_id);
+        fac && fac->control == FactionControl::AI_Passive) {
+      continue;
+    }
 
     // Sanitize in case older saves or mods produce out-of-range values.
     if (!std::isfinite(ship.maintenance_condition)) ship.maintenance_condition = 1.0;
@@ -4641,6 +4968,13 @@ void Simulation::tick_repairs(double dt_days) {
   for (Id sid : ship_ids) {
     auto* ship = find_ptr(state_.ships, sid);
     if (!ship) continue;
+
+    // Ambient/passive civilian ships are abstracted and do not use faction
+    // shipyards or colony resources for repairs.
+    if (const auto* fac = find_ptr(state_.factions, ship->faction_id);
+        fac && fac->control == FactionControl::AI_Passive) {
+      continue;
+    }
 
     const auto* d = find_design(ship->design_id);
     const double max_hp = d ? d->max_hp : ship->hp;

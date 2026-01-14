@@ -706,6 +706,34 @@ InstallationDef parse_installation_def(const std::string& inst_id, const json::O
     if (def.weapon_range_mkm <= 0.0) def.weapon_range_mkm = wr2_v->number_value(0.0);
   }
 
+  // Optional: point defense (anti-missile).
+  // Preferred keys:
+  //   point_defense_damage, point_defense_range_mkm
+  // Author-friendly aliases:
+  //   pd_damage, pd_range_mkm, point_defense_range, pd_range
+  if (const auto* pd_v = find_key(vo, "point_defense_damage")) {
+    def.point_defense_damage = pd_v->number_value(0.0);
+  }
+  if (const auto* pd2_v = find_key(vo, "pd_damage")) {
+    if (def.point_defense_damage <= 0.0) def.point_defense_damage = pd2_v->number_value(0.0);
+  }
+  if (const auto* pd3_v = find_key(vo, "point_defense")) {
+    if (def.point_defense_damage <= 0.0) def.point_defense_damage = pd3_v->number_value(0.0);
+  }
+
+  if (const auto* pr_v = find_key(vo, "point_defense_range_mkm")) {
+    def.point_defense_range_mkm = pr_v->number_value(0.0);
+  }
+  if (const auto* pr2_v = find_key(vo, "pd_range_mkm")) {
+    if (def.point_defense_range_mkm <= 0.0) def.point_defense_range_mkm = pr2_v->number_value(0.0);
+  }
+  if (const auto* pr3_v = find_key(vo, "point_defense_range")) {
+    if (def.point_defense_range_mkm <= 0.0) def.point_defense_range_mkm = pr3_v->number_value(0.0);
+  }
+  if (const auto* pr4_v = find_key(vo, "pd_range")) {
+    if (def.point_defense_range_mkm <= 0.0) def.point_defense_range_mkm = pr4_v->number_value(0.0);
+  }
+
   if (const auto* rp_v = find_key(vo, "research_points_per_day")) {
     def.research_points_per_day = rp_v->number_value(0.0);
   }

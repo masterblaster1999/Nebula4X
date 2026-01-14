@@ -15,6 +15,7 @@ int test_serialization();
 int test_auto_freight();
 int test_freight_planner();
 int test_fuel_planner();
+int test_trade_network();
 int test_industry();
 int test_refit();
 int test_diplomacy();
@@ -49,6 +50,7 @@ int test_regression_tape();
 int test_state_export();
 int test_population_growth();
 int test_combat_events();
+int test_planetary_point_defense();
 int test_shields();
 int test_population_transport();
 int test_colonization();
@@ -59,6 +61,7 @@ int test_anomalies();
 int test_anomaly_discovery();
 int test_missile_components();
 int test_auto_tanker();
+int test_auto_refuel();
 int test_ship_repairs();
 int test_crew_experience();
 int test_electronic_warfare();
@@ -177,6 +180,7 @@ int main(int argc, char** argv) {
       {"serialization", test_serialization},
       {"auto_freight", test_auto_freight},
       {"freight_planner", test_freight_planner},
+      {"trade_network", test_trade_network},
       {"fuel_planner", test_fuel_planner},
       {"industry", test_industry},
       {"refit", test_refit},
@@ -238,7 +242,9 @@ int main(int argc, char** argv) {
       {"anomaly_discovery", test_anomaly_discovery},
       {"missile_components", test_missile_components},
       {"auto_tanker", test_auto_tanker},
+    {"auto_refuel", test_auto_refuel},
       {"combat_events", test_combat_events},
+      {"planetary_point_defense", test_planetary_point_defense},
       {"shields", test_shields},
       {"turn_ticks", test_turn_ticks},
       {"intercept", test_intercept},

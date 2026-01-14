@@ -134,6 +134,12 @@ std::vector<std::string> validate_game_state(const GameState& s, const ContentDB
       push(errors, join("Fleet id mismatch: key=", id_u64(id), " value.id=", id_u64(fl.id)));
     }
   }
+  for (const auto& [id, c] : s.contracts) {
+    bump_max(id);
+    if (c.id != kInvalidId && c.id != id) {
+      push(errors, join("Contract id mismatch: key=", id_u64(id), " value.id=", id_u64(c.id)));
+    }
+  }
 
   if (s.next_id != kInvalidId && max_id != kInvalidId && s.next_id <= max_id) {
     push(errors,
@@ -143,6 +149,45 @@ std::vector<std::string> validate_game_state(const GameState& s, const ContentDB
   // --- selected system ---
   if (s.selected_system != kInvalidId && !has_system(s.selected_system)) {
     push(errors, join("selected_system references unknown system id ", id_u64(s.selected_system)));
+  }
+
+  // --- Contracts ---
+  for (const auto& [cid, c] : s.contracts) {
+    if (c.issuer_faction_id != kInvalidId && !has_faction(c.issuer_faction_id)) {
+      push(errors, join("Contract ", id_u64(cid), " references missing issuer_faction_id ", id_u64(c.issuer_faction_id)));
+    }
+    if (c.assignee_faction_id != kInvalidId && !has_faction(c.assignee_faction_id)) {
+      push(errors, join("Contract ", id_u64(cid), " references missing assignee_faction_id ", id_u64(c.assignee_faction_id)));
+    }
+    if (c.system_id != kInvalidId && !has_system(c.system_id)) {
+      push(errors, join("Contract ", id_u64(cid), " references missing system_id ", id_u64(c.system_id)));
+    }
+    if (c.assigned_ship_id != kInvalidId && !has_ship(c.assigned_ship_id)) {
+      push(errors, join("Contract ", id_u64(cid), " references missing assigned_ship_id ", id_u64(c.assigned_ship_id)));
+    }
+    if (c.assigned_fleet_id != kInvalidId && s.fleets.find(c.assigned_fleet_id) == s.fleets.end()) {
+      push(errors, join("Contract ", id_u64(cid), " references missing assigned_fleet_id ", id_u64(c.assigned_fleet_id)));
+    }
+
+    if (c.target_id != kInvalidId) {
+      switch (c.kind) {
+        case ContractKind::InvestigateAnomaly:
+          if (!has_anomaly(c.target_id)) {
+            push(errors, join("Contract ", id_u64(cid), " targets missing anomaly id ", id_u64(c.target_id)));
+          }
+          break;
+        case ContractKind::SalvageWreck:
+          if (!has_wreck(c.target_id)) {
+            push(errors, join("Contract ", id_u64(cid), " targets missing wreck id ", id_u64(c.target_id)));
+          }
+          break;
+        case ContractKind::SurveyJumpPoint:
+          if (!has_jump(c.target_id)) {
+            push(errors, join("Contract ", id_u64(cid), " targets missing jump point id ", id_u64(c.target_id)));
+          }
+          break;
+      }
+    }
   }
 
   // --- Systems cross-reference lists ---
@@ -1332,6 +1377,12 @@ FixReport fix_game_state(GameState& s, const ContentDB* content) {
       fl.id = id;
     }
   }
+  for (auto& [id, c] : s.contracts) {
+    if (c.id != id) {
+      note(join("Fix: Contract id mismatch: key=", id_u64(id), " value.id=", id_u64(c.id)));
+      c.id = id;
+    }
+  }
 
   // --- Choose deterministic fallbacks ---
   const Id first_system = (!s.systems.empty()) ? sorted_keys(s.systems).front() : kInvalidId;
@@ -1594,6 +1645,94 @@ FixReport fix_game_state(GameState& s, const ContentDB* content) {
     }
   }
 
+
+
+  // --- Contracts ---
+  for (Id cid : sorted_keys(s.contracts)) {
+    auto it = s.contracts.find(cid);
+    if (it == s.contracts.end()) continue;
+    auto& c = it->second;
+
+    // Normalize enum ranges (defensive vs corrupt saves).
+    {
+      const int k = static_cast<int>(c.kind);
+      if (k < 0 || k > 2) {
+        note(join("Fix: Contract ", id_u64(cid), " had invalid kind ", k, "; set to investigate_anomaly"));
+        c.kind = ContractKind::InvestigateAnomaly;
+      }
+      const int st = static_cast<int>(c.status);
+      if (st < 0 || st > 4) {
+        note(join("Fix: Contract ", id_u64(cid), " had invalid status ", st, "; set to offered"));
+        c.status = ContractStatus::Offered;
+      }
+    }
+
+    if (c.name.empty()) {
+      note(join("Fix: Contract ", id_u64(cid), " had empty name; set"));
+      c.name = join("Contract ", id_u64(cid));
+    }
+
+    if (c.issuer_faction_id != kInvalidId && !has_faction(c.issuer_faction_id)) {
+      note(join("Fix: Contract ", id_u64(cid), " had missing issuer_faction_id ", id_u64(c.issuer_faction_id),
+                "; cleared"));
+      c.issuer_faction_id = kInvalidId;
+    }
+    if (c.assignee_faction_id != kInvalidId && !has_faction(c.assignee_faction_id)) {
+      note(join("Fix: Contract ", id_u64(cid), " had missing assignee_faction_id ", id_u64(c.assignee_faction_id),
+                "; cleared"));
+      c.assignee_faction_id = kInvalidId;
+    }
+
+    if (c.system_id != kInvalidId && !has_system(c.system_id)) {
+      if (fallback_system != kInvalidId) {
+        note(join("Fix: Contract ", id_u64(cid), " had missing system_id ", id_u64(c.system_id), "; set to ",
+                  id_u64(fallback_system)));
+        c.system_id = fallback_system;
+      } else {
+        note(join("Fix: Contract ", id_u64(cid), " had missing system_id ", id_u64(c.system_id), "; cleared"));
+        c.system_id = kInvalidId;
+      }
+    }
+
+    if (c.assigned_ship_id != kInvalidId && !has_ship(c.assigned_ship_id)) {
+      note(join("Fix: Contract ", id_u64(cid), " had missing assigned_ship_id ", id_u64(c.assigned_ship_id),
+                "; cleared"));
+      c.assigned_ship_id = kInvalidId;
+    }
+    if (c.assigned_fleet_id != kInvalidId && s.fleets.find(c.assigned_fleet_id) == s.fleets.end()) {
+      note(join("Fix: Contract ", id_u64(cid), " had missing assigned_fleet_id ", id_u64(c.assigned_fleet_id),
+                "; cleared"));
+      c.assigned_fleet_id = kInvalidId;
+    }
+
+    // Target integrity: if the target entity is missing, drop the contract entirely.
+    bool target_ok = true;
+    if (c.target_id != kInvalidId) {
+      switch (c.kind) {
+        case ContractKind::InvestigateAnomaly: target_ok = has_anomaly(c.target_id); break;
+        case ContractKind::SalvageWreck: target_ok = has_wreck(c.target_id); break;
+        case ContractKind::SurveyJumpPoint: target_ok = has_jump(c.target_id); break;
+      }
+    }
+    if (!target_ok) {
+      note(join("Fix: Contract ", id_u64(cid), " referenced missing target ", id_u64(c.target_id), "; removed"));
+      s.contracts.erase(it);
+      continue;
+    }
+
+    if (!std::isfinite(c.risk_estimate) || c.risk_estimate < 0.0) {
+      note(join("Fix: Contract ", id_u64(cid), " had invalid risk_estimate; set to 0"));
+      c.risk_estimate = 0.0;
+    }
+    if (c.hops_estimate < 0) {
+      note(join("Fix: Contract ", id_u64(cid), " had negative hops_estimate; clamped"));
+      c.hops_estimate = 0;
+    }
+    if (!std::isfinite(c.reward_research_points) || c.reward_research_points < 0.0) {
+      note(join("Fix: Contract ", id_u64(cid), " had invalid reward_research_points; set to 0"));
+      c.reward_research_points = 0.0;
+    }
+  }
   // --- Colonies ---
   // Remove colonies that point at missing bodies, and ensure body_id uniqueness.
   {

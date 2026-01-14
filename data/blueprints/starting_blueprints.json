@@ -557,6 +557,18 @@
         "Corbomite": 100
       }
     },
+    "point_defense_battery": {
+      "name": "Point Defense Battery",
+      "point_defense_damage": 4.0,
+      "point_defense_range_mkm": 6.0,
+      "construction_cost": 350,
+      "build_costs": {
+        "Duranium": 900,
+        "Neutronium": 120,
+        "Tritanium": 80,
+        "Corbomite": 60
+      }
+    },
     "terraforming_plant": {
       "name": "Terraforming Plant",
       "terraforming_points_per_day": 8,

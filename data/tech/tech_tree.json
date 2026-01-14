@@ -274,6 +274,10 @@
         {
           "type": "unlock_installation",
           "value": "planetary_fortress"
+        },
+        {
+          "type": "unlock_installation",
+          "value": "point_defense_battery"
         }
       ]
     },

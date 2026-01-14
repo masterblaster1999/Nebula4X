@@ -4645,13 +4645,43 @@ const bool can_up = (i > 0);
 
         ImGui::Separator();
         ImGui::Text("Installations");
-        for (const auto& [k, v] : colony->installations) {
-          const auto it = sim.content().installations.find(k);
-          const std::string nm = (it == sim.content().installations.end()) ? k : it->second.name;
-          if (it != sim.content().installations.end() && it->second.sensor_range_mkm > 0.0) {
-            ImGui::BulletText("%s: %d  (Sensor %.0f mkm)", nm.c_str(), v, it->second.sensor_range_mkm);
-          } else {
-            ImGui::BulletText("%s: %d", nm.c_str(), v);
+        {
+          std::vector<std::string> inst_ids;
+          inst_ids.reserve(colony->installations.size());
+          for (const auto& [k, _] : colony->installations) inst_ids.push_back(k);
+          std::sort(inst_ids.begin(), inst_ids.end());
+
+          for (const auto& k : inst_ids) {
+            const int v = colony->installations.at(k);
+            const auto it = sim.content().installations.find(k);
+            const std::string nm = (it == sim.content().installations.end()) ? k : it->second.name;
+
+            std::vector<std::string> tags;
+            if (it != sim.content().installations.end()) {
+              const auto& def = it->second;
+              if (def.sensor_range_mkm > 0.0) {
+                tags.push_back("Sensor " + std::to_string(static_cast<int>(std::round(def.sensor_range_mkm))) + " mkm");
+              }
+              if (def.weapon_damage > 0.0 && def.weapon_range_mkm > 0.0) {
+                tags.push_back("Weapon " + format("%.1f", def.weapon_damage) + "/day @ " +
+                               format("%.1f", def.weapon_range_mkm) + " mkm");
+              }
+              if (def.point_defense_damage > 0.0 && def.point_defense_range_mkm > 0.0) {
+                tags.push_back("PD " + format("%.1f", def.point_defense_damage) + "/day @ " +
+                               format("%.1f", def.point_defense_range_mkm) + " mkm");
+              }
+            }
+
+            if (tags.empty()) {
+              ImGui::BulletText("%s: %d", nm.c_str(), v);
+            } else {
+              std::string extra;
+              for (std::size_t i = 0; i < tags.size(); ++i) {
+                if (i) extra += "; ";
+                extra += tags[i];
+              }
+              ImGui::BulletText("%s: %d  (%s)", nm.c_str(), v, extra.c_str());
+            }
           }
         }
 
@@ -7730,6 +7760,30 @@ if (colony->shipyard_queue.empty()) {
                     }
                   }
                 }
+                if (je.anomaly_id != kInvalidId) {
+                  ImGui::SameLine();
+                  if (ImGui::SmallButton("Center anomaly")) {
+                    if (const auto* a = find_ptr(s.anomalies, je.anomaly_id)) {
+                      s.selected_system = a->system_id;
+                      ui.request_map_tab = MapTab::System;
+                      ui.request_system_map_center = true;
+                      ui.request_system_map_center_pos = a->position_mkm;
+                      ui.request_system_map_center_zoom = 0.0;
+                    }
+                  }
+                }
+                if (je.wreck_id != kInvalidId) {
+                  ImGui::SameLine();
+                  if (ImGui::SmallButton("Center wreck")) {
+                    if (const auto* w = find_ptr(s.wrecks, je.wreck_id)) {
+                      s.selected_system = w->system_id;
+                      ui.request_map_tab = MapTab::System;
+                      ui.request_system_map_center = true;
+                      ui.request_system_map_center_pos = w->position_mkm;
+                      ui.request_system_map_center_zoom = 0.0;
+                    }
+                  }
+                }
 
                 ImGui::TreePop();
               }
@@ -8172,6 +8226,12 @@ void draw_settings_window(UIState& ui, char* ui_prefs_path, UIPrefActions& actio
     ImGui::Checkbox("Intel alerts", &ui.show_galaxy_intel_alerts);
     ImGui::Checkbox("Galaxy: freight lanes", &ui.show_galaxy_freight_lanes);
     ImGui::TextDisabled("Draws current auto-freight routes (cargo orders) for the viewer faction.");
+
+    ImGui::Checkbox("Galaxy: trade lanes", &ui.show_galaxy_trade_lanes);
+    ImGui::SameLine();
+    ImGui::Checkbox("Hubs", &ui.show_galaxy_trade_hubs);
+    ImGui::TextDisabled("Procedural civilian trade overlay (markets + lanes).\n"
+                        "This is informational for now, and will later feed piracy/blockade systems.");
 
     ImGui::SliderInt("Contact max age (days)", &ui.contact_max_age_days, 1, 3650);
     ui.contact_max_age_days = std::clamp(ui.contact_max_age_days, 1, 3650);

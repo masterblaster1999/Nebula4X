@@ -321,11 +321,28 @@ void Simulation::tick_combat(double dt_days) {
   if (!state_.missile_salvos.empty()) {
     const auto missile_ids = sorted_keys(state_.missile_salvos);
 
-    // Compute a global maximum PD range and a per-system list of PD-capable defenders.
+    // Compute a global maximum PD range and a per-system list of PD-capable defenders
+    // (ships + colonies).
     double max_pd_range_mkm = 0.0;
-    std::unordered_map<Id, std::vector<Id>> pd_defenders_by_system;
+
+    enum class PDDefenderKind : uint8_t {
+      Ship,
+      Colony,
+    };
+
+    struct PDDefender {
+      PDDefenderKind kind{PDDefenderKind::Ship};
+      Id id{kInvalidId};  // ship_id or colony_id
+      Id faction_id{kInvalidId};
+      Vec2 pos_mkm{0.0, 0.0};
+      double pd_damage_per_day{0.0};
+      double pd_range_mkm{0.0};
+    };
+
+    std::unordered_map<Id, std::vector<PDDefender>> pd_defenders_by_system;
     pd_defenders_by_system.reserve(state_.systems.size());
 
+    // Ship point defense.
     for (Id sid : ship_ids) {
       const auto* sh = find_ptr(state_.ships, sid);
       if (!sh) continue;
@@ -333,8 +350,53 @@ void Simulation::tick_combat(double dt_days) {
       const auto* d = find_design(sh->design_id);
       if (!d) continue;
       if (d->point_defense_damage > 0.0 && d->point_defense_range_mkm > 0.0) {
-        max_pd_range_mkm = std::max(max_pd_range_mkm, d->point_defense_range_mkm);
-        pd_defenders_by_system[sh->system_id].push_back(sid);
+        PDDefender pd;
+        pd.kind = PDDefenderKind::Ship;
+        pd.id = sid;
+        pd.faction_id = sh->faction_id;
+        pd.pos_mkm = sh->position_mkm;
+        pd.pd_damage_per_day = d->point_defense_damage;
+        pd.pd_range_mkm = d->point_defense_range_mkm;
+        max_pd_range_mkm = std::max(max_pd_range_mkm, pd.pd_range_mkm);
+        pd_defenders_by_system[sh->system_id].push_back(pd);
+      }
+    }
+
+    // Colony point defense (installations).
+    // Each installation type contributes a separate PD entry so mixed-range
+    // batteries don't artificially extend their reach.
+    for (Id cid : sorted_keys(state_.colonies)) {
+      const auto& col = state_.colonies.at(cid);
+      const auto* body = find_ptr(state_.bodies, col.body_id);
+      if (!body) continue;
+      if (body->system_id == kInvalidId) continue;
+
+      // Deterministic iteration order: installations is an unordered_map.
+      std::vector<std::pair<std::string, int>> insts;
+      insts.reserve(col.installations.size());
+      for (const auto& [inst_id, count] : col.installations) {
+        if (count <= 0) continue;
+        insts.push_back({inst_id, count});
+      }
+      std::sort(insts.begin(), insts.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+
+      for (const auto& [inst_id, count] : insts) {
+        auto it = content_.installations.find(inst_id);
+        if (it == content_.installations.end()) continue;
+        const auto& idef = it->second;
+        if (idef.point_defense_damage <= 0.0 || idef.point_defense_range_mkm <= 0.0) continue;
+
+        PDDefender pd;
+        pd.kind = PDDefenderKind::Colony;
+        pd.id = cid;
+        pd.faction_id = col.faction_id;
+        pd.pos_mkm = body->position_mkm;
+        pd.pd_damage_per_day = std::max(0.0, idef.point_defense_damage) * static_cast<double>(count);
+        pd.pd_range_mkm = idef.point_defense_range_mkm;
+        if (pd.pd_damage_per_day <= 1e-12 || pd.pd_range_mkm <= 1e-12) continue;
+
+        max_pd_range_mkm = std::max(max_pd_range_mkm, pd.pd_range_mkm);
+        pd_defenders_by_system[body->system_id].push_back(pd);
       }
     }
 
@@ -616,6 +678,11 @@ void Simulation::tick_combat(double dt_days) {
       if (expired_this_tick) expired_salvos.push_back(mid);
     }
 
+    // Accumulate colony point-defense interceptions for optional event logging.
+    std::unordered_map<Id, double> colony_pd_intercepted;
+    std::unordered_map<Id, std::vector<Id>> colony_pd_attackers;
+    std::unordered_map<Id, Id> colony_pd_system;
+
     // Phase 2: continuous point defense during this tick.
     // Instead of checking only the end-of-tick position, compute the time
     // each salvo spends inside each defender's PD radius, then integrate PD
@@ -663,17 +730,42 @@ void Simulation::tick_combat(double dt_days) {
         const auto it_def = pd_defenders_by_system.find(sys_id);
         if (it_def == pd_defenders_by_system.end() || it_def->second.empty()) continue;
 
-        for (Id did : it_def->second) {
-          const auto* def = find_ptr(state_.ships, did);
-          if (!def || def->hp <= 0.0) continue;
-          const auto* dd = find_design(def->design_id);
-          if (!dd) continue;
-          if (dd->point_defense_damage <= 0.0 || dd->point_defense_range_mkm <= 0.0) continue;
+        for (const auto& pd : it_def->second) {
+          if (pd.pd_damage_per_day <= 1e-12 || pd.pd_range_mkm <= 1e-12) continue;
 
-          const auto p = compute_power_allocation(*dd, def->power_policy);
-          if (!p.weapons_online) continue;
+          const Ship* def_ship = nullptr;
+          const ShipDesign* dd = nullptr;
 
-          const double r = dd->point_defense_range_mkm;
+          Id defender_fid = pd.faction_id;
+          Vec2 defender_pos = pd.pos_mkm;
+          double r = pd.pd_range_mkm;
+          double pd_damage_per_day = pd.pd_damage_per_day;
+          double pd_mult = 1.0;
+          Id ship_id_for_intensity = kInvalidId;
+
+          if (pd.kind == PDDefenderKind::Ship) {
+            def_ship = find_ptr(state_.ships, pd.id);
+            if (!def_ship || def_ship->hp <= 0.0) continue;
+            dd = find_design(def_ship->design_id);
+            if (!dd) continue;
+            if (dd->point_defense_damage <= 0.0 || dd->point_defense_range_mkm <= 0.0) continue;
+
+            const auto p = compute_power_allocation(*dd, def_ship->power_policy);
+            if (!p.weapons_online) continue;
+
+            defender_fid = def_ship->faction_id;
+            defender_pos = def_ship->position_mkm;
+            r = dd->point_defense_range_mkm;
+            pd_damage_per_day = dd->point_defense_damage;
+            const double crew_pd_mult = std::max(0.0, 1.0 + crew_grade_bonus(*def_ship));
+            pd_mult = maintenance_combat_mult(*def_ship) * ship_heat_weapon_output_multiplier(*def_ship) *
+                      ship_subsystem_weapon_output_multiplier(*def_ship) * crew_pd_mult;
+            ship_id_for_intensity = def_ship->id;
+          } else {
+            // Colony PD currently has no power/heat model; it is assumed to be online.
+          }
+
+          if (pd_damage_per_day <= 1e-12 || r <= 1e-12) continue;
           std::vector<Entry> entries;
           entries.reserve(segs.size());
 
@@ -685,10 +777,10 @@ void Simulation::tick_combat(double dt_days) {
             if (ms.damage <= 0.0) continue;
 
             // Only defend if (a) not hostile to the target and (b) hostile to the attacker.
-            if (are_factions_hostile(def->faction_id, ms.target_faction_id)) continue;
-            if (!are_factions_hostile(def->faction_id, ms.attacker_faction_id)) continue;
+            if (are_factions_hostile(defender_fid, ms.target_faction_id)) continue;
+            if (!are_factions_hostile(defender_fid, ms.attacker_faction_id)) continue;
 
-            const auto iv = seg_circle_interval_u01(seg.p0_mkm, seg.p1_mkm, def->position_mkm, r);
+            const auto iv = seg_circle_interval_u01(seg.p0_mkm, seg.p1_mkm, defender_pos, r);
             if (!iv) continue;
             const double t0 = std::max(0.0, iv->first) * seg.dt_days;
             const double t1 = std::min(1.0, iv->second) * seg.dt_days;
@@ -729,9 +821,7 @@ void Simulation::tick_combat(double dt_days) {
           union_t += std::max(0.0, cur_e - cur_s);
           union_t = std::clamp(union_t, 0.0, dt_days);
 
-          const double crew_pd_mult = std::max(0.0, 1.0 + crew_grade_bonus(*def));
-          const double pd_available = std::max(0.0, dd->point_defense_damage) * maintenance_combat_mult(*def) *
-                                      ship_heat_weapon_output_multiplier(*def) * ship_subsystem_weapon_output_multiplier(*def) * crew_pd_mult * union_t;
+          const double pd_available = std::max(0.0, pd_damage_per_day) * std::max(0.0, pd_mult) * union_t;
           if (pd_available <= 1e-12) continue;
 
           for (const auto& e : entries) {
@@ -746,10 +836,53 @@ void Simulation::tick_combat(double dt_days) {
             if (ms.damage <= 0.0) continue;
 
             const double intercept = std::min(ms.damage, share);
-            if (intercept > 1e-12) crew_intensity[did] += intercept;
+            if (intercept > 1e-12) {
+              if (pd.kind == PDDefenderKind::Ship) {
+                if (ship_id_for_intensity != kInvalidId) crew_intensity[ship_id_for_intensity] += intercept;
+              } else {
+                colony_pd_intercepted[pd.id] += intercept;
+                colony_pd_system[pd.id] = sys_id;
+                colony_pd_attackers[pd.id].push_back(ms.attacker_faction_id);
+              }
+            }
             ms.damage = std::max(0.0, ms.damage - intercept);
           }
         }
+      }
+    }
+
+    // Log colony PD interceptions (aggregated) as Combat events for the defending faction.
+    if (!colony_pd_intercepted.empty()) {
+      const double min_log = std::max(0.1, cfg_.combat_damage_event_min_abs);
+      for (Id cid : sorted_keys(colony_pd_intercepted)) {
+        const double intercepted = colony_pd_intercepted[cid];
+        if (intercepted < min_log) continue;
+        const auto* col = find_ptr(state_.colonies, cid);
+        if (!col) continue;
+        Id sys_id = kInvalidId;
+        if (auto it = colony_pd_system.find(cid); it != colony_pd_system.end()) sys_id = it->second;
+        if (sys_id == kInvalidId) {
+          if (const auto* body = find_ptr(state_.bodies, col->body_id)) sys_id = body->system_id;
+        }
+
+        std::string msg = "Colony point defense at " + col->name + " intercepted " + fmt1(intercepted) +
+                          " missile payload";
+        if (const auto* sys = find_ptr(state_.systems, sys_id)) msg += " in " + sys->name;
+        msg += ".";
+
+        EventContext ctx;
+        ctx.faction_id = col->faction_id;
+        ctx.system_id = sys_id;
+        ctx.colony_id = cid;
+
+        if (auto it = colony_pd_attackers.find(cid); it != colony_pd_attackers.end() && !it->second.empty()) {
+          auto attackers = it->second;
+          std::sort(attackers.begin(), attackers.end());
+          attackers.erase(std::unique(attackers.begin(), attackers.end()), attackers.end());
+          ctx.faction_id2 = attackers.front();
+        }
+
+        push_event(EventLevel::Info, EventCategory::Combat, std::move(msg), ctx);
       }
     }
 

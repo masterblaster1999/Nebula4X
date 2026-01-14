@@ -1737,7 +1737,11 @@ std::vector<ScoreboardEntry> Simulation::compute_scoreboard(const VictoryRules& 
     e.faction_id = fid;
     e.faction_name = f.name;
     e.control = f.control;
-    e.eligible_for_victory = !(rules.exclude_pirates && f.control == FactionControl::AI_Pirate);
+    // Passive factions (neutral ambient entities, e.g. Merchant Guild) are not
+    // intended to participate in victory conditions.
+    e.eligible_for_victory =
+        !(rules.exclude_pirates && f.control == FactionControl::AI_Pirate) &&
+        (f.control != FactionControl::AI_Passive);
 
     const int colonies = colony_counts.contains(fid) ? colony_counts.at(fid) : 0;
     const bool has_colony = colonies > 0;

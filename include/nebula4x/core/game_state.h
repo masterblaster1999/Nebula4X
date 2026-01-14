@@ -109,7 +109,8 @@ struct VictoryState {
 struct GameState {
   // v50: nebula storms (temporary system-level environmental hazards).
   // v51: faction narrative journal entries.
-  int save_version{51};
+  // v52: procedural contracts (mission board scaffolding).
+  int save_version{52};
   Date date;
 
   // Hour-of-day within the current Date (0..23).
@@ -139,6 +140,9 @@ struct GameState {
 
   // Exploration anomalies / points of interest.
   std::unordered_map<Id, Anomaly> anomalies;
+
+  // Procedural contracts / missions.
+  std::unordered_map<Id, Contract> contracts;
 
   // In-flight missile salvos.
   std::unordered_map<Id, MissileSalvo> missile_salvos;

@@ -918,6 +918,39 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       if (auto it = obj->find("system_map_show_minimap"); it != obj->end()) {
         ui_.system_map_show_minimap = it->second.bool_value(ui_.system_map_show_minimap);
       }
+      if (auto it = obj->find("system_map_time_preview"); it != obj->end()) {
+        ui_.system_map_time_preview = it->second.bool_value(ui_.system_map_time_preview);
+      }
+      if (auto it = obj->find("system_map_time_preview_days"); it != obj->end()) {
+        ui_.system_map_time_preview_days =
+            static_cast<float>(it->second.number_value(ui_.system_map_time_preview_days));
+        ui_.system_map_time_preview_days = std::clamp(ui_.system_map_time_preview_days, -365.0f, 365.0f);
+      }
+      if (auto it = obj->find("system_map_time_preview_vectors"); it != obj->end()) {
+        ui_.system_map_time_preview_vectors = it->second.bool_value(ui_.system_map_time_preview_vectors);
+      }
+      if (auto it = obj->find("system_map_time_preview_all_ships"); it != obj->end()) {
+        ui_.system_map_time_preview_all_ships = it->second.bool_value(ui_.system_map_time_preview_all_ships);
+      }
+      if (auto it = obj->find("system_map_time_preview_trails"); it != obj->end()) {
+        ui_.system_map_time_preview_trails = it->second.bool_value(ui_.system_map_time_preview_trails);
+      }
+      if (auto it = obj->find("system_map_sensor_heatmap"); it != obj->end()) {
+        ui_.system_map_sensor_heatmap = it->second.bool_value(ui_.system_map_sensor_heatmap);
+      }
+      if (auto it = obj->find("system_map_threat_heatmap"); it != obj->end()) {
+        ui_.system_map_threat_heatmap = it->second.bool_value(ui_.system_map_threat_heatmap);
+      }
+      if (auto it = obj->find("system_map_heatmap_opacity"); it != obj->end()) {
+        ui_.system_map_heatmap_opacity =
+            static_cast<float>(it->second.number_value(ui_.system_map_heatmap_opacity));
+        ui_.system_map_heatmap_opacity = std::clamp(ui_.system_map_heatmap_opacity, 0.0f, 1.0f);
+      }
+      if (auto it = obj->find("system_map_heatmap_resolution"); it != obj->end()) {
+        ui_.system_map_heatmap_resolution =
+            static_cast<int>(it->second.number_value(ui_.system_map_heatmap_resolution));
+        ui_.system_map_heatmap_resolution = std::clamp(ui_.system_map_heatmap_resolution, 16, 200);
+      }
       if (auto it = obj->find("galaxy_map_starfield"); it != obj->end()) {
         ui_.galaxy_map_starfield = it->second.bool_value(ui_.galaxy_map_starfield);
       }
@@ -929,6 +962,9 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       }
       if (auto it = obj->find("galaxy_map_show_minimap"); it != obj->end()) {
         ui_.galaxy_map_show_minimap = it->second.bool_value(ui_.galaxy_map_show_minimap);
+      }
+      if (auto it = obj->find("galaxy_map_fuel_range"); it != obj->end()) {
+        ui_.galaxy_map_fuel_range = it->second.bool_value(ui_.galaxy_map_fuel_range);
       }
       if (auto it = obj->find("map_starfield_density"); it != obj->end()) {
         ui_.map_starfield_density = static_cast<float>(it->second.number_value(ui_.map_starfield_density));
@@ -1007,6 +1043,12 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       }
       if (auto it = obj->find("show_galaxy_freight_lanes"); it != obj->end()) {
         ui_.show_galaxy_freight_lanes = it->second.bool_value(ui_.show_galaxy_freight_lanes);
+      }
+      if (auto it = obj->find("show_galaxy_trade_lanes"); it != obj->end()) {
+        ui_.show_galaxy_trade_lanes = it->second.bool_value(ui_.show_galaxy_trade_lanes);
+      }
+      if (auto it = obj->find("show_galaxy_trade_hubs"); it != obj->end()) {
+        ui_.show_galaxy_trade_hubs = it->second.bool_value(ui_.show_galaxy_trade_hubs);
       }
       if (auto it = obj->find("contact_max_age_days"); it != obj->end()) {
         ui_.contact_max_age_days = static_cast<int>(it->second.number_value(ui_.contact_max_age_days));
@@ -1665,7 +1707,7 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     }
 
     nebula4x::json::Object o;
-    o["version"] = 29.0;
+    o["version"] = 30.0;
 
     // Theme.
     o["clear_color"] = color_to_json(ui_.clear_color);
@@ -1761,10 +1803,20 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     o["system_map_missile_salvos"] = ui_.system_map_missile_salvos;
     o["system_map_follow_selected"] = ui_.system_map_follow_selected;
     o["system_map_show_minimap"] = ui_.system_map_show_minimap;
+    o["system_map_time_preview"] = ui_.system_map_time_preview;
+    o["system_map_time_preview_days"] = static_cast<double>(ui_.system_map_time_preview_days);
+    o["system_map_time_preview_vectors"] = ui_.system_map_time_preview_vectors;
+    o["system_map_time_preview_all_ships"] = ui_.system_map_time_preview_all_ships;
+    o["system_map_time_preview_trails"] = ui_.system_map_time_preview_trails;
+    o["system_map_sensor_heatmap"] = ui_.system_map_sensor_heatmap;
+    o["system_map_threat_heatmap"] = ui_.system_map_threat_heatmap;
+    o["system_map_heatmap_opacity"] = static_cast<double>(ui_.system_map_heatmap_opacity);
+    o["system_map_heatmap_resolution"] = static_cast<double>(ui_.system_map_heatmap_resolution);
     o["galaxy_map_starfield"] = ui_.galaxy_map_starfield;
     o["galaxy_map_grid"] = ui_.galaxy_map_grid;
     o["galaxy_map_selected_route"] = ui_.galaxy_map_selected_route;
     o["galaxy_map_show_minimap"] = ui_.galaxy_map_show_minimap;
+    o["galaxy_map_fuel_range"] = ui_.galaxy_map_fuel_range;
     o["map_starfield_density"] = static_cast<double>(ui_.map_starfield_density);
     o["map_starfield_parallax"] = static_cast<double>(ui_.map_starfield_parallax);
     o["map_grid_opacity"] = static_cast<double>(ui_.map_grid_opacity);
@@ -1791,6 +1843,8 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     o["show_galaxy_unknown_exits"] = ui_.show_galaxy_unknown_exits;
     o["show_galaxy_intel_alerts"] = ui_.show_galaxy_intel_alerts;
     o["show_galaxy_freight_lanes"] = ui_.show_galaxy_freight_lanes;
+    o["show_galaxy_trade_lanes"] = ui_.show_galaxy_trade_lanes;
+    o["show_galaxy_trade_hubs"] = ui_.show_galaxy_trade_hubs;
     o["contact_max_age_days"] = static_cast<double>(ui_.contact_max_age_days);
 
     // Layout.
@@ -2056,11 +2110,21 @@ void App::reset_ui_theme_defaults() {
   ui_.system_map_missile_salvos = false;
   ui_.system_map_follow_selected = false;
   ui_.system_map_show_minimap = true;
+  ui_.system_map_time_preview = false;
+  ui_.system_map_time_preview_days = 30.0f;
+  ui_.system_map_time_preview_vectors = true;
+  ui_.system_map_time_preview_all_ships = false;
+  ui_.system_map_time_preview_trails = true;
+  ui_.system_map_sensor_heatmap = false;
+  ui_.system_map_threat_heatmap = false;
+  ui_.system_map_heatmap_opacity = 0.35f;
+  ui_.system_map_heatmap_resolution = 64;
   ui_.system_map_missile_salvos = false;
   ui_.galaxy_map_starfield = true;
   ui_.galaxy_map_grid = false;
   ui_.galaxy_map_selected_route = true;
   ui_.galaxy_map_show_minimap = true;
+  ui_.galaxy_map_fuel_range = false;
   ui_.map_starfield_density = 1.0f;
   ui_.map_starfield_parallax = 0.15f;
   ui_.map_grid_opacity = 1.0f;

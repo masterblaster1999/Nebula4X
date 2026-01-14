@@ -342,7 +342,11 @@ void Simulation::tick_victory() {
 
     for (Id fid : sorted_keys(state_.factions)) {
       const auto& f = state_.factions.at(fid);
-      const bool eligible = !(rules.exclude_pirates && f.control == FactionControl::AI_Pirate);
+      // Passive factions are neutral ambient entities and are not intended to
+      // participate in victory conditions.
+      const bool eligible =
+          !(rules.exclude_pirates && f.control == FactionControl::AI_Pirate) &&
+          (f.control != FactionControl::AI_Passive);
       if (!eligible) continue;
 
       eligible_total++;

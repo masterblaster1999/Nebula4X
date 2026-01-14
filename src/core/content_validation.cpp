@@ -374,6 +374,15 @@ if (!is_non_negative(d.eccm_strength))
       push_error(issues, "installation.invalid_weapon_range",
                  join("Installation '", key, "' has invalid weapon_range_mkm: ", inst.weapon_range_mkm), "installation",
                  key);
+
+    if (!is_non_negative(inst.point_defense_damage))
+      push_error(issues, "installation.invalid_pd_damage",
+                 join("Installation '", key, "' has invalid point_defense_damage: ", inst.point_defense_damage),
+                 "installation", key);
+    if (!is_non_negative(inst.point_defense_range_mkm))
+      push_error(issues, "installation.invalid_pd_range",
+                 join("Installation '", key, "' has invalid point_defense_range_mkm: ", inst.point_defense_range_mkm),
+                 "installation", key);
     if (!is_non_negative(inst.research_points_per_day))
       push_error(issues, "installation.invalid_rp",
                  join("Installation '", key, "' has invalid research_points_per_day: ", inst.research_points_per_day),
