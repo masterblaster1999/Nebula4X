@@ -66,6 +66,26 @@ std::string format_number(const double x) {
   return std::string(buf);
 }
 
+// Draw a vertical separator using only public ImGui API.
+void VerticalSeparator(float height = 0.0f) {
+  ImGui::SameLine();
+  const ImGuiStyle& style = ImGui::GetStyle();
+  const float h = (height > 0.0f) ? height : ImGui::GetFrameHeight();
+
+  // Reserve a small rect.
+  ImGui::Dummy(ImVec2(style.ItemSpacing.x, h));
+
+  const ImVec2 a = ImGui::GetItemRectMin();
+  const ImVec2 b = ImGui::GetItemRectMax();
+  const float x = (a.x + b.x) * 0.5f;
+
+  ImDrawList* dl = ImGui::GetWindowDrawList();
+  dl->AddLine(ImVec2(x, a.y + style.FramePadding.y), ImVec2(x, b.y - style.FramePadding.y),
+              ImGui::GetColorU32(ImGuiCol_Separator));
+
+  ImGui::SameLine();
+}
+
 std::string normalize_json_pointer_copy(std::string p) {
   if (p.empty()) return "/";
   // Accept root as either "/" or "".
@@ -359,6 +379,10 @@ struct WidgetRuntime {
   bool last_is_query{false};
   int last_query_op{0};
   int last_type{0};
+
+  // UI-only hover state (for delayed tooltips).
+  bool tooltip_hovering{false};
+  double tooltip_hover_start{0.0};
 };
 
 struct ForgeDoc {
@@ -749,14 +773,7 @@ void draw_kpi_card(UIState& ui, const UiForgeWidgetConfig& cfg, WidgetRuntime& r
     ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "%s", trim_preview(ev.error, 120).c_str());
   }
 
-  // Tooltip.
-  if (ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByPopup)) {
-    if (ImGui::IsMouseHoveringRect(ImGui::GetWindowPos(), ImGui::GetWindowPos() + ImGui::GetWindowSize())) {
-      if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-        // The last item is not reliable here; fall back to context-window hover.
-      }
-    }
-  }
+  // (Tooltip is handled at the card/window level in draw_panel_contents.)
 }
 
 void draw_list_contents(const nebula4x::json::Value& root, const UiForgeWidgetConfig& cfg, const UIState& ui,
@@ -960,38 +977,31 @@ void draw_panel_contents(const Simulation& sim, UIState& ui, const UiForgePanelC
         const EvalResult& ev = rt.cached_eval;
         draw_kpi_card(ui, cfg, rt, ev, tick);
 
-        if (ImGui::IsWindowHovered()) {
-          if (ImGui::IsMouseHoveringRect(ImGui::GetWindowPos(), ImGui::GetWindowPos() + ImGui::GetWindowSize())) {
-            // Show tooltip when hovering the card.
-            if (ImGui::IsMouseHoveringRect(ImGui::GetWindowPos(), ImGui::GetWindowPos() + ImGui::GetWindowSize())) {
-              if (ImGui::IsMouseHoveringRect(ImGui::GetWindowPos(), ImGui::GetWindowPos() + ImGui::GetWindowSize()) &&
-                  ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByPopup)) {
-                if (ImGui::IsMouseHoveringRect(ImGui::GetWindowPos(), ImGui::GetWindowPos() + ImGui::GetWindowSize())) {
-                  if (ImGui::IsMouseHoveringRect(ImGui::GetWindowPos(), ImGui::GetWindowPos() + ImGui::GetWindowSize())) {
-                    // (noop) - keep readable; actual tooltip gating below.
-                  }
-                }
-              }
-            }
-          }
-        }
+        // Hover tooltip for KPI cards.
+        //
+        // We intentionally avoid imgui_internal.h and ImVec2 math operators here to keep
+        // the UI Forge building against a wider range of Dear ImGui versions/configs.
+        const bool card_hovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByPopup);
+        const bool popup_open = ImGui::IsPopupOpen("##ctx");
+        const bool interacting = ImGui::IsAnyItemActive() || ImGui::IsMouseDown(ImGuiMouseButton_Left) ||
+                                 ImGui::IsMouseDown(ImGuiMouseButton_Right);
 
-        if (ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByPopup) &&
-            ImGui::IsMouseHoveringRect(ImGui::GetWindowPos(), ImGui::GetWindowPos() + ImGui::GetWindowSize())) {
-          if (!ImGui::IsPopupOpen("##ctx")) {
-            if (ImGui::IsMouseHoveredRect(ImGui::GetWindowPos(), ImGui::GetWindowPos() + ImGui::GetWindowSize())) {
-              if (ImGui::IsMouseHoveringRect(ImGui::GetWindowPos(), ImGui::GetWindowPos() + ImGui::GetWindowSize())) {
-                // Trigger tooltip only if the card is hovered and no context popup is open.
-                if (ImGui::IsMouseHoveringRect(ImGui::GetWindowPos(), ImGui::GetWindowPos() + ImGui::GetWindowSize())) {
-                  // Show tooltip on hover (with a small delay).
-                  if (ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByPopup) && ImGui::IsMouseHoveringRect(ImGui::GetWindowPos(), ImGui::GetWindowPos() + ImGui::GetWindowSize())) {
-                    // Use a simple heuristic: tooltip when hovering and not interacting.
-                    draw_kpi_tooltip(cfg, ev);
-                  }
-                }
-              }
-            }
+        const bool want_tooltip = card_hovered && !popup_open && !interacting;
+        const double now = ImGui::GetTime();
+
+        if (want_tooltip) {
+          if (!rt.tooltip_hovering) {
+            rt.tooltip_hovering = true;
+            rt.tooltip_hover_start = now;
           }
+
+          // Hold Shift to show instantly; otherwise show after a short hover delay.
+          const bool immediate = ImGui::GetIO().KeyShift;
+          if (immediate || (now - rt.tooltip_hover_start) > 0.45) {
+            draw_kpi_tooltip(cfg, ev);
+          }
+        } else {
+          rt.tooltip_hovering = false;
         }
 
       } else if (cfg.type == 1) {
@@ -1151,7 +1161,7 @@ void draw_ui_forge_window(Simulation& sim, UIState& ui, Id selected_ship, Id sel
     }
 
     ImGui::SameLine();
-    ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
+    VerticalSeparator();
     ImGui::SameLine();
 
     if (ImGui::Button("Refresh JSON")) {
@@ -1162,7 +1172,7 @@ void draw_ui_forge_window(Simulation& sim, UIState& ui, Id selected_ship, Id sel
     ImGui::TextDisabled("rev %llu", (unsigned long long)g_doc.doc_revision);
 
     ImGui::SameLine();
-    ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
+    VerticalSeparator();
     ImGui::SameLine();
 
     ImGui::Checkbox("Show preview", &g_ed.show_preview);
@@ -1354,14 +1364,38 @@ void draw_ui_forge_window(Simulation& sim, UIState& ui, Id selected_ship, Id sel
     ImGui::TextDisabled("Widgets");
 
     // Widget list editor.
+    int dnd_src = -1;
+    int dnd_dst = -1;
     for (int i = 0; i < (int)panel->widgets.size(); ++i) {
       UiForgeWidgetConfig& w = panel->widgets[i];
       ImGui::PushID((int)w.id);
       ImGui::Separator();
 
+      // Drag-drop target: drop a widget here to move it above this widget.
+      if (ImGui::BeginDragDropTarget()) {
+        if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("UIFORGE_WIDGET_REORDER")) {
+          dnd_src = *static_cast<const int*>(payload->Data);
+          dnd_dst = i;
+        }
+        ImGui::EndDragDropTarget();
+      }
+
       // Row controls.
       {
         ImGui::TextDisabled("#%d", i + 1);
+
+        ImGui::SameLine();
+        ImGui::SmallButton("Drag");
+        if (ImGui::IsItemHovered()) {
+          ImGui::SetTooltip("Drag to reorder");
+        }
+        if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
+          ImGui::SetDragDropPayload("UIFORGE_WIDGET_REORDER", &i, sizeof(i));
+          const char* name = w.label.empty() ? "(widget)" : w.label.c_str();
+          ImGui::Text("Move #%d: %s", i + 1, name);
+          ImGui::EndDragDropSource();
+        }
+
         ImGui::SameLine();
         if (ImGui::SmallButton("Up") && i > 0) {
           std::swap(panel->widgets[i], panel->widgets[i - 1]);
@@ -1370,6 +1404,18 @@ void draw_ui_forge_window(Simulation& sim, UIState& ui, Id selected_ship, Id sel
         if (ImGui::SmallButton("Down") && i + 1 < (int)panel->widgets.size()) {
           std::swap(panel->widgets[i], panel->widgets[i + 1]);
         }
+
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Dup")) {
+          UiForgeWidgetConfig cp = w;
+          cp.id = ui.next_ui_forge_widget_id++;
+          if (!cp.label.empty()) cp.label += " (copy)";
+          panel->widgets.insert(panel->widgets.begin() + (i + 1), std::move(cp));
+          ImGui::PopID();
+          ++i;
+          continue;
+        }
+
         ImGui::SameLine();
         if (ImGui::SmallButton("Remove")) {
           panel->widgets.erase(panel->widgets.begin() + i);
@@ -1423,6 +1469,34 @@ void draw_ui_forge_window(Simulation& sim, UIState& ui, Id selected_ship, Id sel
       }
 
       ImGui::PopID();
+    }
+
+    // Drag-drop target: drop here to move a widget to the end.
+    if (!panel->widgets.empty()) {
+      ImGui::Separator();
+      ImGui::TextDisabled("Tip: drag widgets to reorder (drop here to move to end)");
+      if (ImGui::BeginDragDropTarget()) {
+        if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("UIFORGE_WIDGET_REORDER")) {
+          dnd_src = *static_cast<const int*>(payload->Data);
+          dnd_dst = (int)panel->widgets.size();
+        }
+        ImGui::EndDragDropTarget();
+      }
+    }
+
+    // Apply any pending re-order after rendering the editor list (safe with ImGui).
+    if (dnd_src != -1 && dnd_dst != -1 && dnd_src != dnd_dst) {
+      const int n = (int)panel->widgets.size();
+      if (dnd_src >= 0 && dnd_src < n && dnd_dst >= 0 && dnd_dst <= n) {
+        UiForgeWidgetConfig moving = std::move(panel->widgets[dnd_src]);
+        panel->widgets.erase(panel->widgets.begin() + dnd_src);
+
+        int insert_at = dnd_dst;
+        if (dnd_src < dnd_dst) insert_at -= 1;
+        insert_at = std::clamp(insert_at, 0, (int)panel->widgets.size());
+
+        panel->widgets.insert(panel->widgets.begin() + insert_at, std::move(moving));
+      }
     }
 
     if (g_ed.show_preview) {
