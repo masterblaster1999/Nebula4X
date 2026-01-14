@@ -48,6 +48,11 @@ struct Value : std::variant<std::nullptr_t, bool, double, std::string, Array, Ob
   // Convenience casts (throw on wrong type)
   const Object& object() const;
   const Array& array() const;
+
+  // Small ergonomic aliases used by some UI code.
+  // These mirror the naming used by other JSON libs (e.g. json11).
+  const Object& object_items() const { return object(); }
+  const Array& array_items() const { return array(); }
 };
 
 // Parse a JSON document into a tree.

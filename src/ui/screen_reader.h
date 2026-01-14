@@ -53,6 +53,11 @@ class ScreenReader {
   void speak(std::string text, bool interrupt = false);
   void repeat_last();
 
+  // Convenience: announce a HUD toast (warn/error).
+  // Uses a higher priority than normal focus narration so important events
+  // are less likely to be delayed behind UI chrome.
+  void announce_toast(std::string text);
+
   // ImGui helpers.
   // Call once per frame from the UI thread.
   void begin_frame();

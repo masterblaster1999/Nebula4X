@@ -297,6 +297,26 @@ void ScreenReader::speak(std::string text, bool interrupt) {
   impl_->enqueue(std::move(text), interrupt, interrupt ? 100 : 10);
 }
 
+void ScreenReader::announce_toast(std::string text) {
+  if (!enabled()) return;
+  if (!impl_->speak_toasts.load()) return;
+
+  // Higher priority than normal focus/hover narration.
+  //
+  // For ERROR-level toasts we also interrupt, so an urgent failure doesn't get
+  // delayed behind a backlog of focus narration.
+  //
+  // (HUD currently prefixes messages with "Error: " / "Warning: ".)
+  bool interrupt = false;
+  int priority = 60;
+  if (text.rfind("Error:", 0) == 0 || text.rfind("Error ", 0) == 0) {
+    interrupt = true;
+    priority = 90;
+  }
+
+  impl_->enqueue(std::move(text), interrupt, priority);
+}
+
 void ScreenReader::repeat_last() {
   std::string t;
   {

@@ -4663,12 +4663,12 @@ const bool can_up = (i > 0);
                 tags.push_back("Sensor " + std::to_string(static_cast<int>(std::round(def.sensor_range_mkm))) + " mkm");
               }
               if (def.weapon_damage > 0.0 && def.weapon_range_mkm > 0.0) {
-                tags.push_back("Weapon " + format("%.1f", def.weapon_damage) + "/day @ " +
-                               format("%.1f", def.weapon_range_mkm) + " mkm");
+                tags.push_back("Weapon " + format_fixed(def.weapon_damage, 1) + "/day @ " +
+                               format_fixed(def.weapon_range_mkm, 1) + " mkm");
               }
               if (def.point_defense_damage > 0.0 && def.point_defense_range_mkm > 0.0) {
-                tags.push_back("PD " + format("%.1f", def.point_defense_damage) + "/day @ " +
-                               format("%.1f", def.point_defense_range_mkm) + " mkm");
+                tags.push_back("PD " + format_fixed(def.point_defense_damage, 1) + "/day @ " +
+                               format_fixed(def.point_defense_range_mkm, 1) + " mkm");
               }
             }
 
@@ -7767,7 +7767,9 @@ if (colony->shipyard_queue.empty()) {
                       s.selected_system = a->system_id;
                       ui.request_map_tab = MapTab::System;
                       ui.request_system_map_center = true;
-                      ui.request_system_map_center_pos = a->position_mkm;
+                      ui.request_system_map_center_system_id = a->system_id;
+                      ui.request_system_map_center_x_mkm = a->position_mkm.x;
+                      ui.request_system_map_center_y_mkm = a->position_mkm.y;
                       ui.request_system_map_center_zoom = 0.0;
                     }
                   }
@@ -7779,7 +7781,9 @@ if (colony->shipyard_queue.empty()) {
                       s.selected_system = w->system_id;
                       ui.request_map_tab = MapTab::System;
                       ui.request_system_map_center = true;
-                      ui.request_system_map_center_pos = w->position_mkm;
+                      ui.request_system_map_center_system_id = w->system_id;
+                      ui.request_system_map_center_x_mkm = w->position_mkm.x;
+                      ui.request_system_map_center_y_mkm = w->position_mkm.y;
                       ui.request_system_map_center_zoom = 0.0;
                     }
                   }

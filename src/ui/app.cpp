@@ -1617,10 +1617,10 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
 
       // --- Procedural UI: UI Forge (custom panels) ---
       if (auto it = obj->find("next_ui_forge_panel_id"); it != obj->end()) {
-        ui_.next_ui_forge_panel_id = static_cast<std::uint64_t>(it->second.number_value(ui_.next_ui_forge_panel_id));
+        ui_.next_ui_forge_panel_id = static_cast<std::uint64_t>(it->second.number_value(static_cast<double>(ui_.next_ui_forge_panel_id)));
       }
       if (auto it = obj->find("next_ui_forge_widget_id"); it != obj->end()) {
-        ui_.next_ui_forge_widget_id = static_cast<std::uint64_t>(it->second.number_value(ui_.next_ui_forge_widget_id));
+        ui_.next_ui_forge_widget_id = static_cast<std::uint64_t>(it->second.number_value(static_cast<double>(ui_.next_ui_forge_widget_id)));
       }
       if (auto it = obj->find("ui_forge_panels"); it != obj->end()) {
         if (it->second.is_array()) {
@@ -1634,7 +1634,7 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
             UiForgePanelConfig p;
             const auto& po = pv.object_items();
 
-            if (auto jt = po.find("id"); jt != po.end()) p.id = static_cast<std::uint64_t>(jt->second.number_value(p.id));
+            if (auto jt = po.find("id"); jt != po.end()) p.id = static_cast<std::uint64_t>(jt->second.number_value(static_cast<double>(p.id)));
             if (auto jt = po.find("name"); jt != po.end()) p.name = jt->second.string_value(p.name);
             if (auto jt = po.find("open"); jt != po.end()) p.open = jt->second.bool_value(p.open);
             if (auto jt = po.find("root_path"); jt != po.end()) p.root_path = jt->second.string_value(p.root_path);
@@ -1653,7 +1653,7 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
                 UiForgeWidgetConfig w;
                 const auto& wo = wv.object_items();
 
-                if (auto kt = wo.find("id"); kt != wo.end()) w.id = static_cast<std::uint64_t>(kt->second.number_value(w.id));
+                if (auto kt = wo.find("id"); kt != wo.end()) w.id = static_cast<std::uint64_t>(kt->second.number_value(static_cast<double>(w.id)));
                 if (auto kt = wo.find("type"); kt != wo.end()) w.type = static_cast<int>(kt->second.number_value(w.type));
                 if (auto kt = wo.find("label"); kt != wo.end()) w.label = kt->second.string_value(w.label);
                 if (auto kt = wo.find("path"); kt != wo.end()) w.path = kt->second.string_value(w.path);
