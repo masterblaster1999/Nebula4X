@@ -410,6 +410,22 @@ void ensure_installations_for_colony(Simulation& sim, Id faction_id, Colony& c, 
   if (f.control == FactionControl::AI_Pirate) mine_target = std::max(mine_target, 12);
   if (f.control == FactionControl::AI_Explorer) mine_target = std::max(mine_target, 20);
 
+  int geo_target = 0;
+  if (sim.cfg().enable_geological_survey && sim.is_installation_buildable_for_faction(faction_id, "geological_survey")) {
+    const auto* body = find_ptr(sim.state().bodies, c.body_id);
+    if (body && !body->mineral_deposits.empty()) {
+      double total_remaining = 0.0;
+      for (const auto& [_, rem_raw] : body->mineral_deposits) total_remaining += std::max(0.0, rem_raw);
+
+      const double thr = std::max(0.0, sim.cfg().geological_survey_depletion_threshold_tons);
+      if (thr > 1e-9 && total_remaining < thr) {
+        // Scale gently with mining footprint; small baseline so the AI doesn't over-invest.
+        geo_target = std::clamp(std::max(1, mine_target / 12), 1, 4);
+      }
+    }
+  }
+
+
   struct Want {
     const char* id;
     int count;
@@ -420,6 +436,7 @@ void ensure_installations_for_colony(Simulation& sim, Id faction_id, Colony& c, 
       {"sensor_station", desired_sensors},
       {"construction_factory", desired_factories},
       {"research_lab", desired_labs},
+      {"geological_survey", geo_target},
       {"automated_mine", mine_target},
   };
 

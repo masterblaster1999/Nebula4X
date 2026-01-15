@@ -9,6 +9,9 @@
 
 #include "simulation_internal.h"
 #include "simulation_sensors.h"
+#include "simulation_procgen.h"
+
+#include "nebula4x/core/procgen_obscure.h"
 
 #include <algorithm>
 #include <cmath>
@@ -31,24 +34,12 @@ using sim_internal::push_unique;
 using sim_internal::sorted_keys;
 using sim_internal::compute_power_allocation;
 using sim_internal::strongest_active_treaty_between;
-
-// Deterministic pseudo-random helper (used for non-combat procedural events such
-// as anomaly hazards). Keeping this local avoids coupling ship tick ordering to
-// any global RNG state.
-static std::uint64_t splitmix64(std::uint64_t x) {
-  x += 0x9e3779b97f4a7c15ULL;
-  x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
-  x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
-  return x ^ (x >> 31);
-}
-
-static double u01_from_u64(std::uint64_t x) {
-  // Use the top 53 bits to build a double in [0,1).
-  const std::uint64_t v = x >> 11;
-  return static_cast<double>(v) * (1.0 / 9007199254740992.0); // 2^53
-}
-
-
+using sim_procgen::splitmix64;
+using sim_procgen::u01_from_u64;
+using sim_procgen::HashRng;
+using sim_procgen::pick_site_position_mkm;
+using sim_procgen::generate_mineral_bundle;
+using sim_procgen::pick_unlock_component_id;
 
 // --- Procedural exploration leads (anomaly chains) ---------------------------------
 //
@@ -61,32 +52,6 @@ static double u01_from_u64(std::uint64_t x) {
 //
 // These are intentionally "low UI" (events + journal) and do not require a
 // dedicated quest screen.
-
-struct HashRng {
-  std::uint64_t s{0};
-  explicit HashRng(std::uint64_t seed) : s(seed) {}
-
-  std::uint64_t next_u64() {
-    s = splitmix64(s);
-    return s;
-  }
-
-  double next_u01() { return u01_from_u64(next_u64()); }
-
-  double range(double lo, double hi) {
-    if (!(hi > lo)) return lo;
-    return lo + (hi - lo) * next_u01();
-  }
-
-  int range_int(int lo, int hi_inclusive) {
-    if (hi_inclusive <= lo) return lo;
-    const int span = hi_inclusive - lo + 1;
-    const double u = next_u01();
-    int v = lo + static_cast<int>(u * static_cast<double>(span));
-    if (v > hi_inclusive) v = hi_inclusive;
-    return v;
-  }
-};
 
 enum class LeadKind : std::uint8_t {
   None = 0,
@@ -150,64 +115,6 @@ static std::unordered_map<Id, int> compute_system_hops(const GameState& s, Id st
   }
 
   return dist;
-}
-
-static Vec2 pick_site_position_mkm(const GameState& s, Id system_id, HashRng& rng) {
-  const auto* sys = find_ptr(s.systems, system_id);
-  if (!sys) return Vec2{0.0, 0.0};
-
-  Vec2 base{0.0, 0.0};
-  if (!sys->jump_points.empty()) {
-    std::vector<Id> jps = sys->jump_points;
-    std::sort(jps.begin(), jps.end());
-    const int idx = rng.range_int(0, static_cast<int>(jps.size()) - 1);
-    if (const auto* jp = find_ptr(s.jump_points, jps[static_cast<std::size_t>(idx)])) base = jp->position_mkm;
-  }
-
-  const double ang = rng.range(0.0, 6.2831853071795864769);
-  const double r = rng.range(25.0, 140.0);
-  return base + Vec2{std::cos(ang) * r, std::sin(ang) * r};
-}
-
-static std::unordered_map<std::string, double> generate_mineral_bundle(HashRng& rng, double scale) {
-  static const char* pool[] = {"Duranium", "Neutronium", "Sorium", "Corbomite", "Tritanium"};
-  constexpr int n = static_cast<int>(sizeof(pool) / sizeof(pool[0]));
-
-  std::unordered_map<std::string, double> out;
-  const int picks = rng.range_int(1, 3);
-  for (int i = 0; i < picks; ++i) {
-    const int idx = rng.range_int(0, n - 1);
-    const double amt = std::max(0.0, scale) * rng.range(18.0, 95.0);
-    out[pool[idx]] += amt;
-  }
-
-  // Prune tiny entries.
-  for (auto it = out.begin(); it != out.end();) {
-    if (!(it->second > 1e-6) || !std::isfinite(it->second)) it = out.erase(it);
-    else ++it;
-  }
-  return out;
-}
-
-static std::string pick_unlock_component_id(const ContentDB& content, const Faction& fac, HashRng& rng) {
-  if (content.components.empty()) return {};
-
-  std::unordered_set<std::string> unlocked;
-  unlocked.reserve(fac.unlocked_components.size() * 2 + 8);
-  for (const auto& cid : fac.unlocked_components) unlocked.insert(cid);
-
-  std::vector<std::string> candidates;
-  candidates.reserve(content.components.size());
-  for (const auto& [cid, def] : content.components) {
-    if (cid.empty()) continue;
-    if (unlocked.count(cid)) continue;
-    candidates.push_back(cid);
-  }
-  if (candidates.empty()) return {};
-
-  std::sort(candidates.begin(), candidates.end());
-  const int idx = rng.range_int(0, static_cast<int>(candidates.size()) - 1);
-  return candidates[static_cast<std::size_t>(idx)];
 }
 
 static Id pick_weighted_system(HashRng& rng,
@@ -430,7 +337,7 @@ static LeadOutcome maybe_spawn_anomaly_lead(Simulation& sim, const Ship& resolve
       w.position_mkm = pick_site_position_mkm(s, target, rng);
       w.kind = WreckKind::Cache;
       w.created_day = static_cast<int>(s.date.days_since_epoch());
-      w.name = "Hidden Cache";
+      w.name = procgen_obscure::generate_wreck_cache_name(w, "Hidden");
 
       // Cache size scales a bit with hop distance.
       const double scale = 1.0 + 0.20 * std::min(6, out.hops);
@@ -462,11 +369,12 @@ static LeadOutcome maybe_spawn_anomaly_lead(Simulation& sim, const Ship& resolve
       const double t = rng.next_u01();
       if (kind == LeadKind::StarChart) {
         a.kind = (t < 0.55) ? "ruins" : ((t < 0.80) ? "artifact" : "signal");
-        a.name = "Charted Site";
       } else {
         a.kind = (t < 0.45) ? "signal" : ((t < 0.75) ? "ruins" : "phenomenon");
-        a.name = "Signal Trace";
       }
+
+      // Obscure procedural naming. Lead-chains remain coherent via origin_anomaly_id.
+      a.name = procgen_obscure::generate_anomaly_name(a);
 
       // Investigation time and rewards scale gently by hops/depth.
       a.investigation_days = std::max(1, 3 + rng.range_int(0, 6) + depth);
@@ -500,6 +408,201 @@ static LeadOutcome maybe_spawn_anomaly_lead(Simulation& sim, const Ship& resolve
   }
 
   return out;
+}
+
+
+struct CodexEchoOutcome {
+  Id root_anomaly_id{kInvalidId};
+  int fragments_have{0};
+  int fragments_required{0};
+
+  Id target_system_id{kInvalidId};
+  int hops{0};
+  bool revealed_new_system{false};
+  bool revealed_route{false};
+
+  Id spawned_anomaly_id{kInvalidId};
+  Id offered_contract_id{kInvalidId};
+};
+
+static bool has_codex_echo_for_root(const GameState& s, Id root_id) {
+  if (root_id == kInvalidId) return false;
+  for (const auto& [_, a] : s.anomalies) {
+    if (a.kind == "codex_echo" && a.origin_anomaly_id == root_id) return true;
+  }
+  return false;
+}
+
+static std::optional<CodexEchoOutcome> maybe_trigger_codex_echo(Simulation& sim,
+                                                                const Ship& resolver,
+                                                                const Anomaly& resolved) {
+  const auto& cfg = sim.cfg();
+  if (!cfg.enable_obscure_codex_fragments || !cfg.enable_codex_echo_reward) return std::nullopt;
+  if (resolver.faction_id == kInvalidId || resolved.resolved_by_faction_id == kInvalidId) return std::nullopt;
+
+  GameState& s = sim.state();
+  auto* fac = find_ptr(s.factions, resolver.faction_id);
+  if (!fac) return std::nullopt;
+
+  const Id root = procgen_obscure::anomaly_chain_root_id(s.anomalies, resolved.id);
+  const int req = std::max(1, cfg.codex_fragments_required);
+  const int have = procgen_obscure::faction_resolved_anomaly_chain_count(s.anomalies, resolver.faction_id, root);
+  if (have < req) return std::nullopt;
+
+  if (has_codex_echo_for_root(s, root)) return std::nullopt;
+
+  const auto* origin_sys = find_ptr(s.systems, resolver.system_id);
+  if (!origin_sys) return std::nullopt;
+
+  // Determine reachable candidate systems.
+  const auto hop_map = compute_system_hops(s, resolver.system_id);
+
+  double max_dist = 0.0;
+  for (Id sid : sorted_keys(s.systems)) {
+    if (sid == resolver.system_id) continue;
+    if (const auto* sys = find_ptr(s.systems, sid)) {
+      max_dist = std::max(max_dist, (sys->galaxy_pos - origin_sys->galaxy_pos).length());
+    }
+  }
+
+  const int min_h = std::max(0, cfg.codex_echo_min_hops);
+  const int max_h = (cfg.codex_echo_max_hops > 0) ? std::max(min_h, cfg.codex_echo_max_hops) : 9999;
+  const bool use_hop_filter = (cfg.codex_echo_min_hops > 0 || cfg.codex_echo_max_hops > 0);
+
+  auto build_candidates = [&](bool prefer_undiscovered, bool hop_filter) -> std::vector<Id> {
+    std::vector<Id> cand;
+    cand.reserve(s.systems.size());
+    for (Id sid : sorted_keys(s.systems)) {
+      if (sid == resolver.system_id) continue;
+      if (!find_ptr(s.systems, sid)) continue;
+
+      const bool discovered = std::find(fac->discovered_systems.begin(), fac->discovered_systems.end(), sid) !=
+                              fac->discovered_systems.end();
+      if (prefer_undiscovered && discovered) continue;
+      if (!prefer_undiscovered && !discovered) continue;
+
+      if (hop_filter) {
+        auto it = hop_map.find(sid);
+        if (it == hop_map.end()) continue;
+        const int h = std::max(0, it->second);
+        if (h < min_h || h > max_h) continue;
+      }
+
+      cand.push_back(sid);
+    }
+    return cand;
+  };
+
+  std::vector<Id> candidates = build_candidates(/*prefer_undiscovered=*/true, /*hop_filter=*/use_hop_filter);
+  if (candidates.empty()) candidates = build_candidates(/*prefer_undiscovered=*/true, /*hop_filter=*/false);
+  if (candidates.empty()) candidates = build_candidates(/*prefer_undiscovered=*/false, /*hop_filter=*/use_hop_filter);
+  if (candidates.empty()) candidates = build_candidates(/*prefer_undiscovered=*/false, /*hop_filter=*/false);
+  if (candidates.empty()) return std::nullopt;
+
+  // Deterministic RNG seed keyed on chain root + faction.
+  std::uint64_t seed = 0xC0DEC0DEC0DEC0DEULL;
+  seed ^= static_cast<std::uint64_t>(root) * 0x9e3779b97f4a7c15ULL;
+  seed ^= static_cast<std::uint64_t>(resolver.faction_id) * 0xbf58476d1ce4e5b9ULL;
+  seed ^= static_cast<std::uint64_t>(s.date.days_since_epoch()) * 0x94d049bb133111ebULL;
+  HashRng rng(splitmix64(seed));
+
+  CodexEchoOutcome out;
+  out.root_anomaly_id = root;
+  out.fragments_have = have;
+  out.fragments_required = req;
+
+  for (int attempt = 0; attempt < 5 && !candidates.empty(); ++attempt) {
+    std::sort(candidates.begin(), candidates.end());
+    candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
+
+    const Id target = pick_weighted_system(rng, candidates, s, resolver.system_id, hop_map, max_dist, LeadKind::StarChart);
+    if (target == kInvalidId) break;
+
+    const auto plan = sim.plan_jump_route_from_pos(resolver.system_id, resolver.position_mkm, resolver.faction_id,
+                                                   std::max(1e-9, resolver.speed_km_s), target,
+                                                   /*restrict_to_discovered=*/false);
+    if (!plan.has_value()) {
+      candidates.erase(std::remove(candidates.begin(), candidates.end(), target), candidates.end());
+      continue;
+    }
+
+    out.target_system_id = target;
+    out.hops = std::max(0, static_cast<int>(plan->jump_ids.size()));
+
+    const bool target_discovered =
+        std::find(fac->discovered_systems.begin(), fac->discovered_systems.end(), target) != fac->discovered_systems.end();
+    out.revealed_new_system = !target_discovered;
+
+    // Codex echo always reveals route intel (like an explicit chart).
+    sim.reveal_route_intel_for_faction(resolver.faction_id, plan->systems, plan->jump_ids);
+    out.revealed_route = true;
+
+    // Spawn the echo site.
+    Anomaly a;
+    a.id = allocate_id(s);
+    a.system_id = target;
+    a.position_mkm = pick_site_position_mkm(s, target, rng);
+    a.origin_anomaly_id = root;
+    a.lead_depth = std::max(0, resolved.lead_depth + 1);
+
+    a.kind = "codex_echo";
+    a.name = procgen_obscure::anomaly_theme_label(a) + ": Codex Echo";
+
+    // Make it feel special but not wildly out of band.
+    a.investigation_days = std::max(1, 3 + rng.range_int(0, 6));
+    const double hop_scale = 1.0 + 0.12 * std::min(6, out.hops);
+    a.research_reward = std::max(0.0, rng.range(25.0, 85.0) * hop_scale);
+
+    if (rng.next_u01() < 0.65) {
+      a.mineral_reward = generate_mineral_bundle(rng, /*scale=*/1.8 * hop_scale);
+    }
+    if (rng.next_u01() < 0.35) {
+      a.unlock_component_id = pick_unlock_component_id(sim.content(), *fac, rng);
+    }
+    if (rng.next_u01() < 0.60) {
+      a.hazard_chance = rng.range(0.12, 0.35);
+      a.hazard_damage = rng.range(0.8, 5.0) * hop_scale;
+    }
+
+    s.anomalies[a.id] = a;
+    push_unique(fac->discovered_anomalies, a.id);
+    out.spawned_anomaly_id = a.id;
+
+    // Optional contract offer.
+    if (cfg.enable_contracts && cfg.codex_echo_offer_contract) {
+      Contract c;
+      c.id = allocate_id(s);
+      c.kind = ContractKind::InvestigateAnomaly;
+      c.status = ContractStatus::Offered;
+      c.issuer_faction_id = resolver.faction_id;
+      c.assignee_faction_id = resolver.faction_id;
+      c.system_id = target;
+      c.target_id = a.id;
+      c.offered_day = s.date.days_since_epoch();
+      if (cfg.contract_offer_expiry_days > 0) {
+        c.expires_day = c.offered_day + cfg.contract_offer_expiry_days;
+      }
+      c.hops_estimate = out.hops;
+      // Risk estimate: crude proxy from hazard chance.
+      c.risk_estimate = std::clamp(a.hazard_chance, 0.0, 1.0);
+
+      c.name = "Codex Echo: Investigate " + a.name;
+
+      // Reward: based on anomaly value + a bonus for being a codex completion.
+      const double base = std::max(0.0, cfg.contract_reward_base_rp) +
+                          std::max(0.0, cfg.codex_echo_contract_bonus_rp) +
+                          static_cast<double>(std::max(0, c.hops_estimate)) * std::max(0.0, cfg.contract_reward_rp_per_hop) +
+                          c.risk_estimate * std::max(0.0, cfg.contract_reward_rp_per_risk);
+      c.reward_research_points = base + 0.15 * std::max(0.0, a.research_reward);
+
+      s.contracts.emplace(c.id, c);
+      out.offered_contract_id = c.id;
+    }
+
+    return out;
+  }
+
+  return std::nullopt;
 }
 
 } // namespace
@@ -2360,26 +2463,231 @@ void Simulation::tick_ships(double dt_days) {
           anom->resolved_day = state_.date.days_since_epoch();
 
           const double rp = std::max(0.0, anom->research_reward);
+
+          // Direct component unlock (rare; typically from deep ruins/phenomena sites).
           bool unlocked_component = false;
           std::string unlocked_component_id;
+          bool direct_unlock_configured = false;
+          bool direct_unlock_redundant = false;
 
-          if (auto* fac = find_ptr(state_.factions, ship.faction_id)) {
+          // Anomaly schematic fragments (optional): exploration can contribute partial
+          // reverse-engineering progress toward otherwise-locked components.
+          struct SchematicFragment {
+            std::string component_id;
+            double points_added{0.0};
+            double points_total{0.0};
+            double points_required{0.0};
+            bool unlocked{false};
+          };
+
+          std::vector<SchematicFragment> schematic_frags;
+          procgen_obscure::ThemeDomain schematic_domain = procgen_obscure::ThemeDomain::Sensors;
+          double schematic_points_total = 0.0;
+
+          Faction* fac = find_ptr(state_.factions, ship.faction_id);
+          if (fac) {
             if (rp > 1e-9) fac->research_points += rp;
 
             if (!anom->unlock_component_id.empty()) {
               // Only unlock known content components (prevents invalid saves).
               if (content_.components.find(anom->unlock_component_id) != content_.components.end()) {
+                direct_unlock_configured = true;
                 const bool already = std::find(fac->unlocked_components.begin(), fac->unlocked_components.end(),
                                                anom->unlock_component_id) != fac->unlocked_components.end();
                 if (!already) {
                   fac->unlocked_components.push_back(anom->unlock_component_id);
                   unlocked_component = true;
                   unlocked_component_id = anom->unlock_component_id;
+                } else {
+                  direct_unlock_redundant = true;
+                }
+              }
+            }
+
+            // Apply schematic fragments (reverse-engineering points).
+            if (cfg_.enable_reverse_engineering && cfg_.enable_anomaly_schematic_fragments) {
+              const bool allow_stack = cfg_.anomaly_schematic_allow_with_direct_unlock || direct_unlock_redundant;
+              if (!direct_unlock_configured || allow_stack) {
+                // Compute points budget.
+                double pts = std::max(0.0, cfg_.anomaly_schematic_points_base);
+                pts += std::max(0.0, cfg_.anomaly_schematic_points_per_investigation_day) *
+                       static_cast<double>(std::max(1, anom->investigation_days));
+                pts += std::max(0.0, cfg_.anomaly_schematic_points_per_rp) * rp;
+
+                // Kind multiplier.
+                double km = 1.0;
+                if (anom->kind == "ruins" || anom->kind == "artifact") km = cfg_.anomaly_schematic_ruins_multiplier;
+                else if (anom->kind == "signal") km = cfg_.anomaly_schematic_signal_multiplier;
+                else if (anom->kind == "distress") km = cfg_.anomaly_schematic_distress_multiplier;
+                else if (anom->kind == "phenomenon") km = cfg_.anomaly_schematic_phenomenon_multiplier;
+
+                // Risk bonus: hazardous sites are more likely to yield intact data cores.
+                const double hz = std::clamp(anom->hazard_chance, 0.0, 1.0);
+                const double risk_mult = 1.0 + 0.35 * hz;
+
+                // Lead depth bonus: deeper chains skew slightly richer.
+                const double depth_mult = 1.0 + 0.12 * static_cast<double>(std::max(0, anom->lead_depth));
+
+                pts *= std::max(0.0, km) * risk_mult * depth_mult;
+                if (!std::isfinite(pts) || pts <= 1e-9) pts = 0.0;
+
+                // Pick 1..N not-yet-unlocked components biased by the anomaly theme domain.
+                if (pts > 1e-9) {
+                  schematic_points_total = pts;
+                  schematic_domain = procgen_obscure::anomaly_theme_domain(*anom);
+
+                  auto is_unlocked = [&](const std::string& cid) {
+                    return std::find(fac->unlocked_components.begin(), fac->unlocked_components.end(), cid) !=
+                           fac->unlocked_components.end();
+                  };
+
+                  auto build_candidates = [&](const std::vector<ComponentType>& types) {
+                    std::vector<std::string> out;
+                    out.reserve(content_.components.size());
+                    for (const auto& [cid, def] : content_.components) {
+                      if (cid.empty()) continue;
+                      if (is_unlocked(cid)) continue;
+                      if (!types.empty() && std::find(types.begin(), types.end(), def.type) == types.end()) continue;
+                      out.push_back(cid);
+                    }
+                    std::sort(out.begin(), out.end());
+                    out.erase(std::unique(out.begin(), out.end()), out.end());
+                    return out;
+                  };
+
+                  std::vector<ComponentType> domain_types;
+                  switch (schematic_domain) {
+                    case procgen_obscure::ThemeDomain::Sensors:
+                      domain_types = {ComponentType::Sensor};
+                      break;
+                    case procgen_obscure::ThemeDomain::Weapons:
+                      domain_types = {ComponentType::Weapon, ComponentType::Armor, ComponentType::Shield};
+                      break;
+                    case procgen_obscure::ThemeDomain::Propulsion:
+                      domain_types = {ComponentType::Engine, ComponentType::FuelTank};
+                      break;
+                    case procgen_obscure::ThemeDomain::Industry:
+                      domain_types = {ComponentType::Mining, ComponentType::Cargo, ComponentType::ColonyModule};
+                      break;
+                    case procgen_obscure::ThemeDomain::Energy:
+                      domain_types = {ComponentType::Reactor, ComponentType::Shield, ComponentType::Sensor};
+                      break;
+                    default:
+                      break;
+                  }
+
+                  std::vector<ComponentType> kind_types;
+                  if (anom->kind == "signal") {
+                    kind_types = {ComponentType::Sensor, ComponentType::Reactor, ComponentType::Shield};
+                  } else if (anom->kind == "phenomenon") {
+                    kind_types = {ComponentType::Engine, ComponentType::Shield, ComponentType::Sensor, ComponentType::Reactor};
+                  } else if (anom->kind == "ruins" || anom->kind == "artifact") {
+                    kind_types = {ComponentType::Weapon, ComponentType::Armor, ComponentType::Shield, ComponentType::Reactor,
+                                  ComponentType::Sensor};
+                  } else if (anom->kind == "distress") {
+                    kind_types = {ComponentType::Sensor, ComponentType::Engine, ComponentType::Reactor, ComponentType::Cargo};
+                  }
+
+                  std::vector<ComponentType> allowed;
+                  if (!domain_types.empty() && !kind_types.empty()) {
+                    for (ComponentType t : domain_types) {
+                      if (std::find(kind_types.begin(), kind_types.end(), t) != kind_types.end()) allowed.push_back(t);
+                    }
+                  }
+                  if (allowed.empty()) {
+                    if (!domain_types.empty()) allowed = domain_types;
+                    else allowed = kind_types;
+                  }
+
+                  std::vector<std::string> candidates = build_candidates(allowed);
+                  if (candidates.empty()) candidates = build_candidates(domain_types);
+                  if (candidates.empty()) candidates = build_candidates(kind_types);
+                  if (candidates.empty()) candidates = build_candidates({});
+
+                  const int want = std::clamp(cfg_.anomaly_schematic_components_per_anomaly, 1, 3);
+                  const int n = std::min<int>(want, static_cast<int>(candidates.size()));
+
+                  if (n > 0) {
+                    const std::uint64_t seed = splitmix64(procgen_obscure::anomaly_seed(*anom) ^
+                                                         (static_cast<std::uint64_t>(ship.faction_id) * 0x9e3779b97f4a7c15ULL) ^
+                                                         (static_cast<std::uint64_t>(ship_id) * 0xbf58476d1ce4e5b9ULL) ^
+                                                         0x534348454D415449ULL);  // "SCHEMATI"
+                    HashRng rng(seed);
+
+                    const double per = pts / static_cast<double>(n);
+                    int unlock_count = 0;
+                    const int unlock_cap = cfg_.reverse_engineering_unlock_cap_per_tick;
+
+                    std::vector<std::string> unlocked_now;
+
+                    for (int i = 0; i < n; ++i) {
+                      if (candidates.empty()) break;
+                      const int idx = rng.range_int(0, static_cast<int>(candidates.size()) - 1);
+                      const std::string cid = candidates[static_cast<std::size_t>(idx)];
+                      candidates.erase(candidates.begin() + idx);
+                      if (cid.empty()) continue;
+                      if (is_unlocked(cid)) continue;
+
+                      double& cur = fac->reverse_engineering_progress[cid];
+                      if (!std::isfinite(cur) || cur < 0.0) cur = 0.0;
+                      cur += per;
+
+                      const double req = reverse_engineering_points_required_for_component(cid);
+
+                      SchematicFragment frag;
+                      frag.component_id = cid;
+                      frag.points_added = per;
+                      frag.points_total = cur;
+                      frag.points_required = req;
+
+                      if (req > 0.0 && cur + 1e-9 >= req) {
+                        fac->unlocked_components.push_back(cid);
+                        fac->reverse_engineering_progress.erase(cid);
+                        frag.unlocked = true;
+                        unlocked_now.push_back(cid);
+                        ++unlock_count;
+                      }
+
+                      schematic_frags.push_back(std::move(frag));
+
+                      if (unlock_cap > 0 && unlock_count >= unlock_cap) break;
+                    }
+
+                    if (!unlocked_now.empty()) {
+                      // De-dup and keep unlocked_components stable.
+                      std::sort(fac->unlocked_components.begin(), fac->unlocked_components.end());
+                      fac->unlocked_components.erase(std::unique(fac->unlocked_components.begin(), fac->unlocked_components.end()),
+                                                     fac->unlocked_components.end());
+
+                      std::sort(unlocked_now.begin(), unlocked_now.end());
+                      unlocked_now.erase(std::unique(unlocked_now.begin(), unlocked_now.end()), unlocked_now.end());
+
+                      std::ostringstream rs;
+                      rs << "Schematic decoded from anomaly: ";
+                      for (size_t i = 0; i < unlocked_now.size(); ++i) {
+                        const auto itc = content_.components.find(unlocked_now[i]);
+                        const std::string cname = (itc != content_.components.end() && !itc->second.name.empty()) ? itc->second.name
+                                                                                                                  : unlocked_now[i];
+                        if (i) rs << ", ";
+                        rs << cname;
+                      }
+
+                      const std::string nm = anom->name.empty()
+                                                 ? (std::string("Anomaly ") + std::to_string(static_cast<int>(anom->id)))
+                                                 : anom->name;
+                      rs << " (" << nm << ")";
+
+                      EventContext rctx;
+                      rctx.system_id = ship.system_id;
+                      rctx.ship_id = ship_id;
+                      rctx.faction_id = ship.faction_id;
+                      push_event(EventLevel::Info, EventCategory::Research, rs.str(), rctx);
+                    }
+                  }
                 }
               }
             }
           }
-
 
           // Mineral cache reward: load into ship cargo; overflow becomes a wreck (salvage cache).
           std::unordered_map<std::string, double> minerals_loaded;
@@ -2529,6 +2837,24 @@ void Simulation::tick_ships(double dt_days) {
               ss << "; unlocked " << cname;
             }
 
+
+            // Schematic fragment summary (if any).
+            if (!schematic_frags.empty()) {
+              const auto& f0 = schematic_frags.front();
+              const auto itc = content_.components.find(f0.component_id);
+              const std::string cname = (itc != content_.components.end() && !itc->second.name.empty()) ? itc->second.name
+                                                                                                         : f0.component_id;
+
+              ss << "; schematic shard (" << procgen_obscure::theme_domain_label(schematic_domain) << "): " << cname;
+              if (f0.unlocked) {
+                ss << " (decoded)";
+              } else if (f0.points_required > 0.0) {
+                const double pct = 100.0 * std::clamp(f0.points_total / f0.points_required, 0.0, 1.0);
+                ss << " (" << pct << "%)";
+              }
+              if (schematic_frags.size() > 1) ss << " +" << (schematic_frags.size() - 1) << " more";
+            }
+
             // Mineral cache rewards / salvage cache.
             if (minerals_loaded_total > 1e-9 || minerals_overflow_total > 1e-9) {
               if (minerals_loaded_total > 1e-9) {
@@ -2567,6 +2893,71 @@ void Simulation::tick_ships(double dt_days) {
               std::ostringstream js;
               js << ss.str();
 
+              // Add an "obscure" procedural fingerprint + short lore line.
+              // This is deterministic from ids/kind and helps make repeated
+              // anomaly investigations feel less identical.
+              if (anom) {
+                const auto* sys = find_ptr(state_.systems, anom->system_id);
+                const auto* reg = (sys && sys->region_id != kInvalidId) ? find_ptr(state_.regions, sys->region_id) : nullptr;
+                const double neb = sys ? std::clamp(sys->nebula_density, 0.0, 1.0) : 0.0;
+                const double ruins = reg ? std::clamp(reg->ruins_density, 0.0, 1.0) : 0.0;
+                const double pir = reg ? std::clamp(reg->pirate_risk * (1.0 - reg->pirate_suppression), 0.0, 1.0) : 0.0;
+
+                const std::string sig = procgen_obscure::anomaly_signature_code(*anom);
+                js << "\n\nSignal fingerprint: " << sig;
+                js << "\n" << procgen_obscure::anomaly_signature_glyph(*anom);
+                js << "\n\n" << procgen_obscure::anomaly_lore_line(*anom, neb, ruins, pir);
+
+
+                if (cfg_.enable_obscure_codex_fragments) {
+                  const Id root = procgen_obscure::anomaly_chain_root_id(state_.anomalies, anom->id);
+                  const int req = std::max(1, cfg_.codex_fragments_required);
+                  const int have = procgen_obscure::faction_resolved_anomaly_chain_count(state_.anomalies, ship.faction_id, root);
+                  const double frac = std::clamp(static_cast<double>(have) / static_cast<double>(req), 0.0, 1.0);
+
+                  js << "\n\nCodex fragment (" << have << "/" << req << " decoded)";
+                  js << "\nCiphertext: " << procgen_obscure::codex_ciphertext(*anom);
+                  js << "\nTranslation: " << procgen_obscure::codex_partial_plaintext(*anom, frac);
+                }
+
+
+                // Schematic fragments (reverse-engineering progress) detail.
+                if (!schematic_frags.empty()) {
+                  js << "\n\nSchematic fragments (" << procgen_obscure::theme_domain_label(schematic_domain) << " domain)";
+                  if (schematic_points_total > 1e-9) {
+                    js.setf(std::ios::fixed);
+                    js.precision(1);
+                    js << " [" << schematic_points_total << " pts]";
+                  }
+
+                  for (const auto& frag : schematic_frags) {
+                    const auto itc = content_.components.find(frag.component_id);
+                    const std::string cname = (itc != content_.components.end() && !itc->second.name.empty()) ? itc->second.name
+                                                                                                               : frag.component_id;
+
+                    js << "\n\n- " << cname;
+                    const std::string fcode = procgen_obscure::schematic_fragment_code(*anom, frag.component_id);
+                    js << "\n  Shard signature: " << fcode;
+                    js << "\n" << procgen_obscure::schematic_fragment_glyph(*anom, frag.component_id);
+
+                    if (frag.points_required > 0.0) {
+                      js.setf(std::ios::fixed);
+                      js.precision(1);
+                      const double pct = 100.0 * std::clamp(frag.points_total / frag.points_required, 0.0, 1.0);
+                      js << "\n  Progress: " << frag.points_total << "/" << frag.points_required << " (" << pct << "%)";
+                    } else {
+                      js.setf(std::ios::fixed);
+                      js.precision(1);
+                      js << "\n  Progress: +" << frag.points_added << " pts";
+                    }
+
+                    if (frag.unlocked) {
+                      js << "\n  Status: Decoded (component unlocked)";
+                    }
+                  }
+                }
+              }
+
               // Add a breakdown of mineral rewards (when present) for readability.
               if (!minerals_loaded.empty() || !minerals_overflow.empty()) {
                 js << "\n\nMinerals:";
@@ -2599,9 +2990,11 @@ void Simulation::tick_ships(double dt_days) {
             }
           }
 
+          const Anomaly resolved_copy = anom ? *anom : Anomaly{};
+
           // Procedural exploration lead (optional follow-up site / chart / cache).
           {
-            const LeadOutcome lead = maybe_spawn_anomaly_lead(*this, ship, *anom);
+            const LeadOutcome lead = maybe_spawn_anomaly_lead(*this, ship, resolved_copy);
             if (lead.kind != LeadKind::None && lead.target_system_id != kInvalidId) {
               const auto* tgt = find_ptr(state_.systems, lead.target_system_id);
               const std::string tgt_name = (tgt && !tgt->name.empty()) ? tgt->name : std::string("(unknown)");
@@ -2644,8 +3037,8 @@ void Simulation::tick_ships(double dt_days) {
 
               std::ostringstream jt;
               std::string source_nm;
-              if (!anom->name.empty()) source_nm = anom->name;
-              else source_nm = "Anomaly #" + std::to_string(anom->id);
+              if (!resolved_copy.name.empty()) source_nm = resolved_copy.name;
+              else source_nm = "Anomaly #" + std::to_string(resolved_copy.id);
               jt << "Source anomaly: " << source_nm;
               jt << "\nTarget system: " << tgt_name;
               if (lead.hops > 0) jt << " (" << lead.hops << " hop" << (lead.hops == 1 ? "" : "s") << ")";
@@ -2689,6 +3082,74 @@ void Simulation::tick_ships(double dt_days) {
               lje.text = jt.str();
               push_journal_entry(ship.faction_id, std::move(lje));
             }
+          }
+
+          // Completing enough codex fragments in a lead chain can reveal a special follow-up site.
+          if (const auto codex = maybe_trigger_codex_echo(*this, ship, resolved_copy); codex.has_value()) {
+            const auto* tgt = find_ptr(state_.systems, codex->target_system_id);
+            const std::string tgt_name = (tgt && !tgt->name.empty()) ? tgt->name : std::string("(unknown)");
+
+            const std::string theme = procgen_obscure::anomaly_theme_label(resolved_copy);
+
+            std::ostringstream cs;
+            cs << "Codex decoded (" << codex->fragments_have << "/" << codex->fragments_required << "): " << theme
+               << " -> " << tgt_name;
+            if (codex->hops > 0) cs << " (" << codex->hops << " hop" << (codex->hops == 1 ? "" : "s") << ")";
+            if (codex->offered_contract_id != kInvalidId) cs << "; contract offered";
+
+            EventContext cctx;
+            cctx.faction_id = ship.faction_id;
+            cctx.ship_id = ship_id;
+            cctx.system_id = codex->target_system_id;
+            push_event(EventLevel::Info, EventCategory::Exploration, cs.str(), cctx);
+
+            JournalEntry cje;
+            cje.category = EventCategory::Exploration;
+            cje.system_id = codex->target_system_id;
+            cje.ship_id = ship_id;
+            cje.anomaly_id = codex->spawned_anomaly_id;
+            cje.title = "Codex Decoded: " + theme;
+
+            std::ostringstream jt;
+            jt << "Fragments: " << codex->fragments_have << "/" << codex->fragments_required;
+            jt << "\nSource chain: " << theme;
+
+            jt << "\n\nCiphertext:";
+            jt << "\n" << procgen_obscure::codex_ciphertext(resolved_copy);
+            jt << "\n\nTranslation:";
+            jt << "\n" << procgen_obscure::codex_plaintext(resolved_copy);
+
+            jt << "\n\nCoordinates resolved: " << tgt_name;
+            if (codex->hops > 0) jt << " (" << codex->hops << " hop" << (codex->hops == 1 ? "" : "s") << ")";
+
+            if (codex->spawned_anomaly_id != kInvalidId) {
+              if (const auto* ca = find_ptr(state_.anomalies, codex->spawned_anomaly_id)) {
+                const std::string cn = !ca->name.empty() ? ca->name : std::string("(unnamed anomaly)");
+                jt << "\n\nCodex Echo site: " << cn;
+                if (!ca->kind.empty()) jt << "\nKind: " << ca->kind;
+                jt << "\nInvestigation: " << std::max(1, ca->investigation_days) << " day(s) on-station";
+                if (ca->research_reward > 1e-9) {
+                  jt.setf(std::ios::fixed);
+                  jt.precision(1);
+                  jt << "\nPotential reward: +" << ca->research_reward << " RP";
+                }
+                if (!ca->unlock_component_id.empty()) jt << "\nPotential unlock: " << ca->unlock_component_id;
+              }
+            }
+
+            if (codex->offered_contract_id != kInvalidId) {
+              if (const auto* c = find_ptr(state_.contracts, codex->offered_contract_id)) {
+                jt.setf(std::ios::fixed);
+                jt.precision(1);
+                jt << "\n\nContract offer: " << c->name;
+                jt << "\nReward: +" << c->reward_research_points << " RP";
+              } else {
+                jt << "\n\nContract offer: available on the mission board.";
+              }
+            }
+
+            cje.text = jt.str();
+            push_journal_entry(ship.faction_id, std::move(cje));
           }
 
           q.erase(q.begin());

@@ -62,6 +62,26 @@ static bool is_player_faction(const GameState& s, Id faction_id) {
   return fac && fac->control == FactionControl::Player;
 }
 
+static double effective_piracy_risk_for_system(const GameState& s, const SimConfig& cfg, Id system_id) {
+  const auto* sys = find_ptr(s.systems, system_id);
+  if (!sys) return 0.0;
+
+  double risk = std::clamp(cfg.pirate_raid_default_system_risk, 0.0, 1.0);
+  double suppression = 0.0;
+
+  if (sys->region_id != kInvalidId) {
+    if (const auto* reg = find_ptr(s.regions, sys->region_id)) {
+      risk = std::clamp(reg->pirate_risk, 0.0, 1.0);
+      if (cfg.enable_pirate_suppression) {
+        suppression = std::clamp(reg->pirate_suppression, 0.0, 1.0);
+      }
+    }
+  }
+
+  risk *= (1.0 - suppression);
+  return std::clamp(risk, 0.0, 1.0);
+}
+
 static double cargo_used_tons(const Ship& s) {
   double used = 0.0;
   for (const auto& [_, tons] : s.cargo) used += std::max(0.0, tons);
@@ -123,8 +143,8 @@ void Simulation::tick_ai() {
 
     const ShipDesign* d = find_design(ship->design_id);
     if (!d) return false;
-	    const double burn = std::max(0.0, d->fuel_use_per_mkm);
-	    const double cap = std::max(0.0, d->fuel_capacity_tons);
+    const double burn = std::max(0.0, d->fuel_use_per_mkm);
+    const double cap = std::max(0.0, d->fuel_capacity_tons);
     if (cap <= 1e-9) return false;
 
     if (ship->fuel_tons < 0.0) ship->fuel_tons = cap;
@@ -237,7 +257,7 @@ void Simulation::tick_ai() {
 
     const ShipDesign* d = find_design(ship->design_id);
     if (!d) return false;
-	    const double burn = std::max(0.0, d->fuel_use_per_mkm);
+    const double burn = std::max(0.0, d->fuel_use_per_mkm);
     const int cap = std::max(0, d->missile_ammo_capacity);
     if (cap <= 0) return false;
 
@@ -688,6 +708,28 @@ void Simulation::tick_ai() {
   std::unordered_map<Id, std::unordered_set<Id>> reserved_explore_wreck_targets;
   reserved_explore_wreck_targets.reserve(faction_ids.size() * 2 + 8);
 
+  // Reserve targets that are already being handled by an active contract assignment.
+  // This prevents multiple auto-explore ships from duplicating the same work.
+  if (cfg_.enable_contracts && !state_.contracts.empty()) {
+    for (const auto& [_, c] : state_.contracts) {
+      if (c.assignee_faction_id == kInvalidId || c.target_id == kInvalidId) continue;
+      if (c.status != ContractStatus::Accepted && c.status != ContractStatus::Offered) continue;
+      if (c.assigned_ship_id == kInvalidId && c.assigned_fleet_id == kInvalidId) continue;
+
+      switch (c.kind) {
+        case ContractKind::InvestigateAnomaly:
+          reserved_explore_anomaly_targets[c.assignee_faction_id].insert(c.target_id);
+          break;
+        case ContractKind::SalvageWreck:
+          reserved_explore_wreck_targets[c.assignee_faction_id].insert(c.target_id);
+          break;
+        case ContractKind::SurveyJumpPoint:
+          reserved_explore_jump_targets[c.assignee_faction_id].insert(c.target_id);
+          break;
+      }
+    }
+  }
+
   // A system-level ETA helper (no specific goal position; just "get into the system").
   auto estimate_eta_days_to_system = [&](Id start_system_id, Vec2 start_pos_mkm, Id fid, double speed_km_s,
                                         Id goal_system_id) -> double {
@@ -718,6 +760,130 @@ void Simulation::tick_ai() {
     auto& reserved_jumps = reserved_explore_jump_targets[fid];
     auto& reserved_frontiers = reserved_explore_frontier_targets[fid];
     auto& reserved_anoms = reserved_explore_anomaly_targets[fid];
+    auto& reserved_wrecks = reserved_explore_wreck_targets[fid];
+
+    // Contracts: if a ship is idle and has a mission-board assignment (or there is
+    // an available unassigned contract for its faction), prefer fulfilling that
+    // before generic exploration behavior.
+    if (cfg_.enable_contracts && !state_.contracts.empty()) {
+      const bool allow_auto_accept = !is_player_faction(state_, fid);
+
+      auto reserve_contract_target = [&](const Contract& c) {
+        if (c.target_id == kInvalidId) return;
+        switch (c.kind) {
+          case ContractKind::InvestigateAnomaly: reserved_anoms.insert(c.target_id); break;
+          case ContractKind::SalvageWreck: reserved_wrecks.insert(c.target_id); break;
+          case ContractKind::SurveyJumpPoint: reserved_jumps.insert(c.target_id); break;
+        }
+      };
+
+      auto contract_goal = [&](const Contract& c, Id* out_sys, Vec2* out_pos) -> bool {
+        if (out_sys) *out_sys = kInvalidId;
+        if (out_pos) *out_pos = Vec2{0.0, 0.0};
+        if (c.system_id == kInvalidId || c.target_id == kInvalidId) return false;
+
+        switch (c.kind) {
+          case ContractKind::InvestigateAnomaly: {
+            const auto* a = find_ptr(state_.anomalies, c.target_id);
+            if (!a || a->resolved) return false;
+            if (out_sys) *out_sys = a->system_id;
+            if (out_pos) *out_pos = a->position_mkm;
+            return a->system_id != kInvalidId;
+          }
+          case ContractKind::SalvageWreck: {
+            const auto* w = find_ptr(state_.wrecks, c.target_id);
+            if (!w) return false;
+            if (out_sys) *out_sys = w->system_id;
+            if (out_pos) *out_pos = w->position_mkm;
+            return w->system_id != kInvalidId;
+          }
+          case ContractKind::SurveyJumpPoint: {
+            if (is_jump_point_surveyed_by_faction(fid, c.target_id)) return false;
+            const auto* jp = find_ptr(state_.jump_points, c.target_id);
+            if (!jp) return false;
+            if (out_sys) *out_sys = jp->system_id;
+            if (out_pos) *out_pos = jp->position_mkm;
+            return jp->system_id != kInvalidId;
+          }
+        }
+        return false;
+      };
+
+      // (0) If this ship is already assigned to a contract, ensure its orders exist.
+      for (auto& [cid, c] : state_.contracts) {
+        if (c.assignee_faction_id != fid) continue;
+        if (c.assigned_ship_id != ship_id) continue;
+        if (c.status != ContractStatus::Accepted && c.status != ContractStatus::Offered) continue;
+
+        // If the target is already complete/missing, drop the assignment and fall back.
+        Id goal_sys = kInvalidId;
+        Vec2 goal_pos{0.0, 0.0};
+        if (!contract_goal(c, &goal_sys, &goal_pos)) {
+          clear_contract_assignment(cid);
+          break;
+        }
+
+        std::string err;
+        if (assign_contract_to_ship(cid, ship_id, /*clear_existing_orders=*/false,
+                                    /*restrict_to_discovered=*/true,
+                                    /*push_event=*/false, &err)) {
+          reserve_contract_target(c);
+          return true;
+        }
+
+        // Could not issue; clear and fall back to exploration.
+        clear_contract_assignment(cid);
+        break;
+      }
+
+      // (1) Claim the best unassigned contract for this faction (AI may auto-accept).
+      Id best_cid = kInvalidId;
+      double best_score = -std::numeric_limits<double>::infinity();
+      for (const auto& [cid, c] : state_.contracts) {
+        if (c.assignee_faction_id != fid) continue;
+        if (c.assigned_ship_id != kInvalidId || c.assigned_fleet_id != kInvalidId) continue;
+
+        // Respect same-tick reservations from other auto behaviors.
+        if (c.target_id != kInvalidId) {
+          if (c.kind == ContractKind::InvestigateAnomaly && reserved_anoms.contains(c.target_id)) continue;
+          if (c.kind == ContractKind::SalvageWreck && reserved_wrecks.contains(c.target_id)) continue;
+          if (c.kind == ContractKind::SurveyJumpPoint && reserved_jumps.contains(c.target_id)) continue;
+        }
+
+        const bool offered_ok = allow_auto_accept && c.status == ContractStatus::Offered;
+        if (c.status != ContractStatus::Accepted && !offered_ok) continue;
+
+        Id goal_sys = kInvalidId;
+        Vec2 goal_pos{0.0, 0.0};
+        if (!contract_goal(c, &goal_sys, &goal_pos)) continue;
+
+        const double eta = estimate_eta_days_to_pos(ship->system_id, ship->position_mkm, fid,
+                                                    ship->speed_km_s, goal_sys, goal_pos);
+        if (!std::isfinite(eta)) continue;
+
+        double kind_mult = 1.0;
+        if (c.kind == ContractKind::InvestigateAnomaly) kind_mult = 1.10;
+        if (c.kind == ContractKind::SalvageWreck) kind_mult = 0.85;
+
+        const double rp = std::max(0.0, c.reward_research_points);
+        const double score = kind_mult * (rp + 1.0) / (eta + 1.0) - c.risk_estimate * 0.25;
+        if (best_cid == kInvalidId || score > best_score + 1e-9 ||
+            (std::abs(score - best_score) <= 1e-9 && cid < best_cid)) {
+          best_cid = cid;
+          best_score = score;
+        }
+      }
+
+      if (best_cid != kInvalidId) {
+        std::string err;
+        if (assign_contract_to_ship(best_cid, ship_id, /*clear_existing_orders=*/false,
+                                    /*restrict_to_discovered=*/true,
+                                    /*push_event=*/false, &err)) {
+          if (const auto* c = find_ptr(state_.contracts, best_cid)) reserve_contract_target(*c);
+          return true;
+        }
+      }
+    }
 
     std::vector<Id> jps = sys->jump_points;
     std::sort(jps.begin(), jps.end());
@@ -1354,6 +1520,8 @@ void Simulation::tick_ai() {
   {
     NEBULA4X_TRACE_SCOPE("tick_ai_empire_fleets", "sim.ai");
 
+    const int now_day = static_cast<int>(state_.date.days_since_epoch());
+
     auto capital_colony_for_faction = [&](Id fid) -> Id {
       Id best_cid = kInvalidId;
       double best_pop = -1.0;
@@ -1397,6 +1565,45 @@ void Simulation::tick_ai() {
     };
 
     const auto fleet_ids_snapshot = sorted_keys(state_.fleets);
+
+    // Lazy cache for trade-security patrol scoring (computed only if enabled).
+    bool trade_security_cache_ready = false;
+    TradeNetwork trade_security_net;
+    std::unordered_map<Id, Vec2> trade_security_hub_pos;
+    std::unordered_map<Id, double> trade_security_hub_pop;
+    bool trade_security_hubs_ready = false;
+
+    auto ensure_trade_security_cache = [&]() {
+      if (trade_security_cache_ready) return;
+      TradeNetworkOptions topt;
+      topt.max_lanes = std::max(1, cfg_.ai_trade_security_patrol_consider_top_lanes);
+      topt.include_uncolonized_markets = false;
+      topt.include_colony_contributions = true;
+      trade_security_net = compute_trade_network(*this, topt);
+      trade_security_cache_ready = true;
+    };
+
+    auto ensure_trade_security_hubs = [&]() {
+      if (trade_security_hubs_ready) return;
+      trade_security_hub_pos.clear();
+      trade_security_hub_pop.clear();
+      trade_security_hub_pos.reserve(state_.colonies.size() + 8);
+      trade_security_hub_pop.reserve(state_.colonies.size() + 8);
+      for (const auto& [cid, c] : state_.colonies) {
+        (void)cid;
+        const Body* b = find_ptr(state_.bodies, c.body_id);
+        if (!b) continue;
+        if (b->system_id == kInvalidId) continue;
+        const double pop = std::max(0.0, c.population_millions);
+        auto itp = trade_security_hub_pop.find(b->system_id);
+        if (itp == trade_security_hub_pop.end() || pop > itp->second + 1e-9) {
+          trade_security_hub_pop[b->system_id] = pop;
+          trade_security_hub_pos[b->system_id] = b->position_mkm;
+        }
+      }
+      trade_security_hubs_ready = true;
+    };
+
 
     for (Id fid : faction_ids) {
       Faction* fac = find_ptr(state_.factions, fid);
@@ -1554,15 +1761,222 @@ void Simulation::tick_ai() {
         }
       }
       if (patrol_fleet) {
-        if (capital_region != kInvalidId) {
-          patrol_fleet->mission.type = FleetMissionType::PatrolRegion;
-          patrol_fleet->mission.patrol_region_id = capital_region;
-          patrol_fleet->mission.patrol_region_dwell_days = 4;
+        auto set_patrol_target_capital = [&]() {
+          if (capital_region != kInvalidId) {
+            patrol_fleet->mission.type = FleetMissionType::PatrolRegion;
+            patrol_fleet->mission.patrol_region_id = capital_region;
+            patrol_fleet->mission.patrol_region_dwell_days = 4;
+            patrol_fleet->mission.patrol_region_system_index = 0;
+            patrol_fleet->mission.patrol_region_waypoint_index = 0;
+          } else {
+            patrol_fleet->mission.type = FleetMissionType::PatrolSystem;
+            patrol_fleet->mission.patrol_system_id = capital_sys;
+            patrol_fleet->mission.patrol_dwell_days = 4;
+            patrol_fleet->mission.patrol_leg_index = 0;
+          }
+        };
+
+        const bool mission_is_patrol =
+            patrol_fleet->mission.type == FleetMissionType::PatrolRegion ||
+            patrol_fleet->mission.type == FleetMissionType::PatrolSystem;
+
+        // Fresh fleets start with a sensible capital patrol mission.
+        if (!mission_is_patrol) {
+          set_patrol_target_capital();
         } else {
-          patrol_fleet->mission.type = FleetMissionType::PatrolSystem;
-          patrol_fleet->mission.patrol_system_id = capital_sys;
-          patrol_fleet->mission.patrol_dwell_days = 4;
+          // Validate target ids (protect against partially-initialized saves).
+          if (patrol_fleet->mission.type == FleetMissionType::PatrolRegion &&
+              patrol_fleet->mission.patrol_region_id == kInvalidId &&
+              capital_region != kInvalidId) {
+            set_patrol_target_capital();
+          }
+          if (patrol_fleet->mission.type == FleetMissionType::PatrolSystem &&
+              patrol_fleet->mission.patrol_system_id == kInvalidId) {
+            set_patrol_target_capital();
+          }
         }
+
+        // Trade-security retasking: choose patrol regions procedurally from the
+        // current trade network and piracy risk map.
+        if (cfg_.enable_ai_trade_security_patrols) {
+          int interval = cfg_.ai_trade_security_patrol_retarget_interval_days;
+          if (interval <= 0) interval = 1;
+          const bool due =
+              interval <= 1 ||
+              (((now_day + static_cast<int>(patrol_fleet->id)) % interval) == 0);
+
+          if (due) {
+            // Systems containing our colonies represent direct economic exposure.
+            std::unordered_set<Id> own_colony_systems;
+            own_colony_systems.reserve(16);
+            for (const auto& [cid, c] : state_.colonies) {
+              (void)cid;
+              if (c.faction_id != fid) continue;
+              const Body* b = find_ptr(state_.bodies, c.body_id);
+              if (!b) continue;
+              if (b->system_id == kInvalidId) continue;
+              own_colony_systems.insert(b->system_id);
+            }
+
+            if (!own_colony_systems.empty()) {
+              ensure_trade_security_cache();
+              ensure_trade_security_hubs();
+
+              // Score systems by trade throughput (volume share), amplified by
+              // effective piracy risk and our own colony presence.
+              std::unordered_map<Id, double> need_by_system;
+              need_by_system.reserve(64);
+
+              const double min_lane_vol = std::max(0.0, cfg_.ai_trade_security_patrol_min_lane_volume);
+              const double risk_w = std::max(0.0, cfg_.ai_trade_security_patrol_risk_weight);
+              const double own_w = std::max(1.0, cfg_.ai_trade_security_patrol_own_colony_weight);
+
+              for (const auto& lane : trade_security_net.lanes) {
+                if (!(lane.total_volume > min_lane_vol)) continue;
+                if (lane.from_system_id == kInvalidId || lane.to_system_id == kInvalidId) continue;
+                if (lane.from_system_id == lane.to_system_id) continue;
+
+                const bool relevant =
+                    own_colony_systems.contains(lane.from_system_id) ||
+                    own_colony_systems.contains(lane.to_system_id);
+                if (!relevant) continue;
+
+                Vec2 start_pos_mkm{0.0, 0.0};
+                if (auto it = trade_security_hub_pos.find(lane.from_system_id); it != trade_security_hub_pos.end()) {
+                  start_pos_mkm = it->second;
+                }
+                std::optional<Vec2> goal_pos_mkm;
+                if (auto it = trade_security_hub_pos.find(lane.to_system_id); it != trade_security_hub_pos.end()) {
+                  goal_pos_mkm = it->second;
+                }
+
+                // Restrict to what the faction can actually navigate.
+                const auto plan = plan_jump_route_cached(
+                    lane.from_system_id, start_pos_mkm, fid,
+                    /*speed_km_s=*/1000.0, lane.to_system_id,
+                    /*restrict_to_discovered=*/true, goal_pos_mkm);
+                if (!plan) continue;
+                if (plan->systems.empty()) continue;
+
+                const double vol_share = lane.total_volume / static_cast<double>(plan->systems.size());
+                for (Id sys_id : plan->systems) {
+                  if (sys_id == kInvalidId) continue;
+                  const double risk = effective_piracy_risk_for_system(state_, cfg_, sys_id);
+                  double need = vol_share * (0.20 + risk_w * risk);
+                  if (own_colony_systems.contains(sys_id)) need *= own_w;
+                  need_by_system[sys_id] += need;
+                }
+              }
+
+              // Collect discovered regions for filtering.
+              std::unordered_set<Id> discovered_regions;
+              if (const Faction* f = find_ptr(state_.factions, fid)) {
+                discovered_regions.reserve(f->discovered_systems.size() * 2 + 8);
+                for (Id sys_id : f->discovered_systems) {
+                  const StarSystem* sys = find_ptr(state_.systems, sys_id);
+                  if (!sys) continue;
+                  if (sys->region_id != kInvalidId) discovered_regions.insert(sys->region_id);
+                }
+              }
+              if (capital_region != kInvalidId) discovered_regions.insert(capital_region);
+
+              // Reduce to region scores (and keep a representative system).
+              std::unordered_map<Id, double> need_by_region;
+              std::unordered_map<Id, Id> best_sys_for_region;
+              std::unordered_map<Id, double> best_sys_need;
+              std::unordered_map<Id, double> need_no_region;
+
+              for (const auto& [sys_id, need] : need_by_system) {
+                const StarSystem* sys = find_ptr(state_.systems, sys_id);
+                if (!sys) continue;
+                if (!is_system_discovered_by_faction(fid, sys_id)) continue;
+
+                const Id rid = sys->region_id;
+                if (rid != kInvalidId) {
+                  need_by_region[rid] += need;
+
+                  auto itn = best_sys_need.find(rid);
+                  if (itn == best_sys_need.end() || need > itn->second + 1e-9 ||
+                      (std::abs(need - itn->second) <= 1e-9 && sys_id < best_sys_for_region[rid])) {
+                    best_sys_need[rid] = need;
+                    best_sys_for_region[rid] = sys_id;
+                  }
+                } else {
+                  need_no_region[sys_id] += need;
+                }
+              }
+
+              // Estimate travel cost from the capital to discourage cross-sector ping-pong.
+              double patrol_speed = std::numeric_limits<double>::infinity();
+              for (Id sid : patrol_fleet->ship_ids) {
+                const Ship* sh = find_ptr(state_.ships, sid);
+                if (!sh) continue;
+                const double sp = std::max(0.0, sh->speed_km_s);
+                if (sp > 1e-6) patrol_speed = std::min(patrol_speed, sp);
+              }
+              if (!std::isfinite(patrol_speed) || patrol_speed <= 1e-6) patrol_speed = 1000.0;
+
+              Vec2 cap_pos_mkm{0.0, 0.0};
+              if (capb) cap_pos_mkm = capb->position_mkm;
+
+              auto eta_penalized_score = [&](double need, Id target_sys) -> double {
+                if (!(need > 0.0)) return -std::numeric_limits<double>::infinity();
+                if (target_sys == kInvalidId) return -std::numeric_limits<double>::infinity();
+                const double eta = estimate_eta_days_to_system(
+                    capital_sys, cap_pos_mkm, fid, patrol_speed, target_sys);
+                if (!std::isfinite(eta)) return -std::numeric_limits<double>::infinity();
+                return need / (1.0 + eta * 0.05);
+              };
+
+              Id best_region = kInvalidId;
+              double best_region_score = -std::numeric_limits<double>::infinity();
+              for (const auto& [rid, need] : need_by_region) {
+                if (!discovered_regions.contains(rid)) continue;
+                Id target_sys = kInvalidId;
+                if (auto it = best_sys_for_region.find(rid); it != best_sys_for_region.end()) {
+                  target_sys = it->second;
+                }
+                const double score = eta_penalized_score(need, target_sys);
+                if (score > best_region_score + 1e-9 ||
+                    (std::abs(score - best_region_score) <= 1e-9 && rid < best_region)) {
+                  best_region_score = score;
+                  best_region = rid;
+                }
+              }
+
+              Id best_system = kInvalidId;
+              double best_system_score = -std::numeric_limits<double>::infinity();
+              for (const auto& [sys_id, need] : need_no_region) {
+                const double score = eta_penalized_score(need, sys_id);
+                if (score > best_system_score + 1e-9 ||
+                    (std::abs(score - best_system_score) <= 1e-9 && sys_id < best_system)) {
+                  best_system_score = score;
+                  best_system = sys_id;
+                }
+              }
+
+              if (best_region != kInvalidId) {
+                if (patrol_fleet->mission.type != FleetMissionType::PatrolRegion ||
+                    patrol_fleet->mission.patrol_region_id != best_region) {
+                  patrol_fleet->mission.type = FleetMissionType::PatrolRegion;
+                  patrol_fleet->mission.patrol_region_id = best_region;
+                  patrol_fleet->mission.patrol_region_dwell_days = 4;
+                  patrol_fleet->mission.patrol_region_system_index = 0;
+                  patrol_fleet->mission.patrol_region_waypoint_index = 0;
+                }
+              } else if (best_system != kInvalidId) {
+                if (patrol_fleet->mission.type != FleetMissionType::PatrolSystem ||
+                    patrol_fleet->mission.patrol_system_id != best_system) {
+                  patrol_fleet->mission.type = FleetMissionType::PatrolSystem;
+                  patrol_fleet->mission.patrol_system_id = best_system;
+                  patrol_fleet->mission.patrol_dwell_days = 4;
+                  patrol_fleet->mission.patrol_leg_index = 0;
+                }
+              }
+            }
+          }
+        }
+
         ensure_fleet_mission_defaults(*patrol_fleet);
         (void)configure_fleet_formation(patrol_fleet->id, FleetFormation::LineAbreast, 3.0);
       }
@@ -3749,7 +4163,22 @@ void Simulation::tick_civilian_trade_convoys() {
   lanes.reserve(net.lanes.size());
   for (const auto& l : net.lanes) {
     if (!(l.total_volume > 1e-9)) continue;
-    lanes.push_back({l.from_system_id, l.to_system_id, std::max(0.0, l.total_volume), l.top_flows});
+
+    double w = std::max(0.0, l.total_volume);
+
+    // Convoys bias toward safer corridors. Risk is endpoint-weighted (cheap,
+    // deterministic) and automatically responds to piracy suppression.
+    const double ra = effective_piracy_risk_for_system(state_, cfg_, l.from_system_id);
+    const double rb = effective_piracy_risk_for_system(state_, cfg_, l.to_system_id);
+    const double risk = 0.5 * (ra + rb);
+
+    const double av = std::clamp(cfg_.civilian_trade_convoy_risk_aversion, 0.0, 1.0);
+    const double min_mult = std::clamp(cfg_.civilian_trade_convoy_min_risk_weight, 0.0, 1.0);
+    const double mult = std::clamp(1.0 - av * risk, min_mult, 1.0);
+    w *= mult;
+
+    if (!(w > 1e-12)) continue;
+    lanes.push_back({l.from_system_id, l.to_system_id, w, l.top_flows});
   }
   if (lanes.empty()) return;
 
@@ -3985,25 +4414,7 @@ void Simulation::tick_pirate_raids() {
     }
   };
 
-  auto piracy_risk_for_system = [&](Id system_id) -> double {
-    const auto* sys = find_ptr(state_.systems, system_id);
-    if (!sys) return 0.0;
-
-    double risk = std::clamp(cfg_.pirate_raid_default_system_risk, 0.0, 1.0);
-    double suppression = 0.0;
-    if (sys->region_id != kInvalidId) {
-      if (const auto* reg = find_ptr(state_.regions, sys->region_id)) {
-        risk = std::clamp(reg->pirate_risk, 0.0, 1.0);
-        if (cfg_.enable_pirate_suppression) {
-          suppression = std::clamp(reg->pirate_suppression, 0.0, 1.0);
-        }
-      }
-    }
-    risk *= (1.0 - suppression);
-    return std::clamp(risk, 0.0, 1.0);
-  };
-
-  struct SysAcc {
+    struct SysAcc {
     double score{0.0};
 
     // Mobile pirate ships currently present in the system (raiders, etc).
@@ -4120,7 +4531,7 @@ void Simulation::tick_pirate_raids() {
       if (a.score <= 1e-9) continue;
       if (a.pirate_ships > max_pirates_in_sys) continue;
 
-      const double risk = piracy_risk_for_system(sys_id);
+      const double risk = effective_piracy_risk_for_system(state_, cfg_, sys_id);
       if (risk <= 1e-6) continue;
 
       double weight = std::pow(risk, risk_exp) * a.score;

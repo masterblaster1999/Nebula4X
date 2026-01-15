@@ -23,6 +23,7 @@
 #include "ui/freight_window.h"
 #include "ui/fuel_window.h"
 #include "ui/salvage_window.h"
+#include "ui/contracts_window.h"
 #include "ui/sustainment_window.h"
 #include "ui/advisor_window.h"
 #include "ui/colony_profiles_window.h"
@@ -37,6 +38,7 @@
 #include "ui/design_studio_window.h"
 #include "ui/balance_lab_window.h"
 #include "ui/procgen_atlas_window.h"
+#include "ui/star_atlas_window.h"
 #include "ui/intel_window.h"
 #include "ui/victory_window.h"
 #include "ui/diplomacy_window.h"
@@ -388,6 +390,7 @@ void App::frame() {
   if (ui_.show_freight_window) draw_freight_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   if (ui_.show_fuel_window) draw_fuel_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   if (ui_.show_salvage_window) draw_salvage_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  if (ui_.show_contracts_window) draw_contracts_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   if (ui_.show_sustainment_window)
     draw_sustainment_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   if (ui_.show_advisor_window) draw_advisor_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
@@ -405,6 +408,9 @@ void App::frame() {
   }
   if (ui_.show_procgen_atlas_window) {
     draw_procgen_atlas_window(sim_, ui_, selected_body_);
+  }
+  if (ui_.show_star_atlas_window) {
+    draw_star_atlas_window(sim_, ui_);
   }
   if (ui_.show_intel_window) {
     draw_intel_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
@@ -1068,6 +1074,87 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       if (auto it = obj->find("galaxy_procgen_lens_log_scale"); it != obj->end()) {
         ui_.galaxy_procgen_lens_log_scale = it->second.bool_value(ui_.galaxy_procgen_lens_log_scale);
       }
+      if (auto it = obj->find("galaxy_procgen_field"); it != obj->end()) {
+        ui_.galaxy_procgen_field = it->second.bool_value(ui_.galaxy_procgen_field);
+      }
+      if (auto it = obj->find("galaxy_procgen_field_alpha"); it != obj->end()) {
+        ui_.galaxy_procgen_field_alpha = static_cast<float>(it->second.number_value(ui_.galaxy_procgen_field_alpha));
+        ui_.galaxy_procgen_field_alpha = std::clamp(ui_.galaxy_procgen_field_alpha, 0.0f, 1.0f);
+      }
+      if (auto it = obj->find("galaxy_procgen_field_cell_px"); it != obj->end()) {
+        ui_.galaxy_procgen_field_cell_px = static_cast<int>(it->second.number_value(ui_.galaxy_procgen_field_cell_px));
+        ui_.galaxy_procgen_field_cell_px = std::clamp(ui_.galaxy_procgen_field_cell_px, 4, 96);
+      }
+      if (auto it = obj->find("galaxy_procgen_contours"); it != obj->end()) {
+        ui_.galaxy_procgen_contours = it->second.bool_value(ui_.galaxy_procgen_contours);
+      }
+      if (auto it = obj->find("galaxy_procgen_contour_alpha"); it != obj->end()) {
+        ui_.galaxy_procgen_contour_alpha = static_cast<float>(it->second.number_value(ui_.galaxy_procgen_contour_alpha));
+        ui_.galaxy_procgen_contour_alpha = std::clamp(ui_.galaxy_procgen_contour_alpha, 0.0f, 1.0f);
+      }
+      if (auto it = obj->find("galaxy_procgen_contour_cell_px"); it != obj->end()) {
+        ui_.galaxy_procgen_contour_cell_px = static_cast<int>(it->second.number_value(ui_.galaxy_procgen_contour_cell_px));
+        ui_.galaxy_procgen_contour_cell_px = std::clamp(ui_.galaxy_procgen_contour_cell_px, 4, 128);
+      }
+      if (auto it = obj->find("galaxy_procgen_contour_levels"); it != obj->end()) {
+        ui_.galaxy_procgen_contour_levels = static_cast<int>(it->second.number_value(ui_.galaxy_procgen_contour_levels));
+        ui_.galaxy_procgen_contour_levels = std::clamp(ui_.galaxy_procgen_contour_levels, 2, 16);
+      }
+      if (auto it = obj->find("galaxy_procgen_contour_thickness"); it != obj->end()) {
+        ui_.galaxy_procgen_contour_thickness = static_cast<float>(it->second.number_value(ui_.galaxy_procgen_contour_thickness));
+        ui_.galaxy_procgen_contour_thickness = std::clamp(ui_.galaxy_procgen_contour_thickness, 0.5f, 6.0f);
+      }
+      if (auto it = obj->find("galaxy_procgen_vectors"); it != obj->end()) {
+        ui_.galaxy_procgen_vectors = it->second.bool_value(ui_.galaxy_procgen_vectors);
+      }
+      if (auto it = obj->find("galaxy_procgen_vector_alpha"); it != obj->end()) {
+        ui_.galaxy_procgen_vector_alpha = static_cast<float>(it->second.number_value(ui_.galaxy_procgen_vector_alpha));
+        ui_.galaxy_procgen_vector_alpha = std::clamp(ui_.galaxy_procgen_vector_alpha, 0.0f, 1.0f);
+      }
+      if (auto it = obj->find("galaxy_procgen_vector_cell_px"); it != obj->end()) {
+        ui_.galaxy_procgen_vector_cell_px = static_cast<int>(it->second.number_value(ui_.galaxy_procgen_vector_cell_px));
+        ui_.galaxy_procgen_vector_cell_px = std::clamp(ui_.galaxy_procgen_vector_cell_px, 6, 192);
+      }
+      if (auto it = obj->find("galaxy_procgen_vector_scale"); it != obj->end()) {
+        ui_.galaxy_procgen_vector_scale = static_cast<float>(it->second.number_value(ui_.galaxy_procgen_vector_scale));
+        ui_.galaxy_procgen_vector_scale = std::clamp(ui_.galaxy_procgen_vector_scale, 1.0f, 600.0f);
+      }
+      if (auto it = obj->find("galaxy_procgen_vector_min_mag"); it != obj->end()) {
+        ui_.galaxy_procgen_vector_min_mag = static_cast<float>(it->second.number_value(ui_.galaxy_procgen_vector_min_mag));
+        ui_.galaxy_procgen_vector_min_mag = std::clamp(ui_.galaxy_procgen_vector_min_mag, 0.0f, 1.0f);
+      }
+      if (auto it = obj->find("galaxy_procgen_probe"); it != obj->end()) {
+        ui_.galaxy_procgen_probe = it->second.bool_value(ui_.galaxy_procgen_probe);
+      }
+
+      // Star Atlas overlay (procedural constellations).
+      if (auto it = obj->find("galaxy_star_atlas_constellations"); it != obj->end()) {
+        ui_.galaxy_star_atlas_constellations = it->second.bool_value(ui_.galaxy_star_atlas_constellations);
+      }
+      if (auto it = obj->find("galaxy_star_atlas_labels"); it != obj->end()) {
+        ui_.galaxy_star_atlas_labels = it->second.bool_value(ui_.galaxy_star_atlas_labels);
+      }
+      if (auto it = obj->find("galaxy_star_atlas_alpha"); it != obj->end()) {
+        ui_.galaxy_star_atlas_alpha = static_cast<float>(it->second.number_value(ui_.galaxy_star_atlas_alpha));
+        ui_.galaxy_star_atlas_alpha = std::clamp(ui_.galaxy_star_atlas_alpha, 0.0f, 1.0f);
+      }
+      if (auto it = obj->find("galaxy_star_atlas_label_alpha"); it != obj->end()) {
+        ui_.galaxy_star_atlas_label_alpha = static_cast<float>(it->second.number_value(ui_.galaxy_star_atlas_label_alpha));
+        ui_.galaxy_star_atlas_label_alpha = std::clamp(ui_.galaxy_star_atlas_label_alpha, 0.0f, 1.0f);
+      }
+      if (auto it = obj->find("galaxy_star_atlas_target_cluster_size"); it != obj->end()) {
+        ui_.galaxy_star_atlas_target_cluster_size = static_cast<int>(it->second.number_value(ui_.galaxy_star_atlas_target_cluster_size));
+        ui_.galaxy_star_atlas_target_cluster_size = std::clamp(ui_.galaxy_star_atlas_target_cluster_size, 4, 24);
+      }
+      if (auto it = obj->find("galaxy_star_atlas_max_constellations"); it != obj->end()) {
+        ui_.galaxy_star_atlas_max_constellations = static_cast<int>(it->second.number_value(ui_.galaxy_star_atlas_max_constellations));
+        ui_.galaxy_star_atlas_max_constellations = std::clamp(ui_.galaxy_star_atlas_max_constellations, 0, 1000);
+      }
+      if (auto it = obj->find("galaxy_star_atlas_min_zoom"); it != obj->end()) {
+        ui_.galaxy_star_atlas_min_zoom = static_cast<float>(it->second.number_value(ui_.galaxy_star_atlas_min_zoom));
+        ui_.galaxy_star_atlas_min_zoom = std::clamp(ui_.galaxy_star_atlas_min_zoom, 0.01f, 5.0f);
+      }
+
       if (auto it = obj->find("contact_max_age_days"); it != obj->end()) {
         ui_.contact_max_age_days = static_cast<int>(it->second.number_value(ui_.contact_max_age_days));
         ui_.contact_max_age_days = std::clamp(ui_.contact_max_age_days, 1, 3650);
@@ -1123,6 +1210,9 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       }
       if (auto it = obj->find("show_procgen_atlas_window"); it != obj->end()) {
         ui_.show_procgen_atlas_window = it->second.bool_value(ui_.show_procgen_atlas_window);
+      }
+      if (auto it = obj->find("show_star_atlas_window"); it != obj->end()) {
+        ui_.show_star_atlas_window = it->second.bool_value(ui_.show_star_atlas_window);
       }
       if (auto it = obj->find("show_intel_window"); it != obj->end()) {
         ui_.show_intel_window = it->second.bool_value(ui_.show_intel_window);
@@ -1870,6 +1960,30 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     o["galaxy_procgen_lens_alpha"] = static_cast<double>(ui_.galaxy_procgen_lens_alpha);
     o["galaxy_procgen_lens_show_legend"] = ui_.galaxy_procgen_lens_show_legend;
     o["galaxy_procgen_lens_log_scale"] = ui_.galaxy_procgen_lens_log_scale;
+    o["galaxy_procgen_field"] = ui_.galaxy_procgen_field;
+    o["galaxy_procgen_field_alpha"] = static_cast<double>(ui_.galaxy_procgen_field_alpha);
+    o["galaxy_procgen_field_cell_px"] = static_cast<double>(ui_.galaxy_procgen_field_cell_px);
+    o["galaxy_procgen_contours"] = ui_.galaxy_procgen_contours;
+    o["galaxy_procgen_contour_alpha"] = static_cast<double>(ui_.galaxy_procgen_contour_alpha);
+    o["galaxy_procgen_contour_cell_px"] = static_cast<double>(ui_.galaxy_procgen_contour_cell_px);
+    o["galaxy_procgen_contour_levels"] = static_cast<double>(ui_.galaxy_procgen_contour_levels);
+    o["galaxy_procgen_contour_thickness"] = static_cast<double>(ui_.galaxy_procgen_contour_thickness);
+    o["galaxy_procgen_vectors"] = ui_.galaxy_procgen_vectors;
+    o["galaxy_procgen_vector_alpha"] = static_cast<double>(ui_.galaxy_procgen_vector_alpha);
+    o["galaxy_procgen_vector_cell_px"] = static_cast<double>(ui_.galaxy_procgen_vector_cell_px);
+    o["galaxy_procgen_vector_scale"] = static_cast<double>(ui_.galaxy_procgen_vector_scale);
+    o["galaxy_procgen_vector_min_mag"] = static_cast<double>(ui_.galaxy_procgen_vector_min_mag);
+    o["galaxy_procgen_probe"] = ui_.galaxy_procgen_probe;
+
+    // Star Atlas overlay.
+    o["galaxy_star_atlas_constellations"] = ui_.galaxy_star_atlas_constellations;
+    o["galaxy_star_atlas_labels"] = ui_.galaxy_star_atlas_labels;
+    o["galaxy_star_atlas_alpha"] = static_cast<double>(ui_.galaxy_star_atlas_alpha);
+    o["galaxy_star_atlas_label_alpha"] = static_cast<double>(ui_.galaxy_star_atlas_label_alpha);
+    o["galaxy_star_atlas_target_cluster_size"] = static_cast<double>(ui_.galaxy_star_atlas_target_cluster_size);
+    o["galaxy_star_atlas_max_constellations"] = static_cast<double>(ui_.galaxy_star_atlas_max_constellations);
+    o["galaxy_star_atlas_min_zoom"] = static_cast<double>(ui_.galaxy_star_atlas_min_zoom);
+
     o["contact_max_age_days"] = static_cast<double>(ui_.contact_max_age_days);
 
     // Layout.
@@ -1889,6 +2003,7 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     o["show_design_studio_window"] = ui_.show_design_studio_window;
     o["show_balance_lab_window"] = ui_.show_balance_lab_window;
     o["show_procgen_atlas_window"] = ui_.show_procgen_atlas_window;
+    o["show_star_atlas_window"] = ui_.show_star_atlas_window;
     o["show_intel_window"] = ui_.show_intel_window;
     o["show_diplomacy_window"] = ui_.show_diplomacy_window;
     o["show_victory_window"] = ui_.show_victory_window;

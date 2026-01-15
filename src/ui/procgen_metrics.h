@@ -24,13 +24,22 @@ inline const char* procgen_lens_mode_label(ProcGenLensMode m) {
     case ProcGenLensMode::HabitableCandidates: return "Habitable candidates";
     case ProcGenLensMode::MineralWealth: return "Mineral wealth";
     case ProcGenLensMode::JumpDegree: return "Jump degree";
+    case ProcGenLensMode::RegionNebulaBias: return "Region nebula bias";
+    case ProcGenLensMode::RegionPirateRiskEffective: return "Region pirate risk (effective)";
+    case ProcGenLensMode::RegionPirateSuppression: return "Region pirate suppression";
+    case ProcGenLensMode::RegionRuinsDensity: return "Region ruins density";
+    case ProcGenLensMode::RegionMineralRichness: return "Region mineral richness";
+    case ProcGenLensMode::RegionVolatileRichness: return "Region volatile richness";
+    case ProcGenLensMode::RegionSalvageRichness: return "Region salvage richness";
   }
   return "Off";
 }
 
 inline const char* procgen_lens_mode_combo_items() {
   // NOLINTNEXTLINE(bugprone-return-const-ref-from-parameter)
-  return "Off\0Nebula density\0Star temperature\0Star mass\0Star luminosity\0Body count\0Habitable candidates\0Mineral wealth\0Jump degree\0";
+  return "Off\0Nebula density\0Star temperature\0Star mass\0Star luminosity\0Body count\0Habitable candidates\0Mineral wealth\0Jump degree\0"
+         "Region nebula bias\0Region pirate risk (effective)\0Region pirate suppression\0Region ruins density\0"
+         "Region mineral richness\0Region volatile richness\0Region salvage richness\0";
 }
 
 // Returns the system's primary star body if present.
@@ -132,6 +141,37 @@ inline double procgen_lens_value(const GameState& s, const StarSystem& sys, Proc
       return sum_mineral_deposits_tons(s, sys);
     case ProcGenLensMode::JumpDegree:
       return static_cast<double>(sys.jump_points.size());
+    case ProcGenLensMode::RegionNebulaBias: {
+      const Region* r = (sys.region_id != kInvalidId) ? find_ptr(s.regions, sys.region_id) : nullptr;
+      return r ? r->nebula_bias : 0.0;
+    }
+    case ProcGenLensMode::RegionPirateRiskEffective: {
+      const Region* r = (sys.region_id != kInvalidId) ? find_ptr(s.regions, sys.region_id) : nullptr;
+      if (!r) return 0.0;
+      const double base = std::clamp(r->pirate_risk, 0.0, 1.0);
+      const double supp = std::clamp(r->pirate_suppression, 0.0, 1.0);
+      return std::clamp(base * (1.0 - supp), 0.0, 1.0);
+    }
+    case ProcGenLensMode::RegionPirateSuppression: {
+      const Region* r = (sys.region_id != kInvalidId) ? find_ptr(s.regions, sys.region_id) : nullptr;
+      return r ? std::clamp(r->pirate_suppression, 0.0, 1.0) : 0.0;
+    }
+    case ProcGenLensMode::RegionRuinsDensity: {
+      const Region* r = (sys.region_id != kInvalidId) ? find_ptr(s.regions, sys.region_id) : nullptr;
+      return r ? std::clamp(r->ruins_density, 0.0, 1.0) : 0.0;
+    }
+    case ProcGenLensMode::RegionMineralRichness: {
+      const Region* r = (sys.region_id != kInvalidId) ? find_ptr(s.regions, sys.region_id) : nullptr;
+      return r ? r->mineral_richness_mult : 1.0;
+    }
+    case ProcGenLensMode::RegionVolatileRichness: {
+      const Region* r = (sys.region_id != kInvalidId) ? find_ptr(s.regions, sys.region_id) : nullptr;
+      return r ? r->volatile_richness_mult : 1.0;
+    }
+    case ProcGenLensMode::RegionSalvageRichness: {
+      const Region* r = (sys.region_id != kInvalidId) ? find_ptr(s.regions, sys.region_id) : nullptr;
+      return r ? r->salvage_richness_mult : 1.0;
+    }
   }
   return 0.0;
 }
@@ -147,8 +187,49 @@ inline const char* procgen_lens_value_unit(ProcGenLensMode mode) {
     case ProcGenLensMode::HabitableCandidates: return "candidates";
     case ProcGenLensMode::MineralWealth: return "tons";
     case ProcGenLensMode::JumpDegree: return "links";
+    case ProcGenLensMode::RegionNebulaBias: return "bias";
+    case ProcGenLensMode::RegionPirateRiskEffective: return "%";
+    case ProcGenLensMode::RegionPirateSuppression: return "%";
+    case ProcGenLensMode::RegionRuinsDensity: return "%";
+    case ProcGenLensMode::RegionMineralRichness: return "x";
+    case ProcGenLensMode::RegionVolatileRichness: return "x";
+    case ProcGenLensMode::RegionSalvageRichness: return "x";
   }
   return "";
+}
+
+// How to scale raw lens values for display in UI legends.
+// For percentage-like 0..1 metrics we display 0..100.
+inline double procgen_lens_display_scale(ProcGenLensMode mode) {
+  switch (mode) {
+    case ProcGenLensMode::NebulaDensity:
+    case ProcGenLensMode::RegionPirateRiskEffective:
+    case ProcGenLensMode::RegionPirateSuppression:
+    case ProcGenLensMode::RegionRuinsDensity:
+      return 100.0;
+    default:
+      return 1.0;
+  }
+}
+
+// Suggested decimal precision for legends/overlays.
+inline int procgen_lens_display_decimals(ProcGenLensMode mode) {
+  switch (mode) {
+    case ProcGenLensMode::StarMass:
+    case ProcGenLensMode::StarLuminosity:
+    case ProcGenLensMode::RegionNebulaBias:
+    case ProcGenLensMode::RegionMineralRichness:
+    case ProcGenLensMode::RegionVolatileRichness:
+    case ProcGenLensMode::RegionSalvageRichness:
+      return 2;
+    case ProcGenLensMode::NebulaDensity:
+    case ProcGenLensMode::RegionPirateRiskEffective:
+    case ProcGenLensMode::RegionPirateSuppression:
+    case ProcGenLensMode::RegionRuinsDensity:
+      return 0;
+    default:
+      return 0;
+  }
 }
 
 // Simple blue->red perceptual-ish gradient for lens visualizations.

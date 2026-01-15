@@ -47,6 +47,15 @@ enum class ProcGenLensMode : int {
   HabitableCandidates,
   MineralWealth,
   JumpDegree,
+
+  // Region-level procedural modifiers.
+  RegionNebulaBias,
+  RegionPirateRiskEffective,
+  RegionPirateSuppression,
+  RegionRuinsDensity,
+  RegionMineralRichness,
+  RegionVolatileRichness,
+  RegionSalvageRichness,
 };
 
 struct JsonWatchConfig {
@@ -281,6 +290,57 @@ struct UIState {
   // Apply a log scale before normalization for wide-range metrics (e.g. minerals).
   bool galaxy_procgen_lens_log_scale{true};
 
+  // Procedural field rendering (heatmap) for the selected ProcGen lens.
+  //
+  // When enabled, the galaxy map renders a low-res continuous field behind
+  // the system nodes by interpolating the lens metric over space.
+  bool galaxy_procgen_field{false};
+  float galaxy_procgen_field_alpha{0.22f};
+  // Approximate size of a field cell in pixels. Lower => higher resolution.
+  int galaxy_procgen_field_cell_px{18};
+
+  // Procedural contour rendering (isolines) for the selected ProcGen lens.
+  //
+  // When enabled, the galaxy map draws contour lines over the interpolated
+  // lens field to make gradients and boundaries easier to read at a glance.
+  bool galaxy_procgen_contours{false};
+  float galaxy_procgen_contour_alpha{0.20f};
+  // Approximate size of a contour grid cell in pixels. Lower => more detail.
+  int galaxy_procgen_contour_cell_px{26};
+  // Number of contour levels between min and max (evenly spaced).
+  int galaxy_procgen_contour_levels{7};
+  float galaxy_procgen_contour_thickness{1.2f};
+
+  // Procedural gradient vector field rendering for the selected ProcGen lens.
+  //
+  // When enabled, the galaxy map draws small arrows indicating the direction
+  // of increasing lens value (a quick "slope" visualization).
+  bool galaxy_procgen_vectors{false};
+  float galaxy_procgen_vector_alpha{0.22f};
+  // Approximate size of a vector grid cell in pixels. Higher => fewer arrows.
+  int galaxy_procgen_vector_cell_px{42};
+  // Arrow length scaling factor (in pixels per unit gradient magnitude).
+  float galaxy_procgen_vector_scale{120.0f};
+  // Minimum gradient magnitude (dimensionless, in normalized lens-space) to draw a vector.
+  float galaxy_procgen_vector_min_mag{0.020f};
+
+  // Hold Alt over the galaxy map to probe the interpolated ProcGen lens value.
+  bool galaxy_procgen_probe{true};
+
+  // Star Atlas: procedural constellations overlay.
+  //
+  // These are UI-only helpers computed from the currently visible (discovered)
+  // system set. They are meant as a "shape" layer for navigation and for
+  // debugging procgen clustering.
+  bool galaxy_star_atlas_constellations{false};
+  bool galaxy_star_atlas_labels{true};
+  float galaxy_star_atlas_alpha{0.22f};
+  float galaxy_star_atlas_label_alpha{0.35f};
+  int galaxy_star_atlas_target_cluster_size{8};
+  int galaxy_star_atlas_max_constellations{128};
+  // Hide constellations on the galaxy map when zoom is very low (prevents clutter).
+  float galaxy_star_atlas_min_zoom{0.18f};
+
   // Logistics overlays.
   bool show_galaxy_freight_lanes{false};
 
@@ -319,6 +379,7 @@ struct UIState {
   bool show_freight_window{false};
   bool show_fuel_window{false};
   bool show_salvage_window{false};
+  bool show_contracts_window{false};
   bool show_sustainment_window{false};
   bool show_troop_window{false};
   bool show_advisor_window{false};
@@ -346,6 +407,7 @@ struct UIState {
   bool show_reference_graph_window{false};
   bool show_layout_profiles_window{false};
   bool show_procgen_atlas_window{false};
+  bool show_star_atlas_window{false};
   bool show_watchboard_window{false};
   bool show_data_lenses_window{false};
   bool show_dashboards_window{false};

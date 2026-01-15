@@ -299,6 +299,14 @@ void Simulation::tick_one_tick_hours(int hours) {
   // Victory conditions are evaluated on day boundaries so that all daily
   // effects (combat, invasion results, economy) have already been applied.
   if (day_advanced) {
+    // Dynamic procedural points-of-interest are spawned before contracts so that
+    // newly-created anomalies/caches can be picked up by the mission board once
+    // they are discovered.
+    tick_dynamic_points_of_interest();
+
+    // Procedural contracts (mission board) are evaluated at day boundaries so
+    // completion/expiration happens after all simulation effects.
+    tick_contracts();
     tick_victory();
   }
 }

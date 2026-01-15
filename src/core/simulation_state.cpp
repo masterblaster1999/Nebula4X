@@ -19,6 +19,7 @@
 #include "nebula4x/core/ai_economy.h"
 #include "nebula4x/core/content_validation.h"
 #include "nebula4x/core/state_validation.h"
+#include "nebula4x/core/procgen_obscure.h"
 #include "nebula4x/util/log.h"
 #include "nebula4x/util/spatial_index.h"
 
@@ -583,6 +584,19 @@ void Simulation::discover_anomaly_for_faction(Id faction_id, Id anomaly_id, Id d
       ss << "\nHazard risk: " << std::clamp(anom->hazard_chance, 0.0, 1.0) * 100.0 << "%";
     }
 
+    // Procedural "fingerprint" + flavor line for uniqueness.
+    {
+      const auto* reg = (sys && sys->region_id != kInvalidId) ? find_ptr(state_.regions, sys->region_id) : nullptr;
+      const double neb = sys ? std::clamp(sys->nebula_density, 0.0, 1.0) : 0.0;
+      const double ruins = reg ? std::clamp(reg->ruins_density, 0.0, 1.0) : 0.0;
+      const double pir = reg ? std::clamp(reg->pirate_risk * (1.0 - reg->pirate_suppression), 0.0, 1.0) : 0.0;
+
+      const std::string sig = procgen_obscure::anomaly_signature_code(*anom);
+      ss << "\nSignature: " << sig;
+      ss << "\n" << procgen_obscure::anomaly_signature_glyph(*anom);
+      ss << "\n\n" << procgen_obscure::anomaly_lore_line(*anom, neb, ruins, pir);
+    }
+
     je.text = ss.str();
     push_journal_entry(faction_id, std::move(je));
   }
@@ -743,6 +757,10 @@ void Simulation::new_game() {
   recompute_body_positions();
   tick_contacts(0.0, false);
   invalidate_jump_route_cache();
+
+  // Seed initial procedural contract offers so the mission board is not empty
+  // on a fresh start.
+  tick_contracts();
 }
 
 void Simulation::new_game_random(std::uint32_t seed, int num_systems) {
@@ -784,6 +802,10 @@ void Simulation::new_game_random(std::uint32_t seed, int num_systems) {
   recompute_body_positions();
   tick_contacts(0.0, false);
   invalidate_jump_route_cache();
+
+  // Seed initial procedural contract offers so the mission board is not empty
+  // on a fresh start.
+  tick_contracts();
 }
 
 void Simulation::load_game(GameState loaded) {

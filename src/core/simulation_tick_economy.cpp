@@ -1,6 +1,7 @@
 #include "nebula4x/core/simulation.h"
 
 #include "simulation_internal.h"
+#include "simulation_procgen.h"
 
 #include <algorithm>
 #include <cmath>
@@ -363,6 +364,229 @@ void Simulation::tick_colonies(double dt_days, bool emit_daily_events) {
       }
     }
   }
+
+  // --- Geological surveys (procedural deposit discovery) ---
+  //
+  // When enabled, colonies can build the "geological_survey" installation to
+  // occasionally discover additional mineral deposits on their body over time.
+  // This is intentionally *conservative* (low probability, bounded yields) so
+  // it acts as a long-term pressure valve rather than an infinite free-money
+  // button. All rolls are deterministic based on (day, colony id, body id).
+  if (emit_daily_events && cfg_.enable_geological_survey) {
+    // Build a deterministic list of mineable resources (candidate deposits).
+    std::vector<std::string> mineables;
+    mineables.reserve(content_.resources.size());
+    for (const auto& [rid, rd] : content_.resources) {
+      if (rid.empty()) continue;
+      if (!rd.mineable) continue;
+      mineables.push_back(rid);
+    }
+    std::sort(mineables.begin(), mineables.end());
+
+    const std::int64_t now_day = state_.date.days_since_epoch();
+
+    for (Id cid : sorted_keys(state_.colonies)) {
+      Colony& colony = state_.colonies.at(cid);
+
+      const auto it_survey = colony.installations.find("geological_survey");
+      const int survey_count = (it_survey == colony.installations.end()) ? 0 : std::max(0, it_survey->second);
+      if (survey_count <= 0) continue;
+
+      Body* body = find_ptr(state_.bodies, colony.body_id);
+      if (!body) continue;
+
+      // Avoid changing legacy "unlimited deposits" bodies (empty map).
+      if (body->mineral_deposits.empty()) continue;
+
+      // Total remaining deposits on the body (used for depletion scaling + composition bias).
+      double total_remaining = 0.0;
+      for (const auto& [_, rem_raw] : body->mineral_deposits) {
+        const double rem = std::max(0.0, rem_raw);
+        if (rem > 1e-12) total_remaining += rem;
+      }
+
+      // Region richness multipliers (procedural galaxy).
+      double mineral_rich = 1.0;
+      double volatile_rich = 1.0;
+      if (const auto* sys = find_ptr(state_.systems, body->system_id)) {
+        if (const auto* reg = find_ptr(state_.regions, sys->region_id)) {
+          mineral_rich = std::max(0.0, reg->mineral_richness_mult);
+          volatile_rich = std::max(0.0, reg->volatile_richness_mult);
+        }
+      }
+
+      // Depletion fraction: 0 when deposits >= threshold, 1 when fully depleted.
+      double depletion_frac = 0.0;
+      const double dep_thr = std::max(0.0, cfg_.geological_survey_depletion_threshold_tons);
+      if (dep_thr > 1e-9) {
+        depletion_frac = std::clamp(1.0 - (total_remaining / dep_thr), 0.0, 1.0);
+      }
+
+      const double mining_mult = std::max(0.0, mult_for(colony.faction_id).mining);
+
+      // Probability per installation.
+      const double base_p =
+          std::clamp(cfg_.geological_survey_discovery_chance_per_day_per_installation, 0.0, 1.0);
+      double p = base_p * (0.5 + 0.5 * std::clamp(mining_mult, 0.0, 4.0));
+      p *= (1.0 + std::max(0.0, cfg_.geological_survey_depletion_chance_boost) * depletion_frac);
+      p = std::clamp(p, 0.0, 0.25);
+
+      // Deterministic RNG seed (day + colony id + body id).
+      std::uint64_t seed = 0x47534C5645525955ull; // 'GSLVERYU' - arbitrary tag
+      seed ^= static_cast<std::uint64_t>(now_day) * 0x9E3779B97F4A7C15ull;
+      seed ^= static_cast<std::uint64_t>(cid) * 0xBF58476D1CE4E5B9ull;
+      seed ^= static_cast<std::uint64_t>(body->id) * 0x94D049BB133111EBull;
+      sim_procgen::HashRng rng(seed);
+
+      // Record discoveries to emit a single aggregated event.
+      std::unordered_map<std::string, double> discovered_tons;
+      discovered_tons.reserve(4);
+
+      int discoveries = 0;
+      const int max_disc = std::max(0, cfg_.geological_survey_max_discoveries_per_colony_per_day);
+
+      auto pick_mineral_id = [&]() -> std::string {
+        if (mineables.empty()) return {};
+
+        double sum_w = 0.0;
+        std::vector<double> weights;
+        weights.reserve(mineables.size());
+
+        for (const std::string& rid : mineables) {
+          const auto it_rd = content_.resources.find(rid);
+          if (it_rd == content_.resources.end()) {
+            weights.push_back(0.0);
+            continue;
+          }
+          const ResourceDef& rd = it_rd->second;
+
+          double w = 1.0;
+          const bool is_volatile = (rd.category == "volatile");
+          w *= is_volatile ? volatile_rich : mineral_rich;
+
+          // Body-type bias: comets skew heavily toward volatiles.
+          if (body->type == BodyType::Comet) {
+            w *= is_volatile ? 6.0 : 0.25;
+          } else if (body->type == BodyType::Asteroid) {
+            w *= 0.25;
+          } else if (body->type == BodyType::Moon) {
+            w *= 0.6;
+          }
+
+          // Bias toward the body's existing deposit composition (if non-empty).
+          if (total_remaining > 1e-9) {
+            const auto it_dep = body->mineral_deposits.find(rid);
+            if (it_dep != body->mineral_deposits.end()) {
+              const double rem = std::max(0.0, it_dep->second);
+              const double share = std::clamp(rem / total_remaining, 0.0, 1.0);
+              w *= (0.4 + 1.6 * share);
+            } else {
+              w *= 0.6;
+            }
+          }
+
+          if (!std::isfinite(w) || w < 0.0) w = 0.0;
+          weights.push_back(w);
+          sum_w += w;
+        }
+
+        if (!(sum_w > 0.0) || !std::isfinite(sum_w)) {
+          const int idx = rng.range_int(0, static_cast<int>(mineables.size()) - 1);
+          return mineables[static_cast<std::size_t>(idx)];
+        }
+
+        const double r = rng.next_u01() * sum_w;
+        double acc = 0.0;
+        for (std::size_t i = 0; i < mineables.size(); ++i) {
+          acc += weights[i];
+          if (r <= acc) return mineables[i];
+        }
+        return mineables.back();
+      };
+
+      const double min_tons = std::max(0.0, cfg_.geological_survey_min_deposit_tons);
+      const double max_tons = std::max(min_tons, cfg_.geological_survey_max_deposit_tons);
+
+      for (int i = 0; i < survey_count; ++i) {
+        if (max_disc > 0 && discoveries >= max_disc) break;
+        if (!(rng.next_u01() < p)) continue;
+
+        const std::string mineral_id = pick_mineral_id();
+        if (mineral_id.empty()) continue;
+
+        const auto it_rd = content_.resources.find(mineral_id);
+        if (it_rd == content_.resources.end() || !it_rd->second.mineable) continue;
+
+        const bool is_volatile = (it_rd->second.category == "volatile");
+
+        // Base yield and modifiers.
+        double amt = rng.range(min_tons, max_tons);
+
+        double body_mult = 1.0;
+        switch (body->type) {
+          case BodyType::Planet:
+            body_mult = 1.0;
+            break;
+          case BodyType::GasGiant:
+            body_mult = 0.8;
+            break;
+          case BodyType::Moon:
+            body_mult = 0.45;
+            break;
+          case BodyType::Asteroid:
+            body_mult = 0.18;
+            break;
+          case BodyType::Comet:
+            body_mult = 0.12;
+            break;
+          default:
+            body_mult = 0.25;
+            break;
+        }
+
+        const double rich = is_volatile ? volatile_rich : mineral_rich;
+        const double rich_mult = std::clamp(rich, 0.2, 3.0);
+
+        const double tech_mult = std::clamp(0.5 + 0.5 * mining_mult, 0.25, 2.5);
+
+        // Slightly increase yields as deposits deplete (deeper drilling).
+        const double dep_mult = 1.0 + 0.5 * depletion_frac;
+
+        amt *= body_mult * rich_mult * tech_mult * dep_mult;
+        if (!std::isfinite(amt) || amt <= 1e-6) continue;
+
+        // Apply discovery.
+        body->mineral_deposits[mineral_id] = std::max(0.0, body->mineral_deposits[mineral_id] + amt);
+        discovered_tons[mineral_id] += amt;
+        discoveries += 1;
+      }
+
+      if (!discovered_tons.empty()) {
+        std::vector<std::string> keys;
+        keys.reserve(discovered_tons.size());
+        for (const auto& [k, _] : discovered_tons) keys.push_back(k);
+        std::sort(keys.begin(), keys.end());
+
+        std::ostringstream oss;
+        oss << "Geological survey on " << body->name << " uncovered deposits: ";
+        bool first = true;
+        for (const auto& k : keys) {
+          const double t = std::max(0.0, discovered_tons[k]);
+          const long long tons = static_cast<long long>(std::llround(t));
+          if (!first) oss << "; ";
+          first = false;
+          oss << k << " +" << tons << "t";
+        }
+
+        EventContext ctx;
+        ctx.system_id = body->system_id;
+        ctx.colony_id = cid;
+        ctx.faction_id = colony.faction_id;
+        push_event(EventLevel::Info, EventCategory::Exploration, oss.str(), ctx);
+      }
+    }
+  }
+
 }
 
 

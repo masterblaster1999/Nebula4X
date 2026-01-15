@@ -1,12 +1,14 @@
 #include "ui/galaxy_map.h"
 
 #include "ui/map_render.h"
+#include "ui/galaxy_constellations.h"
 #include "ui/minimap.h"
 #include "ui/procgen_metrics.h"
 #include "ui/ruler.h"
 
 #include <imgui.h>
 
+#include <array>
 #include <cstdint>
 #include <algorithm>
 #include <cstdio>
@@ -112,6 +114,512 @@ std::vector<Vec2> convex_hull(std::vector<Vec2> pts) {
 
   if (!h.empty()) h.pop_back();
   return h;
+}
+
+// Small deterministic mixing helper for UI-only caches.
+inline std::uint64_t mix64(std::uint64_t x) {
+  x += 0x9e3779b97f4a7c15ULL;
+  x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+  x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+  return x ^ (x >> 31);
+}
+
+// --- Procedural lens field rendering ---
+//
+// A lightweight raster heatmap drawn behind the galaxy map to visualize
+// ProcGenLensMode metrics as a continuous scalar field.
+//
+// Implementation notes:
+//  - Values are interpolated from visible systems using inverse-distance
+//    weighting (IDW) over the N nearest sources.
+//  - We apply a distance-based fade so the field doesn't smear across the
+//    entire map when only a handful of systems are visible (especially under
+//    fog-of-war).
+struct LensFieldSource {
+  Vec2 p;      // relative to world_center
+  double value{0.0}; // already transformed (e.g. log-scaled) to match lens_min/max
+};
+
+struct IdwSample {
+  bool ok{false};
+  double value{0.0};
+  double min_d2{0.0};
+};
+
+// Sample a scalar field at world coordinate w by inverse-distance weighting (IDW)
+// using the k-nearest visible sources. Returns the interpolated value (in the
+// same transformed space as the input sources) and the squared distance to the
+// closest source (for distance-based fading).
+inline IdwSample sample_lens_field_idw(const Vec2& w,
+                                      const std::vector<LensFieldSource>& sources,
+                                      double soft2) {
+  if (sources.empty()) return IdwSample{};
+
+  constexpr int kN = 8;
+  std::array<double, kN> best_d2;
+  std::array<double, kN> best_v;
+  best_d2.fill(std::numeric_limits<double>::infinity());
+  best_v.fill(0.0);
+
+  double min_d2 = std::numeric_limits<double>::infinity();
+
+  for (const auto& src : sources) {
+    const double dx = w.x - src.p.x;
+    const double dy = w.y - src.p.y;
+    const double d2 = dx * dx + dy * dy;
+    if (d2 < min_d2) min_d2 = d2;
+
+    // Replace the current worst entry if this is closer.
+    int worst_i = 0;
+    double worst_d2 = best_d2[0];
+    for (int i = 1; i < kN; ++i) {
+      if (best_d2[i] > worst_d2) {
+        worst_d2 = best_d2[i];
+        worst_i = i;
+      }
+    }
+    if (d2 < worst_d2) {
+      best_d2[worst_i] = d2;
+      best_v[worst_i] = src.value;
+    }
+  }
+
+  if (!std::isfinite(min_d2)) return IdwSample{};
+
+  // If we're very close to a source, snap to it to avoid numerical noise.
+  double val = 0.0;
+  if (min_d2 < 1e-10) {
+    int best_i = 0;
+    double best_dist = best_d2[0];
+    for (int i = 1; i < kN; ++i) {
+      if (best_d2[i] < best_dist) {
+        best_dist = best_d2[i];
+        best_i = i;
+      }
+    }
+    val = best_v[best_i];
+  } else {
+    double w_sum = 0.0;
+    double v_sum = 0.0;
+    for (int i = 0; i < kN; ++i) {
+      const double d2 = best_d2[i];
+      if (!std::isfinite(d2)) continue;
+      const double wgt = 1.0 / (d2 + soft2);
+      w_sum += wgt;
+      v_sum += wgt * best_v[i];
+    }
+    if (w_sum <= 0.0) return IdwSample{};
+    val = v_sum / w_sum;
+  }
+
+  IdwSample out;
+  out.ok = true;
+  out.value = val;
+  out.min_d2 = min_d2;
+  return out;
+}
+
+void draw_procgen_lens_field(ImDrawList* draw,
+                            const ImVec2& origin,
+                            const ImVec2& avail,
+                            const ImVec2& center_px,
+                            double scale_px_per_unit,
+                            double zoom,
+                            const Vec2& pan,
+                            const std::vector<LensFieldSource>& sources,
+                            double lens_min,
+                            double lens_max,
+                            float alpha,
+                            int cell_px,
+                            double typical_spacing_u) {
+  if (!draw) return;
+  if (sources.empty()) return;
+
+  alpha = std::clamp(alpha, 0.0f, 1.0f);
+  cell_px = std::clamp(cell_px, 4, 128);
+  if (alpha <= 0.001f) return;
+
+  const int cells_x = std::clamp(static_cast<int>(avail.x / static_cast<float>(cell_px)), 8, 240);
+  const int cells_y = std::clamp(static_cast<int>(avail.y / static_cast<float>(cell_px)), 6, 200);
+  const float cw = avail.x / static_cast<float>(cells_x);
+  const float ch = avail.y / static_cast<float>(cells_y);
+
+  // Fade out where there are no nearby sources.
+  const double spacing = std::max(1e-6, typical_spacing_u);
+  const double max_dist = spacing * 2.35;
+  const double max_dist2 = max_dist * max_dist;
+  // Small softening term so IDW doesn't blow up at tiny distances.
+  const double soft2 = (spacing * 0.15) * (spacing * 0.15) + 1e-9;
+
+  ImGui::PushClipRect(origin, ImVec2(origin.x + avail.x, origin.y + avail.y), true);
+  for (int y = 0; y < cells_y; ++y) {
+    const float y0 = origin.y + y * ch;
+    const float y1 = origin.y + (y + 1) * ch;
+    for (int x = 0; x < cells_x; ++x) {
+      const float x0 = origin.x + x * cw;
+      const float x1 = origin.x + (x + 1) * cw;
+
+      const ImVec2 sp(x0 + cw * 0.5f, y0 + ch * 0.5f);
+      const Vec2 w = to_world(sp, center_px, scale_px_per_unit, zoom, pan);
+
+      const IdwSample samp = sample_lens_field_idw(w, sources, soft2);
+      if (!samp.ok || !std::isfinite(samp.min_d2) || samp.min_d2 > max_dist2) {
+        continue;
+      }
+
+      const double val = samp.value;
+      const double min_d2 = samp.min_d2;
+
+      float t = 0.5f;
+      if (std::isfinite(val) && lens_max > lens_min + 1e-12) {
+        t = static_cast<float>((val - lens_min) / (lens_max - lens_min));
+      }
+
+      const float dist = static_cast<float>(std::sqrt(std::max(0.0, min_d2)));
+      float fade = 1.0f - std::clamp(dist / static_cast<float>(max_dist), 0.0f, 1.0f);
+      // Keep a faint baseline to avoid a harsh edge.
+      fade = 0.10f + 0.90f * fade;
+
+      const float a = std::clamp(alpha * fade, 0.0f, 1.0f);
+      if (a <= 0.001f) continue;
+
+      const ImU32 col = procgen_lens_gradient_color(t, a);
+      draw->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), col);
+    }
+  }
+  ImGui::PopClipRect();
+}
+
+// Draw contour lines (isolines) for the current ProcGen lens field.
+//
+// Uses a Marching Squares lookup with linear interpolation along each cell edge.
+// Ambiguous saddle cases are resolved using a simple center-value decider.
+void draw_procgen_lens_contours(ImDrawList* draw,
+                               const ImVec2& origin,
+                               const ImVec2& avail,
+                               const ImVec2& center_px,
+                               double scale_px_per_unit,
+                               double zoom,
+                               const Vec2& pan,
+                               const std::vector<LensFieldSource>& sources,
+                               double lens_min,
+                               double lens_max,
+                               float alpha,
+                               int cell_px,
+                               int levels,
+                               float thickness_px,
+                               double typical_spacing_u) {
+  if (!draw) return;
+  if (sources.empty()) return;
+  if (!(lens_max > lens_min + 1e-12)) return;
+
+  alpha = std::clamp(alpha, 0.0f, 1.0f);
+  if (alpha <= 0.001f) return;
+
+  cell_px = std::clamp(cell_px, 6, 128);
+  levels = std::clamp(levels, 2, 16);
+  thickness_px = std::clamp(thickness_px, 0.5f, 6.0f);
+
+  // Keep contours a little coarser than the heatmap by default.
+  const int cells_x = std::clamp(static_cast<int>(avail.x / static_cast<float>(cell_px)), 10, 220);
+  const int cells_y = std::clamp(static_cast<int>(avail.y / static_cast<float>(cell_px)), 8, 180);
+  const float cw = avail.x / static_cast<float>(cells_x);
+  const float ch = avail.y / static_cast<float>(cells_y);
+
+  // Fade out where there are no nearby sources (matches the heatmap field).
+  const double spacing = std::max(1e-6, typical_spacing_u);
+  const double max_dist = spacing * 2.35;
+  const double max_dist2 = max_dist * max_dist;
+  const double soft2 = (spacing * 0.15) * (spacing * 0.15) + 1e-9;
+
+  const int nodes_x = cells_x + 1;
+  const int nodes_y = cells_y + 1;
+
+  std::vector<float> node_t(static_cast<std::size_t>(nodes_x) * static_cast<std::size_t>(nodes_y), std::numeric_limits<float>::quiet_NaN());
+  std::vector<float> node_fade(static_cast<std::size_t>(nodes_x) * static_cast<std::size_t>(nodes_y), 0.0f);
+
+  auto idx = [&](int x, int y) -> std::size_t {
+    return static_cast<std::size_t>(y) * static_cast<std::size_t>(nodes_x) + static_cast<std::size_t>(x);
+  };
+
+  // Sample the field at grid nodes.
+  for (int y = 0; y < nodes_y; ++y) {
+    const float sy = origin.y + static_cast<float>(y) * ch;
+    for (int x = 0; x < nodes_x; ++x) {
+      const float sx = origin.x + static_cast<float>(x) * cw;
+      const Vec2 w = to_world(ImVec2(sx, sy), center_px, scale_px_per_unit, zoom, pan);
+
+      const IdwSample samp = sample_lens_field_idw(w, sources, soft2);
+      if (!samp.ok || !std::isfinite(samp.min_d2) || samp.min_d2 > max_dist2) {
+        continue;
+      }
+
+      const double val = samp.value;
+      if (!std::isfinite(val)) continue;
+
+      float t = 0.5f;
+      if (lens_max > lens_min + 1e-12) {
+        t = static_cast<float>((val - lens_min) / (lens_max - lens_min));
+      }
+
+      const float dist = static_cast<float>(std::sqrt(std::max(0.0, samp.min_d2)));
+      float fade = 1.0f - std::clamp(dist / static_cast<float>(max_dist), 0.0f, 1.0f);
+      fade = 0.10f + 0.90f * fade;
+
+      node_t[idx(x, y)] = t;
+      node_fade[idx(x, y)] = fade;
+    }
+  }
+
+  auto lerp_pt = [&](const ImVec2& a, const ImVec2& b, float va, float vb, float thr) -> ImVec2 {
+    float t = 0.5f;
+    const float denom = (vb - va);
+    if (std::abs(denom) > 1e-6f) {
+      t = (thr - va) / denom;
+    }
+    t = std::clamp(t, 0.0f, 1.0f);
+    return ImVec2(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t);
+  };
+
+  ImGui::PushClipRect(origin, ImVec2(origin.x + avail.x, origin.y + avail.y), true);
+
+  for (int li = 1; li <= levels; ++li) {
+    const float thr = static_cast<float>(li) / static_cast<float>(levels + 1);
+
+    for (int y = 0; y < cells_y; ++y) {
+      const float y0 = origin.y + static_cast<float>(y) * ch;
+      const float y1 = origin.y + static_cast<float>(y + 1) * ch;
+      for (int x = 0; x < cells_x; ++x) {
+        const float x0 = origin.x + static_cast<float>(x) * cw;
+        const float x1 = origin.x + static_cast<float>(x + 1) * cw;
+
+        const float t00 = node_t[idx(x, y)];
+        const float t10 = node_t[idx(x + 1, y)];
+        const float t11 = node_t[idx(x + 1, y + 1)];
+        const float t01 = node_t[idx(x, y + 1)];
+        if (!std::isfinite(t00) || !std::isfinite(t10) || !std::isfinite(t11) || !std::isfinite(t01)) {
+          continue;
+        }
+
+        const float f00 = node_fade[idx(x, y)];
+        const float f10 = node_fade[idx(x + 1, y)];
+        const float f11 = node_fade[idx(x + 1, y + 1)];
+        const float f01 = node_fade[idx(x, y + 1)];
+        const float fade = std::min(std::min(f00, f10), std::min(f11, f01));
+
+        const float a = std::clamp(alpha * fade, 0.0f, 1.0f);
+        if (a <= 0.01f) continue;
+
+        const int b0 = (t00 > thr) ? 1 : 0;
+        const int b1 = (t10 > thr) ? 1 : 0;
+        const int b2 = (t11 > thr) ? 1 : 0;
+        const int b3 = (t01 > thr) ? 1 : 0;
+        const int code = b0 | (b1 << 1) | (b2 << 2) | (b3 << 3);
+        if (code == 0 || code == 15) continue;
+
+        const ImVec2 p00{x0, y0};
+        const ImVec2 p10{x1, y0};
+        const ImVec2 p11{x1, y1};
+        const ImVec2 p01{x0, y1};
+
+        auto edge_pt = [&](int edge) -> ImVec2 {
+          switch (edge) {
+            case 0: return lerp_pt(p00, p10, t00, t10, thr); // bottom
+            case 1: return lerp_pt(p10, p11, t10, t11, thr); // right
+            case 2: return lerp_pt(p11, p01, t11, t01, thr); // top
+            case 3: return lerp_pt(p01, p00, t01, t00, thr); // left
+            default: return p00;
+          }
+        };
+
+        auto emit = [&](int e0, int e1) {
+          const ImVec2 a0 = edge_pt(e0);
+          const ImVec2 a1 = edge_pt(e1);
+          const ImU32 col = procgen_lens_gradient_color(thr, a);
+          draw->AddLine(a0, a1, col, thickness_px);
+        };
+
+        switch (code) {
+          case 1:  emit(3, 0); break;
+          case 2:  emit(0, 1); break;
+          case 3:  emit(3, 1); break;
+          case 4:  emit(1, 2); break;
+          case 5: {
+            const float center = 0.25f * (t00 + t10 + t11 + t01);
+            if (center > thr) {
+              emit(0, 1);
+              emit(2, 3);
+            } else {
+              emit(3, 0);
+              emit(1, 2);
+            }
+            break;
+          }
+          case 6:  emit(0, 2); break;
+          case 7:  emit(3, 2); break;
+          case 8:  emit(2, 3); break;
+          case 9:  emit(0, 2); break;
+          case 10: {
+            const float center = 0.25f * (t00 + t10 + t11 + t01);
+            if (center > thr) {
+              emit(3, 0);
+              emit(1, 2);
+            } else {
+              emit(0, 1);
+              emit(2, 3);
+            }
+            break;
+          }
+          case 11: emit(1, 2); break;
+          case 12: emit(1, 3); break;
+          case 13: emit(0, 1); break;
+          case 14: emit(3, 0); break;
+          default: break;
+        }
+      }
+    }
+  }
+
+  ImGui::PopClipRect();
+}
+
+// Draw a gradient vector field for the current ProcGen lens.
+
+// Each arrow indicates the direction of increasing lens value (the local
+// gradient) for the interpolated lens field.
+void draw_procgen_lens_vectors(ImDrawList* draw,
+                              const ImVec2& origin,
+                              const ImVec2& avail,
+                              const ImVec2& center_px,
+                              double scale_px_per_unit,
+                              double zoom,
+                              const Vec2& pan,
+                              const std::vector<LensFieldSource>& sources,
+                              double lens_min,
+                              double lens_max,
+                              float alpha,
+                              int cell_px,
+                              float arrow_scale_px,
+                              float min_mag,
+                              double typical_spacing_u) {
+  if (!draw) return;
+  if (sources.empty()) return;
+  if (!(lens_max > lens_min + 1e-12)) return;
+
+  alpha = std::clamp(alpha, 0.0f, 1.0f);
+  cell_px = std::clamp(cell_px, 8, 140);
+  arrow_scale_px = std::clamp(arrow_scale_px, 1.0f, 600.0f);
+  min_mag = std::clamp(min_mag, 0.0f, 1.0f);
+  if (alpha <= 0.001f) return;
+
+  const int cells_x = std::clamp(static_cast<int>(avail.x / static_cast<float>(cell_px)), 10, 180);
+  const int cells_y = std::clamp(static_cast<int>(avail.y / static_cast<float>(cell_px)), 8, 150);
+  const float cw = avail.x / static_cast<float>(cells_x);
+  const float ch = avail.y / static_cast<float>(cells_y);
+
+  // Fade out where there are no nearby sources (matches the heatmap field).
+  const double spacing = std::max(1e-6, typical_spacing_u);
+  const double max_dist = spacing * 2.35;
+  const double max_dist2 = max_dist * max_dist;
+  const double soft2 = (spacing * 0.15) * (spacing * 0.15) + 1e-9;
+
+  const int nodes_x = cells_x + 1;
+  const int nodes_y = cells_y + 1;
+  std::vector<float> node_t(static_cast<std::size_t>(nodes_x) * static_cast<std::size_t>(nodes_y),
+                            std::numeric_limits<float>::quiet_NaN());
+  std::vector<float> node_fade(static_cast<std::size_t>(nodes_x) * static_cast<std::size_t>(nodes_y), 0.0f);
+
+  auto nidx = [&](int x, int y) -> std::size_t {
+    return static_cast<std::size_t>(y) * static_cast<std::size_t>(nodes_x) + static_cast<std::size_t>(x);
+  };
+
+  // Sample the field at grid nodes.
+  for (int y = 0; y < nodes_y; ++y) {
+    const float sy = origin.y + static_cast<float>(y) * ch;
+    for (int x = 0; x < nodes_x; ++x) {
+      const float sx = origin.x + static_cast<float>(x) * cw;
+      const Vec2 w = to_world(ImVec2(sx, sy), center_px, scale_px_per_unit, zoom, pan);
+
+      const IdwSample samp = sample_lens_field_idw(w, sources, soft2);
+      if (!samp.ok || !std::isfinite(samp.min_d2) || samp.min_d2 > max_dist2) {
+        continue;
+      }
+
+      const double val = samp.value;
+      if (!std::isfinite(val)) continue;
+
+      float t = static_cast<float>((val - lens_min) / (lens_max - lens_min));
+
+      const float dist = static_cast<float>(std::sqrt(std::max(0.0, samp.min_d2)));
+      float fade = 1.0f - std::clamp(dist / static_cast<float>(max_dist), 0.0f, 1.0f);
+      fade = 0.10f + 0.90f * fade;
+
+      node_t[nidx(x, y)] = t;
+      node_fade[nidx(x, y)] = fade;
+    }
+  }
+
+  // Decimate if the map is very large to avoid overdraw.
+  int stride = 1;
+  const int total_cells = cells_x * cells_y;
+  if (total_cells > 18000) stride = 2;
+  if (total_cells > 42000) stride = 3;
+
+  const float thickness = 1.35f;
+
+  ImGui::PushClipRect(origin, ImVec2(origin.x + avail.x, origin.y + avail.y), true);
+  for (int y = 0; y < cells_y; y += stride) {
+    const float y0 = origin.y + static_cast<float>(y) * ch;
+    const float y1 = origin.y + static_cast<float>(y + 1) * ch;
+    for (int x = 0; x < cells_x; x += stride) {
+      const float x0 = origin.x + static_cast<float>(x) * cw;
+      const float x1 = origin.x + static_cast<float>(x + 1) * cw;
+
+      const float t00 = node_t[nidx(x, y)];
+      const float t10 = node_t[nidx(x + 1, y)];
+      const float t11 = node_t[nidx(x + 1, y + 1)];
+      const float t01 = node_t[nidx(x, y + 1)];
+      if (!std::isfinite(t00) || !std::isfinite(t10) || !std::isfinite(t11) || !std::isfinite(t01)) {
+        continue;
+      }
+
+      const float f00 = node_fade[nidx(x, y)];
+      const float f10 = node_fade[nidx(x + 1, y)];
+      const float f11 = node_fade[nidx(x + 1, y + 1)];
+      const float f01 = node_fade[nidx(x, y + 1)];
+      const float fade = std::min(std::min(f00, f10), std::min(f11, f01));
+
+      const float a = std::clamp(alpha * fade, 0.0f, 1.0f);
+      if (a <= 0.01f) continue;
+
+      // Gradient estimate at the cell center using mid-edge differences.
+      const float dx = 0.5f * ((t10 + t11) - (t00 + t01));
+      const float dy = 0.5f * ((t01 + t11) - (t00 + t10));
+      const float mag = std::sqrt(dx * dx + dy * dy);
+      if (mag < min_mag) continue;
+
+      // Convert to a screen-space direction (account for aspect).
+      const float vx0 = dx / std::max(1e-6f, cw);
+      const float vy0 = dy / std::max(1e-6f, ch);
+      const float vlen = std::sqrt(vx0 * vx0 + vy0 * vy0);
+      if (vlen <= 1e-6f) continue;
+      const float vx = vx0 / vlen;
+      const float vy = vy0 / vlen;
+
+      float len = 6.0f + arrow_scale_px * mag;
+      len = std::clamp(len, 6.0f, 34.0f);
+
+      const ImVec2 c(x0 + cw * 0.5f, y0 + ch * 0.5f);
+      const ImVec2 p0(c.x - vx * len * 0.45f, c.y - vy * len * 0.45f);
+      const ImVec2 p1(c.x + vx * len * 0.55f, c.y + vy * len * 0.55f);
+
+      const float tavg = 0.25f * (t00 + t10 + t11 + t01);
+      const ImU32 col = procgen_lens_gradient_color(tavg, a);
+      draw->AddLine(p0, p1, col, thickness);
+      add_arrowhead(draw, p0, p1, col, 6.0f);
+    }
+  }
+  ImGui::PopClipRect();
 }
 
 } // namespace
@@ -236,6 +744,30 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   const double fit = std::min(avail.x, avail.y) * 0.45;
   const double scale = fit / std::max(1.0, max_half_span);
 
+  // ProcGen lens sources for continuous overlays (field, contours, probe).
+  std::vector<LensFieldSource> lens_sources;
+  double lens_typical_spacing = 1.0;
+  const bool want_lens_sources = lens_active && lens_bounds_valid &&
+                               (ui.galaxy_procgen_field || ui.galaxy_procgen_contours || ui.galaxy_procgen_vectors || ui.galaxy_procgen_probe);
+  if (want_lens_sources) {
+    lens_sources.reserve(visible.size());
+    for (const auto& v : visible) {
+      const double raw = procgen_lens_value(s, *v.sys, lens_mode);
+      if (!std::isfinite(raw)) continue;
+      double x = raw;
+      if (ui.galaxy_procgen_lens_log_scale && (lens_mode == ProcGenLensMode::MineralWealth)) {
+        x = std::log10(std::max(0.0, raw) + 1.0);
+      }
+      if (!std::isfinite(x)) continue;
+      lens_sources.push_back(LensFieldSource{v.sys->galaxy_pos - world_center, x});
+    }
+
+    // Approximate typical spacing to avoid smearing overlays across the entire map when
+    // the visible set is sparse.
+    const double area = std::max(1e-9, span_x * span_y);
+    lens_typical_spacing = std::sqrt(area / std::max(1.0, static_cast<double>(visible.size())));
+  }
+
   // One-frame request (from other windows) to center/fit the galaxy map.
   if (ui.request_galaxy_map_center) {
     const Vec2 abs{ui.request_galaxy_map_center_x, ui.request_galaxy_map_center_y};
@@ -354,6 +886,16 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
     draw_starfield(draw, origin, avail, bg, pan_px_x, pan_px_y,
                    static_cast<std::uint32_t>(viewer_faction_id == kInvalidId ? 0xC0FFEEu : viewer_faction_id), sf);
 
+    // Procedural lens *field* overlay (optional).
+    // Draw behind the grid/region boundaries so the map stays readable.
+    if (ui.galaxy_procgen_field && lens_active && lens_bounds_valid && !lens_sources.empty()) {
+      draw_procgen_lens_field(draw, origin, avail, center_px, scale, zoom, pan,
+                              lens_sources, lens_min, lens_max,
+                              ui.galaxy_procgen_field_alpha,
+                              ui.galaxy_procgen_field_cell_px,
+                              lens_typical_spacing);
+    }
+
     GridStyle gs;
     gs.enabled = ui.galaxy_map_grid;
     gs.desired_minor_px = 95.0f;
@@ -363,6 +905,31 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
     gs.axis_alpha = 0.25f * ui.map_grid_opacity;
     gs.label_alpha = 0.70f * ui.map_grid_opacity;
     draw_grid(draw, origin, avail, center_px, scale, zoom, pan, IM_COL32(220, 220, 220, 255), gs, "u");
+
+    // ProcGen contour lines (optional).
+    // Draw above the grid but behind region boundaries / links / nodes.
+    if (ui.galaxy_procgen_contours && lens_active && lens_bounds_valid) {
+      draw_procgen_lens_contours(draw, origin, avail, center_px, scale, zoom, pan,
+                                lens_sources, lens_min, lens_max,
+                                ui.galaxy_procgen_contour_alpha,
+                                ui.galaxy_procgen_contour_cell_px,
+                                ui.galaxy_procgen_contour_levels,
+                                ui.galaxy_procgen_contour_thickness,
+                                lens_typical_spacing);
+    }
+
+    // ProcGen gradient vectors (optional).
+    // Draw above contours but behind region boundaries / links / nodes.
+    if (ui.galaxy_procgen_vectors && lens_active && lens_bounds_valid && !lens_sources.empty()) {
+      draw_procgen_lens_vectors(draw, origin, avail, center_px, scale, zoom, pan,
+                               lens_sources, lens_min, lens_max,
+                               ui.galaxy_procgen_vector_alpha,
+                               ui.galaxy_procgen_vector_cell_px,
+                               ui.galaxy_procgen_vector_scale,
+                               ui.galaxy_procgen_vector_min_mag,
+                               lens_typical_spacing);
+    }
+
 
     // Region boundaries (procedural sector overlays).
     // Draw behind jump links / nodes but above the grid so the map stays readable.
@@ -549,6 +1116,69 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
 
     for (int i = 0; i < n; ++i) {
       if (ap[static_cast<std::size_t>(i)]) chokepoints.insert(vids[static_cast<std::size_t>(i)]);
+    }
+  }
+
+  // Star Atlas (procedural constellations): faint connective skeleton that
+  // groups visible systems into deterministic clusters.
+  if (ui.galaxy_star_atlas_constellations && zoom >= ui.galaxy_star_atlas_min_zoom) {
+    std::vector<Id> vids;
+    vids.reserve(visible.size());
+    for (const auto& v : visible) vids.push_back(v.id);
+
+    GalaxyConstellationParams params;
+    params.target_cluster_size = ui.galaxy_star_atlas_target_cluster_size;
+    params.max_constellations = ui.galaxy_star_atlas_max_constellations;
+
+    struct Cache {
+      std::uint64_t key{0};
+      std::vector<GalaxyConstellation> constellations;
+    };
+    static Cache cache;
+    static std::uint64_t cache_state_gen = 0;
+    if (cache_state_gen != sim.state_generation()) {
+      cache = Cache{};
+      cache_state_gen = sim.state_generation();
+    }
+
+    // Order-independent key: include params, fog flag, and the set of visible system ids.
+    std::uint64_t acc = 0;
+    for (Id id : vids) acc ^= mix64(static_cast<std::uint64_t>(id) * 0xA24BAED4963EE407ULL);
+    std::uint64_t key = 0xC0FFEE00BADC0DE1ULL;
+    key ^= mix64(static_cast<std::uint64_t>(params.target_cluster_size));
+    key ^= mix64(static_cast<std::uint64_t>(params.max_constellations) << 1);
+    key ^= mix64(static_cast<std::uint64_t>(ui.fog_of_war) << 8);
+    key ^= mix64(acc);
+    key = mix64(key);
+
+    if (key != cache.key) {
+      cache.key = key;
+      cache.constellations = build_galaxy_constellations(s, vids, params);
+    }
+
+    const float zfade = std::clamp(static_cast<float>((zoom - ui.galaxy_star_atlas_min_zoom) / std::max(0.10f, ui.galaxy_star_atlas_min_zoom)), 0.0f, 1.0f);
+    const float a_line = std::clamp(ui.galaxy_star_atlas_alpha * zfade, 0.0f, 1.0f);
+    const float a_label = std::clamp(ui.galaxy_star_atlas_label_alpha * zfade, 0.0f, 1.0f);
+
+    for (const auto& c : cache.constellations) {
+      const ImU32 col = region_col(c.region_id, a_line);
+      for (const auto& e : c.edges) {
+        const auto* a_sys = find_ptr(s.systems, e.a);
+        const auto* b_sys = find_ptr(s.systems, e.b);
+        if (!a_sys || !b_sys) continue;
+        const Vec2 a = a_sys->galaxy_pos - world_center;
+        const Vec2 b = b_sys->galaxy_pos - world_center;
+        const ImVec2 pa = to_screen(a, center_px, scale, zoom, pan);
+        const ImVec2 pb = to_screen(b, center_px, scale, zoom, pan);
+        draw->AddLine(pa, pb, col, 1.0f);
+      }
+
+      if (ui.galaxy_star_atlas_labels && a_label > 0.001f) {
+        const ImU32 tcol = region_col(c.region_id, a_label);
+        const Vec2 rel = c.centroid - world_center;
+        const ImVec2 pc = to_screen(rel, center_px, scale, zoom, pan);
+        draw->AddText(ImVec2(pc.x + 4.0f, pc.y + 4.0f), tcol, c.name.c_str());
+      }
     }
   }
 
@@ -1484,6 +2114,27 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
       ImGui::BeginTooltip();
       ImGui::Text("%s", sys->name.c_str());
       ImGui::Separator();
+
+      // Current ProcGen lens value for this system (if enabled).
+      if (lens_active && lens_bounds_valid && lens_mode != ProcGenLensMode::Off) {
+        const double raw_lens = procgen_lens_value(s, *sys, lens_mode);
+        if (std::isfinite(raw_lens)) {
+          const char* unit = procgen_lens_value_unit(lens_mode);
+          const double sc = procgen_lens_display_scale(lens_mode);
+          const int dec = procgen_lens_display_decimals(lens_mode);
+          const double disp = raw_lens * sc;
+          if (dec <= 0) {
+            ImGui::TextDisabled("%s: %.0f %s", procgen_lens_mode_label(lens_mode), disp, unit);
+          } else if (dec == 1) {
+            ImGui::TextDisabled("%s: %.1f %s", procgen_lens_mode_label(lens_mode), disp, unit);
+          } else if (dec == 2) {
+            ImGui::TextDisabled("%s: %.2f %s", procgen_lens_mode_label(lens_mode), disp, unit);
+          } else {
+            ImGui::TextDisabled("%s: %.3f %s", procgen_lens_mode_label(lens_mode), disp, unit);
+          }
+        }
+      }
+
       const double neb = std::clamp(sys->nebula_density, 0.0, 1.0);
       if (neb > 0.01) {
         ImGui::Text("Nebula density: %.0f%%", neb * 100.0);
@@ -1719,6 +2370,79 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
     }
   }
 
+
+  // ProcGen lens probe (hold Alt) for continuous field visualization.
+  // Only shows when not hovering a system (to avoid fighting with the system tooltip).
+  if (ui.galaxy_procgen_probe && lens_active && lens_bounds_valid && lens_mode != ProcGenLensMode::Off &&
+      ImGui::GetIO().KeyAlt && hovered && mouse_in_rect && !over_minimap &&
+      hovered_system == kInvalidId && !lens_sources.empty() && !ImGui::IsAnyItemHovered()) {
+
+    const double spacing = std::max(1e-6, lens_typical_spacing);
+    const double max_dist = spacing * 2.35;
+    const double max_dist2 = max_dist * max_dist;
+    const double soft2 = (spacing * 0.15) * (spacing * 0.15) + 1e-9;
+
+    const Vec2 w = to_world(mouse, center_px, scale, zoom, pan);
+    const IdwSample samp = sample_lens_field_idw(w, lens_sources, soft2);
+
+    ImGui::BeginTooltip();
+    ImGui::Text("ProcGen probe: %s", procgen_lens_mode_label(lens_mode));
+    ImGui::Separator();
+
+    if (!samp.ok || !std::isfinite(samp.min_d2) || samp.min_d2 > max_dist2 || !std::isfinite(samp.value)) {
+      ImGui::TextDisabled("No nearby data (out of range)");
+    } else {
+      // Convert back to raw units for display (inverse of log scaling).
+      double raw_est = samp.value;
+      if (ui.galaxy_procgen_lens_log_scale && (lens_mode == ProcGenLensMode::MineralWealth)) {
+        raw_est = std::pow(10.0, std::max(0.0, samp.value)) - 1.0;
+      }
+
+      const char* unit = procgen_lens_value_unit(lens_mode);
+      const double sc = procgen_lens_display_scale(lens_mode);
+      const int dec = procgen_lens_display_decimals(lens_mode);
+      const double disp = raw_est * sc;
+
+      if (dec <= 0) {
+        ImGui::Text("Value: %.0f %s", disp, unit);
+      } else if (dec == 1) {
+        ImGui::Text("Value: %.1f %s", disp, unit);
+      } else if (dec == 2) {
+        ImGui::Text("Value: %.2f %s", disp, unit);
+      } else {
+        ImGui::Text("Value: %.3f %s", disp, unit);
+      }
+
+      // Nearest visible system (context).
+      Id nearest_id = kInvalidId;
+      double nearest_d2 = std::numeric_limits<double>::infinity();
+      for (const auto& v : visible) {
+        const Vec2 rel = v.sys->galaxy_pos - world_center;
+        const double dx = w.x - rel.x;
+        const double dy = w.y - rel.y;
+        const double d2 = dx * dx + dy * dy;
+        if (d2 < nearest_d2) {
+          nearest_d2 = d2;
+          nearest_id = v.id;
+        }
+      }
+      if (nearest_id != kInvalidId) {
+        const auto* ns = find_ptr(s.systems, nearest_id);
+        const double d = std::sqrt(std::max(0.0, nearest_d2));
+        if (ns) {
+          ImGui::TextDisabled("Nearest system: %s (%.1f u)", ns->name.c_str(), d);
+        } else {
+          ImGui::TextDisabled("Nearest system: %.1f u", d);
+        }
+      }
+
+      const double d_near = std::sqrt(std::max(0.0, samp.min_d2));
+      ImGui::TextDisabled("Nearest sample: %.1f u (fade radius %.1f u)", d_near, max_dist);
+    }
+
+    ImGui::EndTooltip();
+  }
+
   // Minimap overlay (bottom-right).
   if (minimap_enabled) {
     const ImU32 mm_bg = IM_COL32(8, 8, 10, 200);
@@ -1801,6 +2525,21 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   ImGui::Checkbox("Labels", &ui.show_galaxy_labels);
   ImGui::Checkbox("Jump links", &ui.show_galaxy_jump_lines);
   ImGui::Checkbox("Chokepoints (articulation)", &ui.show_galaxy_chokepoints);
+  {
+    ImGui::Checkbox("Star Atlas constellations", &ui.galaxy_star_atlas_constellations);
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Open Star Atlas")) ui.show_star_atlas_window = true;
+    if (ui.galaxy_star_atlas_constellations) {
+      ImGui::Indent();
+      ImGui::Checkbox("Constellation labels", &ui.galaxy_star_atlas_labels);
+      ImGui::SliderFloat("Line alpha##atlas", &ui.galaxy_star_atlas_alpha, 0.05f, 0.60f, "%.2f");
+      ImGui::SliderFloat("Label alpha##atlas", &ui.galaxy_star_atlas_label_alpha, 0.05f, 0.70f, "%.2f");
+      ImGui::SliderInt("Cluster size##atlas", &ui.galaxy_star_atlas_target_cluster_size, 4, 18);
+      ImGui::SliderInt("Max##atlas", &ui.galaxy_star_atlas_max_constellations, 0, 512);
+      ImGui::SliderFloat("Min zoom##atlas", &ui.galaxy_star_atlas_min_zoom, 0.05f, 2.0f, "%.2f");
+      ImGui::Unindent();
+    }
+  }
   ImGui::Checkbox("Unknown exits hint (unsurveyed / undiscovered)", &ui.show_galaxy_unknown_exits);
   ImGui::Checkbox("Intel alerts", &ui.show_galaxy_intel_alerts);
   ImGui::Checkbox("Freight lanes", &ui.show_galaxy_freight_lanes);
@@ -1816,6 +2555,66 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
     ImGui::Combo("Metric", &mode, procgen_lens_mode_combo_items());
     ui.galaxy_procgen_lens_mode = static_cast<ProcGenLensMode>(mode);
     ImGui::SliderFloat("Intensity", &ui.galaxy_procgen_lens_alpha, 0.10f, 1.00f, "%.2f");
+
+    // Continuous field (heatmap) behind the galaxy map.
+    {
+      ImGui::BeginDisabled(ui.galaxy_procgen_lens_mode == ProcGenLensMode::Off);
+      ImGui::Checkbox("Field overlay", &ui.galaxy_procgen_field);
+      ImGui::EndDisabled();
+      if (ui.galaxy_procgen_field && ui.galaxy_procgen_lens_mode != ProcGenLensMode::Off) {
+        ImGui::SliderFloat("Field alpha", &ui.galaxy_procgen_field_alpha, 0.05f, 0.60f, "%.2f");
+        ui.galaxy_procgen_field_alpha = std::clamp(ui.galaxy_procgen_field_alpha, 0.0f, 1.0f);
+        ImGui::SliderInt("Cell px", &ui.galaxy_procgen_field_cell_px, 6, 48);
+        ui.galaxy_procgen_field_cell_px = std::clamp(ui.galaxy_procgen_field_cell_px, 4, 128);
+        ImGui::TextDisabled("Lower cell px = higher resolution (more draw calls)");
+      }
+    }
+
+    // Contour lines (isolines) over the interpolated lens field.
+    {
+      ImGui::BeginDisabled(ui.galaxy_procgen_lens_mode == ProcGenLensMode::Off);
+      ImGui::Checkbox("Contours", &ui.galaxy_procgen_contours);
+      ImGui::EndDisabled();
+      if (ui.galaxy_procgen_contours && ui.galaxy_procgen_lens_mode != ProcGenLensMode::Off) {
+        ImGui::SliderFloat("Contour alpha", &ui.galaxy_procgen_contour_alpha, 0.05f, 0.55f, "%.2f");
+        ui.galaxy_procgen_contour_alpha = std::clamp(ui.galaxy_procgen_contour_alpha, 0.0f, 1.0f);
+        ImGui::SliderInt("Contour cell px", &ui.galaxy_procgen_contour_cell_px, 10, 72);
+        ui.galaxy_procgen_contour_cell_px = std::clamp(ui.galaxy_procgen_contour_cell_px, 4, 128);
+        ImGui::SliderInt("Levels", &ui.galaxy_procgen_contour_levels, 2, 16);
+        ui.galaxy_procgen_contour_levels = std::clamp(ui.galaxy_procgen_contour_levels, 2, 16);
+        ImGui::SliderFloat("Thickness", &ui.galaxy_procgen_contour_thickness, 0.8f, 3.0f, "%.1f");
+        ui.galaxy_procgen_contour_thickness = std::clamp(ui.galaxy_procgen_contour_thickness, 0.5f, 6.0f);
+      }
+    }
+
+    // Gradient vectors (optional) for the interpolated lens field.
+    {
+      ImGui::BeginDisabled(ui.galaxy_procgen_lens_mode == ProcGenLensMode::Off);
+      ImGui::Checkbox("Vectors", &ui.galaxy_procgen_vectors);
+      ImGui::EndDisabled();
+      if (ui.galaxy_procgen_vectors && ui.galaxy_procgen_lens_mode != ProcGenLensMode::Off) {
+        ImGui::SliderFloat("Vector alpha", &ui.galaxy_procgen_vector_alpha, 0.05f, 0.60f, "%.2f");
+        ui.galaxy_procgen_vector_alpha = std::clamp(ui.galaxy_procgen_vector_alpha, 0.0f, 1.0f);
+        ImGui::SliderInt("Vector cell px", &ui.galaxy_procgen_vector_cell_px, 10, 120);
+        ui.galaxy_procgen_vector_cell_px = std::clamp(ui.galaxy_procgen_vector_cell_px, 6, 192);
+        ImGui::SliderFloat("Vector scale", &ui.galaxy_procgen_vector_scale, 10.0f, 300.0f, "%.0f");
+        ui.galaxy_procgen_vector_scale = std::clamp(ui.galaxy_procgen_vector_scale, 1.0f, 600.0f);
+        ImGui::SliderFloat("Min gradient", &ui.galaxy_procgen_vector_min_mag, 0.000f, 0.200f, "%.3f");
+        ui.galaxy_procgen_vector_min_mag = std::clamp(ui.galaxy_procgen_vector_min_mag, 0.0f, 1.0f);
+        ImGui::TextDisabled("Arrows show direction of increasing value");
+      }
+    }
+
+    // Probe tool: hold Alt over the map to sample the interpolated lens value.
+    {
+      ImGui::BeginDisabled(ui.galaxy_procgen_lens_mode == ProcGenLensMode::Off);
+      ImGui::Checkbox("Alt probe", &ui.galaxy_procgen_probe);
+      ImGui::EndDisabled();
+      if (ui.galaxy_procgen_probe) {
+        ImGui::TextDisabled("Hold Alt over the map to sample the lens field");
+      }
+    }
+
     if (ui.galaxy_procgen_lens_mode == ProcGenLensMode::MineralWealth) {
       ImGui::Checkbox("Log scale", &ui.galaxy_procgen_lens_log_scale);
     } else {
@@ -1839,11 +2638,72 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
                                  procgen_lens_gradient_color(0.0f, 1.0f));
       dl->AddRect(p0, p1, IM_COL32(0, 0, 0, 200));
       ImGui::Dummy(ImVec2(w, h + 4.0f));
+
+      // Distribution histogram (visible systems) to help tune lenses/thresholds.
+      {
+        constexpr int kBins = 24;
+        std::array<int, kBins> bins{};
+        bins.fill(0);
+        int total = 0;
+        if (lens_max > lens_min + 1e-12) {
+          for (const auto& v : visible) {
+            const double raw = procgen_lens_value(s, *v.sys, lens_mode);
+            if (!std::isfinite(raw)) continue;
+            double x = raw;
+            if (ui.galaxy_procgen_lens_log_scale && (lens_mode == ProcGenLensMode::MineralWealth)) {
+              x = std::log10(std::max(0.0, raw) + 1.0);
+            }
+            if (!std::isfinite(x)) continue;
+            float t = static_cast<float>((x - lens_min) / (lens_max - lens_min));
+            t = std::clamp(t, 0.0f, 1.0f);
+            int b = static_cast<int>(t * static_cast<float>(kBins));
+            if (b >= kBins) b = kBins - 1;
+            if (b < 0) b = 0;
+            bins[b] += 1;
+            total += 1;
+          }
+        }
+
+        int max_bin = 0;
+        for (int i = 0; i < kBins; ++i) max_bin = std::max(max_bin, bins[i]);
+
+        const float hist_h = 32.0f;
+        const ImVec2 hp0 = ImGui::GetCursorScreenPos();
+        const ImVec2 hp1 = ImVec2(hp0.x + w, hp0.y + hist_h);
+
+        if (max_bin > 0) {
+          for (int i = 0; i < kBins; ++i) {
+            const float x0 = hp0.x + (w * (static_cast<float>(i) / static_cast<float>(kBins)));
+            const float x1 = hp0.x + (w * (static_cast<float>(i + 1) / static_cast<float>(kBins)));
+            const float frac = static_cast<float>(bins[i]) / static_cast<float>(max_bin);
+            const float y0 = hp1.y - hist_h * frac;
+            const float tcol = (static_cast<float>(i) + 0.5f) / static_cast<float>(kBins);
+            dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, hp1.y), procgen_lens_gradient_color(tcol, 0.70f));
+          }
+        }
+        dl->AddRect(hp0, hp1, IM_COL32(0, 0, 0, 200));
+        ImGui::Dummy(ImVec2(w, hist_h + 4.0f));
+        ImGui::TextDisabled("Distribution (visible systems): %d", total);
+      }
+
       const char* unit = procgen_lens_value_unit(ui.galaxy_procgen_lens_mode);
+      const double scale = procgen_lens_display_scale(ui.galaxy_procgen_lens_mode);
+      const int dec = procgen_lens_display_decimals(ui.galaxy_procgen_lens_mode);
+      const double disp_min = lens_raw_min * scale;
+      const double disp_max = lens_raw_max * scale;
       if (ui.galaxy_procgen_lens_mode == ProcGenLensMode::MineralWealth && ui.galaxy_procgen_lens_log_scale) {
-        ImGui::TextDisabled("Min %.0f %s, Max %.0f %s (log)", lens_raw_min, unit, lens_raw_max, unit);
+        // Mineral wealth is wide-range; keep a compact integer display.
+        ImGui::TextDisabled("Min %.0f %s, Max %.0f %s (log)", disp_min, unit, disp_max, unit);
       } else {
-        ImGui::TextDisabled("Min %.0f %s, Max %.0f %s", lens_raw_min, unit, lens_raw_max, unit);
+        if (dec <= 0) {
+          ImGui::TextDisabled("Min %.0f %s, Max %.0f %s", disp_min, unit, disp_max, unit);
+        } else if (dec == 1) {
+          ImGui::TextDisabled("Min %.1f %s, Max %.1f %s", disp_min, unit, disp_max, unit);
+        } else if (dec == 2) {
+          ImGui::TextDisabled("Min %.2f %s, Max %.2f %s", disp_min, unit, disp_max, unit);
+        } else {
+          ImGui::TextDisabled("Min %.3f %s, Max %.3f %s", disp_min, unit, disp_max, unit);
+        }
       }
     }
   }

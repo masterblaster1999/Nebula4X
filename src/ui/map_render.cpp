@@ -38,11 +38,91 @@ std::uint32_t hash_u32(std::uint32_t x) {
   return x;
 }
 
-float wrap_mod(float v, float m) {
-  if (m <= 0.0f) return 0.0f;
-  float r = std::fmod(v, m);
-  if (r < 0.0f) r += m;
-  return r;
+float lerp(float a, float b, float t) {
+  return a + (b - a) * t;
+}
+
+float smoothstep01(float t) {
+  t = std::clamp(t, 0.0f, 1.0f);
+  return t * t * (3.0f - 2.0f * t);
+}
+
+float hash_to_f01(std::uint32_t h) {
+  // 24 bits for stable float conversion.
+  return static_cast<float>((h >> 8) & 0x00FFFFFFu) / static_cast<float>(0x01000000u);
+}
+
+float value_noise_2d(float x, float y, std::uint32_t seed) {
+  // Hash-based value noise on an integer lattice with smooth interpolation.
+  const int ix0 = static_cast<int>(std::floor(x));
+  const int iy0 = static_cast<int>(std::floor(y));
+  const int ix1 = ix0 + 1;
+  const int iy1 = iy0 + 1;
+
+  const float fx = x - static_cast<float>(ix0);
+  const float fy = y - static_cast<float>(iy0);
+
+  const auto lattice = [&](int ix, int iy) -> float {
+    const std::uint32_t ux = static_cast<std::uint32_t>(ix);
+    const std::uint32_t uy = static_cast<std::uint32_t>(iy);
+    const std::uint32_t h = hash_u32(seed ^ hash_u32(ux * 374761393u) ^ hash_u32(uy * 668265263u));
+    return hash_to_f01(h);
+  };
+
+  const float v00 = lattice(ix0, iy0);
+  const float v10 = lattice(ix1, iy0);
+  const float v01 = lattice(ix0, iy1);
+  const float v11 = lattice(ix1, iy1);
+
+  const float sx = smoothstep01(fx);
+  const float sy = smoothstep01(fy);
+
+  const float vx0 = lerp(v00, v10, sx);
+  const float vx1 = lerp(v01, v11, sx);
+  return lerp(vx0, vx1, sy);
+}
+
+float fbm_2d(float x, float y, std::uint32_t seed, int octaves = 4) {
+  // Simple fractal Brownian motion using value noise.
+  float sum = 0.0f;
+  float amp = 0.55f;
+  float freq = 1.0f;
+  float norm = 0.0f;
+  for (int i = 0; i < octaves; ++i) {
+    sum += amp * value_noise_2d(x * freq, y * freq, seed ^ (0x9E3779B9u * static_cast<std::uint32_t>(i + 1)));
+    norm += amp;
+    freq *= 2.0f;
+    amp *= 0.5f;
+  }
+  if (norm <= 1e-6f) return 0.0f;
+  return sum / norm;
+}
+
+struct ScrollTiles {
+  int tile_x0{0};
+  int tile_y0{0};
+  float frac_x{0.0f};
+  float frac_y{0.0f};
+};
+
+ScrollTiles compute_scroll_tiles(float offset_px_x, float offset_px_y, float parallax, float tile_px) {
+  // Convert a scrolling offset into an integer tile coordinate + fractional offset.
+  // This yields an infinite, non-repeating tiled pattern (unlike wrap_mod).
+  const double sx = static_cast<double>(offset_px_x) * static_cast<double>(parallax);
+  const double sy = static_cast<double>(offset_px_y) * static_cast<double>(parallax);
+
+  const double tx0d = std::floor(sx / static_cast<double>(tile_px));
+  const double ty0d = std::floor(sy / static_cast<double>(tile_px));
+
+  ScrollTiles st;
+  st.tile_x0 = static_cast<int>(tx0d);
+  st.tile_y0 = static_cast<int>(ty0d);
+
+  st.frac_x = static_cast<float>(sx - tx0d * static_cast<double>(tile_px));
+  st.frac_y = static_cast<float>(sy - ty0d * static_cast<double>(tile_px));
+
+  // frac is in [0, tile_px).
+  return st;
 }
 
 ImVec2 to_screen(const Vec2& world, const ImVec2& center_px, double scale_px_per_unit, double zoom, const Vec2& pan) {
@@ -102,8 +182,6 @@ void draw_starfield(ImDrawList* draw,
   if (size.x <= 2.0f || size.y <= 2.0f) return;
 
   const float tile = 520.0f;
-  const float ox = wrap_mod(offset_px_x * style.parallax, tile);
-  const float oy = wrap_mod(offset_px_y * style.parallax, tile);
 
   // The tint is used as a very subtle colorization to help the starfield
   // harmonize with the user's chosen map background.
@@ -112,80 +190,174 @@ void draw_starfield(ImDrawList* draw,
   const int tiles_x = static_cast<int>(std::ceil(size.x / tile)) + 2;
   const int tiles_y = static_cast<int>(std::ceil(size.y / tile)) + 2;
 
+  const float density = std::max(0.0f, style.density);
+  const float base_parallax = std::clamp(style.parallax, 0.0f, 1.0f);
+  const float base_alpha = std::clamp(style.alpha, 0.0f, 1.0f);
+
+  // Subtle twinkle (kept extremely low amplitude so it's never distracting).
+  const float time_s = static_cast<float>(ImGui::GetTime());
+
   // Clip to the map rect.
   draw->PushClipRect(origin, ImVec2(origin.x + size.x, origin.y + size.y), true);
 
-  for (int ty = -1; ty <= tiles_y; ++ty) {
-    for (int tx = -1; tx <= tiles_x; ++tx) {
-      const float base_x = origin.x + static_cast<float>(tx) * tile - ox;
-      const float base_y = origin.y + static_cast<float>(ty) * tile - oy;
+  // --- Procedural nebula haze (drawn behind stars) ---
+  // This is intentionally conservative: it should add depth without becoming
+  // a dominant overlay that competes with map data.
+  if (density > 1e-3f && base_alpha > 1e-3f) {
+    const float neb_parallax = std::clamp(base_parallax * 0.08f, 0.0f, 1.0f);
+    const ScrollTiles sc = compute_scroll_tiles(offset_px_x, offset_px_y, neb_parallax, tile);
 
-      // Unique deterministic seed per tile.
-      const std::uint32_t tile_seed = hash_u32(seed ^ hash_u32(static_cast<std::uint32_t>(tx * 73856093) ^
-                                                              static_cast<std::uint32_t>(ty * 19349663)));
-      Rng rng(tile_seed);
+    for (int ty = -1; ty <= tiles_y; ++ty) {
+      for (int tx = -1; tx <= tiles_x; ++tx) {
+        const int gx = tx + sc.tile_x0;
+        const int gy = ty + sc.tile_y0;
 
-      const int star_count = std::clamp(static_cast<int>(64.0f * style.density), 16, 220);
-      for (int i = 0; i < star_count; ++i) {
-        const float x = base_x + rng.next_f01() * tile;
-        const float y = base_y + rng.next_f01() * tile;
+        const float base_x = origin.x + static_cast<float>(tx) * tile - sc.frac_x;
+        const float base_y = origin.y + static_cast<float>(ty) * tile - sc.frac_y;
 
-        // Size distribution: many tiny, few medium.
-        const float r0 = rng.next_f01();
-        float radius = 0.7f;
-        if (r0 > 0.985f) radius = 2.2f;
-        else if (r0 > 0.95f) radius = 1.6f;
-        else if (r0 > 0.80f) radius = 1.05f;
+        const std::uint32_t hx = static_cast<std::uint32_t>(gx) * 73856093u;
+        const std::uint32_t hy = static_cast<std::uint32_t>(gy) * 19349663u;
+        const std::uint32_t tile_seed = hash_u32(seed ^ 0xA8F1D3B9u ^ hash_u32(hx ^ hy));
+        Rng rng(tile_seed);
 
-        // Brightness distribution.
-        const float b = 0.45f + 0.55f * rng.next_f01();
-        float a = (0.20f + 0.70f * b) * style.alpha;
+        const int blob_count = std::clamp(static_cast<int>(1.0f + 2.6f * density), 0, 6);
+        for (int i = 0; i < blob_count; ++i) {
+          const float lx = rng.next_f01() * tile;
+          const float ly = rng.next_f01() * tile;
 
-        // Occasional colored star (very subtle).
-        const float hue = rng.next_f01();
-        float r = 1.0f;
-        float g = 1.0f;
-        float bl = 1.0f;
-        if (hue < 0.06f) {
-          // Cool/blue
-          r = 0.85f;
-          g = 0.92f;
-          bl = 1.0f;
-        } else if (hue > 0.96f) {
-          // Warm/yellow
-          r = 1.0f;
-          g = 0.95f;
-          bl = 0.82f;
+          // Global, infinite starfield-plane coordinates for coherent noise.
+          const float gx_px = static_cast<float>(gx) * tile + lx;
+          const float gy_px = static_cast<float>(gy) * tile + ly;
+
+          // Low-frequency domain warp to avoid obvious grid alignment.
+          const float warp = fbm_2d(gx_px * 0.00065f, gy_px * 0.00065f, seed ^ 0x3C6EF372u, 3);
+          const float nx = (gx_px + 420.0f * warp) * 0.00115f;
+          const float ny = (gy_px - 380.0f * warp) * 0.00115f;
+
+          const float n = fbm_2d(nx, ny, seed ^ 0x1B873593u, 4);
+
+          // Emphasize high values to create sparse clouds.
+          float intensity = (n - 0.56f) * 2.6f;
+          intensity = std::clamp(intensity, 0.0f, 1.0f);
+          if (intensity <= 0.001f) continue;
+
+          // Slight color variation (cool -> warm) driven by a separate noise sample.
+          const float cnoise = fbm_2d(nx + 37.0f, ny - 19.0f, seed ^ 0x85EBCA6Bu, 3);
+          const float hue = 0.60f + 0.12f * cnoise; // ~blue/purple band
+          const float sat = 0.25f + 0.20f * rng.next_f01();
+          const float val = 0.55f + 0.25f * intensity;
+
+          float r = 1.0f, g = 1.0f, b = 1.0f;
+          ImGui::ColorConvertHSVtoRGB(hue, sat, val, r, g, b);
+
+          // Apply background tint (subtle).
+          r = std::clamp(r * (0.75f + 0.25f * tint4.x), 0.0f, 1.0f);
+          g = std::clamp(g * (0.75f + 0.25f * tint4.y), 0.0f, 1.0f);
+          b = std::clamp(b * (0.75f + 0.25f * tint4.z), 0.0f, 1.0f);
+
+          const float cx = base_x + lx;
+          const float cy = base_y + ly;
+          const float rad = (90.0f + 210.0f * rng.next_f01()) * (0.75f + 0.70f * intensity);
+
+          // Alpha is intentionally low; this is "depth haze", not a gameplay overlay.
+          const float aa = (0.010f + 0.055f * intensity) * base_alpha;
+
+          const ImVec4 c0(r, g, b, aa);
+          const ImVec4 c1(r, g, b, 0.0f);
+          // Fake radial gradient: draw two circles.
+          draw->AddCircleFilled(ImVec2(cx, cy), rad, ImGui::ColorConvertFloat4ToU32(c0), 0);
+          draw->AddCircleFilled(ImVec2(cx, cy), rad * 0.55f, ImGui::ColorConvertFloat4ToU32(c1), 0);
         }
-
-        // Apply background tint (subtle).
-        r = std::clamp(r * (0.85f + 0.15f * tint4.x), 0.0f, 1.0f);
-        g = std::clamp(g * (0.85f + 0.15f * tint4.y), 0.0f, 1.0f);
-        bl = std::clamp(bl * (0.85f + 0.15f * tint4.z), 0.0f, 1.0f);
-
-        const ImU32 col = ImGui::ColorConvertFloat4ToU32(ImVec4(r, g, bl, a));
-        draw->AddCircleFilled(ImVec2(x, y), radius, col, 0);
-      }
-
-      // Occasional soft "nebula" blotches to reduce flatness.
-      // We keep this sparse to avoid an obviously tiled appearance.
-      if (rng.next_f01() < 0.14f * style.density) {
-        const float cx = base_x + rng.next_f01() * tile;
-        const float cy = base_y + rng.next_f01() * tile;
-        const float rad = 70.0f + rng.next_f01() * 140.0f;
-        const float rr = 0.35f + 0.40f * rng.next_f01();
-        const float gg = 0.35f + 0.40f * rng.next_f01();
-        const float bb = 0.55f + 0.35f * rng.next_f01();
-        const float aa = 0.06f * style.alpha;
-
-        const ImVec4 c0(rr * tint4.z + (1.0f - tint4.z) * rr, gg, bb, aa);
-        const ImVec4 c1(rr, gg, bb, 0.0f);
-        // Fake radial gradient: draw two circles.
-        draw->AddCircleFilled(ImVec2(cx, cy), rad, ImGui::ColorConvertFloat4ToU32(c0), 0);
-        draw->AddCircleFilled(ImVec2(cx, cy), rad * 0.55f, ImGui::ColorConvertFloat4ToU32(c1), 0);
       }
     }
   }
+
+  // --- Star layers ---
+  auto draw_star_layer = [&](float parallax_mul, float density_mul, float alpha_mul, float size_mul,
+                             std::uint32_t layer_tag, bool twinkle) {
+    if (density <= 1e-3f || base_alpha <= 1e-3f) return;
+
+    const float par = std::clamp(base_parallax * parallax_mul, 0.0f, 1.0f);
+    const ScrollTiles sc = compute_scroll_tiles(offset_px_x, offset_px_y, par, tile);
+
+    for (int ty = -1; ty <= tiles_y; ++ty) {
+      for (int tx = -1; tx <= tiles_x; ++tx) {
+        const int gx = tx + sc.tile_x0;
+        const int gy = ty + sc.tile_y0;
+
+        const float base_x = origin.x + static_cast<float>(tx) * tile - sc.frac_x;
+        const float base_y = origin.y + static_cast<float>(ty) * tile - sc.frac_y;
+
+        const std::uint32_t hx = static_cast<std::uint32_t>(gx) * 73856093u;
+        const std::uint32_t hy = static_cast<std::uint32_t>(gy) * 19349663u;
+        const std::uint32_t tile_seed = hash_u32(seed ^ layer_tag ^ hash_u32(hx ^ hy));
+        Rng rng(tile_seed);
+
+        const int star_count_raw = static_cast<int>(64.0f * density * density_mul);
+        const int star_count = std::clamp(star_count_raw, 0, 280);
+        if (star_count <= 0) continue;
+
+        for (int i = 0; i < star_count; ++i) {
+          const float lx = rng.next_f01() * tile;
+          const float ly = rng.next_f01() * tile;
+          const float x = base_x + lx;
+          const float y = base_y + ly;
+
+          // Size distribution: many tiny, few medium.
+          const float r0 = rng.next_f01();
+          float radius = 0.7f;
+          if (r0 > 0.985f) radius = 2.2f;
+          else if (r0 > 0.95f) radius = 1.6f;
+          else if (r0 > 0.80f) radius = 1.05f;
+          radius *= size_mul;
+
+          // Brightness distribution.
+          const float b0 = 0.45f + 0.55f * rng.next_f01();
+          float a = (0.20f + 0.70f * b0) * base_alpha * alpha_mul;
+
+          if (twinkle) {
+            // Stable per-star phase/frequency based on hashed star coords.
+            const std::uint32_t ph = hash_u32(tile_seed ^ hash_u32(static_cast<std::uint32_t>(i) * 2654435761u));
+            const float phase = 6.2831853f * hash_to_f01(ph);
+            const float freq = 0.55f + 1.85f * hash_to_f01(ph ^ 0x6D2B79F5u);
+            const float w = 0.5f + 0.5f * std::sin(time_s * freq + phase);
+            // Extremely subtle amplitude (≈ +/-3%).
+            a *= (0.97f + 0.03f * w);
+          }
+
+          // Occasional colored star (very subtle).
+          const float hue_r = rng.next_f01();
+          float r = 1.0f;
+          float g = 1.0f;
+          float bl = 1.0f;
+          if (hue_r < 0.06f) {
+            // Cool/blue
+            r = 0.85f;
+            g = 0.92f;
+            bl = 1.0f;
+          } else if (hue_r > 0.96f) {
+            // Warm/yellow
+            r = 1.0f;
+            g = 0.95f;
+            bl = 0.82f;
+          }
+
+          // Apply background tint (subtle).
+          r = std::clamp(r * (0.85f + 0.15f * tint4.x), 0.0f, 1.0f);
+          g = std::clamp(g * (0.85f + 0.15f * tint4.y), 0.0f, 1.0f);
+          bl = std::clamp(bl * (0.85f + 0.15f * tint4.z), 0.0f, 1.0f);
+
+          const ImU32 col = ImGui::ColorConvertFloat4ToU32(ImVec4(r, g, bl, a));
+          draw->AddCircleFilled(ImVec2(x, y), radius, col, 0);
+        }
+      }
+    }
+  };
+
+  // Far layer: smaller, denser stars.
+  draw_star_layer(0.50f, 0.55f, 0.60f, 0.82f, 0xC0FFEE11u, false);
+  // Near layer: slightly larger stars with gentle twinkle.
+  draw_star_layer(1.00f, 0.70f, 1.00f, 1.05f, 0xC0FFEE22u, true);
 
   draw->PopClipRect();
 }
@@ -267,6 +439,7 @@ void draw_grid(ImDrawList* draw,
       draw->AddLine(a, b, col, thick);
 
       if (style.labels && major) {
+        // Label near the left.
         const float la = std::clamp(style.label_alpha, 0.0f, 1.0f);
         const ImU32 lcol = modulate_alpha(color, la);
         char buf[64];
@@ -275,7 +448,7 @@ void draw_grid(ImDrawList* draw,
         } else {
           std::snprintf(buf, sizeof(buf), "%.0f", y);
         }
-        draw->AddText(ImVec2(origin.x + 4.0f, a.y + 2.0f), lcol, buf);
+        draw->AddText(ImVec2(origin.x + 4.0f, a.y + 3.0f), lcol, buf);
       }
     }
   }
@@ -291,22 +464,24 @@ void draw_scale_bar(ImDrawList* draw,
                     const ScaleBarStyle& style,
                     const char* unit_suffix) {
   if (!draw || !style.enabled) return;
-  if (size.x <= 40.0f || size.y <= 20.0f) return;
-  if (!(units_per_px > 0.0) || !std::isfinite(units_per_px)) return;
+  if (size.x <= 2.0f || size.y <= 2.0f) return;
+  if (!(units_per_px > 0.0)) return;
 
-  const float desired_px = std::clamp(style.desired_px, 40.0f, 260.0f);
-  const double raw_units = static_cast<double>(desired_px) * units_per_px;
-  const double nice_units = nice_number_125(raw_units);
-  const float bar_px = static_cast<float>(nice_units / units_per_px);
+  const float alpha = std::clamp(style.alpha, 0.0f, 1.0f);
+  if (alpha <= 1e-4f) return;
 
-  const float pad = 10.0f;
-  const ImVec2 p0(origin.x + pad, origin.y + size.y - pad);
-  const ImVec2 p1(p0.x + bar_px, p0.y);
+  const double desired_units = static_cast<double>(std::max(10.0f, style.desired_px)) * units_per_px;
+  const double nice_units = nice_number_125(desired_units);
+  const double bar_px = nice_units / units_per_px;
 
-  const ImU32 col = modulate_alpha(color, style.alpha);
-  draw->AddLine(p0, p1, col, 2.0f);
-  draw->AddLine(ImVec2(p0.x, p0.y - 4.0f), ImVec2(p0.x, p0.y + 4.0f), col, 2.0f);
-  draw->AddLine(ImVec2(p1.x, p1.y - 4.0f), ImVec2(p1.x, p1.y + 4.0f), col, 2.0f);
+  const float x0 = origin.x + 14.0f;
+  const float y0 = origin.y + size.y - 18.0f;
+  const float x1 = x0 + static_cast<float>(bar_px);
+
+  const ImU32 col = modulate_alpha(color, alpha);
+  draw->AddLine(ImVec2(x0, y0), ImVec2(x1, y0), col, 2.0f);
+  draw->AddLine(ImVec2(x0, y0 - 4.0f), ImVec2(x0, y0 + 4.0f), col, 2.0f);
+  draw->AddLine(ImVec2(x1, y0 - 4.0f), ImVec2(x1, y0 + 4.0f), col, 2.0f);
 
   char buf[64];
   if (unit_suffix && unit_suffix[0] != '\0') {
@@ -314,7 +489,7 @@ void draw_scale_bar(ImDrawList* draw,
   } else {
     std::snprintf(buf, sizeof(buf), "%.0f", nice_units);
   }
-  draw->AddText(ImVec2(p0.x, p0.y - 18.0f), col, buf);
+  draw->AddText(ImVec2(x0, y0 - 16.0f), col, buf);
 }
 
 } // namespace nebula4x::ui

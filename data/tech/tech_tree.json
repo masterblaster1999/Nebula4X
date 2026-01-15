@@ -16,6 +16,10 @@
           "value": "fuel_refinery"
         },
         {
+          "type": "unlock_installation",
+          "value": "geological_survey"
+        },
+        {
           "type": "unlock_component",
           "value": "engine_chem_mk1"
         },

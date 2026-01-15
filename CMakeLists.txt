@@ -58,6 +58,8 @@ target_sources(nebula4x_core
     src/core/simulation.cpp
     src/core/simulation_state.cpp
     src/core/simulation_orders.cpp
+    src/core/simulation_tick_contracts.cpp
+    src/core/simulation_tick_procgen.cpp
     src/core/simulation_tick_core.cpp
     src/core/simulation_tick_economy.cpp
     src/core/simulation_tick_ai.cpp
@@ -207,6 +209,7 @@ if(NEBULA4X_BUILD_UI)
     src/ui/freight_window.cpp
     src/ui/fuel_window.cpp
     src/ui/salvage_window.cpp
+    src/ui/contracts_window.cpp
     src/ui/sustainment_window.cpp
     src/ui/troop_window.cpp
     src/ui/advisor_window.cpp
@@ -236,6 +239,8 @@ if(NEBULA4X_BUILD_UI)
     src/ui/layout_profiles_window.cpp
     src/ui/production_window.cpp
     src/ui/galaxy_map.cpp
+    src/ui/galaxy_constellations.cpp
+    src/ui/star_atlas_window.cpp
     src/ui/system_map.cpp
     src/ui/timeline_window.cpp
     src/ui/design_studio_window.cpp

@@ -124,6 +124,85 @@ struct SimConfig {
   // 0 or negative => unlimited.
   int reverse_engineering_unlock_cap_per_tick{2};
 
+  // --- Anomaly schematics (reverse engineering from exploration) ---
+  //
+  // When enabled, resolving anomalies can yield small amounts of reverse-engineering
+  // progress toward otherwise-locked components. This is intended to make
+  // exploration rewards feel more distinct from pure +RP.
+  bool enable_anomaly_schematic_fragments{true};
+
+  // Base points gained when resolving an anomaly (scaled by investigation time and RP reward).
+  double anomaly_schematic_points_base{1.0};
+  double anomaly_schematic_points_per_investigation_day{0.6};
+  double anomaly_schematic_points_per_rp{0.02};
+
+  // Kind multipliers (reward flavor).
+  double anomaly_schematic_ruins_multiplier{1.3};
+  double anomaly_schematic_signal_multiplier{1.0};
+  double anomaly_schematic_distress_multiplier{0.9};
+  double anomaly_schematic_phenomenon_multiplier{0.8};
+
+  // Number of components to spread points across (1 = focused).
+  int anomaly_schematic_components_per_anomaly{1};
+
+  // If true, anomalies that already directly unlock a component can also grant schematic fragments.
+  bool anomaly_schematic_allow_with_direct_unlock{false};
+
+  // --- Obscure codex fragments (procedural ciphered lore) ---
+  //
+  // When enabled, anomalies expose a deterministic "codex fragment": a short
+  // ciphered message plus a gradually-revealed translation that improves as
+  // a faction resolves more anomalies in the same lead chain.
+  //
+  // Optionally, fully decoding a lead chain can reveal a special follow-up
+  // "Codex Echo" site (and an optional contract offer).
+  bool enable_obscure_codex_fragments{true};
+
+  // Number of resolved anomalies in a lead chain required for full translation.
+  // 1 => always fully translated.
+  int codex_fragments_required{2};
+
+  // When enabled, completing a codex translation (reaching codex_fragments_required)
+  // spawns a special follow-up site (and, optionally, a contract).
+  bool enable_codex_echo_reward{true};
+
+  // Hop distance window for Codex Echo targets (computed over the jump network).
+  // 0 disables hop filtering.
+  int codex_echo_min_hops{2};
+  int codex_echo_max_hops{6};
+
+  // When enabled, Codex Echo rewards create an "Investigate" contract offer for
+  // the discovering faction (if contracts are enabled).
+  bool codex_echo_offer_contract{true};
+
+  // Bonus research reward (RP) added to Codex Echo contracts.
+  double codex_echo_contract_bonus_rp{20.0};
+
+  // --- Procedural contracts / mission board ---
+  //
+  // When enabled, the simulation generates lightweight faction-scoped "contracts"
+  // (missions) based on the existing world state:
+  //   - discovered but unresolved anomalies
+  //   - salvageable wrecks in discovered systems
+  //   - unsurveyed jump points in discovered systems
+  //
+  // Contracts are persisted in saves and can be accepted/assigned via the UI.
+  bool enable_contracts{true};
+
+  // Maximum number of concurrently Offered contracts per faction.
+  int contract_max_offers_per_faction{6};
+
+  // Number of new Offered contracts generated per faction per day (up to max_offers).
+  int contract_daily_new_offers_per_faction{2};
+
+  // Offered contracts expire after this many days. <= 0 => never expire.
+  int contract_offer_expiry_days{60};
+
+  // Reward heuristic (research points) components.
+  double contract_reward_base_rp{5.0};
+  double contract_reward_rp_per_hop{2.0};
+  double contract_reward_rp_per_risk{15.0};
+
   double docking_range_mkm{3.0};
 
   // Generic "arrived" epsilon used for fixed targets (move-to-point).
@@ -467,6 +546,30 @@ double ship_maintenance_breakdown_subsystem_damage_max{0.20};
   // Remaining probability goes to a follow-up anomaly site.
   double anomaly_lead_star_chart_chance{0.30};
   double anomaly_lead_hidden_cache_chance{0.18};
+
+  // --- Dynamic procedural points-of-interest (mid/late-game exploration) ---
+  //
+  // Random scenarios can feel "front-loaded": once initial anomalies are cleared,
+  // exploration content can taper off. This system slowly injects new anomalies
+  // and salvage caches over time, biased by procedural Region attributes
+  // (ruins_density, pirate_risk, salvage_richness_mult) so the galaxy remains
+  // uneven and flavorful.
+  //
+  // Spawned POIs are *not automatically revealed*; normal sensor discovery rules apply.
+  bool enable_dynamic_poi_spawns{true};
+
+  // Base per-system daily spawn chances (before region/nebula/colony modifiers).
+  double dynamic_anomaly_spawn_chance_per_system_per_day{0.0025};
+  double dynamic_cache_spawn_chance_per_system_per_day{0.0015};
+
+  // Global caps. If <= 0, a size-scaled default is used.
+  int dynamic_poi_max_unresolved_anomalies_total{0}; // default: ~2x num systems
+  int dynamic_poi_max_active_caches_total{0};        // default: ~1x num systems
+
+  // Per-system caps to avoid clumping.
+  int dynamic_poi_max_unresolved_anomalies_per_system{3};
+  int dynamic_poi_max_active_caches_per_system{2};
+
 
   // --- Intel / contact prediction ---
   //
@@ -829,6 +932,35 @@ double ship_maintenance_breakdown_subsystem_damage_max{0.20};
   // desired stockpile is 60 Duranium.
   double auto_freight_industry_input_buffer_days{30.0};
 
+
+  // --- Geological surveys (procedural mineral deposit discoveries) ---
+  //
+  // Colonies that build Geological Survey installations can occasionally discover
+  // additional mineral deposits on their body over time. This helps keep the
+  // mid/late-game economy from hard-stalling once initial deposits are exhausted,
+  // while remaining deterministic (seeded by day+colony id).
+  bool enable_geological_survey{true};
+
+  // Baseline daily probability *per* geological_survey installation to discover a deposit.
+  // (Scaled by region richness, mining tech multipliers, and depletion.)
+  double geological_survey_discovery_chance_per_day_per_installation{0.001};
+
+  // Hard cap to prevent extremely large colonies from rolling hundreds of times per day.
+  int geological_survey_max_discoveries_per_colony_per_day{2};
+
+  // Deposit yield range (tons) before modifiers.
+  double geological_survey_min_deposit_tons{5000.0};
+  double geological_survey_max_deposit_tons{150000.0};
+
+  // When total remaining deposits on the body fall below this threshold (tons),
+  // geological survey discovery odds are boosted linearly as deposits approach zero.
+  double geological_survey_depletion_threshold_tons{500000.0};
+
+  // Maximum multiplicative boost applied at full depletion (0 remaining).
+  // Example: 4.0 -> up to 5x base chance.
+  double geological_survey_depletion_chance_boost{4.0};
+
+
   // --- Auto-tanker (fuel logistics) ---
   //
   // Ships with Ship::auto_tanker enabled will, when idle, automatically seek out
@@ -963,6 +1095,46 @@ double ship_maintenance_breakdown_subsystem_damage_max{0.20};
   // How full civilian convoy cargo holds should be (0..1). Cargo is purely
   // cosmetic / salvageable and does not directly transfer colony minerals.
   double civilian_trade_convoy_cargo_fill_fraction{0.80};
+
+
+  // How strongly civilian convoys avoid high-risk endpoints (0..1).
+  // Higher values shift traffic toward safer corridors, indirectly rewarding
+  // suppression patrols.
+  double civilian_trade_convoy_risk_aversion{0.65};
+
+  // Lower bound on the convoy weight multiplier after risk aversion is applied.
+  // Prevents all traffic from collapsing to a single lane when piracy is high.
+  double civilian_trade_convoy_min_risk_weight{0.35};
+
+
+  // --- AI trade security patrols (procedural) ---
+  //
+  // When enabled, AI-controlled explorer empires will periodically retask their
+  // Patrol Fleet to protect regions where their economic exposure (trade lane
+  // volume involving their colonies) intersects with high piracy risk.
+  //
+  // This ties the procedural trade network into the piracy suppression system:
+  // patrol presence increases Region::pirate_suppression, which in turn lowers
+  // raid rates and attracts civilian traffic back to safe corridors.
+  bool enable_ai_trade_security_patrols{true};
+
+  // Re-evaluate patrol targets every N days (staggered per fleet).
+  // <= 0 => every day.
+  int ai_trade_security_patrol_retarget_interval_days{14};
+
+  // Consider only the top N trade lanes (by volume) when scoring security needs.
+  int ai_trade_security_patrol_consider_top_lanes{24};
+
+  // Ignore lanes with total_volume below this threshold.
+  double ai_trade_security_patrol_min_lane_volume{1.0};
+
+  // Extra weight applied when a trade corridor passes through a system that
+  // contains a colony owned by the patrolling faction.
+  double ai_trade_security_patrol_own_colony_weight{1.5};
+
+  // How strongly piracy risk amplifies patrol demand.
+  // Need ~= volume_share * (0.20 + risk_weight * risk).
+  double ai_trade_security_patrol_risk_weight{1.2};
 
 
   // --- Pirate hideouts (persistent pirate bases) ---
@@ -1766,6 +1938,20 @@ bool move_construction_order(Id colony_id, int from_index, int to_index);
   std::vector<DiplomaticOffer> diplomatic_offers_between(Id faction_a, Id faction_b) const;
   std::vector<DiplomaticOffer> incoming_diplomatic_offers(Id to_faction_id) const;
 
+  // --- Procedural contracts / mission board ---
+  //
+  // Contracts are faction-scoped tasks generated by tick_contracts().
+  // These APIs are convenience helpers for UI and automation.
+  bool accept_contract(Id contract_id, bool push_event = true, std::string* error = nullptr);
+  bool abandon_contract(Id contract_id, bool push_event = true, std::string* error = nullptr);
+  bool clear_contract_assignment(Id contract_id, std::string* error = nullptr);
+
+  // Assign a contract to a ship and optionally clear the ship's existing orders.
+  // Assigning an Offered contract implicitly accepts it.
+  bool assign_contract_to_ship(Id contract_id, Id ship_id, bool clear_existing_orders = false,
+                               bool restrict_to_discovered = true, bool push_event = true,
+                               std::string* error = nullptr);
+
 
 
   // Set a diplomatic stance. If reciprocal is true, also sets the inverse (B->A).
@@ -1880,6 +2066,8 @@ bool move_construction_order(Id colony_id, int from_index, int to_index);
   void tick_nebula_storms();
   void tick_treaties();
   void tick_diplomatic_offers();
+  void tick_contracts();
+  void tick_dynamic_points_of_interest();
   void tick_victory();
   void tick_refuel();
   void tick_rearm();

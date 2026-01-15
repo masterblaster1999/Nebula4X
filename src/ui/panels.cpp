@@ -18,6 +18,7 @@
 #include <utility>
 
 #include "nebula4x/core/serialization.h"
+#include "nebula4x/core/procgen_obscure.h"
 #include "nebula4x/core/research_planner.h"
 #include "nebula4x/core/research_schedule.h"
 #include "nebula4x/core/order_planner.h"
@@ -490,9 +491,11 @@ void draw_main_menu(Simulation& sim, UIState& ui, char* save_path, char* load_pa
       ImGui::MenuItem("Economy (Industry/Mining/Tech Tree)", nullptr, &ui.show_economy_window);
       ImGui::MenuItem("Planner (Forecast Dashboard)", nullptr, &ui.show_planner_window);
       ImGui::MenuItem("Regions (Sectors Overview)", "Ctrl+Shift+R", &ui.show_regions_window);
+      ImGui::MenuItem("Star Atlas (Constellations)", nullptr, &ui.show_star_atlas_window);
       ImGui::MenuItem("Freight Planner (Auto-freight Preview)", nullptr, &ui.show_freight_window);
       ImGui::MenuItem("Fuel Planner (Auto-tanker Preview)", nullptr, &ui.show_fuel_window);
       ImGui::MenuItem("Salvage Planner (Wreck Salvage Runs)", nullptr, &ui.show_salvage_window);
+      ImGui::MenuItem("Contracts (Mission Board)", nullptr, &ui.show_contracts_window);
       ImGui::MenuItem("Sustainment Planner (Fleet Base Targets)", nullptr, &ui.show_sustainment_window);
       ImGui::MenuItem("Advisor (Issues)", "Ctrl+Shift+A", &ui.show_advisor_window);
       ImGui::MenuItem("Colony Profiles (Automation Presets)", "Ctrl+Shift+B", &ui.show_colony_profiles_window);
@@ -606,6 +609,9 @@ void draw_main_menu(Simulation& sim, UIState& ui, char* save_path, char* load_pa
       }
       if (ImGui::MenuItem("Open ProcGen Atlas")) {
         ui.show_procgen_atlas_window = true;
+      }
+      if (ImGui::MenuItem("Open Star Atlas (Constellations)")) {
+        ui.show_star_atlas_window = true;
       }
       if (ImGui::MenuItem("Open Timeline")) {
         ui.show_timeline_window = true;
@@ -6328,10 +6334,11 @@ if (colony->shipyard_queue.empty()) {
           ImGui::Text("Reverse engineering");
 
           if (selected_faction->reverse_engineering_progress.empty()) {
-            ImGui::TextDisabled("(no active salvage reverse engineering)");
+            ImGui::TextDisabled("(no active reverse engineering)");
           } else {
             ImGui::TextDisabled(
-                "Progress is earned automatically when salvaging foreign ship wrecks.\n"
+                "Progress is earned automatically when salvaging foreign ship wrecks and\n"
+                "can also be discovered as schematic fragments when resolving anomalies.\n"
                 "Once a component reaches 100%, it is added to your unlocked component list.");
 
             std::vector<std::string> cids;
@@ -9892,6 +9899,49 @@ void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& 
               ui.request_system_map_center_x_mkm = r.pos.x;
               ui.request_system_map_center_y_mkm = r.pos.y;
               ui.request_system_map_center_zoom = 0.0;
+            }
+          }
+
+          // Hover tooltip: procedural "fingerprint" + one-line lore.
+          if (ImGui::IsItemHovered()) {
+            const auto* a = find_ptr(s.anomalies, r.id);
+            if (a) {
+              const auto* sys = find_ptr(s.systems, a->system_id);
+              const auto* reg = (sys && sys->region_id != kInvalidId) ? find_ptr(s.regions, sys->region_id) : nullptr;
+              const double neb = sys ? std::clamp(sys->nebula_density, 0.0, 1.0) : 0.0;
+              const double ruins = reg ? std::clamp(reg->ruins_density, 0.0, 1.0) : 0.0;
+              const double pir = reg ? std::clamp(reg->pirate_risk * (1.0 - reg->pirate_suppression), 0.0, 1.0) : 0.0;
+
+              const std::string sig = procgen_obscure::anomaly_signature_code(*a);
+              const std::string glyph = procgen_obscure::anomaly_signature_glyph(*a);
+              const std::string lore = procgen_obscure::anomaly_lore_line(*a, neb, ruins, pir);
+
+              ImGui::BeginTooltip();
+              ImGui::TextUnformatted((std::string("Signature: ") + sig).c_str());
+              ImGui::Separator();
+              ImGui::TextUnformatted(glyph.c_str());
+              ImGui::Separator();
+              ImGui::TextWrapped("%s", lore.c_str());
+
+              // Obscure codex fragment: deterministic ciphertext + gradually revealed translation.
+              if (sim.cfg().enable_obscure_codex_fragments) {
+                const int req = std::max(1, sim.cfg().codex_fragments_required);
+                int have = 0;
+                if (ui.viewer_faction_id != kInvalidId) {
+                  const Id root = procgen_obscure::anomaly_chain_root_id(s.anomalies, a->id);
+                  have = procgen_obscure::faction_resolved_anomaly_chain_count(s.anomalies, ui.viewer_faction_id, root);
+                }
+                const double frac = std::clamp(static_cast<double>(have) / static_cast<double>(req), 0.0, 1.0);
+
+                ImGui::Separator();
+                ImGui::TextDisabled("Codex fragment (%d/%d)", have, req);
+                const std::string cipher = procgen_obscure::codex_ciphertext(*a);
+                const std::string partial = procgen_obscure::codex_partial_plaintext(*a, frac);
+                ImGui::TextWrapped("%s", cipher.c_str());
+                ImGui::TextWrapped("%s", partial.c_str());
+              }
+
+              ImGui::EndTooltip();
             }
           }
 

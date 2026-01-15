@@ -522,6 +522,16 @@
         "Gallicite": 100
       }
     },
+    "geological_survey": {
+      "name": "Geological Survey Institute",
+      "construction_cost": 250,
+      "build_costs": {
+        "Duranium": 800,
+        "Neutronium": 80,
+        "Gallicite": 150,
+        "Corundium": 60
+      }
+    },
     "sensor_station": {
       "name": "Sensor Station",
       "sensor_range_mkm": 600,
