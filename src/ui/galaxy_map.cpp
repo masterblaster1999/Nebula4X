@@ -2,6 +2,7 @@
 
 #include "ui/map_render.h"
 #include "ui/minimap.h"
+#include "ui/procgen_metrics.h"
 #include "ui/ruler.h"
 
 #include <imgui.h>
@@ -173,6 +174,40 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   if (visible.empty()) {
     ImGui::TextDisabled("No systems to display");
     return;
+  }
+
+  // --- Procedural generation lens normalization (for node coloring). ---
+  //
+  // The lens uses the same visible-system set as the map (respecting FoW) so
+  // it doesn't leak information.
+  const ProcGenLensMode lens_mode = ui.galaxy_procgen_lens_mode;
+  const bool lens_active = (lens_mode != ProcGenLensMode::Off);
+  bool lens_bounds_valid = false;
+  double lens_raw_min = 0.0;
+  double lens_raw_max = 0.0;
+  double lens_min = 0.0; // transformed
+  double lens_max = 0.0; // transformed
+  if (lens_active) {
+    for (const auto& v : visible) {
+      const double raw = procgen_lens_value(s, *v.sys, lens_mode);
+      if (!std::isfinite(raw)) continue;
+      double x = raw;
+      if (ui.galaxy_procgen_lens_log_scale && (lens_mode == ProcGenLensMode::MineralWealth)) {
+        // Wide-range values benefit from log scaling.
+        x = std::log10(std::max(0.0, raw) + 1.0);
+      }
+      if (!std::isfinite(x)) continue;
+      if (!lens_bounds_valid) {
+        lens_bounds_valid = true;
+        lens_raw_min = lens_raw_max = raw;
+        lens_min = lens_max = x;
+      } else {
+        lens_raw_min = std::min(lens_raw_min, raw);
+        lens_raw_max = std::max(lens_raw_max, raw);
+        lens_min = std::min(lens_min, x);
+        lens_max = std::max(lens_max, x);
+      }
+    }
   }
 
   const ImVec2 avail = ImGui::GetContentRegionAvail();
@@ -1211,7 +1246,21 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
 
     const bool is_hovered = (hovered_system == n.id);
 
-    const ImU32 fill = is_selected ? IM_COL32(0, 220, 140, 255) : IM_COL32(240, 240, 240, 255);
+    ImU32 fill = is_selected ? IM_COL32(0, 220, 140, 255) : IM_COL32(240, 240, 240, 255);
+    ImU32 lens_col = 0; // full-alpha lens color (for glow/legend).
+    if (!is_selected && lens_active && lens_bounds_valid && n.sys) {
+      const double raw = procgen_lens_value(s, *n.sys, lens_mode);
+      double x = raw;
+      if (ui.galaxy_procgen_lens_log_scale && (lens_mode == ProcGenLensMode::MineralWealth)) {
+        x = std::log10(std::max(0.0, raw) + 1.0);
+      }
+      float t = 0.5f;
+      if (std::isfinite(x) && lens_max > lens_min + 1e-12) {
+        t = static_cast<float>((x - lens_min) / (lens_max - lens_min));
+      }
+      lens_col = procgen_lens_gradient_color(t, 1.0f);
+      fill = modulate_alpha(lens_col, ui.galaxy_procgen_lens_alpha);
+    }
     const ImU32 outline = IM_COL32(20, 20, 20, 255);
 
     // Nebula haze (system-level environmental effect).
@@ -1241,7 +1290,10 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
 
     // Drop shadow + subtle glow for higher visual contrast.
     draw->AddCircleFilled(ImVec2(n.p.x + 1.5f, n.p.y + 1.5f), base_r + 0.5f, IM_COL32(0, 0, 0, 110), 0);
-    const ImU32 glow_col = is_selected ? IM_COL32(0, 220, 140, 255) : IM_COL32(220, 220, 255, 255);
+    ImU32 glow_col = is_selected ? IM_COL32(0, 220, 140, 255) : IM_COL32(220, 220, 255, 255);
+    if (!is_selected && lens_col != 0) {
+      glow_col = lens_col;
+    }
     draw->AddCircleFilled(n.p, base_r * 2.6f, modulate_alpha(glow_col, is_selected ? 0.12f : 0.08f), 0);
     draw->AddCircleFilled(n.p, base_r * 1.7f, modulate_alpha(glow_col, is_selected ? 0.22f : 0.14f), 0);
 
@@ -1683,6 +1735,18 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
       const bool is_fleet = (selected_fleet_system != kInvalidId && v.id == selected_fleet_system);
       const float r = is_selected ? 3.3f : (is_fleet ? 2.8f : 2.0f);
       ImU32 col = IM_COL32(200, 200, 210, 200);
+      if (!is_selected && lens_active && lens_bounds_valid && lens_mode != ProcGenLensMode::Off) {
+        const double raw = procgen_lens_value(s, *v.sys, lens_mode);
+        double x = raw;
+        if (ui.galaxy_procgen_lens_log_scale && (lens_mode == ProcGenLensMode::MineralWealth)) {
+          x = std::log10(std::max(0.0, raw) + 1.0);
+        }
+        float t = 0.5f;
+        if (std::isfinite(x) && lens_max > lens_min + 1e-12) {
+          t = static_cast<float>((x - lens_min) / (lens_max - lens_min));
+        }
+        col = procgen_lens_gradient_color(t, 0.85f);
+      }
       if (is_fleet) col = IM_COL32(0, 160, 255, 220);
       if (is_selected) col = IM_COL32(245, 245, 245, 255);
       draw->AddCircleFilled(p, r, col, 0);
@@ -1745,6 +1809,44 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   ImGui::SameLine();
   ImGui::Checkbox("Hubs##trade", &ui.show_galaxy_trade_hubs);
   ImGui::TextDisabled("Procedural civilian trade lanes. Color indicates the dominant commodity.");
+
+  ImGui::SeparatorText("ProcGen lens");
+  {
+    int mode = static_cast<int>(ui.galaxy_procgen_lens_mode);
+    ImGui::Combo("Metric", &mode, procgen_lens_mode_combo_items());
+    ui.galaxy_procgen_lens_mode = static_cast<ProcGenLensMode>(mode);
+    ImGui::SliderFloat("Intensity", &ui.galaxy_procgen_lens_alpha, 0.10f, 1.00f, "%.2f");
+    if (ui.galaxy_procgen_lens_mode == ProcGenLensMode::MineralWealth) {
+      ImGui::Checkbox("Log scale", &ui.galaxy_procgen_lens_log_scale);
+    } else {
+      bool dummy = ui.galaxy_procgen_lens_log_scale;
+      ImGui::BeginDisabled(true);
+      ImGui::Checkbox("Log scale", &dummy);
+      ImGui::EndDisabled();
+    }
+    ImGui::Checkbox("Legend", &ui.galaxy_procgen_lens_show_legend);
+
+    if (ui.galaxy_procgen_lens_mode != ProcGenLensMode::Off && lens_bounds_valid && ui.galaxy_procgen_lens_show_legend) {
+      const float w = 220.0f;
+      const float h = 12.0f;
+      const ImVec2 p0 = ImGui::GetCursorScreenPos();
+      const ImVec2 p1 = ImVec2(p0.x + w, p0.y + h);
+      ImDrawList* dl = ImGui::GetWindowDrawList();
+      dl->AddRectFilledMultiColor(p0, p1,
+                                 procgen_lens_gradient_color(0.0f, 1.0f),
+                                 procgen_lens_gradient_color(1.0f, 1.0f),
+                                 procgen_lens_gradient_color(1.0f, 1.0f),
+                                 procgen_lens_gradient_color(0.0f, 1.0f));
+      dl->AddRect(p0, p1, IM_COL32(0, 0, 0, 200));
+      ImGui::Dummy(ImVec2(w, h + 4.0f));
+      const char* unit = procgen_lens_value_unit(ui.galaxy_procgen_lens_mode);
+      if (ui.galaxy_procgen_lens_mode == ProcGenLensMode::MineralWealth && ui.galaxy_procgen_lens_log_scale) {
+        ImGui::TextDisabled("Min %.0f %s, Max %.0f %s (log)", lens_raw_min, unit, lens_raw_max, unit);
+      } else {
+        ImGui::TextDisabled("Min %.0f %s, Max %.0f %s", lens_raw_min, unit, lens_raw_max, unit);
+      }
+    }
+  }
   ImGui::SeparatorText("Route ruler (hold D)");
   ImGui::TextDisabled("Hold D and left click two systems. D+right click clears.");
   {

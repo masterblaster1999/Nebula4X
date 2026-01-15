@@ -604,6 +604,9 @@ void draw_main_menu(Simulation& sim, UIState& ui, char* save_path, char* load_pa
       if (ImGui::MenuItem("Open Balance Lab")) {
         ui.show_balance_lab_window = true;
       }
+      if (ImGui::MenuItem("Open ProcGen Atlas")) {
+        ui.show_procgen_atlas_window = true;
+      }
       if (ImGui::MenuItem("Open Timeline")) {
         ui.show_timeline_window = true;
       }

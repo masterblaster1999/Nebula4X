@@ -229,6 +229,7 @@ if(NEBULA4X_BUILD_UI)
     src/ui/data_lenses_window.cpp
     src/ui/dashboards_window.cpp
     src/ui/pivot_tables_window.cpp
+    src/ui/procgen_atlas_window.cpp
     src/ui/ui_forge_window.cpp
     src/ui/screen_reader.cpp
     src/ui/layout_profiles.cpp

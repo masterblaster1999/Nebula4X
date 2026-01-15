@@ -36,6 +36,7 @@
 #include "ui/timeline_window.h"
 #include "ui/design_studio_window.h"
 #include "ui/balance_lab_window.h"
+#include "ui/procgen_atlas_window.h"
 #include "ui/intel_window.h"
 #include "ui/victory_window.h"
 #include "ui/diplomacy_window.h"
@@ -401,6 +402,9 @@ void App::frame() {
   }
   if (ui_.show_balance_lab_window) {
     draw_balance_lab_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  }
+  if (ui_.show_procgen_atlas_window) {
+    draw_procgen_atlas_window(sim_, ui_, selected_body_);
   }
   if (ui_.show_intel_window) {
     draw_intel_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
@@ -1050,6 +1054,20 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       if (auto it = obj->find("show_galaxy_trade_hubs"); it != obj->end()) {
         ui_.show_galaxy_trade_hubs = it->second.bool_value(ui_.show_galaxy_trade_hubs);
       }
+      if (auto it = obj->find("galaxy_procgen_lens_mode"); it != obj->end()) {
+        ui_.galaxy_procgen_lens_mode = static_cast<ProcGenLensMode>(
+            static_cast<int>(it->second.number_value(static_cast<double>(ui_.galaxy_procgen_lens_mode))));
+      }
+      if (auto it = obj->find("galaxy_procgen_lens_alpha"); it != obj->end()) {
+        ui_.galaxy_procgen_lens_alpha = static_cast<float>(it->second.number_value(ui_.galaxy_procgen_lens_alpha));
+        ui_.galaxy_procgen_lens_alpha = std::clamp(ui_.galaxy_procgen_lens_alpha, 0.0f, 1.0f);
+      }
+      if (auto it = obj->find("galaxy_procgen_lens_show_legend"); it != obj->end()) {
+        ui_.galaxy_procgen_lens_show_legend = it->second.bool_value(ui_.galaxy_procgen_lens_show_legend);
+      }
+      if (auto it = obj->find("galaxy_procgen_lens_log_scale"); it != obj->end()) {
+        ui_.galaxy_procgen_lens_log_scale = it->second.bool_value(ui_.galaxy_procgen_lens_log_scale);
+      }
       if (auto it = obj->find("contact_max_age_days"); it != obj->end()) {
         ui_.contact_max_age_days = static_cast<int>(it->second.number_value(ui_.contact_max_age_days));
         ui_.contact_max_age_days = std::clamp(ui_.contact_max_age_days, 1, 3650);
@@ -1102,6 +1120,9 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       }
       if (auto it = obj->find("show_balance_lab_window"); it != obj->end()) {
         ui_.show_balance_lab_window = it->second.bool_value(ui_.show_balance_lab_window);
+      }
+      if (auto it = obj->find("show_procgen_atlas_window"); it != obj->end()) {
+        ui_.show_procgen_atlas_window = it->second.bool_value(ui_.show_procgen_atlas_window);
       }
       if (auto it = obj->find("show_intel_window"); it != obj->end()) {
         ui_.show_intel_window = it->second.bool_value(ui_.show_intel_window);
@@ -1845,6 +1866,10 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     o["show_galaxy_freight_lanes"] = ui_.show_galaxy_freight_lanes;
     o["show_galaxy_trade_lanes"] = ui_.show_galaxy_trade_lanes;
     o["show_galaxy_trade_hubs"] = ui_.show_galaxy_trade_hubs;
+    o["galaxy_procgen_lens_mode"] = static_cast<double>(static_cast<int>(ui_.galaxy_procgen_lens_mode));
+    o["galaxy_procgen_lens_alpha"] = static_cast<double>(ui_.galaxy_procgen_lens_alpha);
+    o["galaxy_procgen_lens_show_legend"] = ui_.galaxy_procgen_lens_show_legend;
+    o["galaxy_procgen_lens_log_scale"] = ui_.galaxy_procgen_lens_log_scale;
     o["contact_max_age_days"] = static_cast<double>(ui_.contact_max_age_days);
 
     // Layout.
@@ -1863,6 +1888,7 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     o["show_timeline_window"] = ui_.show_timeline_window;
     o["show_design_studio_window"] = ui_.show_design_studio_window;
     o["show_balance_lab_window"] = ui_.show_balance_lab_window;
+    o["show_procgen_atlas_window"] = ui_.show_procgen_atlas_window;
     o["show_intel_window"] = ui_.show_intel_window;
     o["show_diplomacy_window"] = ui_.show_diplomacy_window;
     o["show_victory_window"] = ui_.show_victory_window;

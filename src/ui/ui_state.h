@@ -33,6 +33,22 @@ enum class MapTab {
   Galaxy,
 };
 
+// Galaxy-map visualization overlays for procedural-generation outcomes.
+//
+// This is a UI-only enum (not saved in game state). Preferences may be stored
+// in ui_prefs.json.
+enum class ProcGenLensMode : int {
+  Off = 0,
+  NebulaDensity,
+  StarTemperature,
+  StarMass,
+  StarLuminosity,
+  BodyCount,
+  HabitableCandidates,
+  MineralWealth,
+  JumpDegree,
+};
+
 struct JsonWatchConfig {
   std::uint64_t id{0};
   std::string label;
@@ -253,6 +269,18 @@ struct UIState {
   bool show_galaxy_unknown_exits{true};
   bool show_galaxy_intel_alerts{true};
 
+  // Procedural generation visualization lens.
+  //
+  // When enabled (mode != Off), the galaxy map will color system nodes by the
+  // chosen metric to make "shape" and balance issues in the generated galaxy
+  // obvious at a glance (e.g. mineral deserts, habitable clusters, nebula
+  // walls, overly-central hubs).
+  ProcGenLensMode galaxy_procgen_lens_mode{ProcGenLensMode::Off};
+  bool galaxy_procgen_lens_show_legend{true};
+  float galaxy_procgen_lens_alpha{0.80f};
+  // Apply a log scale before normalization for wide-range metrics (e.g. minerals).
+  bool galaxy_procgen_lens_log_scale{true};
+
   // Logistics overlays.
   bool show_galaxy_freight_lanes{false};
 
@@ -317,6 +345,7 @@ struct UIState {
   bool show_entity_inspector_window{false};
   bool show_reference_graph_window{false};
   bool show_layout_profiles_window{false};
+  bool show_procgen_atlas_window{false};
   bool show_watchboard_window{false};
   bool show_data_lenses_window{false};
   bool show_dashboards_window{false};
