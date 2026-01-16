@@ -1131,6 +1131,17 @@ void Simulation::tick_contacts(double dt_days, bool emit_contact_lost_events) {
   // Discover unresolved anomalies when they enter any sensor coverage bubble.
   // This reuses the same per-faction sensor source cache as ship contacts.
   const double anom_range_mult = std::clamp(cfg_.anomaly_detection_range_multiplier, 0.0, 100.0);
+  const double anom_tgt_env_w = std::clamp(cfg_.anomaly_detection_target_env_weight, 0.0, 1.0);
+  auto anom_kind_mult = [&](const std::string& kind) -> double {
+    // Kind-based detectability tuning. These are conservative so unit
+    // tests that rely on strict sensor range (mult=1.0) remain stable.
+    if (kind == "signal") return 1.25;
+    if (kind == "distress") return 1.15;
+    if (kind == "codex_echo") return 1.10;
+    if (kind == "ruins" || kind == "artifact") return 0.90;
+    if (kind == "phenomenon") return 1.00;
+    return 1.00;
+  };
   if (anom_range_mult > 1e-9 && !state_.anomalies.empty()) {
     std::unordered_map<Id, std::vector<Id>> anomalies_by_system;
     anomalies_by_system.reserve(state_.anomalies.size());
@@ -1172,7 +1183,13 @@ void Simulation::tick_contacts(double dt_days, bool emit_contact_lost_events) {
           for (const auto& src : sources) {
             if (src.range_mkm <= 1e-9) continue;
 
-            const double r = src.range_mkm * anom_range_mult;
+            const double tgt_env = this->system_sensor_environment_multiplier_at(sys_id, tgt);
+            const double tgt_env01 = std::clamp(tgt_env, 0.0, 1.0);
+            const double tgt_env_mult = (1.0 - anom_tgt_env_w) + anom_tgt_env_w * tgt_env01;
+
+            const double km = std::clamp(anom_kind_mult(a->kind), 0.25, 3.0);
+
+            const double r = src.range_mkm * anom_range_mult * tgt_env_mult * km;
             if (!std::isfinite(r) || r <= 1e-9) continue;
             const double r2 = r * r;
 
@@ -1301,7 +1318,7 @@ void Simulation::tick_shields(double dt_days) {
     if (cfg_.enable_nebula_storms) {
       const double per_day = std::max(0.0, cfg_.nebula_storm_shield_drain_per_day_at_intensity1);
       if (per_day > 0.0) {
-        const double storm = this->system_storm_intensity(sh->system_id);
+        const double storm = this->system_storm_intensity_at(sh->system_id, sh->position_mkm);
         if (storm > 0.0) drain = per_day * storm;
       }
     }

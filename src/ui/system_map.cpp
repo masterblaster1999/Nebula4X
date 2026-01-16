@@ -9,6 +9,7 @@
 #include "nebula4x/core/contact_prediction.h"
 #include "nebula4x/core/fleet_formation.h"
 #include "nebula4x/core/enum_strings.h"
+#include "nebula4x/core/procgen_jump_phenomena.h"
 #include "nebula4x/core/power.h"
 #include "nebula4x/util/time.h"
 
@@ -170,6 +171,112 @@ void draw_heatmap(ImDrawList* draw,
 
   ImGui::PopClipRect();
 }
+
+void draw_nebula_microfield_overlay(ImDrawList* draw,
+                                   const ImVec2& origin,
+                                   const ImVec2& avail,
+                                   const ImVec2& center_px,
+                                   double scale_px_per_mkm,
+                                   double zoom,
+                                   const Vec2& pan_mkm,
+                                   const Simulation& sim,
+                                   Id system_id,
+                                   int cells_x,
+                                   int cells_y,
+                                   ImU32 base_col,
+                                   float opacity) {
+  if (!draw) return;
+  if (opacity <= 0.0f) return;
+  if (cells_x <= 0 || cells_y <= 0) return;
+
+  const auto& s = sim.state();
+  const auto* sys = find_ptr(s.systems, system_id);
+  if (!sys) return;
+  if (!(sys->nebula_density > 1e-6) && !sim.cfg().enable_nebula_microfields) return;
+
+  const float cw = avail.x / static_cast<float>(cells_x);
+  const float ch = avail.y / static_cast<float>(cells_y);
+
+  const ImVec2 clip_p1(origin.x + avail.x, origin.y + avail.y);
+  ImGui::PushClipRect(origin, clip_p1, true);
+
+  for (int y = 0; y < cells_y; ++y) {
+    const float y0 = origin.y + static_cast<float>(y) * ch;
+    const float y1 = y0 + ch + 0.5f;
+    const float cy = y0 + ch * 0.5f;
+
+    for (int x = 0; x < cells_x; ++x) {
+      const float x0 = origin.x + static_cast<float>(x) * cw;
+      const float x1 = x0 + cw + 0.5f;
+      const float cx = x0 + cw * 0.5f;
+
+      const Vec2 w = to_world(ImVec2(cx, cy), center_px, scale_px_per_mkm, zoom, pan_mkm);
+      const double d = sim.system_nebula_density_at(system_id, w);
+      if (!(d > 1e-6)) continue;
+
+      // Subtle contrast curve.
+      const float a = opacity * static_cast<float>(std::pow(std::clamp(d, 0.0, 1.0), 1.35));
+      if (a <= 0.003f) continue;
+
+      draw->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), modulate_alpha(base_col, a));
+    }
+  }
+
+  ImGui::PopClipRect();
+}
+
+void draw_nebula_storm_cell_overlay(ImDrawList* draw,
+                                   const ImVec2& origin,
+                                   const ImVec2& avail,
+                                   const ImVec2& center_px,
+                                   double scale_px_per_mkm,
+                                   double zoom,
+                                   const Vec2& pan_mkm,
+                                   const Simulation& sim,
+                                   Id system_id,
+                                   int cells_x,
+                                   int cells_y,
+                                   ImU32 base_col,
+                                   float opacity) {
+  if (!draw) return;
+  if (opacity <= 0.0f) return;
+  if (cells_x <= 0 || cells_y <= 0) return;
+  if (!sim.cfg().enable_nebula_storms) return;
+
+  // Storms are temporal and optional; if no storm is active this overlay is a no-op.
+  if (sim.system_storm_intensity(system_id) <= 1e-9) return;
+
+  const float cw = avail.x / static_cast<float>(cells_x);
+  const float ch = avail.y / static_cast<float>(cells_y);
+
+  const ImVec2 clip_p1(origin.x + avail.x, origin.y + avail.y);
+  ImGui::PushClipRect(origin, clip_p1, true);
+
+  for (int y = 0; y < cells_y; ++y) {
+    const float y0 = origin.y + static_cast<float>(y) * ch;
+    const float y1 = y0 + ch + 0.5f;
+    const float cy = y0 + ch * 0.5f;
+
+    for (int x = 0; x < cells_x; ++x) {
+      const float x0 = origin.x + static_cast<float>(x) * cw;
+      const float x1 = x0 + cw + 0.5f;
+      const float cx = x0 + cw * 0.5f;
+
+      const Vec2 w = to_world(ImVec2(cx, cy), center_px, scale_px_per_mkm, zoom, pan_mkm);
+      const double st = sim.system_storm_intensity_at(system_id, w);
+      if (!(st > 1e-6)) continue;
+
+      // Mild contrast curve so fronts read at modest resolutions.
+      const float a = opacity * static_cast<float>(std::pow(std::clamp(st, 0.0, 1.0), 1.25));
+      if (a <= 0.003f) continue;
+
+      draw->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), modulate_alpha(base_col, a));
+    }
+  }
+
+  ImGui::PopClipRect();
+}
+
 
 
 double sim_time_days(const GameState& s) {
@@ -535,6 +642,13 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
         ui.system_map_threat_heatmap = !ui.system_map_threat_heatmap;
       }
     }
+    if (ImGui::IsKeyPressed(ImGuiKey_N)) {
+      ui.system_map_nebula_microfield_overlay = !ui.system_map_nebula_microfield_overlay;
+    }
+
+    if (ImGui::IsKeyPressed(ImGuiKey_S)) {
+      ui.system_map_storm_cell_overlay = !ui.system_map_storm_cell_overlay;
+    }
 
     const float tstep = ImGui::GetIO().KeyShift ? 10.0f : 1.0f;
     if (ImGui::IsKeyPressed(ImGuiKey_LeftBracket)) {
@@ -719,6 +833,30 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
     const float pan_px_y = static_cast<float>(-pan.y * scale * zoom);
     draw_starfield(draw, origin, avail, bg, pan_px_x, pan_px_y,
                    hash_u32(static_cast<std::uint32_t>(sys->id) ^ 0xA3C59AC3u), sf);
+
+    // Nebula microfield overlay: shows local pockets/filaments of nebula density.
+    // Drawn after the starfield but before heatmaps/grid.
+    if (ui.system_map_nebula_microfield_overlay && ui.system_map_nebula_overlay_opacity > 0.0f) {
+      const int cells_x = std::clamp(ui.system_map_nebula_overlay_resolution, 16, 260);
+      const float aspect = (avail.x > 1.0f) ? (avail.y / avail.x) : 1.0f;
+      const int cells_y = std::clamp(static_cast<int>(std::round(static_cast<float>(cells_x) * aspect)), 8, 260);
+
+      draw_nebula_microfield_overlay(draw, origin, avail, center, scale, zoom, pan, sim, sys->id,
+                                    cells_x, cells_y, IM_COL32(0, 150, 230, 255),
+                                    ui.system_map_nebula_overlay_opacity * 0.75f);
+    }
+
+    // Storm cell overlay: spatial storm intensity field (only visible during active storms).
+    // Drawn after the starfield but before heatmaps/grid.
+    if (ui.system_map_storm_cell_overlay && ui.system_map_storm_overlay_opacity > 0.0f) {
+      const int cells_x = std::clamp(ui.system_map_storm_overlay_resolution, 16, 260);
+      const float aspect = (avail.x > 1.0f) ? (avail.y / avail.x) : 1.0f;
+      const int cells_y = std::clamp(static_cast<int>(std::round(static_cast<float>(cells_x) * aspect)), 8, 260);
+
+      draw_nebula_storm_cell_overlay(draw, origin, avail, center, scale, zoom, pan, sim, sys->id,
+                                    cells_x, cells_y, IM_COL32(255, 160, 80, 255),
+                                    ui.system_map_storm_overlay_opacity * 0.75f);
+    }
 
     // Tactical heatmaps: coarse raster overlays for coverage/threat fields.
     // Drawn after the starfield but before the grid so the grid remains readable.
@@ -2040,6 +2178,15 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
           if (!a->kind.empty()) ImGui::TextDisabled("Kind: %s", a->kind.c_str());
           ImGui::TextDisabled("Investigation: %d days", std::max(1, a->investigation_days));
 
+          // Microfield-aware context: anomalies hidden in dense pockets are harder to spot.
+          {
+            const double neb_local = sim.system_nebula_density_at(a->system_id, a->position_mkm);
+            const double env_mult = sim.system_sensor_environment_multiplier_at(a->system_id, a->position_mkm);
+            if (neb_local > 1e-6 || env_mult < 0.999) {
+              ImGui::TextDisabled("Local nebula: %.0f%% (env x%.2f)", std::clamp(neb_local, 0.0, 1.0) * 100.0, std::clamp(env_mult, 0.0, 1.0));
+            }
+          }
+
           if (a->research_reward > 1e-9) {
             ImGui::TextDisabled("Reward: +%.1f RP", a->research_reward);
           }
@@ -2172,15 +2319,18 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
           ImGui::TextDisabled("Surveyed: %s", surveyed ? "Yes" : "No");
 
           // If we're running time-based surveys, show current progress.
-          if (!surveyed && ui.fog_of_war && sim.cfg().jump_survey_points_required > 1e-9) {
+          const double required_points = sim.jump_survey_required_points_for_jump(jp->id);
+          if (!surveyed && ui.fog_of_war && required_points > 1e-9) {
             if (const auto* fac = find_ptr(s.factions, viewer_faction_id)) {
               auto itp = fac->jump_survey_progress.find(jp->id);
               if (itp != fac->jump_survey_progress.end() && std::isfinite(itp->second) && itp->second > 1e-9) {
-                const double frac = std::clamp(itp->second / sim.cfg().jump_survey_points_required, 0.0, 1.0);
+                const double frac = std::clamp(itp->second / required_points, 0.0, 1.0);
                 ImGui::TextDisabled("Survey progress: %.0f%%", frac * 100.0);
               }
+              ImGui::TextDisabled("Required: %.0f pts", required_points);
             }
           }
+
 
           if (!surveyed) {
             ImGui::TextDisabled("To: (unknown)");
@@ -2193,6 +2343,73 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
               }
             } else {
               ImGui::TextDisabled("To: (unknown system)");
+            }
+          }
+
+
+          // Jump-point phenomena readout.
+          // In fog-of-war mode we only reveal this once the jump point is surveyed.
+          const bool show_phenomena = (!ui.fog_of_war) || surveyed;
+          if (sim.cfg().enable_jump_point_phenomena) {
+            if (show_phenomena) {
+              const auto ph = nebula4x::procgen_jump_phenomena::generate(*jp);
+
+              if (ImGui::TreeNode("Phenomena")) {
+                if (!ph.signature_code.empty()) {
+                  ImGui::TextDisabled("Signature: %s", ph.signature_code.c_str());
+                }
+                ImGui::TextDisabled("Stability: %.0f%%", std::clamp(ph.stability01, 0.0, 1.0) * 100.0);
+                ImGui::TextDisabled("Turbulence: %.0f%%  Shear: %.0f%%",
+                                    std::clamp(ph.turbulence01, 0.0, 1.0) * 100.0,
+                                    std::clamp(ph.shear01, 0.0, 1.0) * 100.0);
+
+                // Survey difficulty (relative to global base).
+                const double base_req = sim.cfg().jump_survey_points_required;
+                const double req = sim.jump_survey_required_points_for_jump(jp->id);
+                if (base_req > 1e-9 && req > 1e-9) {
+                  ImGui::TextDisabled("Survey diff: x%.2f", req / base_req);
+                }
+
+                // Current transit risk estimate (same formula as Simulation::tick_ships).
+                if (sim.cfg().jump_phenomena_transit_hazard_strength > 1e-9) {
+                  const double storm = sim.cfg().enable_nebula_storms ? sim.system_storm_intensity_at(jp->system_id, jp->position_mkm) : 0.0;
+                  const double neb = std::clamp(sim.system_nebula_density_at(jp->system_id, jp->position_mkm), 0.0, 1.0);
+
+                  double risk = std::clamp(ph.hazard_chance01, 0.0, 1.0);
+                  risk *= std::max(0.0, sim.cfg().jump_phenomena_transit_hazard_strength);
+                  if (surveyed) {
+                    risk *= std::clamp(sim.cfg().jump_phenomena_hazard_surveyed_multiplier, 0.0, 1.0);
+                  }
+                  risk *= (1.0 + std::max(0.0, sim.cfg().jump_phenomena_storm_hazard_bonus) * storm);
+                  risk *= (1.0 + 0.25 * neb);
+                  risk = std::clamp(risk, 0.0, 1.0);
+
+                  ImGui::TextDisabled("Transit risk (now): %.0f%%", risk * 100.0);
+
+                  if (ph.hazard_damage_frac > 1e-6) {
+                    ImGui::TextDisabled("Damage scale: %.0f%% max HP", std::clamp(ph.hazard_damage_frac, 0.0, 1.0) * 100.0);
+                  }
+                  if (ph.misjump_dispersion_mkm > 1e-6) {
+                    ImGui::TextDisabled("Misjump dispersion: %.0f mkm", std::max(0.0, ph.misjump_dispersion_mkm));
+                  }
+                  if (ph.subsystem_glitch_chance01 > 1e-6) {
+                    ImGui::TextDisabled("Subsystem glitch: %.0f%% (sev %.0f%%)",
+                                        std::clamp(ph.subsystem_glitch_chance01, 0.0, 1.0) * 100.0,
+                                        std::clamp(ph.subsystem_glitch_severity01, 0.0, 1.0) * 100.0);
+                  }
+                }
+
+                if (!ph.stamp.empty()) {
+                  ImGui::Separator();
+                  ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(2, 2));
+                  ImGui::TextUnformatted(ph.stamp.c_str());
+                  ImGui::PopStyleVar();
+                }
+
+                ImGui::TreePop();
+              }
+            } else {
+              ImGui::TextDisabled("Phenomena: (unknown; survey to reveal)");
             }
           }
 
@@ -2411,6 +2628,8 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
   ImGui::BulletText("R: reset view, F: follow selected");
   ImGui::BulletText("T: time preview, [ / ]: adjust days (Shift = 10d)");
   ImGui::BulletText("H: threat heatmap, Shift+H: sensor heatmap");
+  ImGui::BulletText("N: nebula overlay (microfields)");
+  ImGui::BulletText("S: storm cells overlay");
   ImGui::BulletText("Left click: issue order to ship (Shift queues)");
   ImGui::BulletText("Right click: select ship/body (no orders)");
   ImGui::BulletText("Alt+Left click body: colonize (colony ship required)");
@@ -2424,6 +2643,21 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
   ImGui::Checkbox("Starfield", &ui.system_map_starfield);
   ImGui::SameLine();
   ImGui::Checkbox("Grid", &ui.system_map_grid);
+  ImGui::SameLine();
+  ImGui::Checkbox("Nebula (N)", &ui.system_map_nebula_microfield_overlay);
+  if (ui.system_map_nebula_microfield_overlay) {
+    ui.system_map_nebula_overlay_opacity = std::clamp(ui.system_map_nebula_overlay_opacity, 0.0f, 1.0f);
+    ui.system_map_nebula_overlay_resolution = std::clamp(ui.system_map_nebula_overlay_resolution, 16, 260);
+    ImGui::SliderFloat("Opacity##nebula_overlay", &ui.system_map_nebula_overlay_opacity, 0.0f, 1.0f, "%.2f");
+    ImGui::SliderInt("Resolution##nebula_overlay", &ui.system_map_nebula_overlay_resolution, 16, 260);
+  }
+  ImGui::Checkbox("Storm cells (S)", &ui.system_map_storm_cell_overlay);
+  if (ui.system_map_storm_cell_overlay) {
+    ui.system_map_storm_overlay_opacity = std::clamp(ui.system_map_storm_overlay_opacity, 0.0f, 1.0f);
+    ui.system_map_storm_overlay_resolution = std::clamp(ui.system_map_storm_overlay_resolution, 16, 260);
+    ImGui::SliderFloat("Opacity##storm_overlay", &ui.system_map_storm_overlay_opacity, 0.0f, 1.0f, "%.2f");
+    ImGui::SliderInt("Resolution##storm_overlay", &ui.system_map_storm_overlay_resolution, 16, 260);
+  }
   ImGui::Checkbox("Minimap (M)", &ui.system_map_show_minimap);
   ImGui::Checkbox("Order paths", &ui.system_map_order_paths);
   ImGui::SameLine();
@@ -2441,6 +2675,28 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
     const Vec2 w = to_world(mouse, center, scale, zoom, pan);
     ImGui::TextDisabled("Cursor: %.1f, %.1f mkm", w.x, w.y);
     ImGui::TextDisabled("Zoom: %.2fx", zoom);
+    const bool want_env_readout = (ui.system_map_nebula_microfield_overlay || ui.system_map_storm_cell_overlay);
+    if (want_env_readout) {
+      const double d = sim.system_nebula_density_at(sys->id, w);
+      const double st = (sim.cfg().enable_nebula_storms ? sim.system_storm_intensity_at(sys->id, w) : 0.0);
+      if (d > 1e-6 || st > 1e-6) {
+        const double env = sim.system_sensor_environment_multiplier_at(sys->id, w);
+        const double speed = sim.system_movement_speed_multiplier_at(sys->id, w);
+        if (st > 1e-6 && d > 1e-6) {
+          ImGui::TextDisabled("Nebula here: %.0f%%  Storm here: %.0f%%  (Sensors x%.2f  Speed x%.2f)",
+                              d * 100.0,
+                              st * 100.0,
+                              env,
+                              speed);
+        } else if (st > 1e-6) {
+          ImGui::TextDisabled("Storm here: %.0f%%  (Sensors x%.2f  Speed x%.2f)", st * 100.0, env, speed);
+        } else {
+          ImGui::TextDisabled("Nebula here: %.0f%%  (Sensors x%.2f  Speed x%.2f)", d * 100.0, env, speed);
+        }
+      }
+    }
+  }
+
   ImGui::SeparatorText("Time preview (T)");
   ImGui::Checkbox("Enable##timeprev", &ui.system_map_time_preview);
   ImGui::SameLine();
@@ -2468,7 +2724,6 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
     ImGui::TextDisabled("Bodies: Kepler orbit prediction. Ships: inertial extrapolation.");
   }
 
-  }
 
   ImGui::SeparatorText("Ruler (hold D)");
   ImGui::TextDisabled("Snaps to visible bodies/ships/jumps. D + Right click clears.");

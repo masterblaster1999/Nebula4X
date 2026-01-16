@@ -651,11 +651,11 @@ void draw_new_game_modal(Simulation& sim, UIState& ui) {
 
       // Galaxy archetype.
       {
-        int shape = std::clamp(ui.new_game_random_galaxy_shape, 0, 4);
+        int shape = std::clamp(ui.new_game_random_galaxy_shape, 0, 5);
         ImGui::SetNextItemWidth(180.0f);
         ImGui::Combo("Galaxy shape", &shape,
-                     "Spiral disc\0Uniform disc\0Ring\0Clusters\0Filaments\0");
-        ui.new_game_random_galaxy_shape = std::clamp(shape, 0, 4);
+                     "Spiral disc\0Uniform disc\0Ring\0Clusters\0Filaments\0Barred spiral\0");
+        ui.new_game_random_galaxy_shape = std::clamp(shape, 0, 5);
       }
 
       // System placement style.
@@ -678,11 +678,11 @@ void draw_new_game_modal(Simulation& sim, UIState& ui) {
 
       // Jump network archetype.
       {
-        int style = std::clamp(ui.new_game_random_jump_network_style, 0, 5);
+        int style = std::clamp(ui.new_game_random_jump_network_style, 0, 6);
         ImGui::SetNextItemWidth(180.0f);
         ImGui::Combo("Jump network", &style,
-                     "Balanced\0Dense web\0Sparse lanes\0Cluster bridges\0Hub & spoke\0Planar proximity\0");
-        ui.new_game_random_jump_network_style = std::clamp(style, 0, 5);
+                     "Balanced\0Dense web\0Sparse lanes\0Cluster bridges\0Hub & spoke\0Planar proximity\0Subspace rivers\0");
+        ui.new_game_random_jump_network_style = std::clamp(style, 0, 6);
       }
 
       // Jump density (scales how many additional links get added for the chosen archetype).

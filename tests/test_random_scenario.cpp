@@ -201,9 +201,9 @@ int test_random_scenario() {
 
   // Smoke-test all jump network styles/densities, galaxy shapes, and placement
   // modes for determinism + connectivity.
-  for (int shape = 0; shape <= 4; ++shape) {
+  for (int shape = 0; shape <= 5; ++shape) {
     for (int placement = 0; placement <= 1; ++placement) {
-      for (int style = 0; style <= 5; ++style) {
+      for (int style = 0; style <= 6; ++style) {
         for (double dens : {0.0, 1.0, 2.0}) {
           for (bool enable_regions : {false, true}) {
             nebula4x::RandomScenarioConfig cfg;

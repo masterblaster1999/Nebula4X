@@ -28,6 +28,10 @@ enum class RandomGalaxyShape : std::uint8_t {
   // This is a gamey approximation of large-scale structure: it produces
   // contiguous corridors of higher density separated by empty voids.
   Filamentary = 4,
+
+  // Barred spiral: a central bar with two dominant arms.
+  // Produces strong mid-map corridors and a distinct "hubby" topology.
+  BarredSpiral = 5,
 };
 
 // High-level sampling style used to place star systems in the galaxy map.
@@ -66,6 +70,12 @@ enum class RandomJumpNetworkStyle : std::uint8_t {
   // This produces visually readable, near-planar jump maps (few/no crossings)
   // while still allowing density-scaled redundancy.
   PlanarProximity = 5,
+
+  // Vector-field-biased lanes ("subspace rivers").
+  // Starts from a connected MST and then adds extra links that align with a
+  // deterministic flow field, creating long-ish corridors without hard-coding
+  // clusters or hubs.
+  SubspaceRivers = 6,
 };
 
 

@@ -12,6 +12,7 @@
 #include "simulation_procgen.h"
 
 #include "nebula4x/core/procgen_obscure.h"
+#include "nebula4x/core/procgen_jump_phenomena.h"
 
 #include <algorithm>
 #include <cmath>
@@ -3614,6 +3615,147 @@ void Simulation::tick_ships(double dt_days) {
       const auto* dest = find_ptr(state_.jump_points, jp->linked_jump_id);
       if (!dest) return;
 
+      // Capture survey state *before* transit for hazard tuning.
+      const bool surveyed_before = is_jump_point_surveyed_by_faction(ship.faction_id, jp->id);
+
+      // --- Procedural transit hazards (subspace turbulence / misjumps) ---
+      //
+      // This integrates the jump-point phenomena field into actual gameplay.
+      // Hazards are deterministic per (time, ship, jump) so outcomes are stable
+      // across save/load, while still varying over time.
+      bool hazard_triggered = false;
+      double hazard_chance = 0.0;
+      double hazard_shield_dmg = 0.0;
+      double hazard_hull_dmg = 0.0;
+      Vec2 misjump_delta{0.0, 0.0};
+      bool subsystem_glitch = false;
+      std::string glitch_subsystem;
+      double glitch_delta = 0.0;
+      std::string phen_sig;
+
+      if (cfg_.enable_jump_point_phenomena && cfg_.jump_phenomena_transit_hazard_strength > 1e-9) {
+        const auto phen = procgen_jump_phenomena::generate(*jp);
+        phen_sig = phen.signature_code;
+
+        // Environment coupling: storms and local nebula density make transits riskier.
+        const double storm = cfg_.enable_nebula_storms ? system_storm_intensity_at(jp->system_id, jp->position_mkm) : 0.0;
+        const double neb = std::clamp(system_nebula_density_at(jp->system_id, jp->position_mkm), 0.0, 1.0);
+
+        double p = std::clamp(phen.hazard_chance01, 0.0, 1.0);
+        p *= std::max(0.0, cfg_.jump_phenomena_transit_hazard_strength);
+
+        if (surveyed_before) {
+          p *= std::clamp(cfg_.jump_phenomena_hazard_surveyed_multiplier, 0.0, 1.0);
+        }
+
+        // Storms add an additional risk multiplier. Nebula density adds a small bias.
+        p *= (1.0 + std::max(0.0, cfg_.jump_phenomena_storm_hazard_bonus) * storm);
+        p *= (1.0 + 0.25 * neb);
+
+        hazard_chance = std::clamp(p, 0.0, 1.0);
+
+        // Deterministic roll keyed on time + ids.
+        const std::uint64_t now = static_cast<std::uint64_t>(state_.date.days_since_epoch());
+        const std::uint64_t hr = static_cast<std::uint64_t>(std::clamp(state_.hour_of_day, 0, 23));
+        std::uint64_t seed = now * 0x9e3779b97f4a7c15ULL ^ (hr + 1ULL) * 0xbf58476d1ce4e5b9ULL;
+        seed ^= static_cast<std::uint64_t>(ship_id) * 0x94d049bb133111ebULL;
+        seed ^= static_cast<std::uint64_t>(jp->id) * 0xD1B54A32D192ED03ULL;
+        seed ^= static_cast<std::uint64_t>(dest->id) * 0xA24BAED4963EE407ULL;
+
+        HashRng rng(splitmix64(seed));
+
+        if (rng.next_u01() < hazard_chance) {
+          hazard_triggered = true;
+
+          // --- Non-lethal damage (shields first) ---
+          const ShipDesign* d = find_design(ship.design_id);
+          const double max_hp = d ? std::max(1.0, d->max_hp) : std::max(1.0, ship.hp);
+          const double max_sh = d ? std::max(0.0, d->max_shields) : std::max(0.0, ship.shields);
+
+          ship.hp = std::clamp(ship.hp, 0.0, max_hp);
+          ship.shields = std::clamp(ship.shields, 0.0, max_sh);
+
+          double dmg = std::max(0.0, phen.hazard_damage_frac) * max_hp;
+          dmg *= std::max(0.0, cfg_.jump_phenomena_transit_hazard_strength);
+          dmg *= (0.85 + 0.30 * rng.next_u01());
+          dmg *= (1.0 + 0.35 * storm + 0.25 * neb);
+
+          // Cap to avoid excessive spike damage.
+          dmg = std::clamp(dmg, 0.0, std::max(0.5, 0.35 * max_hp));
+
+          hazard_shield_dmg = std::min(dmg, ship.shields);
+          ship.shields -= hazard_shield_dmg;
+          dmg -= hazard_shield_dmg;
+
+          hazard_hull_dmg = std::min(dmg, std::max(0.0, ship.hp - 1.0));
+          ship.hp -= hazard_hull_dmg;
+          dmg -= hazard_hull_dmg;
+
+          // --- Misjump (emergence scatter) ---
+          const double mis_strength = std::max(0.0, cfg_.jump_phenomena_misjump_strength);
+          if (mis_strength > 1e-9) {
+            double mp = std::clamp(0.05 + 0.35 * phen.shear01 + 0.15 * phen.turbulence01, 0.0, 1.0);
+            mp *= 0.35 * mis_strength;  // default: rare unless very sheared
+            if (surveyed_before) {
+              mp *= std::clamp(cfg_.jump_phenomena_hazard_surveyed_multiplier, 0.0, 1.0);
+            }
+            mp = std::clamp(mp, 0.0, 1.0);
+
+            if (rng.next_u01() < mp) {
+              constexpr double kPi = 3.141592653589793238462643383279502884;
+              double R = std::max(0.0, phen.misjump_dispersion_mkm) * mis_strength;
+
+              // Surveying also reduces the scale of the misjump.
+              if (surveyed_before) {
+                R *= std::clamp(cfg_.jump_phenomena_hazard_surveyed_multiplier, 0.0, 1.0);
+              }
+
+              // Scale by local severity.
+              const double sev = std::clamp(0.45 * phen.turbulence01 + 0.55 * phen.shear01, 0.0, 1.0);
+              R *= (0.35 + 0.85 * sev);
+
+              const double ang = rng.range(0.0, 2.0 * kPi);
+              const double rad = std::sqrt(rng.next_u01()) * R;
+              misjump_delta = Vec2{std::cos(ang) * rad, std::sin(ang) * rad};
+            }
+          }
+
+          // --- Subsystem glitch (integrity hit) ---
+          const double glitch_strength = std::max(0.0, cfg_.jump_phenomena_subsystem_glitch_strength);
+          if (glitch_strength > 1e-9) {
+            double gp = std::clamp(phen.subsystem_glitch_chance01, 0.0, 1.0);
+            gp *= 0.25 * glitch_strength;  // default: uncommon
+            if (surveyed_before) {
+              gp *= std::clamp(cfg_.jump_phenomena_hazard_surveyed_multiplier, 0.0, 1.0);
+            }
+            gp = std::clamp(gp, 0.0, 1.0);
+
+            if (rng.next_u01() < gp) {
+              subsystem_glitch = true;
+              const double sev = std::clamp(phen.subsystem_glitch_severity01, 0.0, 1.0);
+              glitch_delta = sev * 0.30 * glitch_strength;
+              glitch_delta *= (0.70 + 0.60 * rng.next_u01());
+              glitch_delta = std::clamp(glitch_delta, 0.0, 0.65);
+
+              const int which = rng.range_int(0, 3);
+              auto apply = [&](double& integrity, const char* label) {
+                const double before = std::clamp(integrity, 0.0, 1.0);
+                integrity = std::clamp(before - glitch_delta, 0.05, 1.0);
+                glitch_delta = before - integrity;  // actual applied
+                glitch_subsystem = label;
+              };
+
+              switch (which) {
+                case 0: apply(ship.engines_integrity, "Engines"); break;
+                case 1: apply(ship.sensors_integrity, "Sensors"); break;
+                case 2: apply(ship.weapons_integrity, "Weapons"); break;
+                default: apply(ship.shields_integrity, "Shields"); break;
+              }
+            }
+          }
+        }
+      }
+
       // Mark both ends as surveyed for the transiting faction (fog-of-war routing).
       survey_jump_point_for_faction(ship.faction_id, jp->id);
       survey_jump_point_for_faction(ship.faction_id, dest->id);
@@ -3626,7 +3768,7 @@ void Simulation::tick_ships(double dt_days) {
       }
 
       ship.system_id = new_sys;
-      ship.position_mkm = dest->position_mkm;
+      ship.position_mkm = dest->position_mkm + misjump_delta;
 
       if (auto* sys_new = find_ptr(state_.systems, new_sys)) {
         sys_new->ships.push_back(ship_id);
@@ -3648,6 +3790,45 @@ void Simulation::tick_ships(double dt_days) {
         ctx.system_id = new_sys;
         ctx.ship_id = ship_id;
         push_event(EventLevel::Info, EventCategory::Movement, msg, ctx);
+
+        if (hazard_triggered) {
+          std::ostringstream hs;
+          hs.setf(std::ios::fixed);
+          hs.precision(1);
+
+          hs << "Jump turbulence: " << ship.name;
+          if (!phen_sig.empty()) hs << " (" << phen_sig << ")";
+
+          const double d = hazard_shield_dmg + hazard_hull_dmg;
+          if (d > 1e-9) {
+            hs << " took " << d << " damage";
+            hs << " (shields -" << hazard_shield_dmg << ", hull -" << hazard_hull_dmg << ")";
+          } else {
+            hs << " encountered a transit hazard";
+          }
+
+          const double md = std::sqrt(misjump_delta.x * misjump_delta.x + misjump_delta.y * misjump_delta.y);
+          if (md > 1e-6) {
+            hs << "; misjumped " << md << " mkm off-course";
+          }
+
+          if (subsystem_glitch && !glitch_subsystem.empty() && glitch_delta > 1e-6) {
+            hs << "; " << glitch_subsystem << " integrity -" << glitch_delta;
+          }
+
+          // Helpful for debugging and for later UI layering (risk readouts).
+          if (hazard_chance > 1e-6) {
+            hs.setf(std::ios::fixed);
+            hs.precision(0);
+            hs << " (risk " << std::clamp(hazard_chance, 0.0, 1.0) * 100.0 << "%)";
+          }
+
+          EventContext hctx;
+          hctx.faction_id = ship.faction_id;
+          hctx.system_id = new_sys;
+          hctx.ship_id = ship_id;
+          push_event(EventLevel::Warn, EventCategory::Movement, hs.str(), hctx);
+        }
       }
     };
 
@@ -3738,7 +3919,8 @@ void Simulation::tick_ships(double dt_days) {
 
 
     // Environmental movement modifiers (nebula drag / storms).
-    effective_speed_km_s *= this->system_movement_speed_multiplier(ship.system_id);
+    // With nebula microfields enabled, this is position-dependent.
+    effective_speed_km_s *= this->system_movement_speed_multiplier_at(ship.system_id, ship.position_mkm);
 
     const double max_step = mkm_per_day_from_speed(effective_speed_km_s, cfg_.seconds_per_day) * dt_days;
     if (max_step <= 0.0) continue;
@@ -3840,7 +4022,7 @@ void Simulation::tick_ships(double dt_days) {
   // faction (and is shared with mutual-friendly factions).
   //
   // Setting cfg_.jump_survey_points_required <= 0 keeps the legacy instant behavior.
-  const double required_points = cfg_.jump_survey_points_required;
+  const double base_required_points = cfg_.jump_survey_points_required;
   const double ref_range = std::max(1e-9, cfg_.jump_survey_reference_sensor_range_mkm);
   const double range_frac = std::max(0.0, cfg_.jump_survey_range_sensor_fraction);
   const double cap_points_per_day = std::max(0.0, cfg_.jump_survey_points_per_day_cap);
@@ -3878,7 +4060,7 @@ void Simulation::tick_ships(double dt_days) {
     if (range_mkm <= 0.0) continue;
 
     // Legacy: instant surveying.
-    if (required_points <= 1e-9) {
+    if (base_required_points <= 1e-9) {
       for (Id jid : sys->jump_points) {
         if (jid == kInvalidId) continue;
         if (is_jump_point_surveyed_by_faction(sh->faction_id, jid)) continue;
@@ -3922,7 +4104,8 @@ void Simulation::tick_ships(double dt_days) {
     if (!std::isfinite(prog) || prog < 0.0) prog = 0.0;
     prog += delta_points;
 
-    if (prog >= required_points - 1e-9) {
+    const double required_points = this->jump_survey_required_points_for_jump(best_jid);
+    if (required_points <= 1e-9 || prog >= required_points - 1e-9) {
       // Keep progress maps tidy; survey_jump_point_for_faction() will also clear.
       fac->jump_survey_progress.erase(best_jid);
       survey_jump_point_for_faction(sh->faction_id, best_jid);

@@ -464,9 +464,58 @@ double ship_maintenance_breakdown_subsystem_damage_max{0.20};
   // Final speed multiplier = base * (1 - penalty * storm_intensity).
   double nebula_storm_speed_penalty{0.40};
 
+  // --- Spatial storm cells ---
+  //
+  // When enabled, active storms gain an additional position-dependent modulation
+  // field ("storm cells"). The system-wide storm intensity remains the average
+  // temporal pulse, but local intensity varies smoothly so ships can seek calmer
+  // pockets or risk high-intensity cores.
+  bool enable_nebula_storm_cells{true};
+
+  // Strength of spatial variation (0..1).
+  // 0 => local intensity == system intensity (uniform).
+  // 1 => local intensity varies roughly in [0, 2x] around the base (clamped).
+  double nebula_storm_cell_strength{0.65};
+
+  // Typical size of storm cells (million-km). Smaller => more, smaller cells.
+  double nebula_storm_cell_scale_mkm{1600.0};
+
+  // Drift speed of the storm pattern (million-km per day).
+  double nebula_storm_cell_drift_speed_mkm_per_day{220.0};
+
+  // Contrast shaping for storm cells (>1 => sharper fronts, <1 => flatter).
+  double nebula_storm_cell_sharpness{1.6};
+
   // Optional baseline movement drag from nebula density (even without storms).
   bool enable_nebula_drag{false};
   double nebula_drag_speed_penalty_at_max_density{0.25};
+
+  // --- Nebula microfields (in-system "terrain") ---
+  //
+  // When enabled, StarSystem::nebula_density becomes the *baseline* density and
+  // a deterministic local microfield creates pockets/filaments of denser and
+  // clearer space. This affects both sensors and movement (via the
+  // *_environment_multiplier_at() helpers).
+  bool enable_nebula_microfields{true};
+
+  // Typical size of microfield features (million-km). Smaller => finer filaments.
+  double nebula_microfield_scale_mkm{900.0};
+  // Size of the low-frequency warp field (million-km). Larger => gentler warps.
+  double nebula_microfield_warp_scale_mkm{2600.0};
+  // Strength of deviation around the system baseline density.
+  double nebula_microfield_strength{0.28};
+  // 0..1 blend between smooth clouds (0) and filamentary ridges (1).
+  double nebula_microfield_filament_mix{0.65};
+  // Contrast shaping (>1 => sharper filaments, <1 => flatter).
+  double nebula_microfield_sharpness{1.25};
+
+  // Targets deep inside a dense microfield should be somewhat harder to detect,
+  // not just sources. We approximate this by lerping the target's signature
+  // multiplier toward the local sensor environment multiplier.
+  //
+  // 0 => no target-side effect (legacy behavior)
+  // 1 => target signature is fully multiplied by the local environment factor
+  double nebula_target_signature_env_weight{0.50};
 
   // Shield drain per day at storm intensity 1.0 (applied when shields are online).
   double nebula_storm_shield_drain_per_day_at_intensity1{4.0};
@@ -507,6 +556,28 @@ double ship_maintenance_breakdown_subsystem_damage_max{0.20};
   // Cap per-ship survey rate to avoid extreme values from modded sensor ranges.
   double jump_survey_points_per_day_cap{5.0};
 
+  // --- Jump point phenomena (procedural difficulty fields) ---
+  //
+  // When enabled, each jump point is assigned a deterministic set of "phenomena"
+  // values (stability/turbulence/shear) derived from its id/system/position.
+  //
+  // In this round we only integrate phenomena into *survey difficulty* (the
+  // required survey points can vary by jump point). Other parameters are
+  // reserved for future integration.
+  bool enable_jump_point_phenomena{true};
+
+  // Strength of the procedural survey difficulty multiplier.
+  // 0 => no effect (all jumps use jump_survey_points_required).
+  // 1 => full procedural multiplier.
+  double jump_phenomena_survey_difficulty_strength{1.0};
+
+  // Reserved tuning knobs for future jump-transit integration.
+  double jump_phenomena_transit_hazard_strength{1.0};
+  double jump_phenomena_hazard_surveyed_multiplier{0.35};
+  double jump_phenomena_storm_hazard_bonus{0.35};
+  double jump_phenomena_misjump_strength{1.0};
+  double jump_phenomena_subsystem_glitch_strength{1.0};
+
   // --- Anomaly discovery (fog-of-war / exploration) ---
   //
   // Anomalies are discovered via sensor coverage. To avoid requiring ships to
@@ -516,6 +587,18 @@ double ship_maintenance_breakdown_subsystem_damage_max{0.20};
   // 1.0 => anomalies are detected at normal sensor range.
   // >1.0 => anomalies are easier to discover (recommended for early-game).
   double anomaly_detection_range_multiplier{3.0};
+
+  // Weight in [0,1] for applying *target-side* environmental attenuation to
+  // anomaly discovery.
+  //
+  // Sensor sources already apply environment multipliers at the source
+  // position (nebula density, storms, microfields). This additional factor
+  // lets dense pockets/filaments also conceal anomalies at the *target*
+  // location without making discovery impossible.
+  //
+  // 0.0 => ignore target environment (legacy behavior).
+  // 1.0 => fully apply target environment (strong concealment).
+  double anomaly_detection_target_env_weight{0.55};
 
   // --- Procedural exploration leads (anomaly chains) ---
   //
@@ -1979,6 +2062,11 @@ bool move_construction_order(Id colony_id, int from_index, int to_index);
   // Exploration / map knowledge helpers.
   bool is_system_discovered_by_faction(Id viewer_faction_id, Id system_id) const;
   bool is_jump_point_surveyed_by_faction(Id viewer_faction_id, Id jump_point_id) const;
+
+  // Required survey points for a specific jump point, accounting for
+  // optional procedural jump-point phenomena (difficulty fields).
+  double jump_survey_required_points_for_jump(Id jump_point_id) const;
+
   bool is_anomaly_discovered_by_faction(Id viewer_faction_id, Id anomaly_id) const;
 
 
@@ -1989,10 +2077,19 @@ bool move_construction_order(Id colony_id, int from_index, int to_index);
   bool system_has_storm(Id system_id) const;
   // Current storm intensity in [0,1], accounting for ramp up/down over time.
   double system_storm_intensity(Id system_id) const;
+  // Local storm intensity (includes optional spatial storm cells).
+  // When storm cells are disabled, this equals system_storm_intensity().
+  double system_storm_intensity_at(Id system_id, const Vec2& pos_mkm) const;
   // Sensor attenuation multiplier in [0,1]. Includes nebula density + storm intensity.
   double system_sensor_environment_multiplier(Id system_id) const;
   // Movement speed multiplier in [0,1]. Includes optional nebula drag + storms.
   double system_movement_speed_multiplier(Id system_id) const;
+
+  // Local, position-dependent variants (used for nebula microfields).
+  // When microfields are disabled, these reduce to the system-wide versions.
+  double system_nebula_density_at(Id system_id, const Vec2& pos_mkm) const;
+  double system_sensor_environment_multiplier_at(Id system_id, const Vec2& pos_mkm) const;
+  double system_movement_speed_multiplier_at(Id system_id, const Vec2& pos_mkm) const;
 
   // --- Jump route planning (query-only) ---
   // Plan a path through the jump network without mutating ship orders.

@@ -19,6 +19,7 @@
 
 #include "nebula4x/core/serialization.h"
 #include "nebula4x/core/procgen_obscure.h"
+#include "nebula4x/core/procgen_surface.h"
 #include "nebula4x/core/research_planner.h"
 #include "nebula4x/core/research_schedule.h"
 #include "nebula4x/core/order_planner.h"
@@ -5824,6 +5825,59 @@ if (colony->shipyard_queue.empty()) {
             if (b->terraforming_complete) ImGui::TextDisabled("(terraforming complete)");
           }
 
+          // --- Procedural surface stamp (flavor) ---
+          // Deterministic ASCII micro-maps for bodies to make exploration/colonization feel less abstract.
+          if (ImGui::CollapsingHeader("Procedural surface", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::PushID("procgen_surface");
+
+            // Cache stamps per body id to avoid re-running the generator every frame.
+            static std::unordered_map<Id, nebula4x::procgen_surface::Flavor> cache;
+            auto it_flavor = cache.find(body_id);
+            if (it_flavor == cache.end()) {
+              it_flavor = cache.emplace(body_id, nebula4x::procgen_surface::flavor(*b, /*w=*/26, /*h=*/12)).first;
+            }
+            const nebula4x::procgen_surface::Flavor& f = it_flavor->second;
+
+            ImGui::Text("Biome: %s", f.biome.c_str());
+
+            if (!f.quirks.empty()) {
+              ImGui::Text("Quirks:");
+              for (const auto& q : f.quirks) {
+                ImGui::BulletText("%s", q.name.c_str());
+                if (ImGui::IsItemHovered() && !q.desc.empty()) {
+                  ImGui::BeginTooltip();
+                  ImGui::TextWrapped("%s", q.desc.c_str());
+                  ImGui::EndTooltip();
+                }
+              }
+            } else {
+              ImGui::TextDisabled("No notable quirks detected.");
+            }
+
+            if (!f.legend.empty()) {
+              ImGui::TextDisabled("%s", f.legend.c_str());
+            }
+
+            const float line_h = ImGui::GetTextLineHeightWithSpacing();
+            // Stamp includes a border: (h + 2) lines, plus a little breathing room.
+            const float stamp_h = line_h * 15.0f;
+            if (ImGui::BeginChild("procgen_surface_stamp", ImVec2(0.0f, stamp_h), true, ImGuiWindowFlags_NoScrollbar)) {
+              ImGui::TextUnformatted(f.stamp.c_str());
+            }
+            ImGui::EndChild();
+
+            if (ImGui::SmallButton("Copy stamp")) {
+              ImGui::SetClipboardText(f.stamp.c_str());
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Refresh")) {
+              cache.erase(body_id);
+            }
+
+            ImGui::PopID();
+          }
+
+
           // Colony on this body (if any).
           Id colony_here = kInvalidId;
           for (const auto& [cid, c] : s.colonies) {
@@ -8213,6 +8267,17 @@ void draw_settings_window(UIState& ui, char* ui_prefs_path, UIPrefActions& actio
     ImGui::SameLine();
     ImGui::Checkbox("Galaxy: selected route", &ui.galaxy_map_selected_route);
     ImGui::Checkbox("System: follow selected ship", &ui.system_map_follow_selected);
+
+    ImGui::Checkbox("System: nebula microfield overlay", &ui.system_map_nebula_microfield_overlay);
+    if (ui.system_map_nebula_microfield_overlay) {
+      ImGui::Indent();
+      ImGui::SliderFloat("Nebula overlay opacity", &ui.system_map_nebula_overlay_opacity, 0.0f, 1.0f, "%.2f");
+      ui.system_map_nebula_overlay_opacity = std::clamp(ui.system_map_nebula_overlay_opacity, 0.0f, 1.0f);
+      ImGui::SliderInt("Nebula overlay resolution", &ui.system_map_nebula_overlay_resolution, 16, 260);
+      ui.system_map_nebula_overlay_resolution = std::clamp(ui.system_map_nebula_overlay_resolution, 16, 260);
+      ImGui::TextDisabled("Visualizes local nebula pockets/filaments that affect sensors and movement.");
+      ImGui::Unindent();
+    }
 
     ImGui::Checkbox("System: weapon range rings (selected)", &ui.show_selected_weapon_range);
     ImGui::SameLine();

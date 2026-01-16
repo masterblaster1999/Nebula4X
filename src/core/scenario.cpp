@@ -1002,6 +1002,19 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
   const double core_fraction = 0.18;
   const double core_radius = galaxy_radius * 0.25;
 
+  // Barred spiral parameters (used for BarredSpiral).
+  //
+  // This is intentionally "gamey": the bar creates a pronounced mid-map feature,
+  // while the two arms generate long corridors that tend to produce chokepoints.
+  const double barred_core_fraction = 0.14;
+  const double barred_bar_fraction = 0.26;
+  const double bar_half_len = galaxy_radius * 0.55;
+  const double bar_half_w = galaxy_radius * 0.10;
+  const double bar_angle = (galaxy_shape == RandomGalaxyShape::BarredSpiral) ? rand_real(rng, 0.0, kTwoPi) : 0.0;
+  const int barred_arms = 2;
+  const double barred_tightness = 1.45;
+  const double barred_spread = 0.22;
+
   // Ring parameters.
   const double ring_inner = galaxy_radius * 0.45;
 
@@ -1081,6 +1094,52 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
             const double rr = std::max(0.0, r + rand_normal(rng, 0.0, arm_spread * 0.55 * j));
             const double tt = theta + rand_normal(rng, 0.0, arm_spread * 0.35 * j);
             p = {rr * std::cos(tt), rr * std::sin(tt)};
+          }
+          break;
+        }
+
+        case RandomGalaxyShape::BarredSpiral: {
+          // A barred spiral: bulge + bar + two dominant arms.
+          const double u = rand_unit(rng);
+          if (u < barred_core_fraction) {
+            const double r = (core_radius * 0.80) * std::sqrt(rand_unit(rng));
+            const double a = rand_real(rng, 0.0, kTwoPi);
+            p = {r * std::cos(a), r * std::sin(a)};
+          } else if (u < (barred_core_fraction + barred_bar_fraction)) {
+            // Elongated "bar" with a gentle taper.
+            double x = rand_real(rng, -bar_half_len, bar_half_len);
+            double w = 1.0 - 0.55 * (std::abs(x) / std::max(1e-6, bar_half_len));
+            w = std::clamp(w, 0.25, 1.0);
+            double y = rand_normal(rng, 0.0, (bar_half_w * 0.45) * w);
+
+            const double ca = std::cos(bar_angle);
+            const double sa = std::sin(bar_angle);
+            p = {x * ca - y * sa, x * sa + y * ca};
+
+            // A tiny additional wobble prevents perfectly straight "bars" in small galaxies.
+            const double j = std::clamp(bar_half_w / std::max(1e-6, galaxy_radius), 0.02, 0.12);
+            p.x += rand_normal(rng, 0.0, j);
+            p.y += rand_normal(rng, 0.0, j);
+          } else {
+            // Arms begin near the bar ends and wind outward logarithmically.
+            const double u2 = rand_unit(rng);
+            const double inner = std::max(0.0, bar_half_len * 0.95);
+            const double r = std::sqrt((inner * inner) * (1.0 - u2) + (galaxy_radius * galaxy_radius) * u2);
+
+            const int arm = rand_int(rng, 0, barred_arms - 1);
+            const double arm_base = bar_angle + static_cast<double>(arm) * (kTwoPi / static_cast<double>(barred_arms));
+            const double theta = arm_base + barred_tightness * std::log(1.0 + r) + rand_normal(rng, 0.0, barred_spread);
+
+            const double j = (0.35 + 0.65 * (r / galaxy_radius));
+            const double rr = std::max(0.0, r + rand_normal(rng, 0.0, barred_spread * 0.55 * j));
+            const double tt = theta + rand_normal(rng, 0.0, barred_spread * 0.35 * j);
+            p = {rr * std::cos(tt), rr * std::sin(tt)};
+          }
+
+          // Keep within the disc.
+          const double len = p.length();
+          if (len > galaxy_radius) {
+            p = p * (galaxy_radius / std::max(1e-6, len));
           }
           break;
         }
@@ -2131,7 +2190,7 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
   //
   // Build a connected "hyperlane" graph over galaxy space. The chosen archetype
   // intentionally changes strategic topology (dense webs vs. sparse chokepoints).
-  const int jump_style_i = std::clamp(static_cast<int>(cfg.jump_network_style), 0, 5);
+  const int jump_style_i = std::clamp(static_cast<int>(cfg.jump_network_style), 0, 6);
   const RandomJumpNetworkStyle jump_style = static_cast<RandomJumpNetworkStyle>(jump_style_i);
   const double jump_density = std::clamp(cfg.jump_density, 0.0, 2.0);
 
@@ -2828,6 +2887,208 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
         add_jump_link(e.a, e.b);
       }
 
+      break;
+    }
+
+    case RandomJumpNetworkStyle::SubspaceRivers: {
+      // Subspace rivers: start connected, then add "lane" edges biased by a
+      // deterministic vector field over galaxy coordinates.
+      //
+      // The goal is a network that *feels* like it has currents: long-ish
+      // corridors with gentle bends, without hard-coding clusters or hubs.
+      if (num_systems <= 1) break;
+
+      connect_mst(all_nodes);
+
+      const int base_extra = std::max(0, (num_systems * 2) / 3);
+      const int extra_target = std::clamp(static_cast<int>(std::llround(static_cast<double>(base_extra) * jump_density)), 0,
+                                          (num_systems * (num_systems - 1)) / 2);
+      const int target_total =
+          (num_systems > 0) ? std::min((num_systems - 1) + extra_target, (num_systems * (num_systems - 1)) / 2) : 0;
+
+      if (extra_target <= 0) break;
+
+      // Deterministic "flow" field (two coupled fBm channels -> direction).
+      const double flow_scale = std::max(3.0, galaxy_radius * 0.22);
+      const double phi_scale = std::max(3.0, galaxy_radius * 0.28);
+
+      auto flow_dir = [&](const Vec2& p) -> Vec2 {
+        const double nx = p.x / flow_scale;
+        const double ny = p.y / flow_scale;
+
+        const double a = fbm_noise_2d(seed ^ 0xD1A5D1A5u, nx, ny, 4);
+        const double b = fbm_noise_2d(seed ^ 0xBADC0DEu, nx * 0.85 + 7.7, ny * 0.85 - 3.1, 4);
+
+        Vec2 v{a - 0.5, b - 0.5};
+        if (v.length() <= 1e-9) return {1.0, 0.0};
+        return v.normalized();
+      };
+
+      auto potential = [&](const Vec2& p) -> double {
+        const double nx = p.x / phi_scale;
+        const double ny = p.y / phi_scale;
+        const double n1 = fbm_noise_2d(seed ^ 0x7F4A7C15u, nx, ny, 5);
+        const double n2 = fbm_noise_2d(seed ^ 0xA11CE5E7u, nx * 0.60 + 13.1, ny * 0.60 - 9.7, 3);
+        return std::clamp(0.62 * n1 + 0.38 * n2, 0.0, 1.0);
+      };
+
+      std::vector<Vec2> flow;
+      flow.reserve(static_cast<std::size_t>(num_systems));
+      std::vector<double> phi;
+      phi.reserve(static_cast<std::size_t>(num_systems));
+      for (int i = 0; i < num_systems; ++i) {
+        const Vec2 p = systems[static_cast<std::size_t>(i)].galaxy_pos;
+        flow.push_back(flow_dir(p));
+        phi.push_back(potential(p));
+      }
+
+      auto dot = [](const Vec2& a, const Vec2& b) -> double { return a.x * b.x + a.y * b.y; };
+
+      // Precompute sorted neighbor lists (small N; O(N^2 log N) is fine).
+      const int k_near = std::clamp(4 + num_systems / 10, 5, 12);
+
+      struct Neighbor {
+        double d{0.0};
+        int j{-1};
+      };
+
+      std::vector<std::vector<Neighbor>> neighbors;
+      neighbors.resize(static_cast<std::size_t>(num_systems));
+      for (int i = 0; i < num_systems; ++i) {
+        auto& nbr = neighbors[static_cast<std::size_t>(i)];
+        nbr.reserve(static_cast<std::size_t>(num_systems - 1));
+        const Vec2 pi = systems[static_cast<std::size_t>(i)].galaxy_pos;
+        for (int j = 0; j < num_systems; ++j) {
+          if (j == i) continue;
+          const Vec2 pj = systems[static_cast<std::size_t>(j)].galaxy_pos;
+          nbr.push_back({(pj - pi).length(), j});
+        }
+        std::sort(nbr.begin(), nbr.end(), [](const Neighbor& a, const Neighbor& b) { return a.d < b.d; });
+        if (static_cast<int>(nbr.size()) > k_near) nbr.resize(static_cast<std::size_t>(k_near));
+      }
+
+      // --- Build a few "trunk rivers" by walking uphill in the potential field. ---
+      const int trunk_count = std::clamp(1 + num_systems / 16, 1, 4);
+      std::vector<int> order;
+      order.reserve(static_cast<std::size_t>(num_systems));
+      for (int i = 0; i < num_systems; ++i) order.push_back(i);
+      std::sort(order.begin(), order.end(), [&](int a, int b) {
+        if (phi[static_cast<std::size_t>(a)] != phi[static_cast<std::size_t>(b)]) {
+          return phi[static_cast<std::size_t>(a)] < phi[static_cast<std::size_t>(b)];
+        }
+        return a < b;
+      });
+
+      const int pool_n = std::clamp(num_systems / 3, 4, std::max(4, num_systems));
+      std::vector<int> pool;
+      pool.reserve(static_cast<std::size_t>(pool_n));
+      for (int i = 0; i < pool_n && i < static_cast<int>(order.size()); ++i) pool.push_back(order[static_cast<std::size_t>(i)]);
+
+      auto min_dist_to = [&](int idx, const std::vector<int>& chosen) -> double {
+        if (chosen.empty()) return 1e9;
+        double best = 1e9;
+        for (int c : chosen) best = std::min(best, system_dist(idx, c));
+        return best;
+      };
+
+      std::vector<int> trunks;
+      trunks.reserve(static_cast<std::size_t>(trunk_count));
+      if (!pool.empty()) trunks.push_back(pool[0]);
+      for (int t = 1; t < trunk_count; ++t) {
+        int best = -1;
+        double best_d = -1.0;
+        for (int cand : pool) {
+          bool used = false;
+          for (int c : trunks) {
+            if (c == cand) {
+              used = true;
+              break;
+            }
+          }
+          if (used) continue;
+          const double d = min_dist_to(cand, trunks);
+          if (d > best_d) {
+            best_d = d;
+            best = cand;
+          }
+        }
+        if (best != -1) trunks.push_back(best);
+      }
+
+      for (int src : trunks) {
+        int cur = src;
+        const int max_steps = std::clamp(6 + num_systems / 10, 6, 18);
+
+        for (int step = 0; step < max_steps; ++step) {
+          const Vec2 pc = systems[static_cast<std::size_t>(cur)].galaxy_pos;
+          const double cur_phi = phi[static_cast<std::size_t>(cur)];
+
+          int best_j = -1;
+          double best_score = -1.0;
+
+          for (const auto& nb : neighbors[static_cast<std::size_t>(cur)]) {
+            const int j = nb.j;
+            const double d = std::max(1e-6, nb.d);
+            const double pj_phi = phi[static_cast<std::size_t>(j)];
+            if (pj_phi <= cur_phi + 0.02) continue; // require uphill progress
+
+            const Vec2 dir = (systems[static_cast<std::size_t>(j)].galaxy_pos - pc).normalized();
+            const double align = dot(dir, flow[static_cast<std::size_t>(cur)]);
+            if (align < 0.10) continue;
+
+            const double gain = (pj_phi - cur_phi);
+            const double score = (gain * (0.65 + 0.35 * align)) / d;
+
+            if (score > best_score) {
+              best_score = score;
+              best_j = j;
+            }
+          }
+
+          if (best_j == -1) break;
+          add_jump_link(cur, best_j);
+          cur = best_j;
+        }
+      }
+
+      // --- Add additional lane edges scored by flow alignment + coherence. ---
+      struct CandEdge {
+        double score{0.0};
+        int a{-1};
+        int b{-1};
+      };
+
+      std::vector<CandEdge> cands;
+      cands.reserve(static_cast<std::size_t>(num_systems * k_near));
+
+      for (int i = 0; i < num_systems; ++i) {
+        const Vec2 pi = systems[static_cast<std::size_t>(i)].galaxy_pos;
+        for (const auto& nb : neighbors[static_cast<std::size_t>(i)]) {
+          const int j = nb.j;
+          const double d = std::max(1e-6, nb.d);
+          const Vec2 dir = (systems[static_cast<std::size_t>(j)].galaxy_pos - pi).normalized();
+          const double align = dot(dir, flow[static_cast<std::size_t>(i)]);
+          if (align < 0.05) continue;
+
+          const double coh = 0.5 + 0.5 * dot(flow[static_cast<std::size_t>(i)], flow[static_cast<std::size_t>(j)]);
+          const double score = (0.60 * align + 0.40 * coh) / d;
+          cands.push_back({score, i, j});
+        }
+      }
+
+      std::sort(cands.begin(), cands.end(), [](const CandEdge& x, const CandEdge& y) {
+        if (x.score != y.score) return x.score > y.score;
+        if (x.a != y.a) return x.a < y.a;
+        return x.b < y.b;
+      });
+
+      for (const auto& e : cands) {
+        if (static_cast<int>(edges.size()) >= target_total) break;
+        add_jump_link(e.a, e.b);
+      }
+
+      // If we didn't hit the target (possible in very small galaxies), fill with shortest edges.
+      add_shortest_until(target_total);
       break;
     }
 

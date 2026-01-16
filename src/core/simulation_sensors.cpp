@@ -80,6 +80,18 @@ double effective_signature_multiplier(const Simulation& sim, const Ship& ship, c
   double eff = base * emcon * heat_mult;
   if (!std::isfinite(eff)) eff = base;
 
+  // Environmental hiding: targets inside dense nebulas should be somewhat
+  // harder to detect, not just sensor sources. We approximate line-of-sight
+  // attenuation by lerping the target's signature multiplier toward the
+  // local sensor environment multiplier.
+  const double w = std::clamp(sim.cfg().nebula_target_signature_env_weight, 0.0, 1.0);
+  if (w > 1e-9) {
+    const double env = sim.system_sensor_environment_multiplier_at(ship.system_id, ship.position_mkm);
+    const double env01 = std::clamp(env, 0.0, 1.0);
+    const double m = (1.0 - w) + w * env01;
+    eff *= std::clamp(m, 0.05, 1.0);
+  }
+
   const double max_sig = max_signature_multiplier_for_detection(sim);
   eff = std::clamp(eff, 0.0, max_sig);
   return eff;
@@ -108,7 +120,10 @@ std::vector<SensorSource> gather_sensor_sources(const Simulation& sim, Id factio
   if (!sys) return out;
 
   // Environmental sensor attenuation (nebula + storms).
-  const double env_mult = sim.system_sensor_environment_multiplier(system_id);
+  //
+  // With nebula microfields enabled, attenuation becomes position-dependent.
+  // We compute per-source multipliers so ships can find/hold "clear lanes" and
+  // dense hiding pockets in a single system.
 
   // Mutual-friendly factions share sensor coverage.
   std::vector<Id> sensor_factions;
@@ -134,6 +149,7 @@ std::vector<SensorSource> gather_sensor_sources(const Simulation& sim, Id factio
     const auto* d = sim.find_design(sh->design_id);
     if (!d) continue;
 
+    const double env_mult = sim.system_sensor_environment_multiplier_at(system_id, sh->position_mkm);
     const double range_mkm = sensor_range_mkm_with_mode(sim, *sh, *d) * env_mult;
     if (range_mkm <= 0.0) continue;
 
@@ -161,6 +177,7 @@ std::vector<SensorSource> gather_sensor_sources(const Simulation& sim, Id factio
       best_mkm = std::max(best_mkm, std::max(0.0, it->second.sensor_range_mkm));
     }
 
+    const double env_mult = sim.system_sensor_environment_multiplier_at(system_id, body->position_mkm);
     best_mkm *= env_mult;
     if (best_mkm <= 0.0) continue;
     out.push_back(SensorSource{body->position_mkm, best_mkm, kInvalidId, 0.0});

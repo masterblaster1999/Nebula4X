@@ -19,6 +19,9 @@
 #include <unordered_set>
 
 #include "nebula4x/core/scenario.h"
+#include "nebula4x/core/procgen_nebula_microfield.h"
+#include "nebula4x/core/procgen_nebula_stormfield.h"
+#include "nebula4x/core/procgen_jump_phenomena.h"
 #include "nebula4x/core/ai_economy.h"
 #include "nebula4x/util/log.h"
 #include "nebula4x/util/spatial_index.h"
@@ -889,6 +892,29 @@ bool Simulation::is_jump_point_surveyed_by_faction(Id viewer_faction_id, Id jump
          fac->surveyed_jump_points.end();
 }
 
+double Simulation::jump_survey_required_points_for_jump(Id jump_point_id) const {
+  const double base = cfg_.jump_survey_points_required;
+  if (base <= 1e-9) return base;
+  if (jump_point_id == kInvalidId) return base;
+  if (!cfg_.enable_jump_point_phenomena) return base;
+
+  const double strength = std::clamp(cfg_.jump_phenomena_survey_difficulty_strength, 0.0, 3.0);
+  if (strength <= 1e-9) return base;
+
+  const auto* jp = find_ptr(state_.jump_points, jump_point_id);
+  if (!jp) return base;
+
+  const auto ph = procgen_jump_phenomena::generate(*jp);
+  double mult = ph.survey_difficulty_mult;
+  if (!std::isfinite(mult) || mult <= 0.0) mult = 1.0;
+  mult = std::clamp(mult, 0.25, 10.0);
+
+  const double eff_mult = 1.0 + (mult - 1.0) * strength;
+  double required = base * eff_mult;
+  if (!std::isfinite(required)) required = base;
+  return std::max(0.0, required);
+}
+
 bool Simulation::is_anomaly_discovered_by_faction(Id viewer_faction_id, Id anomaly_id) const {
   if (anomaly_id == kInvalidId) return false;
   // When there is no "viewer" (e.g. omniscient mode / tools), treat all anomalies as known.
@@ -940,6 +966,54 @@ double Simulation::system_storm_intensity(Id system_id) const {
   return std::clamp(peak * std::max(0.0, pulse), 0.0, 1.0);
 }
 
+double Simulation::system_storm_intensity_at(Id system_id, const Vec2& pos_mkm) const {
+  // Base (system-wide) storm pulse.
+  const double base = system_storm_intensity(system_id);
+  if (base <= 0.0) return 0.0;
+  if (!cfg_.enable_nebula_storm_cells) return base;
+
+  const auto* sys = find_ptr(state_.systems, system_id);
+  if (!sys) return base;
+
+  // Compute storm-relative time (days) to keep the procedural field numerically stable.
+  const double now = static_cast<double>(state_.date.days_since_epoch()) +
+                     static_cast<double>(state_.hour_of_day) / 24.0;
+  const double start = static_cast<double>(sys->storm_start_day);
+  const double end = static_cast<double>(sys->storm_end_day);
+  if (now < start || now >= end) return 0.0;
+  const double age = now - start;
+
+  // Deterministic per-storm seed (system id + storm window).
+  std::uint64_t seed = procgen_obscure::splitmix64(static_cast<std::uint64_t>(system_id) ^ 0x6C8E9CF570932BD5ULL);
+  seed = procgen_obscure::splitmix64(seed ^ static_cast<std::uint64_t>(sys->storm_start_day));
+  seed = procgen_obscure::splitmix64(seed ^ static_cast<std::uint64_t>(sys->storm_end_day));
+
+  procgen_nebula_stormfield::Params p;
+  p.cell_scale_mkm = cfg_.nebula_storm_cell_scale_mkm;
+  p.drift_speed_mkm_per_day = cfg_.nebula_storm_cell_drift_speed_mkm_per_day;
+  // Map the single "sharpness" knob into both the underlying noise curve and
+  // the final contrast curve used for cells.
+  const double sh = std::clamp(cfg_.nebula_storm_cell_sharpness, 0.25, 4.0);
+  p.sharpness = sh;
+  p.cell_contrast = std::clamp(0.85 * sh, 0.25, 6.0);
+
+  // Keep the storm look consistent (these are intentionally not exposed as config knobs yet).
+  p.filament_mix = 0.55;
+  p.cell_threshold = 0.30;
+  p.swirl_strength = 0.18;
+  p.swirl_scale_mkm = 8000.0;
+
+  const double v = procgen_nebula_stormfield::sample_cell01(seed, pos_mkm, age, p);
+  const double strength = std::clamp(cfg_.nebula_storm_cell_strength, 0.0, 1.5);
+
+  // Remap around 1.0 so the system-wide intensity remains the average.
+  double factor = 1.0 + strength * (v - 0.5) * 2.0;
+  if (!std::isfinite(factor)) factor = 1.0;
+  factor = std::clamp(factor, 0.0, 2.0);
+
+  return std::clamp(base * factor, 0.0, 1.0);
+}
+
 double Simulation::system_sensor_environment_multiplier(Id system_id) const {
   const auto* sys = find_ptr(state_.systems, system_id);
   if (!sys) return 1.0;
@@ -962,6 +1036,67 @@ double Simulation::system_movement_speed_multiplier(Id system_id) const {
 
   const double neb = std::clamp(sys->nebula_density, 0.0, 1.0);
   const double storm = (cfg_.enable_nebula_storms ? system_storm_intensity(system_id) : 0.0);
+
+  double m = 1.0;
+
+  if (cfg_.enable_nebula_drag) {
+    const double drag = std::max(0.0, cfg_.nebula_drag_speed_penalty_at_max_density);
+    m *= std::clamp(1.0 - drag * neb, 0.05, 1.0);
+  }
+
+  if (cfg_.enable_nebula_storms) {
+    const double pen = std::max(0.0, cfg_.nebula_storm_speed_penalty);
+    m *= std::clamp(1.0 - pen * storm, 0.05, 1.0);
+  }
+
+  return std::clamp(m, 0.05, 1.0);
+}
+
+
+double Simulation::system_nebula_density_at(Id system_id, const Vec2& pos_mkm) const {
+  const auto* sys = find_ptr(state_.systems, system_id);
+  if (!sys) return 0.0;
+
+  const double base = std::clamp(sys->nebula_density, 0.0, 1.0);
+  if (!cfg_.enable_nebula_microfields) return base;
+  if (base <= 1e-6) return 0.0;
+
+  procgen_nebula_microfield::Params p;
+  p.scale_mkm = cfg_.nebula_microfield_scale_mkm;
+  p.warp_scale_mkm = cfg_.nebula_microfield_warp_scale_mkm;
+  p.strength = cfg_.nebula_microfield_strength;
+  p.filament_mix = cfg_.nebula_microfield_filament_mix;
+  p.sharpness = cfg_.nebula_microfield_sharpness;
+
+  // Deterministic per-system seed. We intentionally avoid save-specific RNG
+  // state so the field is stable and cacheable.
+  std::uint64_t seed = procgen_obscure::splitmix64(static_cast<std::uint64_t>(system_id) ^ 0x9E3779B97F4A7C15ULL);
+
+  return procgen_nebula_microfield::local_density(base, seed, pos_mkm, p);
+}
+
+double Simulation::system_sensor_environment_multiplier_at(Id system_id, const Vec2& pos_mkm) const {
+  const auto* sys = find_ptr(state_.systems, system_id);
+  if (!sys) return 1.0;
+
+  const double neb = std::clamp(system_nebula_density_at(system_id, pos_mkm), 0.0, 1.0);
+  const double base = std::clamp(1.0 - 0.65 * neb, 0.25, 1.0);
+
+  if (!cfg_.enable_nebula_storms) return base;
+
+  const double storm = system_storm_intensity_at(system_id, pos_mkm);
+  const double pen = std::max(0.0, cfg_.nebula_storm_sensor_penalty);
+  const double storm_mult = std::clamp(1.0 - pen * storm, 0.05, 1.0);
+
+  return std::clamp(base * storm_mult, 0.05, 1.0);
+}
+
+double Simulation::system_movement_speed_multiplier_at(Id system_id, const Vec2& pos_mkm) const {
+  const auto* sys = find_ptr(state_.systems, system_id);
+  if (!sys) return 1.0;
+
+  const double neb = std::clamp(system_nebula_density_at(system_id, pos_mkm), 0.0, 1.0);
+  const double storm = (cfg_.enable_nebula_storms ? system_storm_intensity_at(system_id, pos_mkm) : 0.0);
 
   double m = 1.0;
 

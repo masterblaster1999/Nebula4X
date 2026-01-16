@@ -961,6 +961,34 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
             static_cast<int>(it->second.number_value(ui_.system_map_heatmap_resolution));
         ui_.system_map_heatmap_resolution = std::clamp(ui_.system_map_heatmap_resolution, 16, 200);
       }
+      if (auto it = obj->find("system_map_nebula_microfield_overlay"); it != obj->end()) {
+        ui_.system_map_nebula_microfield_overlay = it->second.bool_value(ui_.system_map_nebula_microfield_overlay);
+      }
+      if (auto it = obj->find("system_map_nebula_overlay_opacity"); it != obj->end()) {
+        ui_.system_map_nebula_overlay_opacity =
+            static_cast<float>(it->second.number_value(ui_.system_map_nebula_overlay_opacity));
+        ui_.system_map_nebula_overlay_opacity = std::clamp(ui_.system_map_nebula_overlay_opacity, 0.0f, 1.0f);
+      }
+      if (auto it = obj->find("system_map_nebula_overlay_resolution"); it != obj->end()) {
+        ui_.system_map_nebula_overlay_resolution =
+            static_cast<int>(it->second.number_value(ui_.system_map_nebula_overlay_resolution));
+        ui_.system_map_nebula_overlay_resolution = std::clamp(ui_.system_map_nebula_overlay_resolution, 16, 260);
+      }
+      // System map storm cell overlay prefs.
+      if (auto it = obj->find("system_map_storm_cell_overlay"); it != obj->end()) {
+        ui_.system_map_storm_cell_overlay = it->second.bool_value(ui_.system_map_storm_cell_overlay);
+      }
+      if (auto it = obj->find("system_map_storm_overlay_opacity"); it != obj->end()) {
+        ui_.system_map_storm_overlay_opacity =
+            static_cast<float>(it->second.number_value(ui_.system_map_storm_overlay_opacity));
+        ui_.system_map_storm_overlay_opacity = std::clamp(ui_.system_map_storm_overlay_opacity, 0.0f, 1.0f);
+      }
+      if (auto it = obj->find("system_map_storm_overlay_resolution"); it != obj->end()) {
+        ui_.system_map_storm_overlay_resolution =
+            static_cast<int>(it->second.number_value(ui_.system_map_storm_overlay_resolution));
+        ui_.system_map_storm_overlay_resolution = std::clamp(ui_.system_map_storm_overlay_resolution, 16, 260);
+      }
+
       if (auto it = obj->find("galaxy_map_starfield"); it != obj->end()) {
         ui_.galaxy_map_starfield = it->second.bool_value(ui_.galaxy_map_starfield);
       }
@@ -1923,6 +1951,12 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     o["system_map_threat_heatmap"] = ui_.system_map_threat_heatmap;
     o["system_map_heatmap_opacity"] = static_cast<double>(ui_.system_map_heatmap_opacity);
     o["system_map_heatmap_resolution"] = static_cast<double>(ui_.system_map_heatmap_resolution);
+    o["system_map_nebula_microfield_overlay"] = ui_.system_map_nebula_microfield_overlay;
+    o["system_map_nebula_overlay_opacity"] = static_cast<double>(ui_.system_map_nebula_overlay_opacity);
+    o["system_map_nebula_overlay_resolution"] = static_cast<double>(ui_.system_map_nebula_overlay_resolution);
+    o["system_map_storm_cell_overlay"] = ui_.system_map_storm_cell_overlay;
+    o["system_map_storm_overlay_opacity"] = static_cast<double>(ui_.system_map_storm_overlay_opacity);
+    o["system_map_storm_overlay_resolution"] = static_cast<double>(ui_.system_map_storm_overlay_resolution);
     o["galaxy_map_starfield"] = ui_.galaxy_map_starfield;
     o["galaxy_map_grid"] = ui_.galaxy_map_grid;
     o["galaxy_map_selected_route"] = ui_.galaxy_map_selected_route;
@@ -2260,6 +2294,12 @@ void App::reset_ui_theme_defaults() {
   ui_.system_map_threat_heatmap = false;
   ui_.system_map_heatmap_opacity = 0.35f;
   ui_.system_map_heatmap_resolution = 64;
+  ui_.system_map_nebula_microfield_overlay = true;
+  ui_.system_map_nebula_overlay_opacity = 0.22f;
+  ui_.system_map_nebula_overlay_resolution = 84;
+  ui_.system_map_storm_cell_overlay = true;
+  ui_.system_map_storm_overlay_opacity = 0.18f;
+  ui_.system_map_storm_overlay_resolution = 84;
   ui_.system_map_missile_salvos = false;
   ui_.galaxy_map_starfield = true;
   ui_.galaxy_map_grid = false;

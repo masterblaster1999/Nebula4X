@@ -705,6 +705,22 @@ struct UIState {
   // Approximate number of cells across the map width (higher = sharper, slower).
   int system_map_heatmap_resolution{64};
 
+  // --- System map nebula microfield overlay ---
+  // Visualizes Simulation::system_nebula_density_at() as a subtle raster.
+  // This helps players understand the new in-system "terrain" created by
+  // nebula microfields.
+  bool system_map_nebula_microfield_overlay{true};
+  float system_map_nebula_overlay_opacity{0.22f};
+  int system_map_nebula_overlay_resolution{84};
+
+  
+  // --- System map storm cell overlay ---
+  // Visualizes Simulation::system_storm_intensity_at() as a subtle raster
+  // (spatial storm fronts/calm pockets).
+  bool system_map_storm_cell_overlay{true};
+  float system_map_storm_overlay_opacity{0.18f};
+  int system_map_storm_overlay_resolution{84};
+
   bool galaxy_map_starfield{true};
   bool galaxy_map_grid{false};
   bool galaxy_map_selected_route{true};

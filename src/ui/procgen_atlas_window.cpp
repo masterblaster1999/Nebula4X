@@ -16,6 +16,7 @@
 
 #include "nebula4x/core/enum_strings.h"
 #include "nebula4x/core/simulation.h"
+#include "nebula4x/core/procgen_surface.h"
 #include "nebula4x/util/file_io.h"
 #include "nebula4x/util/json.h"
 
@@ -140,12 +141,20 @@ struct BodyRow {
   const Body* body{nullptr};
   std::string name;
   std::string type;
+  std::string biome;
   std::string parent;
   double orbit_mkm{0.0};
   double temp_k{0.0};
   double atm{0.0};
   double minerals{0.0};
 };
+
+inline bool is_habitable_candidate(double temp_k, double atm, BodyType type) {
+  if (type != BodyType::Planet && type != BodyType::Moon) return false;
+  if (!(temp_k > 0.0) || !(atm > 0.0)) return false;
+  return (temp_k >= 245.0 && temp_k <= 330.0 && atm >= 0.4 && atm <= 4.5);
+}
+
 
 std::string region_label(const GameState& s, const StarSystem& sys) {
   if (sys.region_id == kInvalidId) return "-";
@@ -568,6 +577,7 @@ void draw_procgen_atlas_window(Simulation& sim, UIState& ui, Id& selected_body) 
           r.body = b;
           r.name = b->name;
           r.type = body_type_to_string(b->type);
+          r.biome = nebula4x::procgen_surface::biome_label(*b);
           r.parent = "-";
           if (b->parent_body_id != kInvalidId) {
             if (const Body* p = find_ptr(s.bodies, b->parent_body_id)) {
@@ -584,10 +594,11 @@ void draw_procgen_atlas_window(Simulation& sim, UIState& ui, Id& selected_body) 
         const ImGuiTableFlags flags = ImGuiTableFlags_BordersV | ImGuiTableFlags_BordersOuterH |
                                     ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable |
                                     ImGuiTableFlags_ScrollY;
-        if (ImGui::BeginTable("procgen_bodies", 8, flags, ImVec2(0.0f, 420.0f))) {
+        if (ImGui::BeginTable("procgen_bodies", 9, flags, ImVec2(0.0f, 420.0f))) {
           ImGui::TableSetupScrollFreeze(0, 1);
           ImGui::TableSetupColumn("Name", 0, 220.0f);
           ImGui::TableSetupColumn("Type", 0, 90.0f);
+          ImGui::TableSetupColumn("Biome", 0, 180.0f);
           ImGui::TableSetupColumn("Parent", 0, 140.0f);
           ImGui::TableSetupColumn("Orbit (mkm)", 0, 90.0f);
           ImGui::TableSetupColumn("Temp (K)", 0, 75.0f);
@@ -612,16 +623,18 @@ void draw_procgen_atlas_window(Simulation& sim, UIState& ui, Id& selected_body) 
               ImGui::TableSetColumnIndex(1);
               ImGui::TextUnformatted(r.type.c_str());
               ImGui::TableSetColumnIndex(2);
-              ImGui::TextUnformatted(r.parent.c_str());
+              ImGui::TextUnformatted(r.biome.c_str());
               ImGui::TableSetColumnIndex(3);
-              ImGui::Text("%.0f", r.orbit_mkm);
+              ImGui::TextUnformatted(r.parent.c_str());
               ImGui::TableSetColumnIndex(4);
-              ImGui::Text("%.0f", r.temp_k);
+              ImGui::Text("%.0f", r.orbit_mkm);
               ImGui::TableSetColumnIndex(5);
-              ImGui::Text("%.2f", r.atm);
+              ImGui::Text("%.0f", r.temp_k);
               ImGui::TableSetColumnIndex(6);
-              ImGui::Text("%.0f", r.minerals);
+              ImGui::Text("%.2f", r.atm);
               ImGui::TableSetColumnIndex(7);
+              ImGui::Text("%.0f", r.minerals);
+              ImGui::TableSetColumnIndex(8);
               const bool hab = is_habitable_candidate(r.temp_k, r.atm, r.body ? r.body->type : BodyType::Planet);
               ImGui::TextUnformatted(hab ? "✓" : "");
             }
