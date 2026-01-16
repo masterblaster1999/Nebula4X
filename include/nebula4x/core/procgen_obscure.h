@@ -343,8 +343,6 @@ inline std::string generate_anomaly_name(const Anomaly& a) {
 
   const bool is_ruins = (a.kind == "ruins" || a.kind == "artifact");
   const bool is_phen = (a.kind == "phenomenon");
-  const bool is_signal = (!is_ruins && !is_phen);
-
   const char* node = is_ruins ? pick_from(kRuins, rng) : (is_phen ? pick_from(kPhenom, rng) : pick_from(kSignal, rng));
 
   // A few formats so lists don't look like clones.

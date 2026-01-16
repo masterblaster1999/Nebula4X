@@ -116,6 +116,7 @@ bool Simulation::accept_contract(Id contract_id, bool push_event, std::string* e
   if (c.status != ContractStatus::Offered) return fail("Contract is not in Offered state");
 
   const std::int64_t now = state_.date.days_since_epoch();
+  if (c.expires_day > 0 && now >= c.expires_day) return fail("Contract offer has expired");
   c.status = ContractStatus::Accepted;
   c.accepted_day = now;
 
@@ -123,7 +124,7 @@ bool Simulation::accept_contract(Id contract_id, bool push_event, std::string* e
     EventContext ctx;
     ctx.faction_id = c.assignee_faction_id;
     ctx.system_id = c.system_id;
-    push_event(EventLevel::Info, EventCategory::Exploration, "Contract accepted: " + c.name, ctx);
+    this->push_event(EventLevel::Info, EventCategory::Exploration, "Contract accepted: " + c.name, ctx);
   }
 
   return true;
@@ -152,7 +153,7 @@ bool Simulation::abandon_contract(Id contract_id, bool push_event, std::string* 
     EventContext ctx;
     ctx.faction_id = c.assignee_faction_id;
     ctx.system_id = c.system_id;
-    push_event(EventLevel::Warn, EventCategory::Exploration, "Contract abandoned: " + c.name, ctx);
+    this->push_event(EventLevel::Warn, EventCategory::Exploration, "Contract abandoned: " + c.name, ctx);
   }
 
   return true;
@@ -248,12 +249,105 @@ void Simulation::tick_contracts() {
       continue;
     }
 
-    // Offered contracts can expire.
-    if (c.status == ContractStatus::Offered && c.expires_day > 0 && now >= c.expires_day) {
+    auto mark_expired = [&](std::string reason) {
       c.status = ContractStatus::Expired;
       c.resolved_day = now;
       c.assigned_ship_id = kInvalidId;
       c.assigned_fleet_id = kInvalidId;
+
+      if (is_player_faction(state_, c.assignee_faction_id)) {
+        EventContext ctx;
+        ctx.faction_id = c.assignee_faction_id;
+        ctx.system_id = c.system_id;
+
+        std::string msg = "Contract expired: " + c.name;
+        if (!reason.empty()) msg += " (" + reason + ")";
+
+        push_event(EventLevel::Warn, EventCategory::Exploration, msg, ctx);
+
+        JournalEntry je;
+        je.day = now;
+        je.hour = state_.hour_of_day;
+        je.category = EventCategory::Exploration;
+        je.title = "Contract Expired";
+        je.text = msg;
+        je.system_id = c.system_id;
+        push_journal_entry(c.assignee_faction_id, std::move(je));
+      }
+    };
+
+    auto mark_failed = [&](std::string reason) {
+      c.status = ContractStatus::Failed;
+      c.resolved_day = now;
+      c.assigned_ship_id = kInvalidId;
+      c.assigned_fleet_id = kInvalidId;
+
+      if (is_player_faction(state_, c.assignee_faction_id)) {
+        EventContext ctx;
+        ctx.faction_id = c.assignee_faction_id;
+        ctx.system_id = c.system_id;
+
+        std::string msg = "Contract failed: " + c.name;
+        if (!reason.empty()) msg += " (" + reason + ")";
+
+        push_event(EventLevel::Warn, EventCategory::Exploration, msg, ctx);
+
+        JournalEntry je;
+        je.day = now;
+        je.hour = state_.hour_of_day;
+        je.category = EventCategory::Exploration;
+        je.title = "Contract Failed";
+        je.text = msg;
+        je.system_id = c.system_id;
+        push_journal_entry(c.assignee_faction_id, std::move(je));
+      }
+    };
+
+    // Target validity checks (stale offers/accepted contracts).
+    // This primarily matters for anomalies, which become impossible to complete
+    // after another faction resolves them.
+    if (c.kind == ContractKind::InvestigateAnomaly) {
+      const auto* a = find_ptr(state_.anomalies, c.target_id);
+      if (!a) {
+        if (c.status == ContractStatus::Offered) {
+          mark_expired("target missing");
+        } else if (c.status == ContractStatus::Accepted) {
+          mark_failed("target missing");
+        }
+        continue;
+      }
+      if (a->resolved) {
+        if (c.status == ContractStatus::Offered) {
+          mark_expired("target already resolved");
+          continue;
+        }
+        if (c.status == ContractStatus::Accepted && c.assignee_faction_id != kInvalidId &&
+            a->resolved_by_faction_id != kInvalidId && a->resolved_by_faction_id != c.assignee_faction_id) {
+          mark_failed("resolved by another faction");
+          continue;
+        }
+      }
+    } else if (c.kind == ContractKind::SalvageWreck) {
+      const auto* w = find_ptr(state_.wrecks, c.target_id);
+      if ((!w || w->minerals.empty()) && c.status == ContractStatus::Offered) {
+        mark_expired("wreck already salvaged");
+        continue;
+      }
+    } else if (c.kind == ContractKind::SurveyJumpPoint) {
+      const auto* jp = find_ptr(state_.jump_points, c.target_id);
+      if (!jp) {
+        if (c.status == ContractStatus::Offered) {
+          mark_expired("target missing");
+        } else if (c.status == ContractStatus::Accepted) {
+          mark_failed("target missing");
+        }
+        continue;
+      }
+    }
+
+    // Offered contracts can expire.
+    if (c.status == ContractStatus::Offered && c.expires_day > 0 && now >= c.expires_day) {
+      mark_expired("offer expired");
       continue;
     }
 
@@ -271,7 +365,7 @@ void Simulation::tick_contracts() {
       case ContractKind::SalvageWreck: {
         const auto* w = find_ptr(state_.wrecks, c.target_id);
         // Wrecks are erased when their minerals hit zero.
-        complete = (w == nullptr);
+        complete = (w == nullptr) || (w && w->minerals.empty());
         break;
       }
       case ContractKind::SurveyJumpPoint: {

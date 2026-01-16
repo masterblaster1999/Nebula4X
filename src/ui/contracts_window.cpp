@@ -2,9 +2,12 @@
 
 #include "ui/imgui_includes.h"
 
+#include "nebula4x/core/contract_planner.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <limits>
 #include <string>
 #include <vector>
@@ -113,6 +116,28 @@ bool is_ship_idle(const GameState& st, Id ship_id) {
   return true;
 }
 
+std::string fmt_eta_days(double days) {
+  if (!std::isfinite(days)) return "∞";
+  if (days < 0.0) days = 0.0;
+  char buf[64];
+  if (days < 10.0) {
+    std::snprintf(buf, sizeof(buf), "%.2fd", days);
+  } else if (days < 100.0) {
+    std::snprintf(buf, sizeof(buf), "%.1fd", days);
+  } else {
+    std::snprintf(buf, sizeof(buf), "%.0fd", days);
+  }
+  return std::string(buf);
+}
+
+std::string fmt_arrival_label(const Simulation& sim, double eta_days) {
+  if (!std::isfinite(eta_days)) return {};
+  const auto& st = sim.state();
+  const int dplus = static_cast<int>(std::ceil(std::max(0.0, eta_days)));
+  const Date arrive = st.date.add_days(dplus);
+  return "D+" + std::to_string(dplus) + " (" + arrive.to_string() + ")";
+}
+
 void focus_contract_target(const Contract& c, Simulation& sim, UIState& ui) {
   auto& st = sim.state();
   Id sys_id = kInvalidId;
@@ -158,6 +183,27 @@ struct ContractsWindowState {
   bool restrict_to_discovered{true};
   Id assign_ship{kInvalidId};
 
+  // --- Auto planner (multi-contract ship assignment) ---
+  bool planner_auto_refresh{false};
+  bool planner_require_idle{true};
+  bool planner_exclude_fleet_ships{true};
+  bool planner_avoid_hostile_systems{true};
+  bool planner_include_offered{true};
+  bool planner_include_accepted_unassigned{true};
+  bool planner_include_already_assigned{false};
+  bool planner_clear_orders_before_apply{true};
+
+  int planner_max_ships{256};
+  int planner_max_contracts{64};
+  float planner_risk_penalty{0.35f};
+  float planner_hop_overhead_days{0.25f};
+
+  bool planner_have_plan{false};
+  int planner_last_day{-1};
+  int planner_last_hour{-1};
+  nebula4x::ContractPlannerResult planner_plan;
+  std::string planner_last_message;
+
   std::string last_error;
 };
 
@@ -201,6 +247,37 @@ void draw_contracts_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& 
   ImGui::Text("Faction: %s", fac->name.c_str());
   ImGui::SameLine();
   ImGui::TextDisabled("(Contracts: %zu)", st.contracts.size());
+
+  auto recompute_planner = [&]() {
+    nebula4x::ContractPlannerOptions opt;
+    opt.require_idle = ws.planner_require_idle;
+    opt.exclude_fleet_ships = ws.planner_exclude_fleet_ships;
+    opt.restrict_to_discovered = ws.restrict_to_discovered;
+    opt.avoid_hostile_systems = ws.planner_avoid_hostile_systems;
+    opt.include_offered = ws.planner_include_offered;
+    opt.include_accepted_unassigned = ws.planner_include_accepted_unassigned;
+    opt.include_already_assigned = ws.planner_include_already_assigned;
+    opt.clear_orders_before_apply = ws.planner_clear_orders_before_apply;
+    opt.max_ships = ws.planner_max_ships;
+    opt.max_contracts = ws.planner_max_contracts;
+    opt.risk_penalty = std::max(0.0, (double)ws.planner_risk_penalty);
+    opt.hop_overhead_days = std::max(0.0, (double)ws.planner_hop_overhead_days);
+
+    ws.planner_plan = nebula4x::compute_contract_plan(sim, fid, opt);
+    ws.planner_have_plan = true;
+    ws.planner_last_day = (int)st.date.days_since_epoch();
+    ws.planner_last_hour = st.hour_of_day;
+    ws.planner_last_message = ws.planner_plan.message;
+  };
+
+  // Optional: keep the planner preview fresh as time advances.
+  if (ws.planner_auto_refresh && ws.planner_have_plan) {
+    const int cur_day = (int)st.date.days_since_epoch();
+    const int cur_hour = st.hour_of_day;
+    if (cur_day != ws.planner_last_day || cur_hour != ws.planner_last_hour) {
+      recompute_planner();
+    }
+  }
 
   // Status filters.
   ImGui::Checkbox("Offered", &ws.show_offered);
@@ -388,6 +465,24 @@ void draw_contracts_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& 
   ImGui::SameLine();
   ImGui::Checkbox("Restrict to surveyed routes", &ws.restrict_to_discovered);
 
+  // Show a best-effort ETA preview for the currently selected ship.
+  {
+    Id target_sys = kInvalidId;
+    Vec2 target_pos{0.0, 0.0};
+    if (ws.assign_ship != kInvalidId && contract_target_pos(st, *c, &target_sys, &target_pos) && target_sys != kInvalidId) {
+      const bool include_queued_jumps = !ws.clear_orders_on_assign;
+      const auto plan = sim.plan_jump_route_for_ship_to_pos(ws.assign_ship, target_sys, target_pos,
+                                                           ws.restrict_to_discovered, include_queued_jumps);
+      if (plan) {
+        const std::string eta = fmt_eta_days(plan->total_eta_days);
+        const std::string arr = fmt_arrival_label(sim, plan->total_eta_days);
+        ImGui::TextDisabled("ETA: %s  %s", eta.c_str(), arr.c_str());
+      } else {
+        ImGui::TextDisabled("ETA: (no route)");
+      }
+    }
+  }
+
   bool can_assign = (ws.assign_ship != kInvalidId) && (c->status == ContractStatus::Offered || c->status == ContractStatus::Accepted);
   if (!can_assign) {
     ImGui::BeginDisabled();
@@ -410,6 +505,132 @@ void draw_contracts_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& 
       ws.last_error.clear();
       std::string err;
       if (!sim.clear_contract_assignment(c->id, &err)) ws.last_error = err.empty() ? "Failed to clear assignment." : err;
+    }
+  }
+
+  // --- Auto planner ---
+  ImGui::Separator();
+  if (ImGui::CollapsingHeader("Auto Planner (Assign Multiple Contracts)", ImGuiTreeNodeFlags_DefaultOpen)) {
+    ImGui::Checkbox("Auto refresh", &ws.planner_auto_refresh);
+    ImGui::SameLine();
+    ImGui::Checkbox("Require idle ships", &ws.planner_require_idle);
+    ImGui::SameLine();
+    ImGui::Checkbox("Exclude fleet ships", &ws.planner_exclude_fleet_ships);
+
+    ImGui::Checkbox("Avoid hostile systems", &ws.planner_avoid_hostile_systems);
+
+    ImGui::Checkbox("Include Offered", &ws.planner_include_offered);
+    ImGui::SameLine();
+    ImGui::Checkbox("Include Accepted (unassigned)", &ws.planner_include_accepted_unassigned);
+    ImGui::SameLine();
+    ImGui::Checkbox("Include Already Assigned", &ws.planner_include_already_assigned);
+
+    ImGui::Checkbox("Clear orders before apply", &ws.planner_clear_orders_before_apply);
+
+    ImGui::SetNextItemWidth(120.0f);
+    ImGui::InputInt("Max ships", &ws.planner_max_ships);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(120.0f);
+    ImGui::InputInt("Max contracts", &ws.planner_max_contracts);
+
+    ImGui::SetNextItemWidth(200.0f);
+    ImGui::SliderFloat("Risk penalty", &ws.planner_risk_penalty, 0.0f, 1.0f, "%.2f");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(200.0f);
+    ImGui::SliderFloat("Hop overhead (days)", &ws.planner_hop_overhead_days, 0.0f, 2.0f, "%.2f");
+
+    if (ImGui::Button("Compute Plan")) {
+      ws.last_error.clear();
+      recompute_planner();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Clear Plan")) {
+      ws.planner_have_plan = false;
+      ws.planner_plan = {};
+      ws.planner_last_message.clear();
+    }
+
+    if (ws.planner_have_plan) {
+      if (!ws.planner_last_message.empty()) {
+        ImGui::TextDisabled("%s", ws.planner_last_message.c_str());
+      }
+      if (ws.planner_plan.truncated) {
+        ImGui::TextDisabled("(Planner truncated results; increase caps for more coverage)");
+      }
+
+      const bool can_apply = ws.planner_plan.ok && !ws.planner_plan.assignments.empty();
+      if (!can_apply) ImGui::BeginDisabled();
+      if (ImGui::Button("Apply Plan")) {
+        ws.last_error.clear();
+        std::string err;
+        if (!nebula4x::apply_contract_plan(sim, ws.planner_plan, /*push_event=*/true, &err)) {
+          ws.last_error = err.empty() ? "Failed to apply contract plan." : err;
+        } else {
+          // Refresh immediately after applying.
+          recompute_planner();
+        }
+      }
+      if (!can_apply) ImGui::EndDisabled();
+
+      ImGuiTableFlags pflags = ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable |
+                               ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp;
+      if (ImGui::BeginTable("contract_planner_table", 6, pflags, ImVec2(0.0f, 220.0f))) {
+        ImGui::TableSetupColumn("Contract");
+        ImGui::TableSetupColumn("Kind");
+        ImGui::TableSetupColumn("Ship");
+        ImGui::TableSetupColumn("ETA", ImGuiTableColumnFlags_WidthFixed, 90.0f);
+        ImGui::TableSetupColumn("Work", ImGuiTableColumnFlags_WidthFixed, 90.0f);
+        ImGui::TableSetupColumn("Score", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+        ImGui::TableHeadersRow();
+
+        for (const auto& asg : ws.planner_plan.assignments) {
+          const auto* pc = find_ptr(st.contracts, asg.contract_id);
+          const auto* psh = find_ptr(st.ships, asg.ship_id);
+          if (!pc || !psh) continue;
+
+          ImGui::TableNextRow();
+
+          ImGui::TableNextColumn();
+          {
+            const std::string nm = pc->name.empty() ? (std::string("Contract ") + std::to_string((unsigned long long)pc->id))
+                                                    : pc->name;
+            const std::string label = nm + "##plan_contract_" + std::to_string((unsigned long long)pc->id);
+            if (ImGui::Selectable(label.c_str(), ws.selected_contract == pc->id, ImGuiSelectableFlags_SpanAllColumns)) {
+              ws.selected_contract = pc->id;
+              ws.last_error.clear();
+            }
+          }
+
+          ImGui::TableNextColumn();
+          ImGui::TextUnformatted(contract_kind_label(pc->kind));
+
+          ImGui::TableNextColumn();
+          {
+            const std::string nm = ship_label(st, psh->id);
+            const std::string label = nm + "##plan_ship_" + std::to_string((unsigned long long)psh->id);
+            if (ImGui::Selectable(label.c_str(), false)) {
+              focus_ship(psh->id, sim, ui, selected_ship, selected_colony, selected_body);
+            }
+          }
+
+          ImGui::TableNextColumn();
+          {
+            const std::string eta = fmt_eta_days(asg.eta_days);
+            const std::string arr = fmt_arrival_label(sim, asg.eta_days);
+            ImGui::TextUnformatted((eta + " " + arr).c_str());
+          }
+
+          ImGui::TableNextColumn();
+          ImGui::TextUnformatted(fmt_eta_days(asg.work_days).c_str());
+
+          ImGui::TableNextColumn();
+          ImGui::Text("%.3f", asg.score);
+        }
+
+        ImGui::EndTable();
+      }
+    } else {
+      ImGui::TextDisabled("No plan computed.");
     }
   }
 

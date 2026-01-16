@@ -45,6 +45,7 @@ target_sources(nebula4x_core
     src/core/fuel_planner.cpp
     src/core/trade_network.cpp
     src/core/salvage_planner.cpp
+    src/core/contract_planner.cpp
     src/core/troop_planner.cpp
     src/core/research_schedule.cpp
     src/core/colony_schedule.cpp
