@@ -709,6 +709,8 @@ void draw_widget_context_menu(UIState& ui, const UiForgeWidgetConfig& cfg, const
 
 void draw_kpi_card(UIState& ui, const UiForgeWidgetConfig& cfg, WidgetRuntime& rt, const EvalResult& ev,
                    const std::int64_t tick) {
+  (void)ui;
+
   // History sampling (once per sim tick).
   float delta = 0.0f;
   bool has_delta = false;
@@ -842,6 +844,8 @@ void draw_list_contents(const nebula4x::json::Value& root, const UiForgeWidgetCo
 
 void draw_list_card(UIState& ui, const UiForgeWidgetConfig& cfg, const UIState& ui_ro, const nebula4x::json::Value& root,
                     EvalResult& ev, std::vector<std::pair<std::string, std::string>>& rows) {
+  (void)ui;
+
   draw_list_contents(root, cfg, ui_ro, ev, rows);
 
   const char* title = cfg.label.empty() ? label_from_pointer(cfg.path).c_str() : cfg.label.c_str();
@@ -1032,6 +1036,8 @@ void draw_panel_contents(const Simulation& sim, UIState& ui, const UiForgePanelC
 
 bool set_panel_root_from_entity(UIState& ui, UiForgePanelConfig& panel, const std::uint64_t entity_id,
                                const char* kind_label) {
+  (void)ui;
+
   if (entity_id == 0) return false;
   const auto* ent = find_game_entity(entity_id);
   if (!ent) return false;

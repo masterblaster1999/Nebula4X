@@ -69,6 +69,9 @@ struct HashRng {
     if (hi < lo) std::swap(lo, hi);
     return lo + (hi - lo) * next_u01();
   }
+
+  // Back-compat alias: some call sites use range_real().
+  double range_real(double lo_incl, double hi_incl) { return range(lo_incl, hi_incl); }
 };
 
 // 64-bit FNV-1a for stable hashing of kind tags.

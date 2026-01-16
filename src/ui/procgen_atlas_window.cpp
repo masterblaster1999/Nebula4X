@@ -1,6 +1,6 @@
 #include "ui/procgen_atlas_window.h"
 
-#include <imgui.h>
+#include "ui/imgui_includes.h"
 
 #include <algorithm>
 #include <array>
@@ -43,6 +43,51 @@ struct GalaxySummary {
 
   std::array<int, 7> spectral_counts{}; // O,B,A,F,G,K,M
 };
+
+// Mineral helper: sum remaining deposits for a body.
+//
+// Note: if mineral_deposits is empty, the save/mod is using legacy "unlimited"
+// mining behavior. For atlas analytics we treat that as "unknown" => 0.
+inline double body_mineral_total(const Body& b) {
+  double total = 0.0;
+  for (const auto& [k, v] : b.mineral_deposits) {
+    (void)k;
+    if (!std::isfinite(v) || v <= 0.0) continue;
+    total += v;
+  }
+  return total;
+}
+
+inline int count_planets(const GameState& s, const StarSystem& sys) {
+  int n = 0;
+  for (Id bid : sys.bodies) {
+    const Body* b = find_ptr(s.bodies, bid);
+    if (!b) continue;
+    if (b->type == BodyType::Planet || b->type == BodyType::GasGiant) {
+      ++n;
+    }
+  }
+  return n;
+}
+
+inline double system_mineral_total(const GameState& s, const StarSystem& sys) {
+  return sum_mineral_deposits_tons(s, sys);
+}
+
+inline double primary_star_temperature(const GameState& s, const StarSystem& sys) {
+  const Body* star = find_primary_star(s, sys);
+  return star ? star->surface_temp_k : 0.0;
+}
+
+inline double primary_star_mass_solar(const GameState& s, const StarSystem& sys) {
+  const Body* star = find_primary_star(s, sys);
+  return star ? star->mass_solar : 0.0;
+}
+
+inline double primary_star_luminosity_solar(const GameState& s, const StarSystem& sys) {
+  const Body* star = find_primary_star(s, sys);
+  return star ? star->luminosity_solar : 0.0;
+}
 
 int spectral_bucket_index(double temp_k) {
   if (!std::isfinite(temp_k) || temp_k <= 0.0) return -1;
@@ -172,7 +217,7 @@ double distance_to_ref(const StarSystem& sys, const StarSystem* ref) {
 
 // Simple orbit chart: places each body on its orbit circle at a deterministic
 // pseudo-angle derived from its id so plots remain stable frame-to-frame.
-void draw_orbit_chart(const GameState& s, const StarSystem& sys, const Id selected_body) {
+void draw_orbit_chart(const GameState& s, const StarSystem& sys, Id& selected_body) {
   ImGui::SeparatorText("Orbit chart");
   const ImVec2 avail = ImGui::GetContentRegionAvail();
   const float h = std::min(260.0f, std::max(150.0f, avail.x * 0.52f));
@@ -232,8 +277,8 @@ void draw_orbit_chart(const GameState& s, const StarSystem& sys, const Id select
     const float r = static_cast<float>(r_log) * radius_px;
 
     // Deterministic pseudo angle from id.
-    const std::uint32_t h = static_cast<std::uint32_t>(bid) * 2654435761u;
-    const float a = (static_cast<float>(h % 10000u) / 10000.0f) * 6.2831853f;
+    const std::uint32_t h32 = static_cast<std::uint32_t>(bid) * 2654435761u;
+    const float a = (static_cast<float>(h32 % 10000u) / 10000.0f) * 6.2831853f;
     const ImVec2 p(center.x + std::cos(a) * r, center.y + std::sin(a) * r);
 
     const bool is_sel = (bid == selected_body);
@@ -254,6 +299,12 @@ void draw_orbit_chart(const GameState& s, const StarSystem& sys, const Id select
 
   // Star marker at center.
   dl->AddCircleFilled(center, 4.0f, IM_COL32(255, 255, 255, 200), 0);
+
+  // Click-to-select.
+  if (hovered != kInvalidId && ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem) &&
+      ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+    selected_body = hovered;
+  }
 
   // Tooltip for hovered.
   if (hovered != kInvalidId) {
@@ -536,6 +587,8 @@ void draw_procgen_atlas_window(Simulation& sim, UIState& ui, Id& selected_body) 
           }
         }
 
+        
+
         ImGui::EndTable();
       }
 
@@ -642,26 +695,107 @@ void draw_procgen_atlas_window(Simulation& sim, UIState& ui, Id& selected_body) 
 
           ImGui::EndTable();
         }
+
+        ImGui::SeparatorText("Selected body dossier");
+        ImGui::TextDisabled("Tip: click a marker in the orbit chart or a row in the table to select a body.");
+
+        if (selected_body == kInvalidId) {
+          ImGui::TextDisabled("No body selected.");
+        } else if (const Body* b = find_ptr(s.bodies, selected_body)) {
+          ImGui::Text("%s", b->name.c_str());
+          ImGui::SameLine();
+          ImGui::TextDisabled("(%s)", body_type_to_string(b->type).c_str());
+
+          if (b->surface_temp_k > 0.0 || b->atmosphere_atm > 0.0) {
+            ImGui::TextDisabled("Temp: %.0f K    Atm: %.2f atm", b->surface_temp_k, b->atmosphere_atm);
+          }
+
+          // Procedural surface flavor (deterministic).
+          const nebula4x::procgen_surface::Flavor f = nebula4x::procgen_surface::flavor(*b, 32, 14);
+          ImGui::TextDisabled("Biome: %s", f.biome.c_str());
+
+          if (!f.quirks.empty()) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("| Quirks: %d", static_cast<int>(f.quirks.size()));
+          }
+
+          if (ImGui::SmallButton("Copy stamp")) {
+            ImGui::SetClipboardText(f.stamp.c_str());
+          }
+
+          ImGui::BeginChild("procgen_body_stamp", ImVec2(0.0f, 180.0f), true);
+          ImGui::TextUnformatted(f.stamp.c_str());
+          if (!f.legend.empty()) {
+            ImGui::Separator();
+            ImGui::TextDisabled("%s", f.legend.c_str());
+          }
+          ImGui::EndChild();
+
+          if (!f.quirks.empty()) {
+            ImGui::SeparatorText("Quirks");
+            for (const auto& q : f.quirks) {
+              ImGui::BulletText("%s", q.name.c_str());
+              if (!q.desc.empty()) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("- %s", q.desc.c_str());
+              }
+            }
+          }
+
+          ImGui::SeparatorText("Mineral deposits");
+          if (b->mineral_deposits.empty()) {
+            ImGui::TextDisabled("(legacy) mineral_deposits is empty -> treated as unlimited by the simulation.");
+          } else {
+            // Show largest deposits first.
+            std::vector<std::pair<std::string, double>> deps;
+            deps.reserve(b->mineral_deposits.size());
+            for (const auto& [k, v] : b->mineral_deposits) {
+              if (!std::isfinite(v) || v <= 0.0) continue;
+              deps.emplace_back(k, v);
+            }
+            std::sort(deps.begin(), deps.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+            if (deps.empty()) {
+              ImGui::TextDisabled("No remaining deposits.");
+            } else if (ImGui::BeginTable("procgen_body_minerals", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV, ImVec2(0.0f, 150.0f))) {
+              ImGui::TableSetupColumn("Mineral", ImGuiTableColumnFlags_WidthStretch);
+              ImGui::TableSetupColumn("Tons", ImGuiTableColumnFlags_WidthFixed, 120.0f);
+              ImGui::TableHeadersRow();
+              for (const auto& kv : deps) {
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                ImGui::TextUnformatted(kv.first.c_str());
+                ImGui::TableSetColumnIndex(1);
+                ImGui::Text("%.0f", kv.second);
+              }
+              ImGui::EndTable();
+            }
+          }
+        } else {
+          ImGui::TextDisabled("Selected body id not found.");
+        }
+
         ImGui::EndTabItem();
       }
     }
 
     if (ImGui::BeginTabItem("Export")) {
       static char out_path[256] = "procgen_report.json";
+      static std::string export_error;
+
       ImGui::InputText("Path", out_path, sizeof(out_path));
       ImGui::SameLine();
 
       if (ImGui::Button("Export JSON report")) {
         json::Object root;
-        root["systems"] = summary.systems;
-        root["bodies"] = summary.bodies;
-        root["stars"] = summary.stars;
-        root["planets"] = summary.planets;
-        root["moons"] = summary.moons;
-        root["gas_giants"] = summary.gas_giants;
-        root["asteroids"] = summary.asteroids;
-        root["habitable_candidates"] = summary.habitable;
-        root["jump_points"] = summary.jump_points;
+        root["systems"] = static_cast<double>(summary.systems);
+        root["bodies"] = static_cast<double>(summary.bodies);
+        root["stars"] = static_cast<double>(summary.stars);
+        root["planets"] = static_cast<double>(summary.planets);
+        root["moons"] = static_cast<double>(summary.moons);
+        root["gas_giants"] = static_cast<double>(summary.gas_giants);
+        root["asteroids"] = static_cast<double>(summary.asteroids);
+        root["habitable_candidates"] = static_cast<double>(summary.habitable);
+        root["jump_points"] = static_cast<double>(summary.jump_points);
         root["avg_nebula_density"] = (summary.systems > 0) ? (summary.nebula_sum / summary.systems) : 0.0;
         root["total_minerals"] = summary.minerals_sum;
 
@@ -669,17 +803,17 @@ void draw_procgen_atlas_window(Simulation& sim, UIState& ui, Id& selected_body) 
         sys_arr.reserve(s.systems.size());
         for (const auto& [id, sys] : s.systems) {
           json::Object o;
-          o["id"] = static_cast<std::int64_t>(id);
+          o["id"] = static_cast<double>(id);
           o["name"] = sys.name;
-          o["region_id"] = static_cast<std::int64_t>(sys.region_id);
+          o["region_id"] = static_cast<double>(sys.region_id);
           o["region"] = region_label(s, sys);
           o["galaxy_x"] = sys.galaxy_pos.x;
           o["galaxy_y"] = sys.galaxy_pos.y;
           o["nebula_density"] = sys.nebula_density;
-          o["jump_degree"] = static_cast<int>(sys.jump_points.size());
-          o["body_count"] = static_cast<int>(sys.bodies.size());
-          o["planet_count"] = count_planets(s, sys);
-          o["habitable_candidates"] = count_habitable_candidates(s, sys);
+          o["jump_degree"] = static_cast<double>(sys.jump_points.size());
+          o["body_count"] = static_cast<double>(sys.bodies.size());
+          o["planet_count"] = static_cast<double>(count_planets(s, sys));
+          o["habitable_candidates"] = static_cast<double>(count_habitable_candidates(s, sys));
           o["mineral_total"] = system_mineral_total(s, sys);
           o["primary_star_temp_k"] = primary_star_temperature(s, sys);
           o["primary_star_mass_solar"] = primary_star_mass_solar(s, sys);
@@ -688,14 +822,21 @@ void draw_procgen_atlas_window(Simulation& sim, UIState& ui, Id& selected_body) 
         }
         root["systems_list"] = std::move(sys_arr);
 
-        const std::string txt = json::stringify(root, /*pretty=*/true);
-        if (!write_text_file(out_path, txt)) {
+        const std::string txt = json::stringify(root, 2);
+        try {
+          write_text_file(out_path, txt);
+        } catch (const std::exception& e) {
+          export_error = e.what();
           ImGui::OpenPopup("procgen_export_failed");
         }
       }
 
       if (ImGui::BeginPopupModal("procgen_export_failed", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::Text("Failed to write report.");
+        ImGui::TextUnformatted("Failed to write report.");
+        if (!export_error.empty()) {
+          ImGui::Separator();
+          ImGui::TextWrapped("%s", export_error.c_str());
+        }
         if (ImGui::Button("OK")) {
           ImGui::CloseCurrentPopup();
         }
