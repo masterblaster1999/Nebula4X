@@ -244,6 +244,27 @@ struct SimConfig {
   double repair_duranium_per_hp{0.0};
   double repair_neutronium_per_hp{0.0};
 
+  // --- Blockades (economic disruption) ---
+  // When enabled, hostile armed ships loitering near a colony's body can impose a
+  // "blockade" that reduces certain colony outputs (repairs, training, terraforming).
+  //
+  // This is intentionally lightweight: blockade pressure is computed from nearby
+  // hostile/defender combat presence (plus static defenses) and turned into an
+  // output multiplier.
+  bool enable_blockades{true};
+
+  // Radius around a colony's body within which hostile/defender ships contribute
+  // to blockade pressure.
+  double blockade_radius_mkm{10.0};
+
+  // Baseline "resistance" power that reduces the impact of small raiding forces.
+  // (Bigger values require larger hostile fleets to achieve the same pressure.)
+  double blockade_base_resistance_power{20.0};
+
+  // Maximum fractional output penalty at full pressure (0..1).
+  // Example: 0.75 => at pressure=1, affected outputs run at 25%.
+  double blockade_max_output_penalty{0.75};
+
   // --- Ship maintenance / spare parts (optional) ---
   //
   // When enabled, ships consume a chosen stockpiled resource ("spare parts") while
@@ -1189,6 +1210,15 @@ double ship_maintenance_breakdown_subsystem_damage_max{0.20};
   // Prevents all traffic from collapsing to a single lane when piracy is high.
   double civilian_trade_convoy_min_risk_weight{0.35};
 
+  // Additional risk term from blockades.
+  //
+  // Civilian lane endpoint risk is approximated as:
+  //   risk ~= piracy_risk + (civilian_trade_convoy_blockade_risk_weight * blockade_pressure)
+  // where blockade_pressure is derived from hostile presence near colonies in the system.
+  //
+  // 0 disables this weighting.
+  double civilian_trade_convoy_blockade_risk_weight{0.80};
+
 
   // --- AI trade security patrols (procedural) ---
   //
@@ -1367,6 +1397,27 @@ struct LogisticsNeed {
   // Optional context identifier. For Construction needs this is typically the installation_id.
   // For Shipyard needs this is usually empty.
   std::string context_id;
+};
+
+// A lightweight summary of blockade pressure on a colony.
+//
+// Blockade pressure is driven by hostile combat presence near the colony's body
+// relative to local defensive presence (friendly ships + static weapon
+// installations) and a configurable baseline resistance.
+//
+// pressure is normalized to [0,1]. output_multiplier maps pressure into an
+// efficiency scalar applied to certain colony outputs.
+struct BlockadeStatus {
+  Id colony_id{kInvalidId};
+
+  double pressure{0.0};
+  double output_multiplier{1.0};
+
+  double hostile_power{0.0};
+  double defender_power{0.0};
+
+  int hostile_ships{0};
+  int defender_ships{0};
 };
 
 // Notes:
@@ -1881,6 +1932,13 @@ class Simulation {
   double crew_training_points_per_day(const Colony& colony) const;
   double fortification_points(const Colony& colony) const;
 
+  // Blockade query helpers.
+  //
+  // These are pure queries (no save-game persistence). The implementation caches
+  // per-colony pressure for the current day/hour to avoid repeated scans.
+  BlockadeStatus blockade_status_for_colony(Id colony_id) const;
+  double blockade_output_multiplier_for_colony(Id colony_id) const;
+
   // Crew grade helpers.
   // Returns a signed bonus fraction (e.g. +0.10 = +10%).
   double crew_grade_bonus_for_points(double grade_points) const;
@@ -2034,6 +2092,17 @@ bool move_construction_order(Id colony_id, int from_index, int to_index);
   bool assign_contract_to_ship(Id contract_id, Id ship_id, bool clear_existing_orders = false,
                                bool restrict_to_discovered = true, bool push_event = true,
                                std::string* error = nullptr);
+
+
+  // Assign a contract to a fleet.
+  //
+  // The contract is assigned to a single primary ship for UI focus, but the fleet
+  // will move and operate as a group (escorts will follow the primary ship).
+  //
+  // Assigning an Offered contract implicitly accepts it.
+  bool assign_contract_to_fleet(Id contract_id, Id fleet_id, bool clear_existing_orders = false,
+                                bool restrict_to_discovered = true, bool push_event = true,
+                                std::string* error = nullptr);
 
 
 
@@ -2200,6 +2269,13 @@ bool move_construction_order(Id colony_id, int from_index, int to_index);
   //
   // This is a curated story layer over the raw event log.
   void push_journal_entry(Id faction_id, JournalEntry entry);
+
+  // --- Blockade cache (performance) ---
+  // Blockade pressure queries may be called frequently (UI + multiple tick
+  // systems). Cache per-colony pressure for the current day/hour.
+  void ensure_blockade_cache_current() const;
+  void invalidate_blockade_cache() const;
+
 // --- Jump route planning cache (performance) ---
 // Route planning can be called frequently from the UI (hover previews) and from AI logistics.
 // Cache successful plans for the current simulation day to avoid repeated Dijkstra runs.
@@ -2272,6 +2348,14 @@ mutable std::list<JumpRouteCacheKey> jump_route_cache_lru_;
 mutable JumpRouteCacheMap jump_route_cache_;
 mutable std::uint64_t jump_route_cache_hits_{0};
 mutable std::uint64_t jump_route_cache_misses_{0};
+
+// --- Blockade cache ---
+mutable bool blockade_cache_valid_{false};
+mutable std::int64_t blockade_cache_day_{0};
+mutable int blockade_cache_hour_{0};
+mutable std::uint64_t blockade_cache_state_generation_{0};
+mutable std::uint64_t blockade_cache_content_generation_{0};
+mutable std::unordered_map<Id, BlockadeStatus> blockade_cache_;
 
 
 

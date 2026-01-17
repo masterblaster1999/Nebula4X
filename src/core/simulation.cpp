@@ -1114,6 +1114,166 @@ double Simulation::system_movement_speed_multiplier_at(Id system_id, const Vec2&
 }
 
 
+void Simulation::ensure_blockade_cache_current() const {
+  if (!cfg_.enable_blockades) {
+    invalidate_blockade_cache();
+    return;
+  }
+
+  const std::int64_t day = state_.date.days_since_epoch();
+  const int hour = std::clamp(state_.hour_of_day, 0, 23);
+
+  if (blockade_cache_valid_ && blockade_cache_day_ == day && blockade_cache_hour_ == hour &&
+      blockade_cache_state_generation_ == state_generation_ &&
+      blockade_cache_content_generation_ == content_generation_) {
+    return;
+  }
+
+  blockade_cache_valid_ = true;
+  blockade_cache_day_ = day;
+  blockade_cache_hour_ = hour;
+  blockade_cache_state_generation_ = state_generation_;
+  blockade_cache_content_generation_ = content_generation_;
+
+  blockade_cache_.clear();
+  blockade_cache_.reserve(state_.colonies.size() * 2 + 8);
+
+  const double radius_mkm = std::max(0.0, cfg_.blockade_radius_mkm);
+
+  auto ship_power = [&](const Ship& sh) -> double {
+    const ShipDesign* d = find_design(sh.design_id);
+    if (!d) return 0.0;
+    const double w = std::max(0.0, d->weapon_damage) +
+                     std::max(0.0, d->missile_damage) +
+                     0.5 * std::max(0.0, d->point_defense_damage);
+    if (!(w > 1e-9)) return 0.0;
+
+    // Mirror the piracy-suppression heuristic: weapons + a bit of durability/sensors.
+    const double dur = 0.05 * std::max(0.0, sh.hp + sh.shields);
+    const double sen = 0.25 * std::max(0.0, d->sensor_range_mkm);
+    return std::max(0.0, w + dur + sen);
+  };
+
+  const double static_mult = 1.0;
+  const double base_resist = std::max(0.0, cfg_.blockade_base_resistance_power);
+  const double max_penalty = std::clamp(cfg_.blockade_max_output_penalty, 0.0, 1.0);
+
+  for (const auto& [cid, col] : state_.colonies) {
+    (void)cid;
+    BlockadeStatus bs;
+    bs.colony_id = col.id;
+
+    const Body* body = find_ptr(state_.bodies, col.body_id);
+    if (!body) {
+      bs.pressure = 0.0;
+      bs.output_multiplier = 1.0;
+      blockade_cache_.emplace(col.id, bs);
+      continue;
+    }
+    const Id sys_id = body->system_id;
+    if (sys_id == kInvalidId) {
+      bs.pressure = 0.0;
+      bs.output_multiplier = 1.0;
+      blockade_cache_.emplace(col.id, bs);
+      continue;
+    }
+
+    const auto* sys = find_ptr(state_.systems, sys_id);
+    if (!sys) {
+      bs.pressure = 0.0;
+      bs.output_multiplier = 1.0;
+      blockade_cache_.emplace(col.id, bs);
+      continue;
+    }
+
+    const Vec2 anchor = body->position_mkm;
+
+    // Nearby ship presence.
+    for (Id sid : sys->ships) {
+      const Ship* sh = find_ptr(state_.ships, sid);
+      if (!sh) continue;
+      if (sh->hp <= 1e-9) continue;
+      if (sh->system_id != sys_id) continue;
+      if (radius_mkm > 0.0) {
+        const double d = (sh->position_mkm - anchor).length();
+        if (d > radius_mkm + 1e-9) continue;
+      }
+      if (sh->faction_id == kInvalidId) continue;
+
+      const double p = ship_power(*sh);
+      if (!(p > 1e-9)) continue;
+
+      if (sh->faction_id == col.faction_id || are_factions_trade_partners(col.faction_id, sh->faction_id)) {
+        bs.defender_power += p;
+        bs.defender_ships += 1;
+      } else if (are_factions_hostile(sh->faction_id, col.faction_id) ||
+                 are_factions_hostile(col.faction_id, sh->faction_id)) {
+        bs.hostile_power += p;
+        bs.hostile_ships += 1;
+      }
+    }
+
+    // Static defensive weapons.
+    double static_power = 0.0;
+    for (const auto& [inst_id, count] : col.installations) {
+      if (count <= 0) continue;
+      auto it = content_.installations.find(inst_id);
+      if (it == content_.installations.end()) continue;
+      const auto& def = it->second;
+      const double w = std::max(0.0, def.weapon_damage) + 0.5 * std::max(0.0, def.point_defense_damage);
+      if (w > 1e-9) static_power += w * static_cast<double>(count);
+    }
+    bs.defender_power += static_power * static_mult;
+
+    const double denom = bs.hostile_power + bs.defender_power + base_resist;
+    if (denom > 1e-9) {
+      bs.pressure = std::clamp(bs.hostile_power / denom, 0.0, 1.0);
+    } else {
+      bs.pressure = 0.0;
+    }
+
+    // Convert pressure into an output multiplier.
+    bs.output_multiplier = std::clamp(1.0 - bs.pressure * max_penalty, 1.0 - max_penalty, 1.0);
+
+    blockade_cache_.emplace(col.id, bs);
+  }
+}
+
+void Simulation::invalidate_blockade_cache() const {
+  blockade_cache_valid_ = false;
+  blockade_cache_.clear();
+  blockade_cache_day_ = state_.date.days_since_epoch();
+  blockade_cache_hour_ = std::clamp(state_.hour_of_day, 0, 23);
+  blockade_cache_state_generation_ = state_generation_;
+  blockade_cache_content_generation_ = content_generation_;
+}
+
+BlockadeStatus Simulation::blockade_status_for_colony(Id colony_id) const {
+  if (colony_id == kInvalidId) return BlockadeStatus{};
+  if (!cfg_.enable_blockades) {
+    BlockadeStatus bs;
+    bs.colony_id = colony_id;
+    bs.pressure = 0.0;
+    bs.output_multiplier = 1.0;
+    return bs;
+  }
+
+  ensure_blockade_cache_current();
+  auto it = blockade_cache_.find(colony_id);
+  if (it != blockade_cache_.end()) return it->second;
+
+  BlockadeStatus bs;
+  bs.colony_id = colony_id;
+  bs.pressure = 0.0;
+  bs.output_multiplier = 1.0;
+  return bs;
+}
+
+double Simulation::blockade_output_multiplier_for_colony(Id colony_id) const {
+  return std::clamp(blockade_status_for_colony(colony_id).output_multiplier, 0.0, 1.0);
+}
+
+
 void Simulation::ensure_jump_route_cache_current() const {
   const std::int64_t day = state_.date.days_since_epoch();
   if (!jump_route_cache_day_valid_ || jump_route_cache_day_ != day) {

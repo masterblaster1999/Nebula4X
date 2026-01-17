@@ -1492,6 +1492,14 @@ enum class FleetMissionType : std::uint8_t {
   Explore = 5,
   PatrolRegion = 6,
   AssaultColony = 7,
+  // Maintain a hostile presence near a colony to disrupt its activity.
+  BlockadeColony = 8,
+
+  // Shuttle between two systems (useful for guarding trade lanes / chokepoints).
+  PatrolRoute = 9,
+
+  // Hold position near a specific jump point, intercepting detected hostiles.
+  GuardJumpPoint = 10,
 };
 
 enum class FleetSustainmentMode : std::uint8_t {
@@ -1521,6 +1529,29 @@ struct FleetMission {
 
   // Internal: current waypoint index.
   int patrol_leg_index{0};
+
+  // --- PatrolRoute ---
+  // Shuttle between two systems, engaging detected hostiles in any system
+  // along the path.
+  //
+  // Uses patrol_dwell_days for endpoint loiter time and patrol_leg_index as a
+  // simple direction toggle (even=to B, odd=to A).
+  Id patrol_route_a_system_id{kInvalidId};
+  Id patrol_route_b_system_id{kInvalidId};
+
+  // --- GuardJumpPoint ---
+  // Jump point id to guard.
+  Id guard_jump_point_id{kInvalidId};
+
+  // Response radius around the guarded jump point position.
+  // 0 => treat as "anywhere in-system" (may chase far targets).
+  double guard_jump_radius_mkm{50.0};
+
+  // How long to loiter at the jump point before re-evaluating.
+  int guard_jump_dwell_days{3};
+
+  // Runtime: last day we emitted a guard/intercept alert.
+  int guard_last_alert_day{0};
 
   // --- PatrolRegion ---
   // Region/sector id to patrol.
@@ -1626,6 +1657,14 @@ struct FleetMission {
   // Runtime: set when the mission has already executed its initial bombardment
   // phase (if enabled) so it can transition to invasion.
   bool assault_bombard_executed{false};
+
+  // --- BlockadeColony ---
+  // Target colony (not body) id to blockade.
+  Id blockade_colony_id{kInvalidId};
+
+  // Orbit/engagement radius around the target body's position.
+  // 0 => use the global blockade radius from SimConfig.
+  double blockade_radius_mkm{0.0};
 
   // --- Sustainment (all mission types) ---
   bool auto_refuel{true};

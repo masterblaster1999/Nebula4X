@@ -377,6 +377,9 @@ const char* fleet_mission_type_to_string(FleetMissionType t) {
     case FleetMissionType::Explore: return "explore";
     case FleetMissionType::PatrolRegion: return "patrol_region";
     case FleetMissionType::AssaultColony: return "assault_colony";
+    case FleetMissionType::BlockadeColony: return "blockade_colony";
+    case FleetMissionType::PatrolRoute: return "patrol_route";
+    case FleetMissionType::GuardJumpPoint: return "guard_jump_point";
   }
   return "none";
 }
@@ -389,6 +392,9 @@ FleetMissionType fleet_mission_type_from_string(const std::string& s) {
   if (s == "explore" || s == "explore_systems" || s == "exploration") return FleetMissionType::Explore;
   if (s == "patrol_region" || s == "patrolreg" || s == "region_patrol") return FleetMissionType::PatrolRegion;
   if (s == "assault_colony" || s == "assault" || s == "invade" || s == "conquer") return FleetMissionType::AssaultColony;
+  if (s == "blockade_colony" || s == "blockade") return FleetMissionType::BlockadeColony;
+  if (s == "patrol_route" || s == "route_patrol" || s == "patrol_link") return FleetMissionType::PatrolRoute;
+  if (s == "guard_jump_point" || s == "guard_jump" || s == "guard_jp" || s == "jump_guard") return FleetMissionType::GuardJumpPoint;
   return FleetMissionType::None;
 }
 
@@ -1674,6 +1680,13 @@ std::string serialize_game_to_json(const GameState& s) {
       m["patrol_system_id"] = static_cast<double>(f.mission.patrol_system_id);
       m["patrol_dwell_days"] = static_cast<double>(f.mission.patrol_dwell_days);
       m["patrol_leg_index"] = static_cast<double>(f.mission.patrol_leg_index);
+      m["patrol_route_a_system_id"] = static_cast<double>(f.mission.patrol_route_a_system_id);
+      m["patrol_route_b_system_id"] = static_cast<double>(f.mission.patrol_route_b_system_id);
+
+      m["guard_jump_point_id"] = static_cast<double>(f.mission.guard_jump_point_id);
+      m["guard_jump_radius_mkm"] = f.mission.guard_jump_radius_mkm;
+      m["guard_jump_dwell_days"] = static_cast<double>(f.mission.guard_jump_dwell_days);
+      m["guard_last_alert_day"] = static_cast<double>(f.mission.guard_last_alert_day);
 
       m["patrol_region_id"] = static_cast<double>(f.mission.patrol_region_id);
       m["patrol_region_dwell_days"] = static_cast<double>(f.mission.patrol_region_dwell_days);
@@ -1702,6 +1715,9 @@ std::string serialize_game_to_json(const GameState& s) {
       m["assault_use_bombardment"] = f.mission.assault_use_bombardment;
       m["assault_bombard_days"] = static_cast<double>(f.mission.assault_bombard_days);
       m["assault_bombard_executed"] = f.mission.assault_bombard_executed;
+
+      m["blockade_colony_id"] = static_cast<double>(f.mission.blockade_colony_id);
+      m["blockade_radius_mkm"] = f.mission.blockade_radius_mkm;
 
       m["auto_refuel"] = f.mission.auto_refuel;
       m["refuel_threshold_fraction"] = f.mission.refuel_threshold_fraction;
@@ -2933,6 +2949,24 @@ GameState deserialize_game_from_json(const std::string& json_text) {
           if (auto itl = m.find("patrol_leg_index"); itl != m.end()) {
             fl.mission.patrol_leg_index = std::max(0, static_cast<int>(itl->second.int_value(fl.mission.patrol_leg_index)));
           }
+          if (auto ita = m.find("patrol_route_a_system_id"); ita != m.end()) {
+            fl.mission.patrol_route_a_system_id = static_cast<Id>(ita->second.int_value(kInvalidId));
+          }
+          if (auto itb = m.find("patrol_route_b_system_id"); itb != m.end()) {
+            fl.mission.patrol_route_b_system_id = static_cast<Id>(itb->second.int_value(kInvalidId));
+          }
+          if (auto itgj = m.find("guard_jump_point_id"); itgj != m.end()) {
+            fl.mission.guard_jump_point_id = static_cast<Id>(itgj->second.int_value(fl.mission.guard_jump_point_id));
+          }
+          if (auto itgr = m.find("guard_jump_radius_mkm"); itgr != m.end()) {
+            fl.mission.guard_jump_radius_mkm = std::max(0.0, itgr->second.number_value(fl.mission.guard_jump_radius_mkm));
+          }
+          if (auto itgd = m.find("guard_jump_dwell_days"); itgd != m.end()) {
+            fl.mission.guard_jump_dwell_days = std::max(1, static_cast<int>(itgd->second.int_value(fl.mission.guard_jump_dwell_days)));
+          }
+          if (auto itga = m.find("guard_last_alert_day"); itga != m.end()) {
+            fl.mission.guard_last_alert_day = static_cast<int>(itga->second.int_value(fl.mission.guard_last_alert_day));
+          }
           if (auto itrgn = m.find("patrol_region_id"); itrgn != m.end()) {
             fl.mission.patrol_region_id = static_cast<Id>(itrgn->second.int_value(kInvalidId));
           }
@@ -3007,6 +3041,13 @@ GameState deserialize_game_from_json(const std::string& json_text) {
           }
           if (auto iae = m.find("assault_bombard_executed"); iae != m.end()) {
             fl.mission.assault_bombard_executed = iae->second.bool_value(fl.mission.assault_bombard_executed);
+          }
+
+          if (auto ibc = m.find("blockade_colony_id"); ibc != m.end()) {
+            fl.mission.blockade_colony_id = static_cast<Id>(ibc->second.int_value(fl.mission.blockade_colony_id));
+          }
+          if (auto ibr = m.find("blockade_radius_mkm"); ibr != m.end()) {
+            fl.mission.blockade_radius_mkm = std::max(0.0, ibr->second.number_value(fl.mission.blockade_radius_mkm));
           }
 
           if (auto itar = m.find("auto_refuel"); itar != m.end()) {

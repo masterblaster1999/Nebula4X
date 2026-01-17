@@ -1594,6 +1594,7 @@ double Simulation::terraforming_points_per_day(const Colony& c) const {
     const auto m = compute_faction_economy_multipliers(content_, *fac);
     total *= std::max(0.0, m.terraforming);
   }
+  if (cfg_.enable_blockades) total *= blockade_output_multiplier_for_colony(c.id);
   return std::max(0.0, total);
 }
 
@@ -1610,6 +1611,7 @@ double Simulation::troop_training_points_per_day(const Colony& c) const {
     const auto m = compute_faction_economy_multipliers(content_, *fac);
     total *= std::max(0.0, m.troop_training);
   }
+  if (cfg_.enable_blockades) total *= blockade_output_multiplier_for_colony(c.id);
   return std::max(0.0, total);
 }
 
@@ -1628,6 +1630,7 @@ double Simulation::crew_training_points_per_day(const Colony& c) const {
     total *= std::max(0.0, m.troop_training);
   }
   total *= std::max(0.0, cfg_.crew_training_points_multiplier);
+  if (cfg_.enable_blockades) total *= blockade_output_multiplier_for_colony(c.id);
   return std::max(0.0, total);
 }
 

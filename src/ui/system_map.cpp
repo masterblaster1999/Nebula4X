@@ -1124,7 +1124,28 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
     }
   }
 
-  // Jump points
+  // Jump points (guard overlays)
+  std::unordered_map<Id, int> guarded_jump_points;
+  guarded_jump_points.reserve(sys->jump_points.size() + 4);
+
+  Id selected_guard_jp = kInvalidId;
+  double selected_guard_radius_mkm = 0.0;
+
+  if (viewer_faction_id != kInvalidId) {
+    for (const auto& [fid, fl] : s.fleets) {
+      (void)fid;
+      if (fl.faction_id != viewer_faction_id) continue;
+      if (fl.mission.type != FleetMissionType::GuardJumpPoint) continue;
+      if (fl.mission.guard_jump_point_id == kInvalidId) continue;
+      guarded_jump_points[fl.mission.guard_jump_point_id] += 1;
+    }
+
+    if (selected_fleet && selected_fleet->mission.type == FleetMissionType::GuardJumpPoint) {
+      selected_guard_jp = selected_fleet->mission.guard_jump_point_id;
+      selected_guard_radius_mkm = selected_fleet->mission.guard_jump_radius_mkm;
+    }
+  }
+
   for (Id jid : sys->jump_points) {
     const auto* jp = find_ptr(s.jump_points, jid);
     if (!jp) continue;
@@ -1134,6 +1155,27 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
     const bool surveyed = (!ui.fog_of_war) || sim.is_jump_point_surveyed_by_faction(viewer_faction_id, jid);
     const ImU32 col = (surveyed ? color_jump() : IM_COL32(90, 90, 100, 255));
     const ImU32 text_col = (surveyed ? IM_COL32(200, 200, 200, 255) : IM_COL32(140, 140, 150, 255));
+
+    // Guard overlays: show which jump points are currently being guarded by fleets
+    // of the viewer faction, and draw the selected fleet's response radius.
+    const auto itg = guarded_jump_points.find(jid);
+    if (itg != guarded_jump_points.end()) {
+      draw->AddCircle(p, r + 3.0f, IM_COL32(0, 255, 140, 170), 0, 2.0f);
+      if (itg->second > 1) {
+        draw->AddCircle(p, r + 5.0f, IM_COL32(0, 255, 140, 110), 0, 1.5f);
+      }
+    }
+
+    if (jid == selected_guard_jp) {
+      draw->AddCircle(p, r + 6.0f, IM_COL32(255, 220, 80, 220), 0, 2.5f);
+      if (selected_guard_radius_mkm > 1e-9) {
+        const float rr = static_cast<float>(selected_guard_radius_mkm * scale * zoom);
+        if (rr > r + 8.0f && rr < 5000.0f) {
+          draw->AddCircle(p, rr, IM_COL32(0, 255, 140, 70), 0, 1.25f);
+        }
+      }
+    }
+
     draw->AddCircle(p, r, col, 0, 2.0f);
     draw->AddText(ImVec2(p.x + 6, p.y - 6), text_col, jp->name.c_str());
   }

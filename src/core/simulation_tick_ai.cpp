@@ -2741,6 +2741,240 @@ void Simulation::tick_ai() {
 
 
 
+
+      if (fl.mission.type == FleetMissionType::GuardJumpPoint) {
+        // GuardJumpPoint: Hold position near a specific jump point, intercepting
+        // detected hostiles within a response radius.
+        Id jp_id = fl.mission.guard_jump_point_id;
+        const JumpPoint* jp = (jp_id != kInvalidId) ? find_ptr(state_.jump_points, jp_id) : nullptr;
+
+        // Best-effort default: pick the lowest-id jump point in the fleet leader's
+        // current system when the mission target is unset / invalid.
+        if (!jp || jp->system_id == kInvalidId) {
+          const StarSystem* lsys = find_ptr(state_.systems, leader->system_id);
+          if (lsys) {
+            auto jps = lsys->jump_points;
+            std::sort(jps.begin(), jps.end());
+            for (Id cand : jps) {
+              const JumpPoint* jp2 = find_ptr(state_.jump_points, cand);
+              if (!jp2) continue;
+              if (jp2->system_id == kInvalidId) continue;
+              jp_id = cand;
+              jp = jp2;
+              break;
+            }
+          }
+          fl.mission.guard_jump_point_id = jp_id;
+        }
+
+        if (!jp || jp->system_id == kInvalidId) continue;
+
+        const Id guard_sys = jp->system_id;
+        const Vec2 anchor_pos = jp->position_mkm;
+        const double r_mkm = std::max(0.0, fl.mission.guard_jump_radius_mkm);
+
+        // If we're not in the guard system yet, go there first.
+        if (leader->system_id != guard_sys) {
+          if (fleet_orders_overrideable(fl)) {
+            (void)clear_fleet_orders(fid);
+            (void)issue_fleet_travel_to_system(fid, guard_sys, /*restrict_to_discovered=*/true);
+          }
+          continue;
+        }
+
+        // Engage detected hostiles near the guarded jump point.
+        std::vector<Id> hostiles = detected_hostile_ships_in_system(fl.faction_id, guard_sys);
+        if (r_mkm > 1e-9) {
+          hostiles.erase(std::remove_if(hostiles.begin(), hostiles.end(), [&](Id tid) {
+            const Ship* t = find_ptr(state_.ships, tid);
+            if (!t) return true;
+            return (t->position_mkm - anchor_pos).length() > r_mkm + 1e-9;
+          }), hostiles.end());
+        }
+
+        if (!hostiles.empty()) {
+          Id best = kInvalidId;
+          int best_prio = 999;
+          double best_dist = 0.0;
+
+          for (Id tid : hostiles) {
+            const Ship* tgt = find_ptr(state_.ships, tid);
+            if (!tgt) continue;
+            const ShipDesign* td = find_design(tgt->design_id);
+            const ShipRole tr = td ? td->role : ShipRole::Unknown;
+            const int prio = combat_target_priority(tr);
+            const double dist = (tgt->position_mkm - anchor_pos).length();
+
+            if (best == kInvalidId || prio < best_prio ||
+                (prio == best_prio && (dist < best_dist - 1e-9 ||
+                                       (std::abs(dist - best_dist) <= 1e-9 && tid < best)))) {
+              best = tid;
+              best_prio = prio;
+              best_dist = dist;
+            }
+          }
+
+          if (best != kInvalidId && fleet_orders_overrideable(fl)) {
+            (void)clear_fleet_orders(fid);
+            (void)issue_fleet_attack_ship(fid, best, /*restrict_to_discovered=*/true);
+
+            // Best-effort intel alert (rate-limited to 1/day unless target changes).
+            if (best != fl.mission.last_target_ship_id || fl.mission.guard_last_alert_day != now_day) {
+              fl.mission.guard_last_alert_day = now_day;
+
+              const auto* sys = find_ptr(state_.systems, guard_sys);
+              const auto* tgt = find_ptr(state_.ships, best);
+              std::string msg = "Guard: " + fl.name + " intercepting ";
+              msg += (tgt ? (tgt->name.empty() ? ("Ship " + std::to_string(best)) : tgt->name)
+                          : ("Ship " + std::to_string(best)));
+              msg += " near " + jp->name;
+              if (sys) msg += " (" + sys->name + ")";
+
+              EventContext ctx;
+              ctx.faction_id = fl.faction_id;
+              ctx.system_id = guard_sys;
+              ctx.ship_id = best;
+              push_event(EventLevel::Info, EventCategory::Intel, std::move(msg), ctx);
+            }
+
+            fl.mission.last_target_ship_id = best;
+          }
+          continue;
+        }
+
+        // No hostiles: return to / maintain a defensive picket at the jump point.
+        if (fleet_orders_overrideable(fl)) {
+          const double station_tol = std::max(0.5, cfg_.docking_range_mkm);
+
+          const bool at_anchor = (leader->system_id == guard_sys) &&
+                                 ((leader->position_mkm - anchor_pos).length() <= station_tol + 1e-9);
+
+          bool need_orders = false;
+          bool already_moving_to_anchor = false;
+
+          auto it_ord = state_.ship_orders.find(leader->id);
+          if (it_ord != state_.ship_orders.end() && !it_ord->second.queue.empty()) {
+            const auto& ord = it_ord->second.queue.front();
+            if (const auto* mv = std::get_if<MoveToPoint>(&ord)) {
+              if ((mv->target_mkm - anchor_pos).length() <= station_tol + 1e-9) {
+                already_moving_to_anchor = true;
+              }
+            }
+            if (std::holds_alternative<WaitDays>(ord)) {
+              already_moving_to_anchor = true;
+            }
+          }
+
+          if (!at_anchor && already_moving_to_anchor) {
+            need_orders = false;
+          } else if (!at_anchor) {
+            need_orders = true;
+          } else {
+            if (it_ord == state_.ship_orders.end() || it_ord->second.queue.empty()) {
+              need_orders = true;
+            } else {
+              const auto& ord = it_ord->second.queue.front();
+              if (!(std::holds_alternative<WaitDays>(ord) ||
+                    (std::holds_alternative<MoveToPoint>(ord)))) {
+                need_orders = true;
+              }
+            }
+          }
+
+          if (need_orders) {
+            (void)clear_fleet_orders(fid);
+            (void)issue_fleet_move_to_point(fid, anchor_pos);
+            (void)issue_fleet_wait_days(fid, std::max(1, fl.mission.guard_jump_dwell_days));
+          }
+        }
+
+        continue;
+      }
+
+      if (fl.mission.type == FleetMissionType::PatrolRoute) {
+        // PatrolRoute: shuttle between two systems and engage detected hostiles
+        // in any system encountered along the path.
+        Id a = fl.mission.patrol_route_a_system_id;
+        Id b = fl.mission.patrol_route_b_system_id;
+
+        // Best-effort defaults: if unset, seed endpoints from the fleet's current location.
+        if (a == kInvalidId) a = leader->system_id;
+        if (b == kInvalidId) b = a;
+        fl.mission.patrol_route_a_system_id = a;
+        fl.mission.patrol_route_b_system_id = b;
+
+        if (a == kInvalidId || b == kInvalidId) continue;
+
+        // Engage detected hostiles in the fleet's *current* system, regardless of
+        // whether we are traveling or parked.
+        {
+          const auto hostiles = detected_hostile_ships_in_system(fl.faction_id, leader->system_id);
+          if (!hostiles.empty()) {
+            Id best = kInvalidId;
+            int best_prio = 999;
+            double best_dist = 0.0;
+
+            for (Id tid : hostiles) {
+              const Ship* tgt = find_ptr(state_.ships, tid);
+              if (!tgt) continue;
+              const ShipDesign* td = find_design(tgt->design_id);
+              const ShipRole tr = td ? td->role : ShipRole::Unknown;
+              const int prio = combat_target_priority(tr);
+              const double dist = (tgt->position_mkm - leader->position_mkm).length();
+
+              if (best == kInvalidId || prio < best_prio ||
+                  (prio == best_prio && (dist < best_dist - 1e-9 ||
+                                         (std::abs(dist - best_dist) <= 1e-9 && tid < best)))) {
+                best = tid;
+                best_prio = prio;
+                best_dist = dist;
+              }
+            }
+
+            if (best != kInvalidId && fleet_orders_overrideable(fl)) {
+              (void)clear_fleet_orders(fid);
+              (void)issue_fleet_attack_ship(fid, best, /*restrict_to_discovered=*/true);
+              fl.mission.last_target_ship_id = best;
+            }
+            continue;
+          }
+        }
+
+        // Determine the current target endpoint.
+        const int leg = (fl.mission.patrol_leg_index < 0) ? 0 : fl.mission.patrol_leg_index;
+        const bool to_b = ((leg % 2) == 0);
+        const Id target_sys = to_b ? b : a;
+        const Id next_sys = to_b ? a : b;
+
+        // If we're not in the target system yet, route there.
+        if (leader->system_id != target_sys) {
+          // TravelViaJump orders are not overrideable, so this won't thrash while in transit.
+          if (fleet_orders_overrideable(fl)) {
+            (void)clear_fleet_orders(fid);
+            (void)issue_fleet_travel_to_system(fid, target_sys, /*restrict_to_discovered=*/true);
+          }
+          continue;
+        }
+
+        // When idle at an endpoint, loiter, then route to the other endpoint.
+        if (!fleet_all_orders_empty(fl)) continue;
+
+        const int dwell = std::max(1, fl.mission.patrol_dwell_days);
+        (void)issue_fleet_wait_days(fid, dwell);
+
+        bool issued = true;
+        if (next_sys != target_sys) {
+          issued = issue_fleet_travel_to_system(fid, next_sys, /*restrict_to_discovered=*/true);
+        }
+
+        if (issued) {
+          fl.mission.patrol_leg_index = leg + 1;
+        }
+        continue;
+      }
+
+
+
       if (fl.mission.type == FleetMissionType::PatrolRegion) {
         // Region-wide patrol: cycle through discovered systems in a region and
         // visit key waypoints (friendly colonies, then jump points, then major bodies).
@@ -3412,6 +3646,107 @@ void Simulation::tick_ai() {
             if (sh->faction_id != fl.faction_id) continue;
             if (sh->troops <= 1e-6) continue;
             (void)issue_invade_colony(sid, target_cid, /*restrict_to_discovered=*/true);
+          }
+        }
+
+        continue;
+      }
+
+      if (fl.mission.type == FleetMissionType::BlockadeColony) {
+        const Id target_cid = fl.mission.blockade_colony_id;
+        const Colony* tgt_col = (target_cid != kInvalidId) ? find_ptr(state_.colonies, target_cid) : nullptr;
+        const Body* tgt_body = tgt_col ? find_ptr(state_.bodies, tgt_col->body_id) : nullptr;
+        const Id target_sys = tgt_body ? tgt_body->system_id : kInvalidId;
+        if (!tgt_col || !tgt_body || target_sys == kInvalidId) continue;
+
+        // Mission complete/invalid: colony is no longer a hostile target.
+        if (tgt_col->faction_id == fl.faction_id || are_factions_trade_partners(fl.faction_id, tgt_col->faction_id) ||
+            (!are_factions_hostile(fl.faction_id, tgt_col->faction_id) &&
+             !are_factions_hostile(tgt_col->faction_id, fl.faction_id))) {
+          fl.mission = FleetMission{};
+          continue;
+        }
+
+        // Can't plan against undiscovered systems.
+        if (!is_system_discovered_by_faction(fl.faction_id, target_sys)) continue;
+
+        const Vec2 anchor_pos = tgt_body->position_mkm;
+        double engage_radius = fl.mission.blockade_radius_mkm;
+        if (engage_radius <= 0.0) engage_radius = std::max(0.0, cfg_.blockade_radius_mkm);
+
+        // If we're not in the target system yet, go there first.
+        if (leader->system_id != target_sys) {
+          if (fleet_orders_overrideable(fl)) {
+            (void)clear_fleet_orders(fid);
+            (void)issue_fleet_travel_to_system(fid, target_sys, /*restrict_to_discovered=*/true);
+            (void)issue_fleet_move_to_body(fid, tgt_body->id, /*restrict_to_discovered=*/true);
+            (void)issue_fleet_orbit_body(fid, tgt_body->id, /*duration_days=*/-1,
+                                        /*restrict_to_discovered=*/true);
+          }
+          continue;
+        }
+
+        // Engage detected hostiles near the target body.
+        const auto hostiles = detected_hostile_ships_in_system(fl.faction_id, target_sys);
+        if (!hostiles.empty()) {
+          Id best = kInvalidId;
+          int best_prio = 999;
+          double best_dist = 0.0;
+
+          for (Id tid : hostiles) {
+            const Ship* tgt = find_ptr(state_.ships, tid);
+            if (!tgt) continue;
+            if (engage_radius > 0.0) {
+              const double dist_anchor = (tgt->position_mkm - anchor_pos).length();
+              if (dist_anchor > engage_radius + 1e-9) continue;
+            }
+            const ShipDesign* td = find_design(tgt->design_id);
+            const ShipRole tr = td ? td->role : ShipRole::Unknown;
+            const int prio = combat_target_priority(tr);
+            const double dist = (tgt->position_mkm - leader->position_mkm).length();
+
+            if (best == kInvalidId || prio < best_prio ||
+                (prio == best_prio && (dist < best_dist - 1e-9 ||
+                                       (std::abs(dist - best_dist) <= 1e-9 && tid < best)))) {
+              best = tid;
+              best_prio = prio;
+              best_dist = dist;
+            }
+          }
+
+          if (best != kInvalidId && fleet_orders_overrideable(fl)) {
+            (void)clear_fleet_orders(fid);
+            (void)issue_fleet_attack_ship(fid, best, /*restrict_to_discovered=*/true);
+            fl.mission.last_target_ship_id = best;
+          }
+          continue;
+        }
+
+        // No hostiles: maintain orbit around the target body.
+        if (fleet_orders_overrideable(fl)) {
+          const double dock_range = std::max(0.0, cfg_.docking_range_mkm);
+          const bool at_body = (leader->system_id == target_sys) &&
+                               ((leader->position_mkm - anchor_pos).length() <= dock_range + 1e-9);
+
+          bool need_orders = false;
+          if (!at_body) {
+            need_orders = true;
+          } else {
+            auto it_ord = state_.ship_orders.find(leader->id);
+            if (it_ord == state_.ship_orders.end() || it_ord->second.queue.empty()) {
+              need_orders = true;
+            } else if (const auto* ob = std::get_if<OrbitBody>(&it_ord->second.queue.front())) {
+              if (ob->body_id != tgt_body->id) need_orders = true;
+            } else {
+              need_orders = true;
+            }
+          }
+
+          if (need_orders) {
+            (void)clear_fleet_orders(fid);
+            (void)issue_fleet_move_to_body(fid, tgt_body->id, /*restrict_to_discovered=*/true);
+            (void)issue_fleet_orbit_body(fid, tgt_body->id, /*duration_days=*/-1,
+                                        /*restrict_to_discovered=*/true);
           }
         }
 
@@ -4156,6 +4491,27 @@ void Simulation::tick_civilian_trade_convoys() {
   std::uint64_t rng = static_cast<std::uint64_t>(state_.date.days_since_epoch());
   rng ^= static_cast<std::uint64_t>(merchant_fid) * 0x9e3779b97f4a7c15ULL;
 
+  // Approximate blockade pressure per system (max over colonies in that system).
+  std::unordered_map<Id, double> blockade_pressure_by_system;
+  const double blockade_risk_w = std::max(0.0, cfg_.civilian_trade_convoy_blockade_risk_weight);
+  if (cfg_.enable_blockades && blockade_risk_w > 1e-12) {
+    blockade_pressure_by_system.reserve(state_.systems.size() * 2 + 8);
+    ensure_blockade_cache_current();
+    for (const auto& [cid, c] : state_.colonies) {
+      (void)cid;
+      const Body* b = find_ptr(state_.bodies, c.body_id);
+      if (!b) continue;
+      const Id sys = b->system_id;
+      if (sys == kInvalidId) continue;
+      const auto it_bs = blockade_cache_.find(c.id);
+      const double p = (it_bs != blockade_cache_.end()) ? std::clamp(it_bs->second.pressure, 0.0, 1.0) : 0.0;
+      auto it = blockade_pressure_by_system.find(sys);
+      if (it == blockade_pressure_by_system.end() || p > it->second + 1e-12) {
+        blockade_pressure_by_system[sys] = p;
+      }
+    }
+  }
+
   // Copy lanes into a local working list for weighted sampling without
   // replacement (helps spread convoys across multiple corridors).
   struct LanePick { Id from; Id to; double w; std::vector<TradeGoodFlow> flows; };
@@ -4170,7 +4526,20 @@ void Simulation::tick_civilian_trade_convoys() {
     // deterministic) and automatically responds to piracy suppression.
     const double ra = effective_piracy_risk_for_system(state_, cfg_, l.from_system_id);
     const double rb = effective_piracy_risk_for_system(state_, cfg_, l.to_system_id);
-    const double risk = 0.5 * (ra + rb);
+    double risk = 0.5 * (ra + rb);
+
+    // Blockade disruption also deters civilian traffic.
+    if (blockade_risk_w > 1e-12 && !blockade_pressure_by_system.empty()) {
+      const double ba = blockade_pressure_by_system.contains(l.from_system_id)
+                           ? blockade_pressure_by_system[l.from_system_id]
+                           : 0.0;
+      const double bb = blockade_pressure_by_system.contains(l.to_system_id)
+                           ? blockade_pressure_by_system[l.to_system_id]
+                           : 0.0;
+      const double blockade_risk = 0.5 * (ba + bb);
+      risk += blockade_risk_w * blockade_risk;
+    }
+    risk = std::clamp(risk, 0.0, 1.0);
 
     const double av = std::clamp(cfg_.civilian_trade_convoy_risk_aversion, 0.0, 1.0);
     const double min_mult = std::clamp(cfg_.civilian_trade_convoy_min_risk_weight, 0.0, 1.0);
@@ -4335,21 +4704,9 @@ void Simulation::tick_piracy_suppression() {
     if (!fac) continue;
     if (fac->control == FactionControl::AI_Pirate) continue;
 
-    // We only count explicit patrol missions (system/region) for suppression.
-    Id rid = kInvalidId;
-    if (fl->mission.type == FleetMissionType::PatrolRegion) {
-      rid = fl->mission.patrol_region_id;
-    } else if (fl->mission.type == FleetMissionType::PatrolSystem) {
-      const auto* psys = find_ptr(state_.systems, fl->mission.patrol_system_id);
-      if (psys) rid = psys->region_id;
-    } else {
-      continue;
-    }
-    if (rid == kInvalidId) continue;
-
-    // Require the fleet to actually be in the region right now; otherwise we'd
-    // suppress regions from across the galaxy while the fleet is still in
-    // transit.
+    // Count patrol missions that represent an active security presence.
+    // PatrolRoute contributes suppression to whichever region the fleet is
+    // currently traversing.
     const Id leader_id =
         (fl->leader_ship_id != kInvalidId)
             ? fl->leader_ship_id
@@ -4359,7 +4716,30 @@ void Simulation::tick_piracy_suppression() {
 
     const auto* sys_here = find_ptr(state_.systems, leader->system_id);
     if (!sys_here) continue;
-    if (sys_here->region_id != rid) continue;
+
+    Id rid = kInvalidId;
+    if (fl->mission.type == FleetMissionType::PatrolRegion) {
+      rid = fl->mission.patrol_region_id;
+      // Require the fleet to actually be in the region right now; otherwise we'd
+      // suppress regions from across the galaxy while the fleet is still in transit.
+      if (rid == kInvalidId) continue;
+      if (sys_here->region_id != rid) continue;
+    } else if (fl->mission.type == FleetMissionType::PatrolSystem) {
+      const auto* psys = find_ptr(state_.systems, fl->mission.patrol_system_id);
+      if (psys) rid = psys->region_id;
+      if (rid == kInvalidId) continue;
+      if (sys_here->region_id != rid) continue;
+    } else if (fl->mission.type == FleetMissionType::PatrolRoute) {
+      rid = sys_here->region_id;
+    } else if (fl->mission.type == FleetMissionType::GuardJumpPoint) {
+      const auto* jp = find_ptr(state_.jump_points, fl->mission.guard_jump_point_id);
+      if (!jp) continue;
+      if (jp->system_id != leader->system_id) continue;
+      rid = sys_here->region_id;
+    } else {
+      continue;
+    }
+    if (rid == kInvalidId) continue;
 
     double fp = 0.0;
     for (Id sid : fl->ship_ids) fp += ship_patrol_power(sid);
@@ -5472,6 +5852,7 @@ void Simulation::tick_repairs(double dt_days) {
     if (yards <= 0) continue;
 
     double capacity = per_yard * static_cast<double>(yards) * dt_days;
+    if (cfg_.enable_blockades) capacity *= blockade_output_multiplier_for_colony(cid);
     if (capacity <= 1e-9) continue;
 
     // Apply mineral limits (if configured).
