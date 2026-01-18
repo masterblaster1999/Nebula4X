@@ -2973,6 +2973,115 @@ void Simulation::tick_ai() {
         continue;
       }
 
+      if (fl.mission.type == FleetMissionType::PatrolCircuit) {
+        // PatrolCircuit: cycle through a user-defined list of waypoint systems,
+        // engaging detected hostiles in the current system.
+
+        // Best-effort defaults: if unset, seed from the fleet's current location.
+        auto& wps = fl.mission.patrol_circuit_system_ids;
+        wps.erase(std::remove(wps.begin(), wps.end(), kInvalidId), wps.end());
+        if (wps.empty() && leader->system_id != kInvalidId) {
+          wps.push_back(leader->system_id);
+        }
+        if (wps.empty()) continue;
+
+        // Engage detected hostiles in the fleet's *current* system, regardless
+        // of whether we are traveling or parked.
+        {
+          const auto hostiles = detected_hostile_ships_in_system(fl.faction_id, leader->system_id);
+          if (!hostiles.empty()) {
+            Id best = kInvalidId;
+            int best_prio = 999;
+            double best_dist = 0.0;
+
+            for (Id tid : hostiles) {
+              const Ship* tgt = find_ptr(state_.ships, tid);
+              if (!tgt) continue;
+              const ShipDesign* td = find_design(tgt->design_id);
+              const ShipRole tr = td ? td->role : ShipRole::Unknown;
+              const int prio = combat_target_priority(tr);
+              const double dist = (tgt->position_mkm - leader->position_mkm).length();
+
+              if (best == kInvalidId || prio < best_prio ||
+                  (prio == best_prio && (dist < best_dist - 1e-9 ||
+                                         (std::abs(dist - best_dist) <= 1e-9 && tid < best)))) {
+                best = tid;
+                best_prio = prio;
+                best_dist = dist;
+              }
+            }
+
+            if (best != kInvalidId && fleet_orders_overrideable(fl)) {
+              (void)clear_fleet_orders(fid);
+              (void)issue_fleet_attack_ship(fid, best, /*restrict_to_discovered=*/true);
+              fl.mission.last_target_ship_id = best;
+            }
+            continue;
+          }
+        }
+
+        const int n = static_cast<int>(wps.size());
+        int idx = fl.mission.patrol_leg_index;
+        if (idx < 0) idx = 0;
+        if (n > 0) idx = idx % n;
+        fl.mission.patrol_leg_index = idx;
+
+        // Current target waypoint.
+        Id target_sys = wps[idx];
+        if (target_sys == kInvalidId) continue;
+
+        // If we're not in the target system yet, route there.
+        if (leader->system_id != target_sys) {
+          if (fleet_orders_overrideable(fl)) {
+            (void)clear_fleet_orders(fid);
+            // If the target is unreachable (due to fog-of-war restrictions),
+            // fall back to the next reachable waypoint instead of stalling.
+            bool issued = issue_fleet_travel_to_system(fid, target_sys, /*restrict_to_discovered=*/true);
+            if (!issued && n > 1) {
+              for (int step = 1; step < n; ++step) {
+                const int nxt = (idx + step) % n;
+                const Id cand = wps[nxt];
+                if (cand == kInvalidId) continue;
+                if (issue_fleet_travel_to_system(fid, cand, /*restrict_to_discovered=*/true)) {
+                  fl.mission.patrol_leg_index = nxt;
+                  issued = true;
+                  break;
+                }
+              }
+            }
+            (void)issued;
+          }
+          continue;
+        }
+
+        // When idle at a waypoint, loiter, then route to the next waypoint.
+        if (!fleet_all_orders_empty(fl)) continue;
+
+        const int dwell = std::max(1, fl.mission.patrol_dwell_days);
+        (void)issue_fleet_wait_days(fid, dwell);
+
+        if (n <= 1) continue;
+
+        bool issued = false;
+        int next_idx = idx;
+        for (int step = 1; step <= n; ++step) {
+          const int nxt = (idx + step) % n;
+          const Id cand = wps[nxt];
+          if (cand == kInvalidId) continue;
+          if (cand == target_sys) continue;
+          if (issue_fleet_travel_to_system(fid, cand, /*restrict_to_discovered=*/true)) {
+            issued = true;
+            next_idx = nxt;
+            break;
+          }
+        }
+
+        if (issued) {
+          fl.mission.patrol_leg_index = next_idx;
+        }
+        continue;
+      }
+
 
 
       if (fl.mission.type == FleetMissionType::PatrolRegion) {
@@ -4730,6 +4839,8 @@ void Simulation::tick_piracy_suppression() {
       if (rid == kInvalidId) continue;
       if (sys_here->region_id != rid) continue;
     } else if (fl->mission.type == FleetMissionType::PatrolRoute) {
+      rid = sys_here->region_id;
+    } else if (fl->mission.type == FleetMissionType::PatrolCircuit) {
       rid = sys_here->region_id;
     } else if (fl->mission.type == FleetMissionType::GuardJumpPoint) {
       const auto* jp = find_ptr(state_.jump_points, fl->mission.guard_jump_point_id);

@@ -1500,6 +1500,10 @@ enum class FleetMissionType : std::uint8_t {
 
   // Hold position near a specific jump point, intercepting detected hostiles.
   GuardJumpPoint = 10,
+
+  // Patrol a user-defined list of waypoint systems in a loop.
+  // Useful for securing long multi-branch trade corridors.
+  PatrolCircuit = 11,
 };
 
 enum class FleetSustainmentMode : std::uint8_t {
@@ -1538,6 +1542,13 @@ struct FleetMission {
   // simple direction toggle (even=to B, odd=to A).
   Id patrol_route_a_system_id{kInvalidId};
   Id patrol_route_b_system_id{kInvalidId};
+
+  // --- PatrolCircuit ---
+  // Patrol a loop of waypoint systems in the order given.
+  //
+  // Uses patrol_dwell_days for loiter time at each waypoint and patrol_leg_index
+  // as the current waypoint index.
+  std::vector<Id> patrol_circuit_system_ids{};
 
   // --- GuardJumpPoint ---
   // Jump point id to guard.

@@ -13,6 +13,7 @@
 #include "nebula4x/util/log.h"
 
 #include "nebula4x/core/serialization.h"
+#include "nebula4x/core/trade_network.h"
 #include "nebula4x/util/file_io.h"
 #include "ui/panels.h"
 #include "ui/new_game_modal.h"
@@ -171,6 +172,7 @@ void App::frame() {
     autosave_mgr_.reset();
     ui_.last_autosave_game_path.clear();
     ui_.last_autosave_game_error.clear();
+    victory_window_autoopened_ = false;
   };
 
   // Apply UI scaling early so every window in this frame uses it.
@@ -455,6 +457,12 @@ void App::frame() {
   // Ensure we react in the same frame (avoids dereferencing stale selections).
   sync_on_state_generation_change();
 
+  // Auto-open the Victory window once when the game ends.
+  if (sim_.state().victory_state.game_over && !victory_window_autoopened_) {
+    ui_.show_victory_window = true;
+    victory_window_autoopened_ = true;
+  }
+
   // --- Rolling autosave (save-game snapshots) ---
   {
     nebula4x::AutosaveConfig cfg;
@@ -717,6 +725,88 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       if (auto it = obj->find("new_game_random_num_systems"); it != obj->end()) {
         ui_.new_game_random_num_systems = static_cast<int>(it->second.number_value(ui_.new_game_random_num_systems));
         ui_.new_game_random_num_systems = std::clamp(ui_.new_game_random_num_systems, 1, 64);
+      }
+      if (auto it = obj->find("new_game_random_galaxy_shape"); it != obj->end()) {
+        ui_.new_game_random_galaxy_shape = static_cast<int>(it->second.number_value(ui_.new_game_random_galaxy_shape));
+        ui_.new_game_random_galaxy_shape = std::clamp(ui_.new_game_random_galaxy_shape, 0, 5);
+      }
+      if (auto it = obj->find("new_game_random_placement_style"); it != obj->end()) {
+        ui_.new_game_random_placement_style = static_cast<int>(it->second.number_value(ui_.new_game_random_placement_style));
+        ui_.new_game_random_placement_style = std::clamp(ui_.new_game_random_placement_style, 0, 1);
+      }
+      if (auto it = obj->find("new_game_random_placement_quality"); it != obj->end()) {
+        ui_.new_game_random_placement_quality = static_cast<int>(it->second.number_value(ui_.new_game_random_placement_quality));
+        ui_.new_game_random_placement_quality = std::clamp(ui_.new_game_random_placement_quality, 4, 96);
+      }
+      if (auto it = obj->find("new_game_random_jump_network_style"); it != obj->end()) {
+        ui_.new_game_random_jump_network_style = static_cast<int>(it->second.number_value(ui_.new_game_random_jump_network_style));
+        ui_.new_game_random_jump_network_style = std::clamp(ui_.new_game_random_jump_network_style, 0, 6);
+      }
+      if (auto it = obj->find("new_game_random_jump_density"); it != obj->end()) {
+        ui_.new_game_random_jump_density = static_cast<float>(it->second.number_value(ui_.new_game_random_jump_density));
+        ui_.new_game_random_jump_density = std::clamp(ui_.new_game_random_jump_density, 0.0f, 2.0f);
+      }
+      if (auto it = obj->find("new_game_random_enable_regions"); it != obj->end()) {
+        ui_.new_game_random_enable_regions = it->second.bool_value(ui_.new_game_random_enable_regions);
+      }
+      if (auto it = obj->find("new_game_random_num_regions"); it != obj->end()) {
+        ui_.new_game_random_num_regions = static_cast<int>(it->second.number_value(ui_.new_game_random_num_regions));
+        ui_.new_game_random_num_regions = std::clamp(ui_.new_game_random_num_regions, -1, 12);
+      }
+      if (auto it = obj->find("new_game_random_ai_empires"); it != obj->end()) {
+        ui_.new_game_random_ai_empires = static_cast<int>(it->second.number_value(ui_.new_game_random_ai_empires));
+        ui_.new_game_random_ai_empires = std::clamp(ui_.new_game_random_ai_empires, -1, 12);
+      }
+      if (auto it = obj->find("new_game_random_enable_pirates"); it != obj->end()) {
+        ui_.new_game_random_enable_pirates = it->second.bool_value(ui_.new_game_random_enable_pirates);
+      }
+      if (auto it = obj->find("new_game_random_pirate_strength"); it != obj->end()) {
+        ui_.new_game_random_pirate_strength = static_cast<float>(it->second.number_value(ui_.new_game_random_pirate_strength));
+        ui_.new_game_random_pirate_strength = std::clamp(ui_.new_game_random_pirate_strength, 0.0f, 5.0f);
+      }
+      if (auto it = obj->find("new_game_random_enable_independents"); it != obj->end()) {
+        ui_.new_game_random_enable_independents = it->second.bool_value(ui_.new_game_random_enable_independents);
+      }
+      if (auto it = obj->find("new_game_random_num_independent_outposts"); it != obj->end()) {
+        ui_.new_game_random_num_independent_outposts = static_cast<int>(it->second.number_value(ui_.new_game_random_num_independent_outposts));
+        ui_.new_game_random_num_independent_outposts = std::clamp(ui_.new_game_random_num_independent_outposts, -1, 64);
+      }
+      if (auto it = obj->find("new_game_random_ensure_clear_home"); it != obj->end()) {
+        ui_.new_game_random_ensure_clear_home = it->second.bool_value(ui_.new_game_random_ensure_clear_home);
+      }
+
+      // Random galaxy preview options.
+      if (auto it = obj->find("new_game_preview_show_jumps"); it != obj->end()) {
+        ui_.new_game_preview_show_jumps = it->second.bool_value(ui_.new_game_preview_show_jumps);
+      }
+      if (auto it = obj->find("new_game_preview_show_labels"); it != obj->end()) {
+        ui_.new_game_preview_show_labels = it->second.bool_value(ui_.new_game_preview_show_labels);
+      }
+      if (auto it = obj->find("new_game_preview_show_regions"); it != obj->end()) {
+        ui_.new_game_preview_show_regions = it->second.bool_value(ui_.new_game_preview_show_regions);
+      }
+      if (auto it = obj->find("new_game_preview_show_nebula"); it != obj->end()) {
+        ui_.new_game_preview_show_nebula = it->second.bool_value(ui_.new_game_preview_show_nebula);
+      }
+      if (auto it = obj->find("new_game_preview_color_by_component"); it != obj->end()) {
+        ui_.new_game_preview_color_by_component = it->second.bool_value(ui_.new_game_preview_color_by_component);
+      }
+      if (auto it = obj->find("new_game_preview_show_chokepoints"); it != obj->end()) {
+        ui_.new_game_preview_show_chokepoints = it->second.bool_value(ui_.new_game_preview_show_chokepoints);
+      }
+
+      // Seed explorer defaults.
+      if (auto it = obj->find("new_game_seed_search_objective"); it != obj->end()) {
+        ui_.new_game_seed_search_objective = static_cast<int>(it->second.number_value(ui_.new_game_seed_search_objective));
+        ui_.new_game_seed_search_objective = std::clamp(ui_.new_game_seed_search_objective, 0, 3);
+      }
+      if (auto it = obj->find("new_game_seed_search_tries"); it != obj->end()) {
+        ui_.new_game_seed_search_tries = static_cast<int>(it->second.number_value(ui_.new_game_seed_search_tries));
+        ui_.new_game_seed_search_tries = std::clamp(ui_.new_game_seed_search_tries, 1, 2000);
+      }
+      if (auto it = obj->find("new_game_seed_search_steps_per_frame"); it != obj->end()) {
+        ui_.new_game_seed_search_steps_per_frame = static_cast<int>(it->second.number_value(ui_.new_game_seed_search_steps_per_frame));
+        ui_.new_game_seed_search_steps_per_frame = std::clamp(ui_.new_game_seed_search_steps_per_frame, 1, 200);
       }
 
       // UI scale (accessibility). This is a UI preference (not a save-game setting).
@@ -1087,6 +1177,62 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       }
       if (auto it = obj->find("show_galaxy_trade_hubs"); it != obj->end()) {
         ui_.show_galaxy_trade_hubs = it->second.bool_value(ui_.show_galaxy_trade_hubs);
+      }
+
+      if (auto it = obj->find("galaxy_trade_good_filter"); it != obj->end()) {
+        ui_.galaxy_trade_good_filter = static_cast<int>(it->second.number_value(ui_.galaxy_trade_good_filter));
+      }
+      // -1 means "all goods".
+      ui_.galaxy_trade_good_filter = std::clamp(ui_.galaxy_trade_good_filter, -1, kTradeGoodKindCount - 1);
+
+      if (auto it = obj->find("galaxy_trade_filter_include_secondary"); it != obj->end()) {
+        ui_.galaxy_trade_filter_include_secondary = it->second.bool_value(ui_.galaxy_trade_filter_include_secondary);
+      }
+      if (auto it = obj->find("galaxy_trade_min_lane_volume"); it != obj->end()) {
+        ui_.galaxy_trade_min_lane_volume = static_cast<float>(it->second.number_value(ui_.galaxy_trade_min_lane_volume));
+      }
+      ui_.galaxy_trade_min_lane_volume = std::clamp(ui_.galaxy_trade_min_lane_volume, 0.0f, 1.0e9f);
+
+      if (auto it = obj->find("galaxy_trade_risk_overlay"); it != obj->end()) {
+        ui_.galaxy_trade_risk_overlay = it->second.bool_value(ui_.galaxy_trade_risk_overlay);
+      }
+      if (auto it = obj->find("galaxy_trade_security_panel"); it != obj->end()) {
+        ui_.galaxy_trade_security_panel = it->second.bool_value(ui_.galaxy_trade_security_panel);
+      }
+      if (auto it = obj->find("galaxy_trade_security_top_n"); it != obj->end()) {
+        ui_.galaxy_trade_security_top_n = static_cast<int>(it->second.number_value(ui_.galaxy_trade_security_top_n));
+      }
+      ui_.galaxy_trade_security_top_n = std::clamp(ui_.galaxy_trade_security_top_n, 3, 30);
+      if (auto it = obj->find("show_galaxy_fleet_missions"); it != obj->end()) {
+        ui_.show_galaxy_fleet_missions = it->second.bool_value(ui_.show_galaxy_fleet_missions);
+      }
+      if (auto it = obj->find("galaxy_fleet_mission_alpha"); it != obj->end()) {
+        ui_.galaxy_fleet_mission_alpha = static_cast<float>(it->second.number_value(ui_.galaxy_fleet_mission_alpha));
+      }
+      ui_.galaxy_fleet_mission_alpha = std::clamp(ui_.galaxy_fleet_mission_alpha, 0.05f, 1.0f);
+      if (auto it = obj->find("show_galaxy_chokepoints"); it != obj->end()) {
+        ui_.show_galaxy_chokepoints = it->second.bool_value(ui_.show_galaxy_chokepoints);
+      }
+      if (auto it = obj->find("show_galaxy_regions"); it != obj->end()) {
+        ui_.show_galaxy_regions = it->second.bool_value(ui_.show_galaxy_regions);
+      }
+      if (auto it = obj->find("show_galaxy_region_labels"); it != obj->end()) {
+        ui_.show_galaxy_region_labels = it->second.bool_value(ui_.show_galaxy_region_labels);
+      }
+      if (auto it = obj->find("show_galaxy_region_boundaries"); it != obj->end()) {
+        ui_.show_galaxy_region_boundaries = it->second.bool_value(ui_.show_galaxy_region_boundaries);
+      }
+      if (auto it = obj->find("galaxy_region_dim_nonselected"); it != obj->end()) {
+        ui_.galaxy_region_dim_nonselected = it->second.bool_value(ui_.galaxy_region_dim_nonselected);
+      }
+      if (auto it = obj->find("galaxy_region_boundary_voronoi"); it != obj->end()) {
+        ui_.galaxy_region_boundary_voronoi = it->second.bool_value(ui_.galaxy_region_boundary_voronoi);
+      }
+      if (auto it = obj->find("show_galaxy_region_centers"); it != obj->end()) {
+        ui_.show_galaxy_region_centers = it->second.bool_value(ui_.show_galaxy_region_centers);
+      }
+      if (auto it = obj->find("show_galaxy_region_border_links"); it != obj->end()) {
+        ui_.show_galaxy_region_border_links = it->second.bool_value(ui_.show_galaxy_region_border_links);
       }
       if (auto it = obj->find("galaxy_procgen_lens_mode"); it != obj->end()) {
         ui_.galaxy_procgen_lens_mode = static_cast<ProcGenLensMode>(
@@ -1866,6 +2012,32 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     o["new_game_scenario"] = static_cast<double>(ui_.new_game_scenario);
     o["new_game_random_seed"] = static_cast<double>(ui_.new_game_random_seed);
     o["new_game_random_num_systems"] = static_cast<double>(ui_.new_game_random_num_systems);
+    o["new_game_random_galaxy_shape"] = static_cast<double>(ui_.new_game_random_galaxy_shape);
+    o["new_game_random_placement_style"] = static_cast<double>(ui_.new_game_random_placement_style);
+    o["new_game_random_placement_quality"] = static_cast<double>(ui_.new_game_random_placement_quality);
+    o["new_game_random_jump_network_style"] = static_cast<double>(ui_.new_game_random_jump_network_style);
+    o["new_game_random_jump_density"] = static_cast<double>(ui_.new_game_random_jump_density);
+    o["new_game_random_enable_regions"] = ui_.new_game_random_enable_regions;
+    o["new_game_random_num_regions"] = static_cast<double>(ui_.new_game_random_num_regions);
+    o["new_game_random_ai_empires"] = static_cast<double>(ui_.new_game_random_ai_empires);
+    o["new_game_random_enable_pirates"] = ui_.new_game_random_enable_pirates;
+    o["new_game_random_pirate_strength"] = static_cast<double>(ui_.new_game_random_pirate_strength);
+    o["new_game_random_enable_independents"] = ui_.new_game_random_enable_independents;
+    o["new_game_random_num_independent_outposts"] = static_cast<double>(ui_.new_game_random_num_independent_outposts);
+    o["new_game_random_ensure_clear_home"] = ui_.new_game_random_ensure_clear_home;
+
+    // Random galaxy preview options.
+    o["new_game_preview_show_jumps"] = ui_.new_game_preview_show_jumps;
+    o["new_game_preview_show_labels"] = ui_.new_game_preview_show_labels;
+    o["new_game_preview_show_regions"] = ui_.new_game_preview_show_regions;
+    o["new_game_preview_show_nebula"] = ui_.new_game_preview_show_nebula;
+    o["new_game_preview_color_by_component"] = ui_.new_game_preview_color_by_component;
+    o["new_game_preview_show_chokepoints"] = ui_.new_game_preview_show_chokepoints;
+
+    // Seed explorer defaults.
+    o["new_game_seed_search_objective"] = static_cast<double>(ui_.new_game_seed_search_objective);
+    o["new_game_seed_search_tries"] = static_cast<double>(ui_.new_game_seed_search_tries);
+    o["new_game_seed_search_steps_per_frame"] = static_cast<double>(ui_.new_game_seed_search_steps_per_frame);
 
     // Accessibility / HUD.
     o["ui_scale"] = static_cast<double>(ui_.ui_scale);
@@ -1990,6 +2162,23 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     o["show_galaxy_freight_lanes"] = ui_.show_galaxy_freight_lanes;
     o["show_galaxy_trade_lanes"] = ui_.show_galaxy_trade_lanes;
     o["show_galaxy_trade_hubs"] = ui_.show_galaxy_trade_hubs;
+
+    o["galaxy_trade_good_filter"] = static_cast<double>(ui_.galaxy_trade_good_filter);
+    o["galaxy_trade_filter_include_secondary"] = ui_.galaxy_trade_filter_include_secondary;
+    o["galaxy_trade_min_lane_volume"] = static_cast<double>(ui_.galaxy_trade_min_lane_volume);
+    o["galaxy_trade_risk_overlay"] = ui_.galaxy_trade_risk_overlay;
+    o["galaxy_trade_security_panel"] = ui_.galaxy_trade_security_panel;
+    o["galaxy_trade_security_top_n"] = static_cast<double>(ui_.galaxy_trade_security_top_n);
+    o["show_galaxy_fleet_missions"] = ui_.show_galaxy_fleet_missions;
+    o["galaxy_fleet_mission_alpha"] = static_cast<double>(ui_.galaxy_fleet_mission_alpha);
+    o["show_galaxy_chokepoints"] = ui_.show_galaxy_chokepoints;
+    o["show_galaxy_regions"] = ui_.show_galaxy_regions;
+    o["show_galaxy_region_labels"] = ui_.show_galaxy_region_labels;
+    o["show_galaxy_region_boundaries"] = ui_.show_galaxy_region_boundaries;
+    o["galaxy_region_dim_nonselected"] = ui_.galaxy_region_dim_nonselected;
+    o["galaxy_region_boundary_voronoi"] = ui_.galaxy_region_boundary_voronoi;
+    o["show_galaxy_region_centers"] = ui_.show_galaxy_region_centers;
+    o["show_galaxy_region_border_links"] = ui_.show_galaxy_region_border_links;
     o["galaxy_procgen_lens_mode"] = static_cast<double>(static_cast<int>(ui_.galaxy_procgen_lens_mode));
     o["galaxy_procgen_lens_alpha"] = static_cast<double>(ui_.galaxy_procgen_lens_alpha);
     o["galaxy_procgen_lens_show_legend"] = ui_.galaxy_procgen_lens_show_legend;

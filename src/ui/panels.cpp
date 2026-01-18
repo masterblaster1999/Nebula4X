@@ -3627,8 +3627,9 @@ const bool can_up = (i > 0);
             "Blockade colony",
             "Patrol route",
             "Guard jump point",
+            "Patrol circuit (waypoints)",
           };
-          static_assert(IM_ARRAYSIZE(kMissionNames) == 1 + static_cast<int>(FleetMissionType::GuardJumpPoint),
+          static_assert(IM_ARRAYSIZE(kMissionNames) == 1 + static_cast<int>(FleetMissionType::PatrolCircuit),
                         "Update mission names array");
           int mission_idx = static_cast<int>(fleet_mut->mission.type);
           if (mission_idx < 0 || mission_idx >= static_cast<int>(IM_ARRAYSIZE(kMissionNames))) mission_idx = 0;
@@ -3652,6 +3653,18 @@ const bool can_up = (i > 0);
             }
             if (fleet_mut->mission.type == FleetMissionType::PatrolSystem && fleet_mut->mission.patrol_system_id == kInvalidId) {
               if (s.selected_system != kInvalidId) fleet_mut->mission.patrol_system_id = s.selected_system;
+            }
+            if (fleet_mut->mission.type == FleetMissionType::PatrolCircuit && fleet_mut->mission.patrol_circuit_system_ids.empty()) {
+              Id seed = kInvalidId;
+              if (s.selected_system != kInvalidId && (!ui.fog_of_war || sim.is_system_discovered_by_faction(fleet_mut->faction_id, s.selected_system))) {
+                seed = s.selected_system;
+              } else if (leader) {
+                seed = leader->system_id;
+              }
+              if (seed != kInvalidId) {
+                fleet_mut->mission.patrol_circuit_system_ids.push_back(seed);
+              }
+              fleet_mut->mission.patrol_leg_index = 0;
             }
             if (fleet_mut->mission.type == FleetMissionType::GuardJumpPoint && fleet_mut->mission.guard_jump_point_id == kInvalidId) {
               Id sys_id = kInvalidId;
@@ -3960,6 +3973,136 @@ const bool can_up = (i > 0);
                 fleet_mut->mission.patrol_dwell_days = std::max(1, dwell);
               }
               ImGui::TextDisabled("Patrol waypoints: jump points first, then major bodies.");
+            }
+
+            if (fleet_mut->mission.type == FleetMissionType::PatrolCircuit) {
+              ImGui::Spacing();
+              ImGui::Text("Patrol circuit");
+
+              auto add_wp = [&](Id sid) {
+                if (sid == kInvalidId) return;
+                if (!sim.is_system_discovered_by_faction(fleet_mut->faction_id, sid)) return;
+                auto& wps = fleet_mut->mission.patrol_circuit_system_ids;
+                // Keep the circuit simple by de-duplicating while preserving order (move to end).
+                wps.erase(std::remove(wps.begin(), wps.end(), sid), wps.end());
+                wps.push_back(sid);
+                fleet_mut->mission.patrol_leg_index = 0;
+              };
+
+              // Quick add from current UI selection.
+              ImGui::BeginDisabled(s.selected_system == kInvalidId ||
+                                  !sim.is_system_discovered_by_faction(fleet_mut->faction_id, s.selected_system));
+              if (ImGui::SmallButton("Add selected system##fleet_mission_circuit_add_selected")) {
+                add_wp(s.selected_system);
+              }
+              ImGui::EndDisabled();
+
+              ImGui::SameLine();
+              if (ImGui::SmallButton("Clear##fleet_mission_circuit_clear")) {
+                fleet_mut->mission.patrol_circuit_system_ids.clear();
+                fleet_mut->mission.patrol_leg_index = 0;
+              }
+
+              // Add from a combo list (discovered systems only).
+              const char* add_label = "(choose system)";
+              if (ImGui::BeginCombo("Add waypoint##fleet_mission_circuit_add", add_label)) {
+                for (Id sid : sorted_keys(s.systems)) {
+                  const auto* sys = find_ptr(s.systems, sid);
+                  if (!sys) continue;
+                  if (!sim.is_system_discovered_by_faction(fleet_mut->faction_id, sid)) continue;
+
+                  const std::string key = sys->name + "##circuit_add_" + std::to_string(static_cast<unsigned long long>(sid));
+                  if (ImGui::Selectable(key.c_str(), false)) {
+                    add_wp(sid);
+                  }
+                }
+                ImGui::EndCombo();
+              }
+
+              auto& wps = fleet_mut->mission.patrol_circuit_system_ids;
+              if (wps.empty()) {
+                ImGui::TextDisabled("No waypoints. Add at least one system.");
+              } else {
+                const int n = static_cast<int>(wps.size());
+                const int cur = (n > 0) ? (std::max(0, fleet_mut->mission.patrol_leg_index) % n) : 0;
+
+                if (ImGui::BeginTable("fleet_mission_patrol_circuit_wps", 3,
+                                      ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable)) {
+                  ImGui::TableSetupColumn("Waypoint", ImGuiTableColumnFlags_WidthStretch);
+                  ImGui::TableSetupColumn("Order", ImGuiTableColumnFlags_WidthFixed, 120.0f);
+                  ImGui::TableSetupColumn("Start", ImGuiTableColumnFlags_WidthFixed, 56.0f);
+                  ImGui::TableHeadersRow();
+
+                  int remove_idx = -1;
+                  int move_from = -1;
+                  int move_to = -1;
+
+                  for (int i = 0; i < n; ++i) {
+                    const Id sid = wps[i];
+                    const auto* sys = find_ptr(s.systems, sid);
+                    const std::string name = sys ? sys->name : ("(unknown #" + std::to_string(static_cast<unsigned long long>(sid)) + ")");
+
+                    ImGui::TableNextRow();
+
+                    // Waypoint label.
+                    ImGui::TableNextColumn();
+                    const bool is_cur = (i == cur);
+                    const std::string row_key = std::to_string(i + 1) + ". " + name + "##circuit_wp_" +
+                                                std::to_string(static_cast<unsigned long long>(sid));
+                    if (ImGui::Selectable(row_key.c_str(), is_cur, ImGuiSelectableFlags_SpanAllColumns)) {
+                      s.selected_system = sid;
+                    }
+
+                    // Order controls.
+                    ImGui::TableNextColumn();
+                    ImGui::BeginDisabled(i == 0);
+                    if (ImGui::SmallButton(("Up##circuit_up_" + std::to_string(i)).c_str())) {
+                      move_from = i;
+                      move_to = i - 1;
+                    }
+                    ImGui::EndDisabled();
+                    ImGui::SameLine();
+                    ImGui::BeginDisabled(i == n - 1);
+                    if (ImGui::SmallButton(("Down##circuit_dn_" + std::to_string(i)).c_str())) {
+                      move_from = i;
+                      move_to = i + 1;
+                    }
+                    ImGui::EndDisabled();
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton(("Remove##circuit_rm_" + std::to_string(i)).c_str())) {
+                      remove_idx = i;
+                    }
+
+                    // Start index control.
+                    ImGui::TableNextColumn();
+                    if (ImGui::SmallButton(("Here##circuit_here_" + std::to_string(i)).c_str())) {
+                      fleet_mut->mission.patrol_leg_index = i;
+                    }
+                  }
+
+                  if (move_from >= 0 && move_to >= 0 && move_from != move_to) {
+                    std::swap(wps[move_from], wps[move_to]);
+                    // Keep the start index stable relative to the list.
+                    if (fleet_mut->mission.patrol_leg_index == move_from) fleet_mut->mission.patrol_leg_index = move_to;
+                    if (fleet_mut->mission.patrol_leg_index == move_to) fleet_mut->mission.patrol_leg_index = move_from;
+                  }
+                  if (remove_idx >= 0 && remove_idx < static_cast<int>(wps.size())) {
+                    wps.erase(wps.begin() + remove_idx);
+                    fleet_mut->mission.patrol_leg_index = 0;
+                  }
+
+                  ImGui::EndTable();
+                }
+              }
+
+              int dwell = std::max(1, fleet_mut->mission.patrol_dwell_days);
+              if (ImGui::InputInt("Dwell days##fleet_mission_circuit_dwell", &dwell)) {
+                fleet_mut->mission.patrol_dwell_days = std::max(1, dwell);
+              }
+
+              ImGui::TextDisabled(
+                  "Visits the waypoint systems in order (loop) and engages detected hostiles in-system.\n"
+                  "Tip: On the Galaxy Map, Ctrl+Alt+Right click a system to add it to the selected fleet's circuit.");
             }
 
             if (fleet_mut->mission.type == FleetMissionType::PatrolRoute) {
@@ -8977,6 +9120,13 @@ void draw_settings_window(UIState& ui, char* ui_prefs_path, UIPrefActions& actio
     ImGui::Checkbox("Hubs", &ui.show_galaxy_trade_hubs);
     ImGui::TextDisabled("Procedural civilian trade overlay (markets + lanes).\n"
                         "This is informational for now, and will later feed piracy/blockade systems.");
+
+    ImGui::Checkbox("Galaxy: fleet missions", &ui.show_galaxy_fleet_missions);
+    if (ui.show_galaxy_fleet_missions) {
+      ImGui::SliderFloat("Fleet mission opacity", &ui.galaxy_fleet_mission_alpha, 0.05f, 1.0f, "%.2f");
+      ui.galaxy_fleet_mission_alpha = std::clamp(ui.galaxy_fleet_mission_alpha, 0.05f, 1.0f);
+    }
+    ImGui::TextDisabled("Draws patrol routes/circuits and other fleet mission geometry for the viewer faction.");
 
     ImGui::SliderInt("Contact max age (days)", &ui.contact_max_age_days, 1, 3650);
     ui.contact_max_age_days = std::clamp(ui.contact_max_age_days, 1, 3650);

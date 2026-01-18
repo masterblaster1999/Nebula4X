@@ -63,6 +63,89 @@ bool can_show_system(Id viewer_faction_id, bool fog_of_war, const Simulation& si
   return sim.is_system_discovered_by_faction(viewer_faction_id, system_id);
 }
 
+float dist2_point_segment(const ImVec2& p, const ImVec2& a, const ImVec2& b, float* t_out = nullptr) {
+  const float abx = b.x - a.x;
+  const float aby = b.y - a.y;
+  const float apx = p.x - a.x;
+  const float apy = p.y - a.y;
+  const float ab_len2 = abx * abx + aby * aby;
+  if (ab_len2 <= 1.0e-6f) {
+    if (t_out) *t_out = 0.0f;
+    return apx * apx + apy * apy;
+  }
+  float t = (apx * abx + apy * aby) / ab_len2;
+  t = std::clamp(t, 0.0f, 1.0f);
+  if (t_out) *t_out = t;
+  const float cx = a.x + abx * t;
+  const float cy = a.y + aby * t;
+  const float dx = p.x - cx;
+  const float dy = p.y - cy;
+  return dx * dx + dy * dy;
+}
+
+ImU32 risk_gradient_color(float t01, float alpha) {
+  t01 = std::clamp(t01, 0.0f, 1.0f);
+  alpha = std::clamp(alpha, 0.0f, 1.0f);
+  // Hue: ~0.33 = green, 0.0 = red.
+  const float h = (1.0f - t01) * 0.33f;
+  const ImVec4 c = ImColor::HSV(h, 0.80f, 0.95f, alpha);
+  return ImGui::ColorConvertFloat4ToU32(c);
+}
+
+// Effective piracy risk for a system used by trade overlays.
+//
+// If the system is assigned to a region, use Region::pirate_risk dampened by
+// Region::piracy_suppression. Otherwise fall back to SimConfig's default risk.
+double system_piracy_risk_effective(const Simulation& sim, const GameState& s, Id system_id) {
+  const auto* sys = find_ptr(s.systems, system_id);
+  if (!sys) return 0.0;
+
+  if (sys->region_id != kInvalidId) {
+    if (const auto* reg = find_ptr(s.regions, sys->region_id)) {
+      const double base = std::clamp(reg->pirate_risk, 0.0, 1.0);
+      const double sup = std::clamp(reg->piracy_suppression, 0.0, 1.0);
+      return std::clamp(base * (1.0 - sup), 0.0, 1.0);
+    }
+  }
+
+  return std::clamp(sim.cfg().pirate_raid_default_system_risk, 0.0, 1.0);
+}
+
+struct TradeOverlayCache {
+  // The trade network is expensive enough that we cache it between frames.
+  //
+  // It depends on the evolving simulation state (e.g. colony output), so we
+  // also include a time key (day/hour) similar to other simulation caches.
+  std::int64_t day{-1};
+  int hour{-1};
+
+  std::uint64_t state_generation{0};
+  std::uint64_t content_generation{0};
+
+  TradeNetworkOptions opts{};
+  bool has_opts{false};
+  std::optional<TradeNetwork> net;
+};
+
+TradeOverlayCache& trade_overlay_cache() {
+  static TradeOverlayCache cache;
+  return cache;
+}
+
+bool trade_opts_equal(const TradeNetworkOptions& a, const TradeNetworkOptions& b) {
+  if (a.max_lanes != b.max_lanes) return false;
+  if (a.max_goods_per_lane != b.max_goods_per_lane) return false;
+  if (a.include_uncolonized_markets != b.include_uncolonized_markets) return false;
+  if (a.include_colony_contributions != b.include_colony_contributions) return false;
+
+  auto eqd = [](double x, double y) {
+    return std::abs(x - y) <= 1.0e-9 * std::max(1.0, std::max(std::abs(x), std::abs(y)));
+  };
+  if (!eqd(a.distance_exponent, b.distance_exponent)) return false;
+  if (!eqd(a.colony_tons_per_unit, b.colony_tons_per_unit)) return false;
+  return true;
+}
+
 ImU32 region_col(Id rid, float alpha) {
   if (rid == kInvalidId) return 0;
   const float h = std::fmod(static_cast<float>((static_cast<std::uint32_t>(rid) * 0.61803398875f)), 1.0f);
@@ -669,8 +752,24 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   std::vector<SysView> visible;
   visible.reserve(s.systems.size());
 
-  // Lazily computed procedural trade overlay cache.
-  std::optional<TradeNetwork> trade_net;
+  // Procedural trade overlay state (computed lazily below when enabled).
+  const TradeNetwork* trade_net = nullptr;
+
+  // Lanes considered for analysis/tooltips this frame (after fog-of-war + filters).
+  //
+  // Note: this list is populated even when the lane rendering toggle is off
+  // (e.g. the player wants the security analysis panel but not the visuals).
+  std::vector<const TradeLane*> trade_lanes_visible;
+  trade_lanes_visible.reserve(256);
+
+  struct TradeLaneHoverInfo {
+    const TradeLane* lane{nullptr};
+    float d2{1e30f};
+    ImVec2 a{0.0f, 0.0f};
+    ImVec2 b{0.0f, 0.0f};
+    float thickness{1.0f};
+    double risk_avg{0.0};
+  } trade_lane_hover;
 
   for (const auto& [id, sys] : s.systems) {
     if (ui.fog_of_war) {
@@ -867,6 +966,9 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
 
   bool ruler_consumed_left = false;
   bool ruler_consumed_right = false;
+
+  bool trade_consumed_left = false;
+  bool trade_consumed_right = false;
 
   auto* draw = ImGui::GetWindowDrawList();
   const ImU32 bg = ImGui::ColorConvertFloat4ToU32(
@@ -1364,13 +1466,37 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   // The intent is to give players strategic context and to provide a future hook
   // for piracy/blockade mechanics.
   if (ui.show_galaxy_trade_lanes || ui.show_galaxy_trade_hubs) {
-    // Lazily compute once per frame if the overlay is enabled.
     TradeNetworkOptions topt;
     topt.max_lanes = 220;
+    topt.max_goods_per_lane = 3;
+    topt.distance_exponent = 1.35;
     topt.include_uncolonized_markets = true;
     topt.include_colony_contributions = true;
+    topt.colony_tons_per_unit = 100.0;
 
-    trade_net = compute_trade_network(sim, topt);
+    // Cache the procedural trade network across frames.
+    //
+    // Without this, the map would recompute an O(N^2) style network every frame
+    // while the overlay is enabled, which is unnecessary when the simulation
+    // hasn't advanced.
+    const std::int64_t day = s.date.days_since_epoch();
+    const int hour = std::clamp(s.hour_of_day, 0, 23);
+    const std::uint64_t gen = sim.state_generation();
+    const std::uint64_t cgen = sim.content_generation();
+
+    auto& cache = trade_overlay_cache();
+    if (!cache.net || cache.day != day || cache.hour != hour ||
+        cache.state_generation != gen || cache.content_generation != cgen ||
+        !trade_opts_equal(cache.opts, topt)) {
+      cache.net = compute_trade_network(sim, topt);
+      cache.day = day;
+      cache.hour = hour;
+      cache.state_generation = gen;
+      cache.content_generation = cgen;
+      cache.opts = topt;
+      cache.has_opts = true;
+    }
+    trade_net = cache.net ? &*cache.net : nullptr;
 
     auto kind_col = [&](TradeGoodKind k, float alpha) {
       alpha = std::clamp(alpha, 0.0f, 1.0f);
@@ -1392,52 +1518,142 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
     const float alpha = std::clamp(ui.map_route_opacity, 0.0f, 1.0f);
     const ImU32 shadow = modulate_alpha(IM_COL32(0, 0, 0, 200), 0.55f * alpha);
 
-    if (ui.show_galaxy_trade_lanes) {
+    // Clear per-frame list.
+    trade_lanes_visible.clear();
+    trade_lanes_visible.reserve(256);
+
+    // Trade lane filtering.
+    const int good_filter = ui.galaxy_trade_good_filter;
+    const float min_volume = std::max(0.0f, ui.galaxy_trade_min_lane_volume);
+    const bool include_secondary = ui.galaxy_trade_filter_include_secondary;
+
+    auto lane_passes_filters = [&](const TradeLane& lane) -> bool {
+      const double v = std::max(0.0, lane.total_volume);
+      if (min_volume > 0.0f && v < static_cast<double>(min_volume)) return false;
+
+      if (good_filter < 0) return true;
+      const TradeGoodKind want = static_cast<TradeGoodKind>(good_filter);
+      if (lane.top_flows.empty()) return false;
+      if (lane.top_flows.front().good == want) return true;
+      if (!include_secondary) return false;
+      for (const auto& f : lane.top_flows) {
+        if (f.good == want && f.volume > 1e-9) return true;
+      }
+      return false;
+    };
+
+    // If a pinned lane no longer exists (trade network changed), clear it.
+    if (trade_net && ui.galaxy_trade_pinned_from != kInvalidId && ui.galaxy_trade_pinned_to != kInvalidId) {
+      bool found = false;
       for (const auto& lane : trade_net->lanes) {
-        if (lane.from_system_id == kInvalidId || lane.to_system_id == kInvalidId) continue;
-        if (lane.from_system_id == lane.to_system_id) continue;
-
-        // Respect fog-of-war: only draw lanes where both endpoints are visible.
-        if (!can_show_system(viewer_faction_id, ui.fog_of_war, sim, lane.from_system_id)) continue;
-        if (!can_show_system(viewer_faction_id, ui.fog_of_war, sim, lane.to_system_id)) continue;
-
-        const auto* a_sys = find_ptr(s.systems, lane.from_system_id);
-        const auto* b_sys = find_ptr(s.systems, lane.to_system_id);
-        if (!a_sys || !b_sys) continue;
-
-        const Vec2 a = a_sys->galaxy_pos - world_center;
-        const Vec2 b = b_sys->galaxy_pos - world_center;
-        const ImVec2 pa = to_screen(a, center_px, scale, zoom, pan);
-        const ImVec2 pb = to_screen(b, center_px, scale, zoom, pan);
-
-        const double v = std::max(0.0, lane.total_volume);
-        const float thick = 1.0f + static_cast<float>(std::clamp(std::log10(v + 1.0) * 0.70, 0.0, 4.5));
-        const TradeGoodKind dom = lane.top_flows.empty() ? TradeGoodKind::RawMetals : lane.top_flows.front().good;
-        const ImU32 col = kind_col(dom, 0.40f * alpha);
-
-        draw->AddLine(pa, pb, shadow, thick + 2.0f);
-        draw->AddLine(pa, pb, col, thick);
-        add_arrowhead(draw, pa, pb, col, 8.0f + thick * 2.0f);
-        draw->AddCircleFilled(pb, 3.0f + thick, shadow, 0);
-        draw->AddCircleFilled(pb, 2.25f + thick * 0.75f, col, 0);
+        if (lane.from_system_id == ui.galaxy_trade_pinned_from && lane.to_system_id == ui.galaxy_trade_pinned_to) {
+          found = true;
+          break;
+        }
+      }
+      if (!found) {
+        ui.galaxy_trade_pinned_from = kInvalidId;
+        ui.galaxy_trade_pinned_to = kInvalidId;
       }
     }
 
-    if (ui.show_galaxy_trade_hubs && zoom >= 0.50f) {
-      for (const auto& node : trade_net->nodes) {
-        if (node.system_id == kInvalidId) continue;
-        if (!can_show_system(viewer_faction_id, ui.fog_of_war, sim, node.system_id)) continue;
-        const auto* sys = find_ptr(s.systems, node.system_id);
-        if (!sys) continue;
+    if (trade_net) {
+      for (const auto& lane : trade_net->lanes) {
+        const auto itA = visible_by_id.find(lane.from_system_id);
+        const auto itB = visible_by_id.find(lane.to_system_id);
+        if (itA == visible_by_id.end() || itB == visible_by_id.end()) {
+          continue;
+        }
 
-        const Vec2 p = sys->galaxy_pos - world_center;
-        const ImVec2 pp = to_screen(p, center_px, scale, zoom, pan);
+        const StarSystem* sysA = itA->second;
+        const StarSystem* sysB = itB->second;
+        if (!sysA || !sysB) {
+          continue;
+        }
 
-        const float r = 4.0f + static_cast<float>(std::clamp(node.market_size, 0.0, 2.5)) * 4.0f;
-        const float a = 0.20f + 0.45f * static_cast<float>(std::clamp(node.hub_score, 0.0, 1.0));
-        const ImU32 col = kind_col(node.primary_export, a * alpha);
-        draw->AddCircle(pp, r, shadow, 0, 3.0f);
-        draw->AddCircle(pp, r, col, 0, 1.5f);
+        const bool pinned_match =
+            (lane.from_system_id == ui.galaxy_trade_pinned_from && lane.to_system_id == ui.galaxy_trade_pinned_to);
+
+        const bool draw_this = lane_passes_filters(lane) || pinned_match;
+        if (!draw_this) {
+          continue;
+        }
+
+        // Always keep the lane for analysis/tooltip purposes (even if the player disables lane rendering).
+        trade_lanes_visible.push_back(&lane);
+
+        if (!ui.show_galaxy_trade_lanes) {
+          continue;
+        }
+
+        const Vec2 a = sysA->galaxy_pos - world_center;
+        const Vec2 b = sysB->galaxy_pos - world_center;
+        const Vec2 pa = pos_px(a);
+        const Vec2 pb = pos_px(b);
+
+        const double vol = std::max(0.0, lane.total_volume);
+        float thick = 1.0f + 3.0f * std::clamp(static_cast<float>(std::log10(vol + 1.0) / 3.0), 0.0f, 1.0f);
+        if (pinned_match) {
+          thick += 1.5f;
+        }
+
+        const TradeGoodKind dom_good = lane.top_flows.empty() ? TradeGoodKind::RawMetals : lane.top_flows.front().good;
+        const ImU32 lane_col = kind_col(dom_good, (pinned_match ? 0.65f : 0.40f) * alpha);
+
+        draw->AddLine(ImVec2(pa.x, pa.y), ImVec2(pb.x, pb.y), shadow, thick + 1.5f);
+        draw->AddLine(ImVec2(pa.x, pa.y), ImVec2(pb.x, pb.y), lane_col, thick);
+
+        // Optional risk overlay (green=safe, red=dangerous).
+        double ravg = 0.0;
+        if (ui.galaxy_trade_risk_overlay) {
+          const double r0 = system_piracy_risk_effective(sim, s, lane.from_system_id);
+          const double r1 = system_piracy_risk_effective(sim, s, lane.to_system_id);
+          ravg = 0.5 * (r0 + r1);
+          const ImU32 risk_col = risk_gradient_color(static_cast<float>(ravg), (pinned_match ? 0.55f : 0.35f) * alpha);
+          draw->AddLine(ImVec2(pa.x, pa.y), ImVec2(pb.x, pb.y), risk_col, thick + (pinned_match ? 1.5f : 0.75f));
+        }
+
+        // Hover pick: closest lane within a small pixel threshold.
+        if (hovered && mouse_in_rect && !over_minimap && !io2.WantTextInput && !ImGui::IsAnyItemHovered()) {
+          const ImVec2 mp = ImGui::GetIO().MousePos;
+          const float d2 = dist2_point_segment(mp, ImVec2(pa.x, pa.y), ImVec2(pb.x, pb.y));
+          const float thresh = 8.0f + thick * 1.5f;
+          if (d2 < thresh * thresh && d2 < trade_lane_hover.d2) {
+            trade_lane_hover.lane = &lane;
+            trade_lane_hover.d2 = d2;
+            trade_lane_hover.a = ImVec2(pa.x, pa.y);
+            trade_lane_hover.b = ImVec2(pb.x, pb.y);
+            trade_lane_hover.thickness = thick;
+            trade_lane_hover.risk_avg = ravg;
+          }
+        }
+      }
+
+      // Render hub markers.
+      if (ui.show_galaxy_trade_hubs && zoom >= 0.50f) {
+        for (const auto& node : trade_net->nodes) {
+          if (node.system_id == kInvalidId) continue;
+          if (!can_show_system(viewer_faction_id, ui.fog_of_war, sim, node.system_id)) continue;
+          const auto* sys = find_ptr(s.systems, node.system_id);
+          if (!sys) continue;
+
+          // If a commodity filter is active, dim hubs that don't match.
+          bool hub_ok = true;
+          if (good_filter >= 0) {
+            const TradeGoodKind want = static_cast<TradeGoodKind>(good_filter);
+            hub_ok = (node.primary_export == want);
+          }
+
+          const Vec2 p = sys->galaxy_pos - world_center;
+          const ImVec2 pp = to_screen(p, center_px, scale, zoom, pan);
+
+          const float r = 4.0f + static_cast<float>(std::clamp(node.market_size, 0.0, 2.5)) * 4.0f;
+          float a = 0.20f + 0.45f * static_cast<float>(std::clamp(node.hub_score, 0.0, 1.0));
+          if (!hub_ok) a *= 0.35f;
+          const ImU32 col = kind_col(node.primary_export, a * alpha);
+          draw->AddCircle(pp, r, shadow, 0, 3.0f);
+          draw->AddCircle(pp, r, col, 0, 1.5f);
+        }
       }
     }
   }
@@ -1691,6 +1907,9 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   }
 
   const ImGuiIO& io = ImGui::GetIO();
+  const bool trade_pick_mode = hovered && mouse_in_rect && !over_minimap && !io.WantTextInput &&
+                               (ui.show_galaxy_trade_lanes || ui.show_galaxy_trade_hubs) &&
+                               ImGui::IsKeyDown(ImGuiKey_T) && !io.KeyCtrl && !io.KeyShift && !io.KeyAlt;
   const bool route_ruler_mode = hovered && mouse_in_rect && !over_minimap && !io.WantTextInput &&
                                ImGui::IsKeyDown(ImGuiKey_D) && !io.KeyCtrl && !io.KeyShift && !io.KeyAlt;
 
@@ -1762,6 +1981,111 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
     preview_from_queue = from_queue;
   }
 
+  // --- Fleet mission overlay (strategic planning geometry) ---
+  // Draws patrol routes/circuits and other mission geometry for the viewer faction.
+  if (ui.show_galaxy_fleet_missions && !pos_px.empty()) {
+    auto fleet_base_col = [&](Id fid) -> ImU32 {
+      const float h = std::fmod((static_cast<float>(static_cast<std::uint32_t>(fid)) * 0.61803398875f), 1.0f);
+      const ImVec4 c = ImColor::HSV(h, 0.55f, 0.95f, 1.0f);
+      return ImGui::ColorConvertFloat4ToU32(c);
+    };
+
+    for (const auto& kv : s.fleets) {
+      const Id fid = kv.first;
+      const Fleet& fl = kv.second;
+
+      // Avoid FoW leaks: only show missions for the viewer faction.
+      if (viewer_faction_id != kInvalidId && fl.faction_id != viewer_faction_id) continue;
+
+      if (fl.mission.type == FleetMissionType::None) continue;
+
+      const bool is_sel = (selected_fleet != nullptr && fid == selected_fleet->id);
+      float a = ui.galaxy_fleet_mission_alpha * (is_sel ? 1.0f : 0.55f);
+      a = std::clamp(a, 0.0f, 1.0f);
+      const ImU32 base = fleet_base_col(fid);
+      const ImU32 line_col = modulate_alpha(base, a);
+      const ImU32 ring_col = modulate_alpha(base, std::min(1.0f, a * 1.35f));
+
+      // PatrolRoute: draw A <-> B segment + direction hint from patrol_leg_index.
+      if (fl.mission.type == FleetMissionType::PatrolRoute) {
+        const Id a_sys = fl.mission.patrol_route_a_system_id;
+        const Id b_sys = fl.mission.patrol_route_b_system_id;
+        if (!can_show_system(viewer_faction_id, ui.fog_of_war, sim, a_sys)) continue;
+        if (!can_show_system(viewer_faction_id, ui.fog_of_war, sim, b_sys)) continue;
+
+        auto ita = pos_px.find(a_sys);
+        auto itb = pos_px.find(b_sys);
+        if (ita == pos_px.end() || itb == pos_px.end()) continue;
+
+        draw->AddLine(ita->second, itb->second, line_col, is_sel ? 2.8f : 2.0f);
+
+        // Direction hint: even index -> toward B, odd -> toward A.
+        const bool to_b = (fl.mission.patrol_leg_index % 2) == 0;
+        const ImVec2 from = to_b ? ita->second : itb->second;
+        const ImVec2 to = to_b ? itb->second : ita->second;
+        add_arrowhead(draw, from, to, line_col, 10.0f);
+
+        // Endpoint rings.
+        draw->AddCircle(ita->second, base_r + 10.0f, ring_col, 0, 2.0f);
+        draw->AddCircle(itb->second, base_r + 10.0f, ring_col, 0, 2.0f);
+      }
+
+      // PatrolCircuit: draw a closed polyline through waypoints.
+      if (fl.mission.type == FleetMissionType::PatrolCircuit) {
+        const auto& wps = fl.mission.patrol_circuit_system_ids;
+        const int n = static_cast<int>(wps.size());
+
+        // Waypoint rings.
+        for (int i = 0; i < n; ++i) {
+          const Id sid = wps[i];
+          if (!can_show_system(viewer_faction_id, ui.fog_of_war, sim, sid)) continue;
+          auto itp = pos_px.find(sid);
+          if (itp == pos_px.end()) continue;
+          draw->AddCircle(itp->second, base_r + 9.0f, ring_col, 0, 2.0f);
+        }
+
+        if (n >= 2) {
+          for (int i = 0; i < n; ++i) {
+            const Id a_sys = wps[i];
+            const Id b_sys = wps[(i + 1) % n];
+            if (!can_show_system(viewer_faction_id, ui.fog_of_war, sim, a_sys)) continue;
+            if (!can_show_system(viewer_faction_id, ui.fog_of_war, sim, b_sys)) continue;
+            auto ita = pos_px.find(a_sys);
+            auto itb = pos_px.find(b_sys);
+            if (ita == pos_px.end() || itb == pos_px.end()) continue;
+            draw->AddLine(ita->second, itb->second, line_col, is_sel ? 2.8f : 2.0f);
+          }
+
+          // Current-leg direction hint.
+          const int idx = (n > 0) ? (std::max(0, fl.mission.patrol_leg_index) % n) : 0;
+          const Id cur = wps[idx];
+          const Id nxt = wps[(idx + 1) % n];
+          if (can_show_system(viewer_faction_id, ui.fog_of_war, sim, cur) &&
+              can_show_system(viewer_faction_id, ui.fog_of_war, sim, nxt)) {
+            auto itc = pos_px.find(cur);
+            auto itn = pos_px.find(nxt);
+            if (itc != pos_px.end() && itn != pos_px.end()) {
+              add_arrowhead(draw, itc->second, itn->second, line_col, 11.0f);
+            }
+          }
+        }
+      }
+
+      // GuardJumpPoint: ring the system containing the guarded JP.
+      if (fl.mission.type == FleetMissionType::GuardJumpPoint) {
+        const auto* jp = find_ptr(s.jump_points, fl.mission.guard_jump_point_id);
+        if (!jp) continue;
+        const Id sys_id = jp->system_id;
+        if (!can_show_system(viewer_faction_id, ui.fog_of_war, sim, sys_id)) continue;
+        auto itp = pos_px.find(sys_id);
+        if (itp == pos_px.end()) continue;
+        draw->AddCircle(itp->second, base_r + 12.0f, ring_col, 0, 2.4f);
+      }
+    }
+  }
+
+  // --- Route preview (hover target) ---
+  // Draw after mission geometry so it stays visually on-top.
   if (preview_route && preview_route->systems.size() >= 2) {
     for (std::size_t i = 0; i + 1 < preview_route->systems.size(); ++i) {
       const Id a = preview_route->systems[i];
@@ -2001,8 +2325,35 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   // - Left click selects a system.
   // - Right click routes selected ship to the target system (Shift queues).
   // - Ctrl + right click routes selected fleet to the target system (Shift queues).
+  // - Ctrl + Alt + right click toggles the hovered system as a waypoint in the
+  //   selected fleet's patrol circuit.
   // Route ruler: hold D and click two systems to keep a persistent planning overlay.
   // This consumes the click so we don't disturb normal selection (especially selected_ship).
+
+  // Trade lane pick/inspect: hold T and click a lane to pin it (right click clears).
+  //
+  // The lane tooltip also exposes a pin button; the hotkey is just a fast path.
+  if (trade_pick_mode) {
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Right) && !ImGui::IsAnyItemHovered()) {
+      ui.galaxy_trade_pinned_from = kInvalidId;
+      ui.galaxy_trade_pinned_to = kInvalidId;
+      trade_consumed_right = true;
+    }
+
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && trade_lane_hover.lane && !ImGui::IsAnyItemHovered()) {
+      const Id from = trade_lane_hover.lane->from_system_id;
+      const Id to = trade_lane_hover.lane->to_system_id;
+      if (ui.galaxy_trade_pinned_from == from && ui.galaxy_trade_pinned_to == to) {
+        ui.galaxy_trade_pinned_from = kInvalidId;
+        ui.galaxy_trade_pinned_to = kInvalidId;
+      } else {
+        ui.galaxy_trade_pinned_from = from;
+        ui.galaxy_trade_pinned_to = to;
+      }
+      trade_consumed_left = true;
+    }
+  }
+
   if (route_ruler_mode) {
     if (ImGui::IsMouseClicked(ImGuiMouseButton_Right) && !ImGui::IsAnyItemHovered()) {
       route_ruler = RouteRulerState{};
@@ -2021,7 +2372,8 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
     }
   }
 
-  if (hovered && !over_minimap && !ruler_consumed_left && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+  if (hovered && !over_minimap && !ruler_consumed_left && !trade_consumed_left &&
+      ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
     if (mouse.x >= origin.x && mouse.x <= origin.x + avail.x && mouse.y >= origin.y && mouse.y <= origin.y + avail.y) {
       if (hovered_system != kInvalidId) {
         s.selected_system = hovered_system;
@@ -2035,20 +2387,58 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
     }
   }
 
-  if (hovered && !over_minimap && !ruler_consumed_right && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+  if (hovered && !over_minimap && !ruler_consumed_right && !trade_consumed_right &&
+      ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
     if (mouse.x >= origin.x && mouse.x <= origin.x + avail.x && mouse.y >= origin.y && mouse.y <= origin.y + avail.y) {
       if (hovered_system != kInvalidId) {
         // Ctrl + right click: route selected fleet.
         const bool fleet_mode = ImGui::GetIO().KeyCtrl && selected_fleet != nullptr;
 
         if (fleet_mode) {
-          const bool queue_orders = ImGui::GetIO().KeyShift;
-          if (!queue_orders) sim.clear_fleet_orders(selected_fleet->id);
+          // Ctrl + Alt + right click: edit selected fleet's patrol circuit waypoints.
+          if (ImGui::GetIO().KeyAlt) {
+            Fleet* fl_mut = find_ptr(s.fleets, selected_fleet->id);
+            if (fl_mut && (viewer_faction_id == kInvalidId || fl_mut->faction_id == viewer_faction_id)) {
+              // Avoid FoW leaks: only allow adding known systems.
+              if (ui.fog_of_war && viewer_faction_id != kInvalidId &&
+                  !sim.is_system_discovered_by_faction(viewer_faction_id, hovered_system)) {
+                nebula4x::log::warn("That system has not been discovered.");
+              } else {
+                if (fl_mut->mission.type != FleetMissionType::PatrolCircuit) {
+                  fl_mut->mission.type = FleetMissionType::PatrolCircuit;
+                  fl_mut->mission.patrol_circuit_system_ids.clear();
+                  if (selected_fleet_system != kInvalidId && selected_fleet_system != hovered_system &&
+                      (!ui.fog_of_war ||
+                       sim.is_system_discovered_by_faction(fl_mut->faction_id, selected_fleet_system))) {
+                    fl_mut->mission.patrol_circuit_system_ids.push_back(selected_fleet_system);
+                  }
+                  if (fl_mut->mission.patrol_dwell_days <= 0) fl_mut->mission.patrol_dwell_days = 3;
+                }
 
-          // In fog-of-war mode, only allow routing through systems the faction already knows.
-          const bool restrict = ui.fog_of_war;
-          if (!sim.issue_fleet_travel_to_system(selected_fleet->id, hovered_system, restrict)) {
-            nebula4x::log::warn("No known jump route to that system.");
+                auto& wps = fl_mut->mission.patrol_circuit_system_ids;
+                auto it = std::find(wps.begin(), wps.end(), hovered_system);
+                if (it != wps.end()) {
+                  wps.erase(it);
+                  nebula4x::log::info("Patrol circuit: removed waypoint.");
+                } else {
+                  wps.push_back(hovered_system);
+                  nebula4x::log::info("Patrol circuit: added waypoint.");
+                }
+                fl_mut->mission.patrol_leg_index = 0;
+              }
+            }
+
+            // Still treat the click as a selection.
+            s.selected_system = hovered_system;
+          } else {
+            const bool queue_orders = ImGui::GetIO().KeyShift;
+            if (!queue_orders) sim.clear_fleet_orders(selected_fleet->id);
+
+            // In fog-of-war mode, only allow routing through systems the faction already knows.
+            const bool restrict = ui.fog_of_war;
+            if (!sim.issue_fleet_travel_to_system(selected_fleet->id, hovered_system, restrict)) {
+              nebula4x::log::warn("No known jump route to that system.");
+            }
           }
         } else if (selected_ship != kInvalidId) {
           // Route the selected ship to the target system.
@@ -2206,6 +2596,22 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
           ImGui::Separator();
           ImGui::Text("Trade market");
           ImGui::TextDisabled("Market size: %.2f  |  Hub: %.2f", tnode->market_size, tnode->hub_score);
+
+          // Additional context: trade exposure + effective piracy risk at this node.
+          const double eff_risk = system_piracy_risk_effective(sim, s, sys->id);
+          double exposure = 0.0;
+          for (const auto* ln : trade_lanes_visible) {
+            if (!ln) continue;
+            if (ln->from_system_id == sys->id || ln->to_system_id == sys->id) {
+              exposure += std::max(0.0, ln->total_volume);
+            }
+          }
+          if (exposure > 1e-6) {
+            ImGui::TextDisabled("Exposure: %.2f  |  Piracy risk (eff): %.0f%%", exposure, eff_risk * 100.0);
+          } else {
+            ImGui::TextDisabled("Piracy risk (eff): %.0f%%", eff_risk * 100.0);
+          }
+
           ImGui::Text("Exports: %s", top_balance(true).c_str());
           ImGui::Text("Imports: %s", top_balance(false).c_str());
         }
@@ -2371,6 +2777,110 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   }
 
 
+  // Tooltip for hovered trade lane (procedural economy overlay).
+  //
+  // Only shows when not hovering a system to avoid fighting with the system tooltip.
+  if (hovered && hovered_system == kInvalidId && trade_lane_hover.lane &&
+      (ui.show_galaxy_trade_lanes || ui.show_galaxy_trade_hubs) && !ImGui::IsAnyItemHovered()) {
+    const TradeLane& lane = *trade_lane_hover.lane;
+
+    const auto* a = find_ptr(s.systems, lane.from_system_id);
+    const auto* b = find_ptr(s.systems, lane.to_system_id);
+    const char* an = a ? a->name.c_str() : "?";
+    const char* bn = b ? b->name.c_str() : "?";
+
+    const TradeGoodKind dom = lane.top_flows.empty() ? TradeGoodKind::RawMetals : lane.top_flows.front().good;
+    const double vol = std::max(0.0, lane.total_volume);
+    const double r0 = system_piracy_risk_effective(sim, s, lane.from_system_id);
+    const double r1 = system_piracy_risk_effective(sim, s, lane.to_system_id);
+    const double ravg = 0.5 * (r0 + r1);
+
+    const double risk_w = std::max(0.0, sim.cfg().ai_trade_security_patrol_risk_weight);
+    const double base_need = 0.20;
+    const double sec_score = vol * (base_need + risk_w * ravg);
+
+    const bool pinned = (ui.galaxy_trade_pinned_from == lane.from_system_id &&
+                         ui.galaxy_trade_pinned_to == lane.to_system_id);
+
+    ImGui::BeginTooltip();
+    ImGui::Text("Trade lane");
+    ImGui::Separator();
+    ImGui::Text("%s  ->  %s", an, bn);
+    ImGui::TextDisabled("Volume: %.2f", vol);
+    ImGui::TextDisabled("Dominant commodity: %s", trade_good_kind_label(dom));
+
+    if (!lane.top_flows.empty() && vol > 1e-9) {
+      ImGui::Separator();
+      ImGui::Text("Top flows");
+      for (const auto& f : lane.top_flows) {
+        if (f.volume <= 1e-9) continue;
+        const double pct = std::clamp(f.volume / vol, 0.0, 1.0) * 100.0;
+        ImGui::Text("%s: %.2f (%.0f%%)", trade_good_kind_label(f.good), f.volume, pct);
+      }
+    }
+
+    ImGui::Separator();
+    ImGui::Text("Security (piracy)");
+    ImGui::TextDisabled("Endpoint risk (eff): %.0f%% / %.0f%%", r0 * 100.0, r1 * 100.0);
+    ImGui::TextDisabled("Lane avg risk: %.0f%%", ravg * 100.0);
+    ImGui::TextDisabled("Score: %.2f  (vol * (0.20 + %.2f*risk))", sec_score, risk_w);
+
+    ImGui::Separator();
+    ImGui::PushID("trade_lane_tt");
+    if (ImGui::SmallButton(pinned ? "Unpin" : "Pin")) {
+      if (pinned) {
+        ui.galaxy_trade_pinned_from = kInvalidId;
+        ui.galaxy_trade_pinned_to = kInvalidId;
+      } else {
+        ui.galaxy_trade_pinned_from = lane.from_system_id;
+        ui.galaxy_trade_pinned_to = lane.to_system_id;
+      }
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Filter commodity")) {
+      ui.galaxy_trade_good_filter = static_cast<int>(dom);
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Clear filter")) {
+      ui.galaxy_trade_good_filter = -1;
+    }
+
+    if (ImGui::SmallButton("Select A")) {
+      if (lane.from_system_id != kInvalidId) s.selected_system = lane.from_system_id;
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Select B")) {
+      if (lane.to_system_id != kInvalidId) s.selected_system = lane.to_system_id;
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Center")) {
+      Vec2 mid{0.0, 0.0};
+      int cnt = 0;
+      if (a) {
+        const Vec2 rel = a->galaxy_pos - world_center;
+        mid.x += rel.x;
+        mid.y += rel.y;
+        cnt++;
+      }
+      if (b) {
+        const Vec2 rel = b->galaxy_pos - world_center;
+        mid.x += rel.x;
+        mid.y += rel.y;
+        cnt++;
+      }
+      if (cnt > 0) {
+        mid.x /= (double)cnt;
+        mid.y /= (double)cnt;
+        pan = Vec2{-mid.x, -mid.y};
+      }
+    }
+
+    ImGui::TextDisabled("Tip: hold T + click a lane to pin it.");
+    ImGui::PopID();
+    ImGui::EndTooltip();
+  }
+
+
   // ProcGen lens probe (hold Alt) for continuous field visualization.
   // Only shows when not hovering a system (to avoid fighting with the system tooltip).
   if (ui.galaxy_procgen_probe && lens_active && lens_bounds_valid && lens_mode != ProcGenLensMode::Off &&
@@ -2501,10 +3011,12 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   ImGui::BulletText("Minimap (M): click/drag to pan");
   // Avoid \x escape parsing pitfalls on MSVC (\x consumes all following hex digits).
   ImGui::BulletText("Hold D + click: route ruler (plan A->B)");
+  ImGui::BulletText("Hold T + click: pin trade lane (T+right click clears)");
   ImGui::BulletText("R: reset view");
   ImGui::BulletText("Left click: select system");
   ImGui::BulletText("Right click: route selected ship (Shift queues)");
   ImGui::BulletText("Ctrl+Right click: route selected fleet (Shift queues)");
+  ImGui::BulletText("Ctrl+Alt+Right click: edit selected fleet patrol circuit waypoints");
   ImGui::BulletText("Hover: route preview (Shift=queued, Ctrl=fleet)");
   ImGui::SeparatorText("Overlays");
   ImGui::Checkbox("Starfield", &ui.galaxy_map_starfield);
@@ -2548,6 +3060,219 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   ImGui::SameLine();
   ImGui::Checkbox("Hubs##trade", &ui.show_galaxy_trade_hubs);
   ImGui::TextDisabled("Procedural civilian trade lanes. Color indicates the dominant commodity.");
+
+  if (ui.show_galaxy_trade_lanes || ui.show_galaxy_trade_hubs) {
+    ImGui::Indent();
+
+    // Commodity filter (dominant good by default; optional inclusion of secondary goods).
+    const char* filter_preview = "All";
+    if (ui.galaxy_trade_good_filter >= 0 && ui.galaxy_trade_good_filter < kTradeGoodKindCount) {
+      filter_preview = trade_good_kind_label(static_cast<TradeGoodKind>(ui.galaxy_trade_good_filter));
+    }
+    if (ImGui::BeginCombo("Commodity filter##trade", filter_preview)) {
+      if (ImGui::Selectable("All", ui.galaxy_trade_good_filter < 0)) {
+        ui.galaxy_trade_good_filter = -1;
+      }
+      ImGui::Separator();
+      for (int k = 0; k < kTradeGoodKindCount; ++k) {
+        const bool sel = ui.galaxy_trade_good_filter == k;
+        if (ImGui::Selectable(trade_good_kind_label(static_cast<TradeGoodKind>(k)), sel)) {
+          ui.galaxy_trade_good_filter = k;
+        }
+      }
+      ImGui::EndCombo();
+    }
+
+    ImGui::Checkbox("Include secondary goods##trade", &ui.galaxy_trade_filter_include_secondary);
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip("When filtering by commodity, keep lanes where the commodity appears as a secondary flow too.");
+    }
+
+    ImGui::DragFloat("Min lane volume##trade", &ui.galaxy_trade_min_lane_volume, 5.0f, 0.0f, 1.0e6f, "%.1f");
+    ui.galaxy_trade_min_lane_volume = std::max(0.0f, ui.galaxy_trade_min_lane_volume);
+
+    ImGui::Checkbox("Risk overlay##trade", &ui.galaxy_trade_risk_overlay);
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip("Draw an additional overlay on lanes based on effective piracy risk (green=safe, red=dangerous).");
+    }
+
+    ImGui::Checkbox("Security panel##trade", &ui.galaxy_trade_security_panel);
+    if (ui.galaxy_trade_security_panel) {
+      ImGui::SliderInt("Top N##trade", &ui.galaxy_trade_security_top_n, 5, 25);
+      ui.galaxy_trade_security_top_n = std::clamp(ui.galaxy_trade_security_top_n, 3, 64);
+    }
+
+    // Pinned lane summary (if any).
+    if (ui.galaxy_trade_pinned_from != kInvalidId && ui.galaxy_trade_pinned_to != kInvalidId) {
+      const auto* a = find_ptr(s.systems, ui.galaxy_trade_pinned_from);
+      const auto* b = find_ptr(s.systems, ui.galaxy_trade_pinned_to);
+      if (a && b) {
+        ImGui::Text("Pinned: %s -> %s", a->name.c_str(), b->name.c_str());
+      } else {
+        ImGui::TextDisabled("Pinned: (invalid)");
+      }
+      ImGui::SameLine();
+      if (ImGui::SmallButton("Clear##trade_pin")) {
+        ui.galaxy_trade_pinned_from = kInvalidId;
+        ui.galaxy_trade_pinned_to = kInvalidId;
+      }
+    } else {
+      ImGui::TextDisabled("Tip: hold T + click a lane to pin it.");
+    }
+
+    // Trade security panel: surfaces the most valuable *and* dangerous corridors/markets.
+    if (ui.galaxy_trade_security_panel && trade_net && !trade_lanes_visible.empty()) {
+      if (ImGui::TreeNodeEx("Trade security", ImGuiTreeNodeFlags_DefaultOpen)) {
+        const double risk_w = std::max(0.0, sim.cfg().ai_trade_security_patrol_risk_weight);
+        constexpr double kBaseNeed = 0.20;
+
+        struct LaneRow {
+          const TradeLane* lane{nullptr};
+          double score{0.0};
+          double vol{0.0};
+          double risk{0.0};
+        };
+        std::vector<LaneRow> lane_rows;
+        lane_rows.reserve(trade_lanes_visible.size());
+
+        std::unordered_map<Id, double> exposure;
+        exposure.reserve(trade_lanes_visible.size() * 2);
+
+        for (const auto* lane : trade_lanes_visible) {
+          if (!lane) continue;
+          const double vol = std::max(0.0, lane->total_volume);
+          const double r0 = system_piracy_risk_effective(sim, s, lane->from_system_id);
+          const double r1 = system_piracy_risk_effective(sim, s, lane->to_system_id);
+          const double ravg = 0.5 * (r0 + r1);
+          const double score = vol * (kBaseNeed + risk_w * ravg);
+          lane_rows.push_back(LaneRow{lane, score, vol, ravg});
+          exposure[lane->from_system_id] += vol;
+          exposure[lane->to_system_id] += vol;
+        }
+
+        std::sort(lane_rows.begin(), lane_rows.end(), [](const LaneRow& a, const LaneRow& b) {
+          if (a.score != b.score) return a.score > b.score;
+          return a.vol > b.vol;
+        });
+
+        struct SysRow {
+          Id system_id{kInvalidId};
+          double score{0.0};
+          double vol{0.0};
+          double risk{0.0};
+        };
+        std::vector<SysRow> sys_rows;
+        sys_rows.reserve(exposure.size());
+        for (const auto& [sid, vol] : exposure) {
+          const double r = system_piracy_risk_effective(sim, s, sid);
+          const double score = vol * (kBaseNeed + risk_w * r);
+          sys_rows.push_back(SysRow{sid, score, vol, r});
+        }
+        std::sort(sys_rows.begin(), sys_rows.end(), [](const SysRow& a, const SysRow& b) {
+          if (a.score != b.score) return a.score > b.score;
+          return a.vol > b.vol;
+        });
+
+        const int top_n = std::clamp(ui.galaxy_trade_security_top_n, 3, 64);
+
+        ImGui::TextDisabled("Score ~ volume * (0.20 + risk_w * risk). risk_w=%.2f", risk_w);
+
+        if (ImGui::BeginTable("trade_sec_lanes", 4, ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_RowBg |
+                                                    ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_ScrollY,
+                              ImVec2(0.0f, 150.0f))) {
+          ImGui::TableSetupColumn("Lane", ImGuiTableColumnFlags_WidthStretch);
+          ImGui::TableSetupColumn("Score", ImGuiTableColumnFlags_WidthFixed);
+          ImGui::TableSetupColumn("Vol", ImGuiTableColumnFlags_WidthFixed);
+          ImGui::TableSetupColumn("Risk", ImGuiTableColumnFlags_WidthFixed);
+          ImGui::TableHeadersRow();
+
+          for (int i = 0; i < (int)lane_rows.size() && i < top_n; ++i) {
+            const auto& row = lane_rows[i];
+            const auto* lane = row.lane;
+            const auto* a = lane ? find_ptr(s.systems, lane->from_system_id) : nullptr;
+            const auto* b = lane ? find_ptr(s.systems, lane->to_system_id) : nullptr;
+            const bool pinned = lane && ui.galaxy_trade_pinned_from == lane->from_system_id &&
+                                ui.galaxy_trade_pinned_to == lane->to_system_id;
+
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::PushID(i);
+            if (lane) {
+              if (ImGui::SmallButton(pinned ? "Unpin" : "Pin")) {
+                if (pinned) {
+                  ui.galaxy_trade_pinned_from = kInvalidId;
+                  ui.galaxy_trade_pinned_to = kInvalidId;
+                } else {
+                  ui.galaxy_trade_pinned_from = lane->from_system_id;
+                  ui.galaxy_trade_pinned_to = lane->to_system_id;
+                }
+              }
+              ImGui::SameLine();
+            }
+            ImGui::Text("%s -> %s", a ? a->name.c_str() : "?", b ? b->name.c_str() : "?");
+            ImGui::PopID();
+
+            ImGui::TableSetColumnIndex(1);
+            ImGui::Text("%.1f", row.score);
+            ImGui::TableSetColumnIndex(2);
+            ImGui::Text("%.1f", row.vol);
+            ImGui::TableSetColumnIndex(3);
+            ImGui::Text("%.0f%%", row.risk * 100.0);
+          }
+          ImGui::EndTable();
+        }
+
+        if (ImGui::BeginTable("trade_sec_systems", 4, ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_RowBg |
+                                                       ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_ScrollY,
+                              ImVec2(0.0f, 150.0f))) {
+          ImGui::TableSetupColumn("System", ImGuiTableColumnFlags_WidthStretch);
+          ImGui::TableSetupColumn("Score", ImGuiTableColumnFlags_WidthFixed);
+          ImGui::TableSetupColumn("Vol", ImGuiTableColumnFlags_WidthFixed);
+          ImGui::TableSetupColumn("Risk", ImGuiTableColumnFlags_WidthFixed);
+          ImGui::TableHeadersRow();
+
+          for (int i = 0; i < (int)sys_rows.size() && i < top_n; ++i) {
+            const auto& row = sys_rows[i];
+            const auto* sys = find_ptr(s.systems, row.system_id);
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::PushID(i);
+            if (ImGui::SmallButton("Go")) {
+              if (sys) {
+                s.selected_system = sys->id;
+                const Vec2 rel = sys->galaxy_pos - world_center;
+                pan = Vec2{-rel.x, -rel.y};
+              }
+            }
+            ImGui::SameLine();
+            ImGui::Text("%s", sys ? sys->name.c_str() : "?");
+            ImGui::PopID();
+            ImGui::TableSetColumnIndex(1);
+            ImGui::Text("%.1f", row.score);
+            ImGui::TableSetColumnIndex(2);
+            ImGui::Text("%.1f", row.vol);
+            ImGui::TableSetColumnIndex(3);
+            ImGui::Text("%.0f%%", row.risk * 100.0);
+          }
+          ImGui::EndTable();
+        }
+
+        ImGui::TreePop();
+      }
+    }
+
+    ImGui::Unindent();
+  }
+
+  ImGui::Checkbox("Fleet missions", &ui.show_galaxy_fleet_missions);
+  if (ui.show_galaxy_fleet_missions) {
+    ImGui::Indent();
+    ImGui::SliderFloat("Opacity##galaxy_fleet_mission_alpha", &ui.galaxy_fleet_mission_alpha, 0.05f, 1.00f,
+                       "%.2f");
+    ui.galaxy_fleet_mission_alpha = std::clamp(ui.galaxy_fleet_mission_alpha, 0.0f, 1.0f);
+    ImGui::TextDisabled("Draws patrol routes/circuits and jump point guards for the viewer faction.");
+    ImGui::Unindent();
+  }
 
   ImGui::SeparatorText("ProcGen lens");
   {

@@ -2234,6 +2234,7 @@ bool move_construction_order(Id colony_id, int from_index, int to_index);
   void tick_diplomatic_offers();
   void tick_contracts();
   void tick_dynamic_points_of_interest();
+  void tick_score_history(bool force);
   void tick_victory();
   void tick_refuel();
   void tick_rearm();

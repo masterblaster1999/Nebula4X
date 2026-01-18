@@ -348,6 +348,38 @@ struct UIState {
   bool show_galaxy_trade_lanes{false};
   bool show_galaxy_trade_hubs{false};
 
+  // Trade overlay controls (UI-only preferences).
+  //
+  // These settings affect how the *procedural* civilian trade overlay is rendered
+  // on the galaxy map (filters, danger/risk visualization, and quick inspection).
+  //
+  // Commodity filter: -1 = show all goods. Otherwise, filter lanes to those
+  // whose dominant commodity matches the selected kind (or any of the lane's
+  // top goods when galaxy_trade_filter_include_secondary is enabled).
+  int galaxy_trade_good_filter{-1};
+  bool galaxy_trade_filter_include_secondary{true};
+
+  // Hide lanes below this total volume (reduces clutter).
+  float galaxy_trade_min_lane_volume{0.0f};
+
+  // When enabled, draw an additional danger overlay on trade lanes based on
+  // effective piracy risk at the endpoints (region pirate risk * (1-suppression)).
+  bool galaxy_trade_risk_overlay{false};
+
+  // Show a small "Trade security" analysis panel in the galaxy map legend.
+  bool galaxy_trade_security_panel{true};
+  int galaxy_trade_security_top_n{10};
+
+  // Pinned trade lane (for persistent inspection/highlighting).
+  // UI-only; not persisted in saves.
+  Id galaxy_trade_pinned_from{kInvalidId};
+  Id galaxy_trade_pinned_to{kInvalidId};
+
+  // Draw mission geometry (patrol routes/circuits, jump point guards) for fleets.
+  // Intended as a strategic planning overlay.
+  bool show_galaxy_fleet_missions{false};
+  float galaxy_fleet_mission_alpha{0.55f};
+
   // Highlight jump-network articulation points ("chokepoint" systems).
   bool show_galaxy_chokepoints{false};
 
@@ -355,6 +387,14 @@ struct UIState {
   bool show_galaxy_regions{false};
   bool show_galaxy_region_labels{false};
   bool show_galaxy_region_boundaries{false};
+  // Boundary geometry mode.
+  // - Hull: convex hull of the region's *visible* systems (cheap but can be misleading).
+  // - Voronoi: true Voronoi partition based on Region::center (matches procgen assignment).
+  bool galaxy_region_boundary_voronoi{true};
+  // Show the region seed/center points (useful for debugging procgen sectors).
+  bool show_galaxy_region_centers{false};
+  // Highlight jump links that cross region borders.
+  bool show_galaxy_region_border_links{false};
   // When a region is selected, optionally dim non-selected regions on the galaxy map.
   bool galaxy_region_dim_nonselected{false};
 
@@ -777,6 +817,28 @@ struct UIState {
   int new_game_random_ai_empires{-1}; // -1 = auto
   bool new_game_random_enable_pirates{true};
   float new_game_random_pirate_strength{1.0f};
+
+  // Independent neutral outposts (procedural minor faction).
+  bool new_game_random_enable_independents{true};
+  int new_game_random_num_independent_outposts{-1}; // -1 = auto
+
+  // Keep the player home system readable by clamping nebula density.
+  bool new_game_random_ensure_clear_home{true};
+
+  // --- Random galaxy preview (New Game modal) ---
+  // These are UI-only visualization toggles.
+  bool new_game_preview_show_jumps{true};
+  bool new_game_preview_show_labels{true};
+  bool new_game_preview_show_regions{true};
+  bool new_game_preview_show_nebula{true};
+  bool new_game_preview_color_by_component{false};
+  bool new_game_preview_show_chokepoints{false};
+
+  // --- Seed explorer (New Game modal) ---
+  // 0=Balanced, 1=Readable (few crossings), 2=Chokepoints, 3=Webby (redundant routes).
+  int new_game_seed_search_objective{0};
+  int new_game_seed_search_tries{64};
+  int new_game_seed_search_steps_per_frame{8};
 };
 
 } // namespace nebula4x::ui

@@ -94,6 +94,18 @@ struct VictoryRules {
   // Exploration points.
   double score_discovered_system_points{10.0};
   double score_discovered_anomaly_points{5.0};
+
+  // --- Score history tracking (analytics / projection) ---
+  // When enabled, the simulation records periodic score snapshots into
+  // GameState::score_history. This powers trend graphs and simple
+  // victory ETA estimates in the UI.
+  bool score_history_enabled{false};
+
+  // Capture cadence in days (1 = daily).
+  int score_history_interval_days{7};
+
+  // Maximum stored samples (older samples are dropped).
+  int score_history_max_samples{520};
 };
 
 // The (persistent) game-over state.
@@ -105,12 +117,31 @@ struct VictoryState {
   double winner_score{0.0};
 };
 
+// --- Score history (victory analytics) ---
+
+struct ScoreHistoryEntry {
+  Id faction_id{kInvalidId};
+  // Total score at the time of the snapshot (already weighted by VictoryRules).
+  double total{0.0};
+};
+
+struct ScoreHistorySample {
+  // Date::days_since_epoch() at capture time.
+  std::int64_t day{0};
+  // Hour-of-day (0..23). For now snapshots are recorded at day boundaries.
+  int hour{0};
+
+  // Scores for all factions (sorted by faction_id for stable diffs).
+  std::vector<ScoreHistoryEntry> scores;
+};
+
 // A single save-game state.
 struct GameState {
   // v50: nebula storms (temporary system-level environmental hazards).
   // v51: faction narrative journal entries.
   // v52: procedural contracts (mission board scaffolding).
-  int save_version{52};
+  // v53: score history snapshots (victory analytics / projection).
+  int save_version{53};
   Date date;
 
   // Hour-of-day within the current Date (0..23).
@@ -159,6 +190,9 @@ struct GameState {
   // Optional win conditions & scoring.
   VictoryRules victory_rules;
   VictoryState victory_state;
+
+  // Periodic score snapshots (Victory window projections).
+  std::vector<ScoreHistorySample> score_history;
 
   // Fleets are lightweight groupings of ships for convenience.
   std::unordered_map<Id, Fleet> fleets;

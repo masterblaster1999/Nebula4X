@@ -761,6 +761,7 @@ void Simulation::new_game() {
   // Seed initial procedural contract offers so the mission board is not empty
   // on a fresh start.
   tick_contracts();
+  tick_score_history(/*force=*/true);
 }
 
 void Simulation::new_game_random(std::uint32_t seed, int num_systems) {
@@ -806,6 +807,7 @@ void Simulation::new_game_random(std::uint32_t seed, int num_systems) {
   // Seed initial procedural contract offers so the mission board is not empty
   // on a fresh start.
   tick_contracts();
+  tick_score_history(/*force=*/true);
 }
 
 void Simulation::load_game(GameState loaded) {
@@ -886,6 +888,12 @@ void Simulation::load_game(GameState loaded) {
   recompute_body_positions();
   tick_contacts(0.0, false);
   invalidate_jump_route_cache();
+
+  // If the user enabled score history on a legacy save, seed one snapshot so
+  // the Victory window can immediately render a trend line.
+  if (state_.victory_rules.score_history_enabled && state_.score_history.empty()) {
+    tick_score_history(/*force=*/true);
+  }
 }
 
 

@@ -171,7 +171,10 @@ void Simulation::tick_one_tick_hours(int hours) {
   if (state_.victory_rules.enabled && state_.victory_rules.elimination_enabled &&
       state_.victory_rules.score_threshold <= 0.0) {
     tick_victory();
-    if (state_.victory_state.game_over) return;
+    if (state_.victory_state.game_over) {
+      tick_score_history(/*force=*/true);
+      return;
+    }
   }
 
   // Defensive: if a caller asks for a tick that crosses more than one day
@@ -308,6 +311,7 @@ void Simulation::tick_one_tick_hours(int hours) {
     // completion/expiration happens after all simulation effects.
     tick_contracts();
     tick_victory();
+    tick_score_history(false);
   }
 }
 
@@ -478,6 +482,54 @@ void Simulation::tick_victory() {
                                       .colony_id = kInvalidId});
       }
     }
+  }
+}
+
+
+
+void Simulation::tick_score_history(bool force) {
+  const VictoryRules& rules = state_.victory_rules;
+  if (!rules.score_history_enabled) return;
+
+  const int interval = std::clamp(rules.score_history_interval_days, 1, 3650);
+  const int max_samples = std::clamp(rules.score_history_max_samples, 0, 20000);
+  if (max_samples == 0) return;
+
+  const std::int64_t now_day = state_.date.days_since_epoch();
+  const int hour = std::clamp(state_.hour_of_day, 0, 23);
+
+  if (!force) {
+    if (interval > 1 && (static_cast<int>(now_day) % interval) != 0) return;
+  }
+
+  if (!state_.score_history.empty()) {
+    const auto& last = state_.score_history.back();
+    if (last.day == now_day && last.hour == hour) return;
+  }
+
+  ScoreHistorySample sh;
+  sh.day = now_day;
+  sh.hour = hour;
+
+  const auto scores = compute_scoreboard(rules);
+  sh.scores.reserve(scores.size());
+  for (const auto& e : scores) {
+    if (e.faction_id == kInvalidId) continue;
+    ScoreHistoryEntry se;
+    se.faction_id = e.faction_id;
+    se.total = e.score.total_points();
+    sh.scores.push_back(se);
+  }
+
+  std::sort(sh.scores.begin(), sh.scores.end(), [](const ScoreHistoryEntry& a, const ScoreHistoryEntry& b) {
+    return a.faction_id < b.faction_id;
+  });
+
+  state_.score_history.push_back(std::move(sh));
+
+  if (max_samples > 0 && (int)state_.score_history.size() > max_samples) {
+    const std::size_t drop = state_.score_history.size() - (std::size_t)max_samples;
+    state_.score_history.erase(state_.score_history.begin(), state_.score_history.begin() + (std::ptrdiff_t)drop);
   }
 }
 

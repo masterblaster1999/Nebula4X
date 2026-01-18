@@ -18,7 +18,7 @@ using json::Array;
 using json::Object;
 using json::Value;
 
-constexpr int kCurrentSaveVersion = 52;
+constexpr int kCurrentSaveVersion = 53;
 
 
 std::string contract_kind_to_string(ContractKind k) {
@@ -232,6 +232,10 @@ Object victory_rules_to_json(const VictoryRules& r) {
   o["score_threshold"] = r.score_threshold;
   o["score_lead_margin"] = r.score_lead_margin;
 
+  o["score_history_enabled"] = r.score_history_enabled;
+  o["score_history_interval_days"] = static_cast<double>(r.score_history_interval_days);
+  o["score_history_max_samples"] = static_cast<double>(r.score_history_max_samples);
+
   Object w;
   w["colony_points"] = r.score_colony_points;
   w["population_per_million"] = r.score_population_per_million;
@@ -257,6 +261,14 @@ VictoryRules victory_rules_from_json(const Value& v) {
   }
   if (auto it = o.find("score_threshold"); it != o.end()) r.score_threshold = sane_nonneg(it->second.number_value(r.score_threshold), r.score_threshold);
   if (auto it = o.find("score_lead_margin"); it != o.end()) r.score_lead_margin = sane_nonneg(it->second.number_value(r.score_lead_margin), r.score_lead_margin);
+
+  if (auto it = o.find("score_history_enabled"); it != o.end()) r.score_history_enabled = it->second.bool_value(r.score_history_enabled);
+  if (auto it = o.find("score_history_interval_days"); it != o.end()) {
+    r.score_history_interval_days = std::clamp(static_cast<int>(it->second.int_value(r.score_history_interval_days)), 1, 3650);
+  }
+  if (auto it = o.find("score_history_max_samples"); it != o.end()) {
+    r.score_history_max_samples = std::clamp(static_cast<int>(it->second.int_value(r.score_history_max_samples)), 0, 20000);
+  }
 
   if (auto itw = o.find("weights"); itw != o.end() && itw->second.is_object()) {
     const Object& w = itw->second.object();
@@ -294,6 +306,55 @@ VictoryState victory_state_from_json(const Value& v) {
   if (auto it = o.find("victory_day"); it != o.end()) vs.victory_day = it->second.int_value(vs.victory_day);
   if (auto it = o.find("winner_score"); it != o.end()) vs.winner_score = sane_nonneg(it->second.number_value(vs.winner_score), vs.winner_score);
   return vs;
+}
+
+Object score_history_sample_to_json(const ScoreHistorySample& sh) {
+  Object o;
+  o["day"] = static_cast<double>(sh.day);
+  o["hour"] = static_cast<double>(sh.hour);
+
+  Array scores;
+  scores.reserve(sh.scores.size());
+  for (const auto& e : sh.scores) {
+    Object eo;
+    eo["faction_id"] = static_cast<double>(e.faction_id);
+    eo["total"] = sane_nonneg(e.total, 0.0);
+    scores.push_back(eo);
+  }
+  o["scores"] = scores;
+
+  return o;
+}
+
+ScoreHistorySample score_history_sample_from_json(const Value& v) {
+  ScoreHistorySample sh;
+  if (!v.is_object()) return sh;
+  const Object& o = v.object();
+  if (auto it = o.find("day"); it != o.end()) sh.day = it->second.int_value(sh.day);
+  if (auto it = o.find("hour"); it != o.end()) sh.hour = static_cast<int>(it->second.int_value(sh.hour));
+  sh.hour = std::clamp(sh.hour, 0, 23);
+
+  if (auto it = o.find("scores"); it != o.end() && it->second.is_array()) {
+    const Array& a = it->second.array();
+    sh.scores.reserve(a.size());
+    for (const auto& ev : a) {
+      if (!ev.is_object()) continue;
+      const Object& eo = ev.object();
+      ScoreHistoryEntry e;
+      if (auto ifid = eo.find("faction_id"); ifid != eo.end()) {
+        e.faction_id = static_cast<Id>(ifid->second.int_value(kInvalidId));
+      }
+      if (auto itot = eo.find("total"); itot != eo.end()) {
+        e.total = sane_nonneg(itot->second.number_value(0.0), 0.0);
+      }
+      if (e.faction_id != kInvalidId) sh.scores.push_back(e);
+    }
+    std::sort(sh.scores.begin(), sh.scores.end(), [](const ScoreHistoryEntry& a, const ScoreHistoryEntry& b) {
+      return a.faction_id < b.faction_id;
+    });
+  }
+
+  return sh;
 }
 
 
@@ -380,6 +441,7 @@ const char* fleet_mission_type_to_string(FleetMissionType t) {
     case FleetMissionType::BlockadeColony: return "blockade_colony";
     case FleetMissionType::PatrolRoute: return "patrol_route";
     case FleetMissionType::GuardJumpPoint: return "guard_jump_point";
+    case FleetMissionType::PatrolCircuit: return "patrol_circuit";
   }
   return "none";
 }
@@ -395,6 +457,7 @@ FleetMissionType fleet_mission_type_from_string(const std::string& s) {
   if (s == "blockade_colony" || s == "blockade") return FleetMissionType::BlockadeColony;
   if (s == "patrol_route" || s == "route_patrol" || s == "patrol_link") return FleetMissionType::PatrolRoute;
   if (s == "guard_jump_point" || s == "guard_jump" || s == "guard_jp" || s == "jump_guard") return FleetMissionType::GuardJumpPoint;
+  if (s == "patrol_circuit" || s == "patrol_waypoints" || s == "waypoint_patrol" || s == "circuit") return FleetMissionType::PatrolCircuit;
   return FleetMissionType::None;
 }
 
@@ -1044,6 +1107,12 @@ std::string serialize_game_to_json(const GameState& s) {
 
   root["victory_rules"] = victory_rules_to_json(s.victory_rules);
   root["victory_state"] = victory_state_to_json(s.victory_state);
+  if (!s.score_history.empty()) {
+    Array hist;
+    hist.reserve(s.score_history.size());
+    for (const auto& sh : s.score_history) hist.push_back(score_history_sample_to_json(sh));
+    root["score_history"] = hist;
+  }
 
 
   // Systems
@@ -1683,6 +1752,15 @@ std::string serialize_game_to_json(const GameState& s) {
       m["patrol_route_a_system_id"] = static_cast<double>(f.mission.patrol_route_a_system_id);
       m["patrol_route_b_system_id"] = static_cast<double>(f.mission.patrol_route_b_system_id);
 
+      {
+        Array circ;
+        circ.reserve(f.mission.patrol_circuit_system_ids.size());
+        for (Id sid : f.mission.patrol_circuit_system_ids) {
+          circ.push_back(static_cast<double>(sid));
+        }
+        m["patrol_circuit_system_ids"] = circ;
+      }
+
       m["guard_jump_point_id"] = static_cast<double>(f.mission.guard_jump_point_id);
       m["guard_jump_radius_mkm"] = f.mission.guard_jump_radius_mkm;
       m["guard_jump_dwell_days"] = static_cast<double>(f.mission.guard_jump_dwell_days);
@@ -1927,6 +2005,17 @@ GameState deserialize_game_from_json(const std::string& json_text) {
   }
   if (auto it = root.find("victory_state"); it != root.end()) {
     s.victory_state = victory_state_from_json(it->second);
+  }
+  if (auto it = root.find("score_history"); it != root.end() && it->second.is_array()) {
+    const Array& a = it->second.array();
+    s.score_history.reserve(a.size());
+    for (const auto& hv : a) {
+      s.score_history.push_back(score_history_sample_from_json(hv));
+    }
+    const int max_samples = std::clamp(s.victory_rules.score_history_max_samples, 0, 20000);
+    if (max_samples > 0 && (int)s.score_history.size() > max_samples) {
+      s.score_history.erase(s.score_history.begin(), s.score_history.begin() + (s.score_history.size() - (std::size_t)max_samples));
+    }
   }
 
   // Regions (optional)
@@ -2954,6 +3043,14 @@ GameState deserialize_game_from_json(const std::string& json_text) {
           }
           if (auto itb = m.find("patrol_route_b_system_id"); itb != m.end()) {
             fl.mission.patrol_route_b_system_id = static_cast<Id>(itb->second.int_value(kInvalidId));
+          }
+          if (auto itc = m.find("patrol_circuit_system_ids"); itc != m.end() && itc->second.is_array()) {
+            fl.mission.patrol_circuit_system_ids.clear();
+            for (const auto& sv : itc->second.array()) {
+              const Id sid = static_cast<Id>(sv.int_value(kInvalidId));
+              if (sid == kInvalidId) continue;
+              fl.mission.patrol_circuit_system_ids.push_back(sid);
+            }
           }
           if (auto itgj = m.find("guard_jump_point_id"); itgj != m.end()) {
             fl.mission.guard_jump_point_id = static_cast<Id>(itgj->second.int_value(fl.mission.guard_jump_point_id));

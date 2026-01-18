@@ -89,6 +89,9 @@ class App {
   nebula4x::AutosaveManager autosave_mgr_{};
   std::uint64_t last_seen_state_generation_{0};
 
+  // Auto-open the Victory window once when the game ends.
+  bool victory_window_autoopened_{false};
+
   // HUD transient state (command palette query, toast queue, etc.).
   HUDState hud_{};
 
