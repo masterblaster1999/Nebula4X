@@ -1095,7 +1095,15 @@ ShipAutomationProfile ship_automation_profile_from_json_value(const Value& v) {
 
 } // namespace
 
-std::string serialize_game_to_json(const GameState& s) {
+// NOTE: The helpers above live in an anonymous namespace, but the public
+// serialization API is defined below. Bring the JSON aliases into this
+// translation unit scope so we can build the JSON DOM without verbose
+// qualification.
+using json::Array;
+using json::Object;
+using json::Value;
+
+json::Value serialize_game_to_json_value(const GameState& s) {
   Object root;
   root["save_version"] = static_cast<double>(s.save_version);
   root["date"] = s.date.to_string();
@@ -1956,7 +1964,14 @@ std::string serialize_game_to_json(const GameState& s) {
     root["ground_battles"] = battles;
   }
 
-  return json::stringify(root, 2);
+  // Return the parsed DOM directly (useful for UI tooling).
+  // Move the root object into the variant to avoid an expensive copy.
+  return Value(std::move(root));
+}
+
+std::string serialize_game_to_json(const GameState& s) {
+  // Keep the old API: pretty-printed JSON text.
+  return json::stringify(serialize_game_to_json_value(s), 2);
 }
 
 GameState deserialize_game_from_json(const std::string& json_text) {

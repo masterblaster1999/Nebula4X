@@ -73,6 +73,28 @@ struct JsonWatchConfig {
   // Aggregation op for query mode.
   //   0=count matches, 1=sum, 2=avg, 3=min, 4=max
   int query_op{0};
+
+  // --- Procedural UI: Alert rules (Watchboard -> HUD toasts) ---
+  // When enabled, the watch pin can generate a toast when the condition is met.
+  //
+  // NOTE: Alerts are UI-only and do not change the simulation.
+  bool alert_enabled{false};
+  // Condition:
+  //   0 = Cross above threshold
+  //   1 = Cross below threshold
+  //   2 = Change (abs delta)
+  //   3 = Change (percent delta)
+  //   4 = Any change (string/number)
+  int alert_mode{0};
+  // Threshold used by cross-above/cross-below.
+  double alert_threshold{0.0};
+  // Delta used by abs/percent change. For percent mode, 0.10 = 10%.
+  double alert_delta{0.0};
+  // Toast level:
+  //   0=Info, 1=Warning, 2=Error
+  int alert_toast_level{1};
+  // Minimum real time between alerts for this pin (debounce).
+  float alert_cooldown_sec{2.0f};
 };
 
 // Procedural UI: data lenses (tables generated from JSON arrays).
@@ -421,6 +443,8 @@ struct UIState {
   bool show_salvage_window{false};
   bool show_contracts_window{false};
   bool show_sustainment_window{false};
+  // Fleet Manager: global fleet list + route planner + quick mission controls.
+  bool show_fleet_manager_window{false};
   bool show_troop_window{false};
   bool show_advisor_window{false};
   bool show_time_warp_window{false};
@@ -432,6 +456,8 @@ struct UIState {
   bool show_victory_window{false};
   bool show_colony_profiles_window{false};
   bool show_ship_profiles_window{false};
+  // Bulk management of ship automation flags (missions/sustainment).
+  bool show_automation_center_window{false};
   bool show_shipyard_targets_window{false};
   bool show_survey_network_window{false};
   bool show_settings_window{false};
@@ -454,6 +480,39 @@ struct UIState {
   bool show_pivot_tables_window{false};
 
   bool show_ui_forge_window{false};
+  bool show_context_forge_window{false};
+
+  // --- Procedural UI: Context Forge (auto-generated UI Forge panel) ---
+  //
+  // Context Forge creates/updates a UI Forge panel that follows selection (ship/colony/body)
+  // or a pinned entity id.
+  //
+  // Most fields are persisted in ui_prefs.json; transient fields are noted.
+  bool context_forge_enabled{false};
+  bool context_forge_follow_selection{true};
+  bool context_forge_auto_update{true};
+  std::uint64_t context_forge_pinned_entity_id{kInvalidId};
+
+  int context_forge_seed{1337};
+  int context_forge_max_kpis{16};
+  int context_forge_max_lists{4};
+  int context_forge_depth{1};
+  int context_forge_max_array_numeric_keys{2};
+  bool context_forge_include_lists{true};
+  bool context_forge_include_queries{true};
+  bool context_forge_include_id_fields{false};
+  bool context_forge_open_panel_on_generate{true};
+
+  // Transient: immediate action flag.
+  bool context_forge_request_regenerate{false};
+  // Persisted: which UI Forge panel id is treated as the context panel.
+  std::uint64_t context_forge_panel_id{0};
+  // Transient: last target id we generated for.
+  std::uint64_t context_forge_last_entity_id{kInvalidId};
+  // Transient: last error string.
+  std::string context_forge_last_error;
+  // Transient: used for friendly "generated X seconds ago" display.
+  double context_forge_last_success_time{0.0};
 
   // --- Procedural UI: JSON Watchboard (pins) ---
   // These are UI preferences persisted in ui_prefs.json.
@@ -542,6 +601,11 @@ struct UIState {
   // Additional UI chrome.
   bool show_status_bar{true};
 
+  // --- Command Console (command palette) ---
+  // Stored as command ids (stable strings) in ui_prefs.json.
+  std::vector<std::string> command_favorites;
+  std::vector<std::string> command_recent;
+
   // Transient helper windows.
   bool show_command_palette{false};
   bool show_help_window{false};
@@ -553,6 +617,10 @@ struct UIState {
   // Optional: request that the JSON Explorer focuses a specific JSON Pointer.
   // Consumed by the JSON Explorer window on the next frame.
   std::string request_json_explorer_goto_path;
+
+  // Optional: request that the Watchboard scrolls/highlights a specific watch id.
+  // Consumed by the Watchboard window on the next frame.
+  std::uint64_t request_watchboard_focus_id{0};
 
   // Optional: request that the Data Lenses window selects a specific table view id.
   // Consumed by the Data Lenses window on the next frame.
@@ -622,8 +690,25 @@ struct UIState {
   float screen_reader_hover_delay_sec{0.65f};   // seconds
 
   // UI style preset (ImGui colors + rounding + chrome).
-  // 0 = Dark (default), 1 = Light, 2 = Classic, 3 = Nebula, 4 = High Contrast
+  // 0 = Dark (default), 1 = Light, 2 = Classic, 3 = Nebula, 4 = High Contrast, 5 = Procedural
   int ui_style_preset{0};
+
+  // --- Procedural theme (ui_style_preset = 5) ---
+  // The procedural theme generates a full accent palette from a small set of parameters
+  // so players can quickly create/share custom UI skins.
+  int ui_procedural_theme_seed{1337};
+  bool ui_procedural_theme_use_seed_hue{true};
+  float ui_procedural_theme_hue_deg{190.0f};
+  // 0=Analogous, 1=Complementary, 2=Triad, 3=Monochrome
+  int ui_procedural_theme_variant{0};
+  float ui_procedural_theme_saturation{0.72f};
+  float ui_procedural_theme_value{0.90f};
+  float ui_procedural_theme_bg_value{0.11f};
+  float ui_procedural_theme_accent_strength{0.28f};
+  bool ui_procedural_theme_animate_hue{false};
+  float ui_procedural_theme_animate_speed_deg_per_sec{6.0f};
+  // When enabled, the theme also drives SDL clear + map backgrounds to keep the UI cohesive.
+  bool ui_procedural_theme_sync_backgrounds{false};
 
   // UI density affects padding/spacing sizing. Useful for data-heavy windows.
   // 0 = Comfortable (default), 1 = Compact, 2 = Spacious
@@ -639,6 +724,27 @@ struct UIState {
   bool docking_always_tab_bar{false};
   bool docking_transparent_payload{true};
 
+  // --- Procedural dock layout synthesizer ---
+  //
+  // Generates a docking layout using DockBuilder from a compact parameter set
+  // (seed + archetype). The resulting dock layout can be saved as a layout
+  // profile (ImGui ini file).
+  //
+  // These values are persisted in ui_prefs.json.
+  int ui_procedural_layout_seed{1337};
+  // 0=Balanced, 1=Command, 2=Data, 3=Debug, 4=Forge
+  int ui_procedural_layout_mode{0};
+  // 0..1: how much randomness to inject into splits/window assignments.
+  float ui_procedural_layout_variation{0.45f};
+  bool ui_procedural_layout_include_tools{false};
+  bool ui_procedural_layout_include_forge_panels{true};
+  // Limit how many custom UI Forge panel windows are auto-docked (0 = all).
+  int ui_procedural_layout_max_forge_panels{4};
+  // When true, generating a layout also toggles windows on so the layout is visible immediately.
+  bool ui_procedural_layout_auto_open_windows{true};
+  // When enabled, generating a layout also saves the active layout profile ini file.
+  bool ui_procedural_layout_autosave_profile{false};
+
   // --- Dock layout profiles ---
   //
   // Dear ImGui stores docking state and window positions in an ini file
@@ -653,6 +759,9 @@ struct UIState {
   // One-shot requests consumed by the App.
   bool request_reload_layout_profile{false};
   bool request_reset_window_layout{false};
+
+  // One-shot request: rebuild a procedural dock layout next frame.
+  bool request_generate_procedural_layout{false};
 
   // UI-only feedback (not persisted).
   std::string layout_profile_status;

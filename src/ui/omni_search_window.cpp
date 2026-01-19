@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <memory>
@@ -164,8 +165,203 @@ struct NodeFrame {
   std::string key_label;
 };
 
+enum class ResultKind : int {
+  JsonNode = 0,
+  Action = 1,
+};
+
+enum class OmniActionId : int {
+  // Window toggles.
+  ToggleFleetManager,
+  ToggleAutomationCenter,
+  ToggleWatchboard,
+  ToggleDataLenses,
+  ToggleDashboards,
+  TogglePivotTables,
+  ToggleUiForge,
+  ToggleContextForge,
+  ToggleSettings,
+  ToggleJsonExplorer,
+  ToggleEntityInspector,
+  ToggleLayoutProfiles,
+  ToggleProcGenAtlas,
+  ToggleStarAtlas,
+
+  // Navigation helpers.
+  MapTabSystem,
+  MapTabGalaxy,
+
+  // UI style presets.
+  StyleDark,
+  StyleNebula,
+  StyleHighContrast,
+  StyleProcedural,
+
+  // Procedural UI quick actions.
+  ProceduralThemeNewSeed,
+  ProceduralLayoutGenerate,
+  ProceduralLayoutNewSeedAndGenerate,
+};
+
+struct OmniActionDef {
+  OmniActionId id;
+  const char* label;
+  const char* desc;
+  const char* keywords;
+};
+
+constexpr OmniActionDef kOmniActions[] = {
+    {OmniActionId::ToggleFleetManager, "Open Fleet Manager", "Global fleet list + quick mission tools.",
+     "fleet ships missions"},
+    {OmniActionId::ToggleAutomationCenter, "Open Automation Center", "Bulk ship automation flags + triage.",
+     "automation autopilot"},
+    {OmniActionId::ToggleWatchboard, "Open Watchboard", "Pin JSON pointers / queries with history + alerts.",
+     "watch pins alerts"},
+    {OmniActionId::ToggleDataLenses, "Open Data Lenses", "Create tables over JSON arrays (inspect/sort/filter).",
+     "lens table"},
+    {OmniActionId::ToggleDashboards, "Open Dashboards", "Procedural KPI cards over JSON arrays.",
+     "dashboard kpi"},
+    {OmniActionId::TogglePivotTables, "Open Pivot Tables", "Group/summarize JSON arrays into pivots.",
+     "pivot group"},
+    {OmniActionId::ToggleUiForge, "Open UI Forge", "Build custom panels from JSON pointers/queries.",
+     "ui forge panels"},
+    {OmniActionId::ToggleContextForge, "Open Context Forge", "Auto-generate a UI Forge panel for current selection.",
+     "context forge"},
+    {OmniActionId::ToggleJsonExplorer, "Open JSON Explorer", "Browse the live game JSON tree.",
+     "json explorer"},
+    {OmniActionId::ToggleEntityInspector, "Open Entity Inspector", "Inspect any entity by id and its JSON path.",
+     "entity inspector"},
+    {OmniActionId::ToggleLayoutProfiles, "Open Layout Profiles", "Save/load ImGui layouts and procedural layouts.",
+     "layout dock profiles"},
+    {OmniActionId::ToggleProcGenAtlas, "Open ProcGen Atlas", "Explore procedural generation maps + metrics.",
+     "procgen atlas"},
+    {OmniActionId::ToggleStarAtlas, "Open Star Atlas", "Browse star systems and galaxy navigation.",
+     "star atlas"},
+    {OmniActionId::ToggleSettings, "Open Settings", "UI configuration (scaling, theme, layout, tools).",
+     "settings options"},
+
+    {OmniActionId::MapTabGalaxy, "Go to Galaxy Map", "Switch map tab to Galaxy.", "map galaxy"},
+    {OmniActionId::MapTabSystem, "Go to System Map", "Switch map tab to System.", "map system"},
+
+    {OmniActionId::StyleDark, "UI Style: Dark", "Switch UI style preset to Dark.", "theme style dark"},
+    {OmniActionId::StyleNebula, "UI Style: Nebula", "Switch UI style preset to Nebula.", "theme style nebula"},
+    {OmniActionId::StyleHighContrast, "UI Style: High Contrast", "Switch UI style preset to High Contrast.",
+     "theme style contrast"},
+    {OmniActionId::StyleProcedural, "UI Style: Procedural", "Switch UI style preset to Procedural.",
+     "theme style procedural"},
+
+    {OmniActionId::ProceduralThemeNewSeed, "Procedural Theme: New Seed", "Mutate the procedural theme seed.",
+     "theme procedural random"},
+    {OmniActionId::ProceduralLayoutGenerate, "Procedural Layout: Generate", "Generate a dock layout from current knobs.",
+     "layout procedural generate"},
+    {OmniActionId::ProceduralLayoutNewSeedAndGenerate, "Procedural Layout: New Seed + Generate",
+     "Mutate the procedural layout seed and regenerate.", "layout procedural random"},
+};
+
+std::uint32_t xorshift32(std::uint32_t& s) {
+  // Simple deterministic PRNG for UI-only seeds (fast, tiny).
+  // Note: not intended for simulation/procgen determinism.
+  if (s == 0) s = 0x6D2B79F5u;
+  s ^= (s << 13);
+  s ^= (s >> 17);
+  s ^= (s << 5);
+  return s;
+}
+
+void invoke_omni_action(UIState& ui, OmniActionId id) {
+  switch (id) {
+    case OmniActionId::ToggleFleetManager:
+      ui.show_fleet_manager_window = true;
+      break;
+    case OmniActionId::ToggleAutomationCenter:
+      ui.show_automation_center_window = true;
+      break;
+    case OmniActionId::ToggleWatchboard:
+      ui.show_watchboard_window = true;
+      break;
+    case OmniActionId::ToggleDataLenses:
+      ui.show_data_lenses_window = true;
+      break;
+    case OmniActionId::ToggleDashboards:
+      ui.show_dashboards_window = true;
+      break;
+    case OmniActionId::TogglePivotTables:
+      ui.show_pivot_tables_window = true;
+      break;
+    case OmniActionId::ToggleUiForge:
+      ui.show_ui_forge_window = true;
+      break;
+    case OmniActionId::ToggleContextForge:
+      ui.show_context_forge_window = true;
+      break;
+    case OmniActionId::ToggleSettings:
+      ui.show_settings_window = true;
+      break;
+    case OmniActionId::ToggleJsonExplorer:
+      ui.show_json_explorer_window = true;
+      break;
+    case OmniActionId::ToggleEntityInspector:
+      ui.show_entity_inspector_window = true;
+      break;
+    case OmniActionId::ToggleLayoutProfiles:
+      ui.show_layout_profiles_window = true;
+      break;
+    case OmniActionId::ToggleProcGenAtlas:
+      ui.show_procgen_atlas_window = true;
+      break;
+    case OmniActionId::ToggleStarAtlas:
+      ui.show_star_atlas_window = true;
+      break;
+
+    case OmniActionId::MapTabSystem:
+      ui.show_map_window = true;
+      ui.request_map_tab = MapTab::System;
+      break;
+    case OmniActionId::MapTabGalaxy:
+      ui.show_map_window = true;
+      ui.request_map_tab = MapTab::Galaxy;
+      break;
+
+    case OmniActionId::StyleDark:
+      ui.ui_style_preset = 0;
+      break;
+    case OmniActionId::StyleNebula:
+      ui.ui_style_preset = 3;
+      break;
+    case OmniActionId::StyleHighContrast:
+      ui.ui_style_preset = 4;
+      break;
+    case OmniActionId::StyleProcedural:
+      ui.ui_style_preset = 5;
+      break;
+
+    case OmniActionId::ProceduralThemeNewSeed: {
+      ui.ui_style_preset = 5;
+      std::uint32_t s = static_cast<std::uint32_t>(ui.ui_procedural_theme_seed);
+      s ^= static_cast<std::uint32_t>(ImGui::GetTime() * 1000.0);
+      xorshift32(s);
+      ui.ui_procedural_theme_seed = static_cast<int>(s & 0x7fffffffU);
+    } break;
+
+    case OmniActionId::ProceduralLayoutGenerate:
+      ui.request_generate_procedural_layout = true;
+      break;
+
+    case OmniActionId::ProceduralLayoutNewSeedAndGenerate: {
+      std::uint32_t s = static_cast<std::uint32_t>(ui.ui_procedural_layout_seed);
+      s ^= static_cast<std::uint32_t>(ImGui::GetTime() * 1000.0);
+      xorshift32(s);
+      ui.ui_procedural_layout_seed = static_cast<int>(s & 0x7fffffffU);
+      ui.request_generate_procedural_layout = true;
+    } break;
+  }
+}
+
 struct SearchResult {
   int score{0};
+  ResultKind kind{ResultKind::JsonNode};
+  int action_id{-1};
+
   std::string path;
   std::string key;
   std::string type;
@@ -188,6 +384,10 @@ struct OmniSearchState {
   char query[256]{};
   std::string last_query;
 
+  // Derived query mode.
+  bool action_only{false};
+  std::string effective_query;
+
   bool scanning{false};
   bool truncated{false};
   int scanned_nodes{0};
@@ -205,6 +405,64 @@ void start_scan(OmniSearchState& st, const UIState& ui);
 void scan_step(OmniSearchState& st, const UIState& ui);
 void open_in_json_explorer(UIState& ui, const std::string& path);
 
+std::string trim_copy(std::string_view s) {
+  std::size_t b = 0;
+  std::size_t e = s.size();
+  while (b < e && std::isspace(static_cast<unsigned char>(s[b]))) ++b;
+  while (e > b && std::isspace(static_cast<unsigned char>(s[e - 1]))) --e;
+  return std::string(s.substr(b, e - b));
+}
+
+void add_action_results(OmniSearchState& st, const UIState& ui) {
+  const std::string q = trim_copy(st.effective_query);
+
+  // When query is empty, show a curated default list.
+  const bool empty = q.empty();
+
+  for (const auto& a : kOmniActions) {
+    int sc = 0;
+    if (!empty) {
+      sc = -1;
+      sc = std::max(sc, fuzzy_score(a.label, q, ui.omni_search_case_sensitive));
+      if (a.desc) sc = std::max(sc, fuzzy_score(a.desc, q, ui.omni_search_case_sensitive));
+      if (a.keywords) sc = std::max(sc, fuzzy_score(a.keywords, q, ui.omni_search_case_sensitive));
+      if (sc < 0) continue;
+
+      // Slight boost so commands remain discoverable alongside JSON results.
+      sc += 250;
+    }
+
+    SearchResult r;
+    r.kind = ResultKind::Action;
+    r.action_id = static_cast<int>(a.id);
+    r.score = sc;
+    r.path = a.label;
+    r.type = "action";
+    r.preview = a.desc ? a.desc : "";
+    r.key.clear();
+    r.array_of_objects = false;
+    r.is_scalar = true;
+    st.results.push_back(std::move(r));
+  }
+
+  st.results_dirty_sort = true;
+}
+
+void sort_results(OmniSearchState& st) {
+  if (!st.results_dirty_sort) return;
+  st.results_dirty_sort = false;
+
+  std::stable_sort(st.results.begin(), st.results.end(), [](const SearchResult& a, const SearchResult& b) {
+    if (a.score != b.score) return a.score > b.score;
+    if (a.kind != b.kind) return a.kind == ResultKind::Action; // prefer actions on ties
+    return a.path < b.path;
+  });
+
+  if (st.selected_idx >= static_cast<int>(st.results.size())) {
+    st.selected_idx = static_cast<int>(st.results.size()) - 1;
+  }
+}
+
 
 void refresh_doc(OmniSearchState& st, const Simulation& sim, double min_refresh_sec, bool force) {
   const double now = ImGui::GetTime();
@@ -219,7 +477,7 @@ void refresh_doc(OmniSearchState& st, const Simulation& sim, double min_refresh_
   }
 }
 
-void start_scan(OmniSearchState& st, const UIState& /*ui*/) {
+void start_scan(OmniSearchState& st, const UIState& ui) {
   st.results.clear();
   st.results_dirty_sort = false;
   st.scanned_nodes = 0;
@@ -227,12 +485,31 @@ void start_scan(OmniSearchState& st, const UIState& /*ui*/) {
   st.stack.clear();
   st.selected_idx = -1;
 
+  // Parse query mode:
+  //  - ">foo" => action-only mode (command palette)
+  //  - "foo"  => JSON + actions
+  st.action_only = false;
+  st.effective_query = st.last_query;
+  if (!st.effective_query.empty() && st.effective_query[0] == '>') {
+    st.action_only = true;
+    st.effective_query.erase(0, 1);
+  }
+  st.effective_query = trim_copy(st.effective_query);
+
+  // Always add actions (even when JSON doc isn't available yet).
+  add_action_results(st, ui);
+
   if (!st.doc_loaded) {
     st.scanning = false;
     return;
   }
 
-  if (st.last_query.empty()) {
+  if (st.effective_query.empty()) {
+    st.scanning = false;
+    return;
+  }
+
+  if (st.action_only) {
     st.scanning = false;
     return;
   }
@@ -247,9 +524,14 @@ void start_scan(OmniSearchState& st, const UIState& /*ui*/) {
 }
 
 void scan_step(OmniSearchState& st, const UIState& ui) {
-  if (!st.scanning) return;
-  if (st.last_query.empty()) {
+  // Even when no scan is active, we may have action results that need sorting.
+  if (!st.scanning) {
+    sort_results(st);
+    return;
+  }
+  if (st.effective_query.empty() || st.action_only) {
     st.scanning = false;
+    sort_results(st);
     return;
   }
 
@@ -269,28 +551,29 @@ void scan_step(OmniSearchState& st, const UIState& ui) {
     int sc = -1;
     if (ui.omni_search_match_keys) {
       if (!n.key_label.empty()) {
-        sc = std::max(sc, fuzzy_score(n.key_label, st.last_query, ui.omni_search_case_sensitive));
+        sc = std::max(sc, fuzzy_score(n.key_label, st.effective_query, ui.omni_search_case_sensitive));
       }
       // Matching against the full path is very useful for nested structures.
-      sc = std::max(sc, fuzzy_score(n.path, st.last_query, ui.omni_search_case_sensitive));
+      sc = std::max(sc, fuzzy_score(n.path, st.effective_query, ui.omni_search_case_sensitive));
     }
     if (ui.omni_search_match_values) {
       if (n.v->is_string()) {
-        sc = std::max(sc, fuzzy_score(n.v->string_value(), st.last_query, ui.omni_search_case_sensitive));
+        sc = std::max(sc, fuzzy_score(n.v->string_value(), st.effective_query, ui.omni_search_case_sensitive));
       } else if (n.v->is_number()) {
         const std::string t = format_number(n.v->number_value());
-        sc = std::max(sc, fuzzy_score(t, st.last_query, ui.omni_search_case_sensitive));
+        sc = std::max(sc, fuzzy_score(t, st.effective_query, ui.omni_search_case_sensitive));
       } else if (n.v->is_bool()) {
         const std::string t = n.v->bool_value() ? "true" : "false";
-        sc = std::max(sc, fuzzy_score(t, st.last_query, ui.omni_search_case_sensitive));
+        sc = std::max(sc, fuzzy_score(t, st.effective_query, ui.omni_search_case_sensitive));
       } else if (n.v->is_null()) {
-        sc = std::max(sc, fuzzy_score("null", st.last_query, ui.omni_search_case_sensitive));
+        sc = std::max(sc, fuzzy_score("null", st.effective_query, ui.omni_search_case_sensitive));
       }
     }
 
     if (sc >= 0) {
       SearchResult r;
       r.score = sc;
+      r.kind = ResultKind::JsonNode;
       r.path = n.path;
       r.key = n.key_label;
       r.type = json_type_name(*n.v);
@@ -340,15 +623,7 @@ void scan_step(OmniSearchState& st, const UIState& ui) {
   }
 
   // Keep best results at the top.
-  if (st.results_dirty_sort) {
-    st.results_dirty_sort = false;
-    std::stable_sort(st.results.begin(), st.results.end(), [](const SearchResult& a, const SearchResult& b) {
-      if (a.score != b.score) return a.score > b.score;
-      return a.path < b.path;
-    });
-
-    if (st.selected_idx >= static_cast<int>(st.results.size())) st.selected_idx = static_cast<int>(st.results.size()) - 1;
-  }
+  sort_results(st);
 }
 
 void open_in_json_explorer(UIState& ui, const std::string& path) {
@@ -450,7 +725,7 @@ void draw_omni_search_window(Simulation& sim, UIState& ui) {
       st.focus_query_next = false;
     }
 
-    query_enter = ImGui::InputTextWithHint("##omni_query", "Search game JSON (keys/paths and scalar values)", st.query,
+    query_enter = ImGui::InputTextWithHint("##omni_query", "Search JSON and commands (prefix '>' for commands)", st.query,
                                           IM_ARRAYSIZE(st.query), tf);
 
     const std::string q = std::string(st.query);
@@ -528,71 +803,86 @@ void draw_omni_search_window(Simulation& sim, UIState& ui) {
 
           // Double-click to jump.
           if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
-            open_in_json_explorer(ui, r.path);
+            if (r.kind == ResultKind::Action) {
+              invoke_omni_action(ui, static_cast<OmniActionId>(r.action_id));
+              ui.show_omni_search_window = false;
+            } else {
+              open_in_json_explorer(ui, r.path);
+            }
           }
 
           // Context menu.
           if (ImGui::BeginPopupContextItem("##omni_ctx")) {
-            if (ImGui::MenuItem("Copy JSON Pointer")) {
-              ImGui::SetClipboardText(r.path.c_str());
-            }
-            if (ImGui::MenuItem("Go to in JSON Explorer")) {
-              open_in_json_explorer(ui, r.path);
-            }
-            if (ImGui::MenuItem("Pin to Watchboard")) {
-              add_watch_item(ui, r.path, r.key.empty() ? r.path : r.key);
-              ui.show_watchboard_window = true;
-            }
+            if (r.kind == ResultKind::Action) {
+              if (ImGui::MenuItem("Run")) {
+                invoke_omni_action(ui, static_cast<OmniActionId>(r.action_id));
+                ui.show_omni_search_window = false;
+              }
+              if (ImGui::MenuItem("Copy command name")) {
+                ImGui::SetClipboardText(r.path.c_str());
+              }
+            } else {
+              if (ImGui::MenuItem("Copy JSON Pointer")) {
+                ImGui::SetClipboardText(r.path.c_str());
+              }
+              if (ImGui::MenuItem("Go to in JSON Explorer")) {
+                open_in_json_explorer(ui, r.path);
+              }
+              if (ImGui::MenuItem("Pin to Watchboard")) {
+                add_watch_item(ui, r.path, r.key.empty() ? r.path : r.key);
+                ui.show_watchboard_window = true;
+              }
 
-            // Resolve the value for type-specific actions.
-            std::string err;
-            const nebula4x::json::Value* v = st.root
-                                                ? resolve_json_pointer(*st.root, r.path,
-                                                                       /*accept_root_slash=*/true, &err)
-                                                : nullptr;
-            if (v) {
-              std::uint64_t ent_id = 0;
-              if (json_to_u64_id(*v, ent_id)) {
-                if (const auto* ent = find_game_entity(ent_id)) {
-                  ImGui::Separator();
-                  std::string elabel = ent->kind + " #" + std::to_string(ent->id);
-                  if (!ent->name.empty()) elabel += "  " + ent->name;
-                  ImGui::TextDisabled("Referenced entity");
-                  ImGui::TextUnformatted(elabel.c_str());
-                  if (ImGui::MenuItem("Go to referenced entity")) {
-                    open_in_json_explorer(ui, ent->path);
-                  }
-                  if (ImGui::MenuItem("Open in Entity Inspector")) {
-                    ui.show_entity_inspector_window = true;
-                    ui.entity_inspector_id = ent->id;
-                  }
-                  if (ImGui::MenuItem("Open in Reference Graph")) {
-                    ui.show_reference_graph_window = true;
-                    ui.reference_graph_focus_id = ent->id;
+              // Resolve the value for type-specific actions.
+              std::string err;
+              const nebula4x::json::Value* v = st.root
+                                                  ? resolve_json_pointer(*st.root, r.path,
+                                                                         /*accept_root_slash=*/true, &err)
+                                                  : nullptr;
+              if (v) {
+                std::uint64_t ent_id = 0;
+                if (json_to_u64_id(*v, ent_id)) {
+                  if (const auto* ent = find_game_entity(ent_id)) {
+                    ImGui::Separator();
+                    std::string elabel = ent->kind + " #" + std::to_string(ent->id);
+                    if (!ent->name.empty()) elabel += "  " + ent->name;
+                    ImGui::TextDisabled("Referenced entity");
+                    ImGui::TextUnformatted(elabel.c_str());
+                    if (ImGui::MenuItem("Go to referenced entity")) {
+                      open_in_json_explorer(ui, ent->path);
+                    }
+                    if (ImGui::MenuItem("Open in Entity Inspector")) {
+                      ui.show_entity_inspector_window = true;
+                      ui.entity_inspector_id = ent->id;
+                    }
+                    if (ImGui::MenuItem("Open in Reference Graph")) {
+                      ui.show_reference_graph_window = true;
+                      ui.reference_graph_focus_id = ent->id;
+                    }
                   }
                 }
               }
-            }
 
-            if (v && v->is_array()) {
-              ImGui::Separator();
-              if (ImGui::MenuItem("Create Data Lens")) {
-                add_json_table_view(ui, r.path);
-                ui.show_data_lenses_window = true;
+              if (v && v->is_array()) {
+                ImGui::Separator();
+                if (ImGui::MenuItem("Create Data Lens")) {
+                  add_json_table_view(ui, r.path);
+                  ui.show_data_lenses_window = true;
+                }
+                if (ImGui::MenuItem("Create Dashboard")) {
+                  add_json_dashboard_for_path(ui, r.path);
+                  ui.show_dashboards_window = true;
+                }
+                if (ImGui::MenuItem("Create Pivot Table")) {
+                  add_json_pivot_for_path(ui, r.path);
+                  ui.show_pivot_tables_window = true;
+                }
               }
-              if (ImGui::MenuItem("Create Dashboard")) {
-                add_json_dashboard_for_path(ui, r.path);
-                ui.show_dashboards_window = true;
-              }
-              if (ImGui::MenuItem("Create Pivot Table")) {
-                add_json_pivot_for_path(ui, r.path);
-                ui.show_pivot_tables_window = true;
-              }
-            }
 
-            if (!err.empty()) {
-              ImGui::Separator();
-              ImGui::TextDisabled("Resolve error: %s", err.c_str());
+              if (!err.empty()) {
+                ImGui::Separator();
+                ImGui::TextDisabled("Resolve error: %s", err.c_str());
+              }
             }
 
             ImGui::EndPopup();
@@ -645,68 +935,96 @@ void draw_omni_search_window(Simulation& sim, UIState& ui) {
     } else {
       const auto& r = st.results[static_cast<std::size_t>(st.selected_idx)];
 
-      ImGui::TextDisabled("Path:");
-      ImGui::TextWrapped("%s", r.path.c_str());
+      if (r.kind == ResultKind::Action) {
+        ImGui::TextDisabled("Command:");
+        ImGui::TextWrapped("%s", r.path.c_str());
 
-      ImGui::TextDisabled("Type:");
-      ImGui::Text("%s", r.type.c_str());
-
-      std::string err;
-      const nebula4x::json::Value* v = st.root ? resolve_json_pointer(*st.root, r.path,
-                                                                     /*accept_root_slash=*/true, &err)
-                                               : nullptr;
-
-      if (v) {
-        ImGui::TextDisabled("Preview:");
-        const std::string pv = json_node_preview(*v, 240);
-        ImGui::TextWrapped("%s", pv.c_str());
+        if (!r.preview.empty()) {
+          ImGui::TextDisabled("Description:");
+          ImGui::TextWrapped("%s", r.preview.c_str());
+        }
 
         ImGui::Separator();
-        if (ImGui::Button("Go to JSON Explorer")) {
-          open_in_json_explorer(ui, r.path);
+        if (ImGui::Button("Run")) {
+          invoke_omni_action(ui, static_cast<OmniActionId>(r.action_id));
+          ui.show_omni_search_window = false;
         }
         ImGui::SameLine();
-        if (ImGui::Button("Copy Pointer")) {
+        if (ImGui::Button("Copy name")) {
           ImGui::SetClipboardText(r.path.c_str());
         }
-        ImGui::SameLine();
-        if (ImGui::Button("Pin")) {
-          add_watch_item(ui, r.path, r.key.empty() ? r.path : r.key);
-          ui.show_watchboard_window = true;
-        }
-
-        if (v->is_array()) {
-          ImGui::SeparatorText("Array actions");
-          if (ImGui::Button("Create Data Lens")) {
-            add_json_table_view(ui, r.path);
-            ui.show_data_lenses_window = true;
-          }
-          if (ImGui::Button("Create Dashboard")) {
-            add_json_dashboard_for_path(ui, r.path);
-            ui.show_dashboards_window = true;
-          }
-          if (ImGui::Button("Create Pivot")) {
-            add_json_pivot_for_path(ui, r.path);
-            ui.show_pivot_tables_window = true;
-          }
-        }
       } else {
-        ImGui::TextColored(ImVec4(1, 0.5f, 0.5f, 1), "Resolve error: %s", err.c_str());
+        ImGui::TextDisabled("Path:");
+        ImGui::TextWrapped("%s", r.path.c_str());
+
+        ImGui::TextDisabled("Type:");
+        ImGui::Text("%s", r.type.c_str());
+
+        std::string err;
+        const nebula4x::json::Value* v = st.root ? resolve_json_pointer(*st.root, r.path,
+                                                                       /*accept_root_slash=*/true, &err)
+                                                 : nullptr;
+
+        if (v) {
+          ImGui::TextDisabled("Preview:");
+          const std::string pv = json_node_preview(*v, 240);
+          ImGui::TextWrapped("%s", pv.c_str());
+
+          ImGui::Separator();
+          if (ImGui::Button("Go to JSON Explorer")) {
+            open_in_json_explorer(ui, r.path);
+          }
+          ImGui::SameLine();
+          if (ImGui::Button("Copy Pointer")) {
+            ImGui::SetClipboardText(r.path.c_str());
+          }
+          ImGui::SameLine();
+          if (ImGui::Button("Pin")) {
+            add_watch_item(ui, r.path, r.key.empty() ? r.path : r.key);
+            ui.show_watchboard_window = true;
+          }
+
+          if (v->is_array()) {
+            ImGui::SeparatorText("Array actions");
+            if (ImGui::Button("Create Data Lens")) {
+              add_json_table_view(ui, r.path);
+              ui.show_data_lenses_window = true;
+            }
+            if (ImGui::Button("Create Dashboard")) {
+              add_json_dashboard_for_path(ui, r.path);
+              ui.show_dashboards_window = true;
+            }
+            if (ImGui::Button("Create Pivot")) {
+              add_json_pivot_for_path(ui, r.path);
+              ui.show_pivot_tables_window = true;
+            }
+          }
+        } else {
+          ImGui::TextColored(ImVec4(1, 0.5f, 0.5f, 1), "Resolve error: %s", err.c_str());
+        }
       }
     }
 
     ImGui::Separator();
     ImGui::TextDisabled("Tips");
-    ImGui::BulletText("Ctrl+F toggles OmniSearch.");
-    ImGui::BulletText("Double-click a result to jump to JSON Explorer.");
-    ImGui::BulletText("Right-click a result for actions (Pin/Lens/Dashboard/Pivot)." );
+    ImGui::BulletText("Ctrl+F toggles OmniSearch. (Ctrl+P opens the Command Palette.)");
+    ImGui::BulletText("Prefix query with '>' to search commands only.");
+    ImGui::BulletText("Enter runs the selected command (or jumps to JSON Explorer for JSON results).");
+    ImGui::BulletText("Double-click a JSON result to jump to JSON Explorer; double-click a command to run it.");
+    ImGui::BulletText("Right-click a JSON result for actions (Pin/Lens/Dashboard/Pivot).");
   }
   ImGui::EndChild();
 
   // Enter: jump to best match.
   if (query_enter && !st.results.empty()) {
     const int idx = (st.selected_idx >= 0 && st.selected_idx < static_cast<int>(st.results.size())) ? st.selected_idx : 0;
-    open_in_json_explorer(ui, st.results[static_cast<std::size_t>(idx)].path);
+    const auto& r = st.results[static_cast<std::size_t>(idx)];
+    if (r.kind == ResultKind::Action) {
+      invoke_omni_action(ui, static_cast<OmniActionId>(r.action_id));
+      ui.show_omni_search_window = false;
+    } else {
+      open_in_json_explorer(ui, r.path);
+    }
   }
 
   ImGui::End();

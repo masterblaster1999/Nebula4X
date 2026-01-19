@@ -1,6 +1,7 @@
 #include "ui/system_map.h"
 
 #include "ui/map_render.h"
+#include "ui/map_label_placer.h"
 #include "ui/minimap.h"
 #include "ui/ruler.h"
 
@@ -93,8 +94,9 @@ ImVec2 to_screen(const Vec2& world_mkm, const ImVec2& center_px, double scale_px
 
 Vec2 to_world(const ImVec2& screen_px, const ImVec2& center_px, double scale_px_per_mkm, double zoom,
               const Vec2& pan_mkm) {
-  const double x = (screen_px.x - center_px.x) / (scale_px_per_mkm * zoom) - pan_mkm.x;
-  const double y = (screen_px.y - center_px.y) / (scale_px_per_mkm * zoom) - pan_mkm.y;
+  const double denom = std::max(1e-12, scale_px_per_mkm * zoom);
+  const double x = (screen_px.x - center_px.x) / denom - pan_mkm.x;
+  const double y = (screen_px.y - center_px.y) / denom - pan_mkm.y;
   return Vec2{x, y};
 }
 
@@ -602,7 +604,7 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
   }
 
   const double fit = std::min(avail.x, avail.y) * 0.45;
-  const double scale = fit / max_r;
+  const double scale = std::max(1e-9, fit / max_r);
 
   // Input handling.
   const bool hovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
@@ -610,13 +612,44 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
   const bool mouse_in_rect =
       (mouse.x >= origin.x && mouse.x <= origin.x + avail.x && mouse.y >= origin.y && mouse.y <= origin.y + avail.y);
 
+  // Map viewport rectangle (content area).
+  const ImVec2 view_p0 = origin;
+  const ImVec2 view_p1(origin.x + avail.x, origin.y + avail.y);
+
+  // Legend overlay rectangle (top-left). The legend is drawn later in the frame using
+  // SetCursorScreenPos/BeginChild, so we must treat this area as UI now or
+  // clicks/scrolls will 'fall through' to the map interactions.
+  const float legend_margin = 10.0f;
+  const ImVec2 legend_desired(320.0f, 480.0f);
+  const float legend_max_w = std::max(0.0f, avail.x - legend_margin * 2.0f);
+  const float legend_max_h = std::max(0.0f, avail.y - legend_margin * 2.0f);
+  ImVec2 legend_size(std::min(legend_desired.x, legend_max_w), std::min(legend_desired.y, legend_max_h));
+  // Avoid (0,0) which in BeginChild means "use remaining region".
+  legend_size.x = std::max(1.0f, legend_size.x);
+  legend_size.y = std::max(1.0f, legend_size.y);
+  const ImVec2 legend_p0(origin.x + legend_margin, origin.y + legend_margin);
+  const ImVec2 legend_p1(legend_p0.x + legend_size.x, legend_p0.y + legend_size.y);
+
+  // Clamp hit-test to visible viewport. This avoids blocking map interactions
+  // in cases where the window is smaller than the overlay and the child window
+  // is clipped by ImGui.
+  const ImVec2 legend_hit_p0(std::max(legend_p0.x, view_p0.x), std::max(legend_p0.y, view_p0.y));
+  const ImVec2 legend_hit_p1(std::min(legend_p1.x, view_p1.x), std::min(legend_p1.y, view_p1.y));
+  const bool legend_hit_valid = legend_hit_p1.x > legend_hit_p0.x && legend_hit_p1.y > legend_hit_p0.y;
+  const bool over_legend = legend_hit_valid && mouse_in_rect && point_in_rect(mouse, legend_hit_p0, legend_hit_p1);
+
   // Minimap rectangle (bottom-right overlay).
   const float mm_margin = 10.0f;
-  const float mm_w = std::clamp(avail.x * 0.28f, 150.0f, 300.0f);
-  const float mm_h = std::clamp(avail.y * 0.23f, 105.0f, 240.0f);
-  const ImVec2 mm_p1(origin.x + avail.x - mm_margin, origin.y + avail.y - mm_margin);
+  float mm_w = std::clamp(avail.x * 0.28f, 150.0f, 300.0f);
+  float mm_h = std::clamp(avail.y * 0.23f, 105.0f, 240.0f);
+  const float mm_max_w = std::max(0.0f, avail.x - mm_margin * 2.0f);
+  const float mm_max_h = std::max(0.0f, avail.y - mm_margin * 2.0f);
+  mm_w = std::min(mm_w, mm_max_w);
+  mm_h = std::min(mm_h, mm_max_h);
+  const bool minimap_has_room = (mm_w >= 10.0f && mm_h >= 10.0f);
+  const ImVec2 mm_p1(view_p1.x - mm_margin, view_p1.y - mm_margin);
   const ImVec2 mm_p0(mm_p1.x - mm_w, mm_p1.y - mm_h);
-  bool minimap_enabled = ui.system_map_show_minimap;
+  bool minimap_enabled = ui.system_map_show_minimap && minimap_has_room;
 
   // Keyboard shortcuts (only when the map window is hovered and the user isn't typing).
   if (hovered && !ImGui::GetIO().WantTextInput) {
@@ -630,7 +663,7 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
     }
     if (ImGui::IsKeyPressed(ImGuiKey_M)) {
       ui.system_map_show_minimap = !ui.system_map_show_minimap;
-      minimap_enabled = ui.system_map_show_minimap;
+      minimap_enabled = ui.system_map_show_minimap && minimap_has_room;
     }
     if (ImGui::IsKeyPressed(ImGuiKey_T)) {
       ui.system_map_time_preview = !ui.system_map_time_preview;
@@ -661,7 +694,10 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
     }
   }
 
-  const bool over_minimap = minimap_enabled && mouse_in_rect && point_in_rect(mouse, mm_p0, mm_p1);
+  const ImVec2 mm_hit_p0(std::max(mm_p0.x, view_p0.x), std::max(mm_p0.y, view_p0.y));
+  const ImVec2 mm_hit_p1(std::min(mm_p1.x, view_p1.x), std::min(mm_p1.y, view_p1.y));
+  const bool mm_hit_valid = minimap_enabled && mm_hit_p1.x > mm_hit_p0.x && mm_hit_p1.y > mm_hit_p0.y;
+  const bool over_minimap = mm_hit_valid && mouse_in_rect && point_in_rect(mouse, mm_hit_p0, mm_hit_p1);
 
   MinimapTransform mm;
   if (minimap_enabled) {
@@ -672,7 +708,7 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
   }
 
   // Zoom via wheel (zoom to cursor).
-  if (hovered && mouse_in_rect && !over_minimap) {
+  if (hovered && mouse_in_rect && !over_minimap && !over_legend) {
     const float wheel = ImGui::GetIO().MouseWheel;
     if (wheel != 0.0f) {
       const Vec2 before = to_world(mouse, center, scale, zoom, pan);
@@ -690,8 +726,9 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
       if (std::abs(d.x) > 0.0f || std::abs(d.y) > 0.0f) {
         ui.system_map_follow_selected = false;
       }
-      pan.x += d.x / (scale * zoom);
-      pan.y += d.y / (scale * zoom);
+      const double denom = std::max(1e-12, scale * zoom);
+      pan.x += d.x / denom;
+      pan.y += d.y / denom;
     }
   }
 
@@ -784,7 +821,7 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
   bool ruler_consumed_right = false;
   {
     const ImGuiIO& io = ImGui::GetIO();
-    const bool ruler_key = hovered && mouse_in_rect && !over_minimap && !io.WantTextInput &&
+    const bool ruler_key = hovered && mouse_in_rect && !over_minimap && !over_legend && !io.WantTextInput &&
                            ImGui::IsKeyDown(ImGuiKey_D) && !io.KeyCtrl && !io.KeyShift && !io.KeyAlt;
 
     if (ruler_key) {
@@ -902,7 +939,8 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
     sb.enabled = true;
     sb.desired_px = 120.0f;
     sb.alpha = 0.85f;
-    draw_scale_bar(draw, origin, avail, 1.0 / (scale * zoom), IM_COL32(220, 220, 220, 255), sb, "mkm");
+    const double units_per_px = 1.0 / std::max(1e-12, scale * zoom);
+    draw_scale_bar(draw, origin, avail, units_per_px, IM_COL32(220, 220, 220, 255), sb, "mkm");
 
     // Environmental overlay: system-level nebula + storms (affects sensors & movement).
     if (sys) {
@@ -965,6 +1003,21 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
     (void)cid;
     if (c.body_id != kInvalidId) colonized_bodies.insert(c.body_id);
   }
+
+  struct MapLabelCandidate {
+    Id id{kInvalidId};
+    ImVec2 anchor{0.0f, 0.0f};
+    float dx{0.0f};
+    float dy{0.0f};
+    const char* text{nullptr};
+    ImU32 col{0};
+    float priority{0.0f};
+    int preferred_quadrant{0};
+  };
+
+  std::vector<MapLabelCandidate> map_labels;
+  map_labels.reserve(sys->bodies.size() + sys->jump_points.size() + 8);
+  const bool declutter_labels = !ImGui::GetIO().KeyAlt; // Alt = show all labels.
 
   // Orbits + bodies
   for (Id bid : sys->bodies) {
@@ -1120,7 +1173,30 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
     const bool show_label =
         (!is_minor) || (selected_body == bid) || (ui.show_minor_body_labels && zoom >= 2.0);
     if (show_label) {
-      draw->AddText(ImVec2(p.x + 6, p.y + 6), IM_COL32(200, 200, 200, 255), b->name.c_str());
+      float pr = 10.0f;
+      if (bid == selected_body) pr += 1000.0f;
+      if (colonized_bodies.find(bid) != colonized_bodies.end()) pr += 600.0f;
+      if (!is_minor) pr += 240.0f; else pr += 60.0f;
+
+      // When zoomed out, avoid flooding the map with minor labels unless the user holds Alt.
+      if (declutter_labels && is_minor && zoom < 1.6f && pr < 500.0f) {
+        // skip
+      } else {
+        ImU32 col = IM_COL32(200, 200, 200, 255);
+        if (bid == selected_body) col = IM_COL32(255, 235, 160, 255);
+        else if (colonized_bodies.find(bid) != colonized_bodies.end()) col = IM_COL32(210, 255, 220, 255);
+
+        MapLabelCandidate c;
+        c.id = bid;
+        c.anchor = p;
+        c.dx = 6.0f;
+        c.dy = 6.0f;
+        c.text = b->name.c_str();
+        c.col = col;
+        c.priority = pr;
+        c.preferred_quadrant = 1; // bottom-right
+        map_labels.push_back(c);
+      }
     }
   }
 
@@ -1177,7 +1253,23 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
     }
 
     draw->AddCircle(p, r, col, 0, 2.0f);
-    draw->AddText(ImVec2(p.x + 6, p.y - 6), text_col, jp->name.c_str());
+
+    {
+      float pr = 260.0f;
+      if (jid == selected_guard_jp) pr += 800.0f;
+      if (itg != guarded_jump_points.end()) pr += 120.0f + 20.0f * std::logf((float)itg->second + 1.0f);
+
+      MapLabelCandidate c;
+      c.id = jid;
+      c.anchor = p;
+      c.dx = 6.0f;
+      c.dy = 6.0f;
+      c.text = jp->name.c_str();
+      c.col = text_col;
+      c.priority = pr;
+      c.preferred_quadrant = 0; // top-right
+      map_labels.push_back(c);
+    }
   }
 
   // Selected ship order path (linked elements).
@@ -1763,7 +1855,7 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
   // Holding Shift will *queue* the order; otherwise it replaces the current queue.
   const bool fleet_mode = ImGui::GetIO().KeyCtrl && selected_fleet != nullptr;
   const bool can_issue_orders = fleet_mode || (selected_ship != kInvalidId);
-  if (hovered && !over_minimap && !ruler_consumed_left && can_issue_orders &&
+  if (hovered && !over_minimap && !over_legend && !ruler_consumed_left && can_issue_orders &&
       ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
     // Don't issue orders when clicking UI controls (legend, etc.).
     if (!ImGui::IsAnyItemHovered()) {
@@ -1866,7 +1958,7 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
   }
 
   // Right click selection (no orders). Prefer ships, then bodies.
-  if (hovered && !over_minimap && !ruler_consumed_right && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+  if (hovered && !over_minimap && !over_legend && !ruler_consumed_right && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
     if (!ImGui::IsAnyItemHovered()) {
       const ImVec2 mp = ImGui::GetIO().MousePos;
       if (mp.x >= origin.x && mp.x <= origin.x + avail.x && mp.y >= origin.y && mp.y <= origin.y + avail.y) {
@@ -1978,7 +2070,7 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
   }
 
   // Hover tooltip (clickable links).
-  if (hovered && mouse_in_rect && !over_minimap && !ImGui::IsAnyItemHovered() &&
+  if (hovered && mouse_in_rect && !over_minimap && !over_legend && !ImGui::IsAnyItemHovered() &&
       !ImGui::IsMouseDown(ImGuiMouseButton_Middle)) {
     const ImVec2 mp = mouse;
     constexpr float kHoverRadiusPx = 18.0f;
@@ -2530,6 +2622,54 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
     draw_ruler_label(draw, ImVec2(mid.x + 8.0f, mid.y + 8.0f), buf);
   }
 
+  // Decluttered body/jump-point labels: draw after most overlays for legibility.
+  if (!map_labels.empty()) {
+    const ImVec2 vmin = origin;
+    const ImVec2 vmax = ImVec2(origin.x + avail.x, origin.y + avail.y);
+
+    const float area = std::max(1.0f, avail.x * avail.y);
+    const float z = std::clamp(zoom, 0.35f, 3.5f);
+    const int budget = static_cast<int>(std::clamp((area / (175.0f * 44.0f)) * (0.55f + 0.75f * z), 20.0f, 650.0f));
+
+    std::stable_sort(map_labels.begin(), map_labels.end(), [](const MapLabelCandidate& a, const MapLabelCandidate& b) {
+      if (a.priority != b.priority) return a.priority > b.priority;
+      return a.id < b.id;
+    });
+
+    if (!declutter_labels) {
+      for (const auto& c : map_labels) {
+        const ImVec2 sz = ImGui::CalcTextSize(c.text);
+        ImVec2 pos = c.anchor;
+        if (c.preferred_quadrant == 1) {
+          pos = ImVec2(c.anchor.x + c.dx, c.anchor.y + c.dy);
+        } else if (c.preferred_quadrant == 0) {
+          pos = ImVec2(c.anchor.x + c.dx, c.anchor.y - c.dy);
+        } else if (c.preferred_quadrant == 2) {
+          pos = ImVec2(c.anchor.x - c.dx - sz.x, c.anchor.y - c.dy);
+        } else {
+          pos = ImVec2(c.anchor.x - c.dx - sz.x, c.anchor.y + c.dy);
+        }
+
+        if (pos.x > vmax.x || pos.y > vmax.y) continue;
+        if (pos.x + sz.x < vmin.x || pos.y + sz.y < vmin.y) continue;
+        draw->AddText(ImVec2(pos.x + 1.0f, pos.y + 1.0f), IM_COL32(0, 0, 0, 170), c.text);
+        draw->AddText(pos, c.col, c.text);
+      }
+    } else {
+      LabelPlacer placer(vmin, vmax, 88.0f);
+      int placed = 0;
+      for (const auto& c : map_labels) {
+        if (placed >= budget && c.priority < 800.0f) break;
+        const ImVec2 sz = ImGui::CalcTextSize(c.text);
+        ImVec2 pos;
+        if (!placer.place_near(c.anchor, c.dx, c.dy, sz, 2.0f, c.preferred_quadrant, &pos)) continue;
+        draw->AddText(ImVec2(pos.x + 1.0f, pos.y + 1.0f), IM_COL32(0, 0, 0, 170), c.text);
+        draw->AddText(pos, c.col, c.text);
+        ++placed;
+      }
+    }
+  }
+
   // Minimap overlay (bottom-right).
   if (minimap_enabled) {
     const ImU32 mm_bg = IM_COL32(8, 8, 10, 200);
@@ -2660,8 +2800,8 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
   }
 
   // Legend / help
-  ImGui::SetCursorScreenPos(ImVec2(origin.x + 10, origin.y + 10));
-  ImGui::BeginChild("legend", ImVec2(320, 480), true);
+  ImGui::SetCursorScreenPos(legend_p0);
+  ImGui::BeginChild("legend", legend_size, true);
   ImGui::Text("Controls");
   ImGui::BulletText("Mouse wheel: zoom (to cursor)");
   ImGui::BulletText("Middle drag: pan");

@@ -35,6 +35,9 @@
 
 #include "ui/screen_reader.h"
 
+#include "ui/procedural_theme.h"
+#include "ui/procedural_layout.h"
+
 namespace nebula4x::ui {
 namespace {
 
@@ -498,9 +501,11 @@ void draw_main_menu(Simulation& sim, UIState& ui, char* save_path, char* load_pa
       ImGui::MenuItem("Salvage Planner (Wreck Salvage Runs)", nullptr, &ui.show_salvage_window);
       ImGui::MenuItem("Contracts (Mission Board)", nullptr, &ui.show_contracts_window);
       ImGui::MenuItem("Sustainment Planner (Fleet Base Targets)", nullptr, &ui.show_sustainment_window);
+      ImGui::MenuItem("Fleet Manager", "Ctrl+Shift+F", &ui.show_fleet_manager_window);
       ImGui::MenuItem("Advisor (Issues)", "Ctrl+Shift+A", &ui.show_advisor_window);
       ImGui::MenuItem("Colony Profiles (Automation Presets)", "Ctrl+Shift+B", &ui.show_colony_profiles_window);
       ImGui::MenuItem("Ship Profiles (Automation Presets)", "Ctrl+Shift+M", &ui.show_ship_profiles_window);
+      ImGui::MenuItem("Automation Center (Ship Automation)", "Ctrl+Shift+O", &ui.show_automation_center_window);
       ImGui::MenuItem("Shipyard Targets (Design Targets)", "Ctrl+Shift+Y", &ui.show_shipyard_targets_window);
       ImGui::MenuItem("Survey Network (Jump Survey)", "Ctrl+Shift+J", &ui.show_survey_network_window);
       ImGui::MenuItem("Time Warp (Until Event)", nullptr, &ui.show_time_warp_window);
@@ -513,7 +518,7 @@ void draw_main_menu(Simulation& sim, UIState& ui, char* save_path, char* load_pa
       ImGui::MenuItem("Settings Window", nullptr, &ui.show_settings_window);
       ImGui::MenuItem("Save Tools (Diff/Patch)", nullptr, &ui.show_save_tools_window);
       ImGui::MenuItem("Time Machine (State History)", "Ctrl+Shift+D", &ui.show_time_machine_window);
-      ImGui::MenuItem("OmniSearch (Game JSON)", "Ctrl+F", &ui.show_omni_search_window);
+      ImGui::MenuItem("OmniSearch (JSON + Commands)", "Ctrl+F", &ui.show_omni_search_window);
       ImGui::MenuItem("Entity Inspector (ID Resolver)", "Ctrl+G", &ui.show_entity_inspector_window);
       ImGui::MenuItem("Reference Graph (Entity IDs)", "Ctrl+Shift+G", &ui.show_reference_graph_window);
       ImGui::MenuItem("Watchboard (JSON Pins)", nullptr, &ui.show_watchboard_window);
@@ -522,6 +527,7 @@ void draw_main_menu(Simulation& sim, UIState& ui, char* save_path, char* load_pa
       ImGui::MenuItem("Pivot Tables (Procedural Aggregations)", nullptr, &ui.show_pivot_tables_window);
       if (ImGui::BeginMenu("Custom Panels")) {
         ImGui::MenuItem("UI Forge (Editor)", "Ctrl+Shift+U", &ui.show_ui_forge_window);
+        ImGui::MenuItem("Context Forge (Procedural)", "Ctrl+Shift+C", &ui.show_context_forge_window);
         ImGui::Separator();
         if (ui.ui_forge_panels.empty()) {
           ImGui::TextDisabled("(no custom panels yet)");
@@ -560,8 +566,8 @@ void draw_main_menu(Simulation& sim, UIState& ui, char* save_path, char* load_pa
     }
 
     if (ImGui::BeginMenu("Tools")) {
-      if (ImGui::MenuItem("Command Palette", "Ctrl+P")) ui.show_command_palette = true;
-      if (ImGui::MenuItem("OmniSearch (Game JSON)", "Ctrl+F")) ui.show_omni_search_window = true;
+      if (ImGui::MenuItem("Command Console", "Ctrl+P")) ui.show_command_palette = true;
+      if (ImGui::MenuItem("OmniSearch (JSON + Commands)", "Ctrl+F")) ui.show_omni_search_window = true;
       if (ImGui::MenuItem("Entity Inspector (ID Resolver)", "Ctrl+G")) ui.show_entity_inspector_window = true;
       if (ImGui::MenuItem("Reference Graph (Entity IDs)", "Ctrl+Shift+G")) ui.show_reference_graph_window = true;
       if (ImGui::MenuItem("Help / Shortcuts", "F1")) ui.show_help_window = true;
@@ -655,6 +661,9 @@ void draw_main_menu(Simulation& sim, UIState& ui, char* save_path, char* load_pa
       }
       if (ImGui::MenuItem("Open UI Forge (Custom Panels)", "Ctrl+Shift+U")) {
         ui.show_ui_forge_window = true;
+      }
+      if (ImGui::MenuItem("Open Context Forge (Procedural)", "Ctrl+Shift+C")) {
+        ui.show_context_forge_window = true;
       }
       if (ImGui::MenuItem("Layout Profiles", "Ctrl+Shift+L")) {
         ui.show_layout_profiles_window = true;
@@ -9024,11 +9033,11 @@ void draw_settings_window(UIState& ui, char* ui_prefs_path, UIPrefActions& actio
   if (ImGui::BeginTabItem("Theme")) {
     ImGui::SeparatorText("UI style");
     {
-      const char* presets[] = {"Dark (default)", "Light", "Classic", "Nebula", "High Contrast"};
+      const char* presets[] = {"Dark (default)", "Light", "Classic", "Nebula", "High Contrast", "Procedural"};
       ui.ui_style_preset = std::clamp(ui.ui_style_preset, 0, (int)IM_ARRAYSIZE(presets) - 1);
       ImGui::Combo("Preset##ui_style", &ui.ui_style_preset, presets, IM_ARRAYSIZE(presets));
       if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Select a built-in UI style preset.\n\n- Nebula: dark theme with cyan accents\n- High Contrast: stronger selection/focus highlighting");
+        ImGui::SetTooltip("Select a built-in UI style preset.\n\n- Nebula: dark theme with cyan accents\n- High Contrast: stronger selection/focus highlighting\n- Procedural: seeded palette you can tweak/share");
       }
     }
 
@@ -9046,7 +9055,157 @@ void draw_settings_window(UIState& ui, char* ui_prefs_path, UIPrefActions& actio
       ImGui::SetTooltip("When enabled, UI scale affects both font size and widget spacing.");
     }
 
+    // Procedural theme controls (preset 5).
+    if (ui.ui_style_preset == 5) {
+      ImGui::SeparatorText("Procedural theme");
+
+      ImGui::TextWrapped(
+          "Generates a cohesive accent palette from a small set of parameters. "
+          "Use the copy/paste buttons to share theme DNA with other players.");
+
+      ImGui::InputInt("Seed##proc_theme", &ui.ui_procedural_theme_seed);
+      if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Seed controls the generated palette when 'Use seed for hue' is enabled.");
+      }
+
+      ImGui::SameLine();
+      if (ImGui::SmallButton("Randomize##proc_theme_seed")) {
+        // Mix the existing seed with time to get a new seed (good enough for UI cosmetics).
+        std::uint32_t x = static_cast<std::uint32_t>(ui.ui_procedural_theme_seed);
+        x ^= static_cast<std::uint32_t>(ImGui::GetTime() * 1000.0);
+        x ^= 0x9e3779b9u;
+        x = x * 0x85ebca6bu + 0xc2b2ae35u;
+        ui.ui_procedural_theme_seed = static_cast<int>(x);
+      }
+
+      ImGui::SameLine();
+      ImGui::Checkbox("Use seed for hue", &ui.ui_procedural_theme_use_seed_hue);
+      if (!ui.ui_procedural_theme_use_seed_hue) {
+        ImGui::SliderFloat("Hue (deg)", &ui.ui_procedural_theme_hue_deg, 0.0f, 360.0f, "%.0f");
+        ui.ui_procedural_theme_hue_deg = std::clamp(ui.ui_procedural_theme_hue_deg, 0.0f, 360.0f);
+      }
+
+      {
+        const char* variants[] = {"Analogous", "Complementary", "Triad", "Monochrome"};
+        ui.ui_procedural_theme_variant = std::clamp(ui.ui_procedural_theme_variant, 0, (int)IM_ARRAYSIZE(variants) - 1);
+        ImGui::Combo("Palette", &ui.ui_procedural_theme_variant, variants, IM_ARRAYSIZE(variants));
+      }
+
+      ImGui::SliderFloat("Accent saturation", &ui.ui_procedural_theme_saturation, 0.0f, 1.0f, "%.2f");
+      ui.ui_procedural_theme_saturation = std::clamp(ui.ui_procedural_theme_saturation, 0.0f, 1.0f);
+      ImGui::SliderFloat("Accent value", &ui.ui_procedural_theme_value, 0.0f, 1.0f, "%.2f");
+      ui.ui_procedural_theme_value = std::clamp(ui.ui_procedural_theme_value, 0.0f, 1.0f);
+      ImGui::SliderFloat("Background value", &ui.ui_procedural_theme_bg_value, 0.0f, 0.25f, "%.2f");
+      ui.ui_procedural_theme_bg_value = std::clamp(ui.ui_procedural_theme_bg_value, 0.0f, 1.0f);
+      ImGui::SliderFloat("Accent strength", &ui.ui_procedural_theme_accent_strength, 0.0f, 1.0f, "%.2f");
+      ui.ui_procedural_theme_accent_strength = std::clamp(ui.ui_procedural_theme_accent_strength, 0.0f, 1.0f);
+
+      ImGui::Checkbox("Animate hue", &ui.ui_procedural_theme_animate_hue);
+      if (ui.ui_procedural_theme_animate_hue) {
+        ImGui::SameLine();
+        ImGui::SliderFloat(
+            "Speed (deg/sec)", &ui.ui_procedural_theme_animate_speed_deg_per_sec, 0.0f, 60.0f, "%.1f");
+        ui.ui_procedural_theme_animate_speed_deg_per_sec =
+            std::clamp(ui.ui_procedural_theme_animate_speed_deg_per_sec, 0.0f, 180.0f);
+      }
+
+      ImGui::Checkbox("Sync map backgrounds", &ui.ui_procedural_theme_sync_backgrounds);
+      if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(
+            "When enabled, the procedural theme also drives the SDL clear color and map backgrounds.");
+      }
+
+      // Preview + share.
+      {
+        ProceduralThemeParams p;
+        p.seed = ui.ui_procedural_theme_seed;
+        p.use_seed_hue = ui.ui_procedural_theme_use_seed_hue;
+        p.hue_deg = ui.ui_procedural_theme_hue_deg;
+        p.variant = ui.ui_procedural_theme_variant;
+        p.saturation = ui.ui_procedural_theme_saturation;
+        p.value = ui.ui_procedural_theme_value;
+        p.bg_value = ui.ui_procedural_theme_bg_value;
+        p.accent_strength = ui.ui_procedural_theme_accent_strength;
+        p.animate_hue = ui.ui_procedural_theme_animate_hue;
+        p.animate_speed_deg_per_sec = ui.ui_procedural_theme_animate_speed_deg_per_sec;
+        p.sync_backgrounds = ui.ui_procedural_theme_sync_backgrounds;
+
+        const auto pal = compute_procedural_theme_palette(p, static_cast<float>(ImGui::GetTime()));
+
+        ImGui::TextDisabled("Preview:");
+        ImGui::SameLine();
+        ImGui::ColorButton("##proc_acc1", pal.accent_primary, ImGuiColorEditFlags_NoTooltip, ImVec2(28, 18));
+        ImGui::SameLine();
+        ImGui::ColorButton("##proc_acc2", pal.accent_secondary, ImGuiColorEditFlags_NoTooltip, ImVec2(28, 18));
+        ImGui::SameLine();
+        ImGui::ColorButton("##proc_bg", pal.bg_window, ImGuiColorEditFlags_NoTooltip, ImVec2(28, 18));
+
+        const std::string theme_str =
+            std::string("nebula-theme-v1") +
+            " seed=" + std::to_string(p.seed) +
+            " use_seed_hue=" + std::to_string(p.use_seed_hue ? 1 : 0) +
+            " hue=" + std::to_string((int)std::round(p.hue_deg)) +
+            " variant=" + std::to_string(p.variant) +
+            " sat=" + std::to_string(p.saturation) +
+            " val=" + std::to_string(p.value) +
+            " bg=" + std::to_string(p.bg_value) +
+            " strength=" + std::to_string(p.accent_strength) +
+            " anim=" + std::to_string(p.animate_hue ? 1 : 0) +
+            " speed=" + std::to_string(p.animate_speed_deg_per_sec) +
+            " sync_bg=" + std::to_string(p.sync_backgrounds ? 1 : 0);
+
+        if (ImGui::SmallButton("Copy theme string")) {
+          ImGui::SetClipboardText(theme_str.c_str());
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Paste theme string")) {
+          if (const char* clip = ImGui::GetClipboardText()) {
+            std::istringstream iss(std::string(clip));
+            std::string tok;
+            while (iss >> tok) {
+              const auto eq = tok.find('=');
+              if (eq == std::string::npos) continue;
+              const std::string key = tok.substr(0, eq);
+              const std::string v = tok.substr(eq + 1);
+              try {
+                if (key == "seed") ui.ui_procedural_theme_seed = std::stoi(v);
+                else if (key == "use_seed_hue") ui.ui_procedural_theme_use_seed_hue = (std::stoi(v) != 0);
+                else if (key == "hue") ui.ui_procedural_theme_hue_deg = std::stof(v);
+                else if (key == "variant") ui.ui_procedural_theme_variant = std::stoi(v);
+                else if (key == "sat") ui.ui_procedural_theme_saturation = std::stof(v);
+                else if (key == "val") ui.ui_procedural_theme_value = std::stof(v);
+                else if (key == "bg") ui.ui_procedural_theme_bg_value = std::stof(v);
+                else if (key == "strength") ui.ui_procedural_theme_accent_strength = std::stof(v);
+                else if (key == "anim") ui.ui_procedural_theme_animate_hue = (std::stoi(v) != 0);
+                else if (key == "speed") ui.ui_procedural_theme_animate_speed_deg_per_sec = std::stof(v);
+                else if (key == "sync_bg") ui.ui_procedural_theme_sync_backgrounds = (std::stoi(v) != 0);
+              } catch (...) {
+                // ignore parse errors
+              }
+            }
+
+            // Clamp after paste.
+            ui.ui_procedural_theme_hue_deg = std::clamp(ui.ui_procedural_theme_hue_deg, 0.0f, 360.0f);
+            ui.ui_procedural_theme_variant = std::clamp(ui.ui_procedural_theme_variant, 0, 3);
+            ui.ui_procedural_theme_saturation = std::clamp(ui.ui_procedural_theme_saturation, 0.0f, 1.0f);
+            ui.ui_procedural_theme_value = std::clamp(ui.ui_procedural_theme_value, 0.0f, 1.0f);
+            ui.ui_procedural_theme_bg_value = std::clamp(ui.ui_procedural_theme_bg_value, 0.0f, 1.0f);
+            ui.ui_procedural_theme_accent_strength = std::clamp(ui.ui_procedural_theme_accent_strength, 0.0f, 1.0f);
+            ui.ui_procedural_theme_animate_speed_deg_per_sec =
+                std::clamp(ui.ui_procedural_theme_animate_speed_deg_per_sec, 0.0f, 180.0f);
+          }
+        }
+      }
+
+      if (ui.override_window_bg) {
+        ImGui::TextDisabled("Note: 'Override window background' overrides the procedural window tint.");
+      }
+    }
+
     ImGui::SeparatorText("Backgrounds");
+
+    const bool procedural_bg_lock = (ui.ui_style_preset == 5 && ui.ui_procedural_theme_sync_backgrounds);
+    if (procedural_bg_lock) ImGui::BeginDisabled();
     ImGui::ColorEdit4("Clear background (SDL)", ui.clear_color);
     ImGui::ColorEdit4("System map background", ui.system_map_bg);
     ImGui::ColorEdit4("Galaxy map background", ui.galaxy_map_bg);
@@ -9054,6 +9213,11 @@ void draw_settings_window(UIState& ui, char* ui_prefs_path, UIPrefActions& actio
     if (ui.override_window_bg) {
       ImGui::ColorEdit4("Window background", ui.window_bg);
     }
+    if (procedural_bg_lock) {
+      ImGui::EndDisabled();
+      ImGui::TextDisabled("Background colors are driven by the procedural theme while 'Sync map backgrounds' is enabled.");
+    }
+
     if (ImGui::Button("Reset theme defaults")) {
       actions.reset_ui_theme = true;
     }
@@ -9355,6 +9519,88 @@ void draw_settings_window(UIState& ui, char* ui_prefs_path, UIPrefActions& actio
       }
     }
 
+
+    ImGui::SeparatorText("Procedural Layout Synthesizer");
+    ImGui::TextWrapped(
+        "Generate a docked workspace procedurally from a compact parameter set (seed + archetype). "
+        "This uses Dear ImGui's DockBuilder API and can be saved as a layout profile.");
+
+    static std::string proc_layout_paste_error;
+
+    const char* modes[] = {"Balanced", "Command", "Data", "Debug", "Forge"};
+    ui.ui_procedural_layout_mode = std::clamp(ui.ui_procedural_layout_mode, 0, (int)IM_ARRAYSIZE(modes) - 1);
+    ImGui::Combo("Mode##proc_layout_mode", &ui.ui_procedural_layout_mode, modes, IM_ARRAYSIZE(modes));
+    ImGui::InputInt("Seed##proc_layout_seed", &ui.ui_procedural_layout_seed);
+    ImGui::SliderFloat("Variation##proc_layout_variation", &ui.ui_procedural_layout_variation, 0.0f, 1.0f, "%.2f");
+    ui.ui_procedural_layout_variation = std::clamp(ui.ui_procedural_layout_variation, 0.0f, 1.0f);
+
+    ImGui::Checkbox("Include tool/debug windows", &ui.ui_procedural_layout_include_tools);
+    ImGui::Checkbox("Include UI Forge panels", &ui.ui_procedural_layout_include_forge_panels);
+    if (ui.ui_procedural_layout_include_forge_panels) {
+      ImGui::SliderInt("Max panels (0=all)##proc_layout_max_panels", &ui.ui_procedural_layout_max_forge_panels, 0, 16);
+    }
+    ImGui::Checkbox("Auto-open docked windows", &ui.ui_procedural_layout_auto_open_windows);
+    ImGui::Checkbox("Auto-save to active profile", &ui.ui_procedural_layout_autosave_profile);
+
+    {
+      ProceduralLayoutParams p;
+      p.seed = static_cast<std::uint32_t>(ui.ui_procedural_layout_seed);
+      p.mode = ui.ui_procedural_layout_mode;
+      p.variation = ui.ui_procedural_layout_variation;
+      p.include_tools = ui.ui_procedural_layout_include_tools;
+      p.include_forge_panels = ui.ui_procedural_layout_include_forge_panels;
+      p.max_forge_panels = ui.ui_procedural_layout_max_forge_panels;
+      p.auto_open_windows = ui.ui_procedural_layout_auto_open_windows;
+      p.auto_save_profile = ui.ui_procedural_layout_autosave_profile;
+
+      const std::string layout_str = encode_layout_dna(p);
+
+      if (ImGui::SmallButton("Copy layout string")) {
+        ImGui::SetClipboardText(layout_str.c_str());
+        proc_layout_paste_error.clear();
+      }
+      ImGui::SameLine();
+      if (ImGui::SmallButton("Paste layout string")) {
+        proc_layout_paste_error.clear();
+        if (const char* clip = ImGui::GetClipboardText()) {
+          ProceduralLayoutParams q;
+          std::string err;
+          if (decode_layout_dna(std::string(clip), &q, &err)) {
+            ui.ui_procedural_layout_seed = static_cast<int>(q.seed);
+            ui.ui_procedural_layout_mode = std::clamp(q.mode, 0, (int)IM_ARRAYSIZE(modes) - 1);
+            ui.ui_procedural_layout_variation = std::clamp(q.variation, 0.0f, 1.0f);
+            ui.ui_procedural_layout_include_tools = q.include_tools;
+            ui.ui_procedural_layout_include_forge_panels = q.include_forge_panels;
+            ui.ui_procedural_layout_max_forge_panels = std::clamp(q.max_forge_panels, 0, 32);
+            ui.ui_procedural_layout_auto_open_windows = q.auto_open_windows;
+            ui.ui_procedural_layout_autosave_profile = q.auto_save_profile;
+          } else {
+            proc_layout_paste_error = err.empty() ? std::string("Failed to parse layout string.") : err;
+          }
+        }
+      }
+
+      if (!proc_layout_paste_error.empty()) {
+        ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "%s", proc_layout_paste_error.c_str());
+      }
+
+      if (ImGui::Button("Generate layout##proc_layout")) {
+        // Optionally open the windows that the layout expects so it's immediately visible.
+        if (p.auto_open_windows) {
+          apply_procedural_layout_visibility(ui, p);
+        }
+        ui.request_generate_procedural_layout = true;
+      }
+      ImGui::SameLine();
+      if (ImGui::SmallButton("Mutate seed")) {
+        // Cheap deterministic "mutation" so the user can iterate quickly.
+        std::uint32_t s = static_cast<std::uint32_t>(ui.ui_procedural_layout_seed);
+        s = s * 1664525u + 1013904223u;
+        ui.ui_procedural_layout_seed = static_cast<int>(s);
+      }
+      ImGui::SameLine();
+      ImGui::TextDisabled("Tip: Use Layout Profiles → Manage to save/share full workspaces.");
+    }
     ImGui::EndTabItem();
   }
 

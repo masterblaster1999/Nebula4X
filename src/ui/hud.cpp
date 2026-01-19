@@ -150,10 +150,12 @@ enum class PaletteAction {
   ToggleDirectory,
   ToggleProduction,
   ToggleEconomy,
+  ToggleFleetManager,
   ToggleRegions,
   ToggleAdvisor,
   ToggleColonyProfiles,
   ToggleShipProfiles,
+  ToggleAutomationCenter,
   ToggleShipyardTargets,
   ToggleSurveyNetwork,
   ToggleTimeline,
@@ -230,6 +232,9 @@ void activate_palette_item(PaletteItem& item, Simulation& sim, UIState& ui, Id& 
         case PaletteAction::ToggleEconomy:
           ui.show_economy_window = !ui.show_economy_window;
           break;
+        case PaletteAction::ToggleFleetManager:
+          ui.show_fleet_manager_window = !ui.show_fleet_manager_window;
+          break;
         case PaletteAction::ToggleRegions:
           ui.show_regions_window = !ui.show_regions_window;
           break;
@@ -241,6 +246,9 @@ void activate_palette_item(PaletteItem& item, Simulation& sim, UIState& ui, Id& 
           break;
         case PaletteAction::ToggleShipProfiles:
           ui.show_ship_profiles_window = !ui.show_ship_profiles_window;
+          break;
+        case PaletteAction::ToggleAutomationCenter:
+          ui.show_automation_center_window = !ui.show_automation_center_window;
           break;
         case PaletteAction::ToggleShipyardTargets:
           ui.show_shipyard_targets_window = !ui.show_shipyard_targets_window;
@@ -528,6 +536,217 @@ void activate_palette_item(PaletteItem& item, Simulation& sim, UIState& ui, Id& 
   }
 }
 
+
+
+// --- command console metadata (labels, categories, tooltips) ---
+
+struct ActionMeta {
+  PaletteAction action;
+  const char* category;
+  const char* label;
+  const char* tooltip;   // may be nullptr (falls back to label)
+  const char* shortcut;  // may be nullptr
+  const char* keywords;  // may be nullptr
+  bool toggles{false};
+};
+
+// NOTE: This table acts as lightweight "reflection" for command actions.
+// It drives both the collapsible panels (browse mode) and auto-generated tooltips.
+constexpr ActionMeta kActionMetas[] = {
+    // Navigation
+    {PaletteAction::FocusSystemMap, "Navigation", "Focus System Map", "Switch the Map window to the System tab.", nullptr,
+     "map system", false},
+    {PaletteAction::FocusGalaxyMap, "Navigation", "Focus Galaxy Map", "Switch the Map window to the Galaxy tab.", nullptr,
+     "map galaxy", false},
+    {PaletteAction::OpenLogTab, "Navigation", "Open Event Log", "Open the Details window on the Event Log tab.", nullptr,
+     "log events", false},
+    {PaletteAction::OpenHelp, "Navigation", "Help / Shortcuts", "Open the shortcuts/help overlay.", "F1",
+     "help shortcuts", false},
+
+    // Windows
+    {PaletteAction::ToggleControls, "Windows", "Controls window", "Show/hide the Controls window.", "Ctrl+1",
+     "controls", true},
+    {PaletteAction::ToggleMap, "Windows", "Map window", "Show/hide the Map window.", "Ctrl+2", "map", true},
+    {PaletteAction::ToggleDetails, "Windows", "Details window", "Show/hide the Details window.", "Ctrl+3",
+     "details", true},
+    {PaletteAction::ToggleDirectory, "Windows", "Directory window", "Show/hide the Directory window.", "Ctrl+4",
+     "directory", true},
+    {PaletteAction::ToggleEconomy, "Windows", "Economy window", "Show/hide the Economy window.", "Ctrl+5", "economy",
+     true},
+    {PaletteAction::ToggleProduction, "Windows", "Production window", "Show/hide the Production window.", "Ctrl+6",
+     "production", true},
+    {PaletteAction::ToggleTimeline, "Windows", "Timeline window", "Show/hide the Timeline window.", "Ctrl+7",
+     "timeline", true},
+    {PaletteAction::ToggleDesignStudio, "Windows", "Design Studio window", "Show/hide the Design Studio.", "Ctrl+8",
+     "design", true},
+    {PaletteAction::ToggleBalanceLab, "Windows", "Balance Lab window", "Show/hide the Balance Lab (combat/economy tuning sandbox).", nullptr,
+     "balance lab", true},
+    {PaletteAction::ToggleIntel, "Windows", "Intel window", "Show/hide the Intel window.", "Ctrl+9", "intel", true},
+    {PaletteAction::ToggleDiplomacyGraph, "Windows", "Diplomacy Graph window", "Show/hide the Diplomacy Graph.", "Ctrl+0",
+     "diplomacy", true},
+
+    {PaletteAction::ToggleFleetManager, "Windows", "Fleet Manager", "Global fleet list + quick mission tools.", "Ctrl+Shift+F",
+     "fleet", true},
+    {PaletteAction::ToggleRegions, "Windows", "Regions (Sectors Overview)", "Sectors/regions overview and management.", "Ctrl+Shift+R",
+     "regions sectors", true},
+    {PaletteAction::ToggleAdvisor, "Windows", "Advisor (Issues)", "Issues list and recommended quick fixes.", "Ctrl+Shift+A",
+     "advisor issues", true},
+
+    // Automation (grouped separately from generic tools)
+    {PaletteAction::ToggleColonyProfiles, "Automation", "Colony Profiles", "Automation presets for colony behavior.", "Ctrl+Shift+B",
+     "colony profiles", true},
+    {PaletteAction::ToggleShipProfiles, "Automation", "Ship Profiles", "Automation presets for ship behavior.", "Ctrl+Shift+M",
+     "ship profiles", true},
+    {PaletteAction::ToggleAutomationCenter, "Automation", "Automation Center", "Bulk ship automation flags + triage.", nullptr,
+     "automation center", true},
+    {PaletteAction::ToggleShipyardTargets, "Automation", "Shipyard Targets", "Design targets and shipyard production intents.", "Ctrl+Shift+Y",
+     "shipyard targets", true},
+    {PaletteAction::ToggleSurveyNetwork, "Automation", "Survey Network", "Jump point survey planning and progress.", "Ctrl+Shift+J",
+     "survey network", true},
+
+    // Tools
+    {PaletteAction::ToggleSettings, "Tools", "Settings", "Open the Settings window (theme, layout, UI options).", "Ctrl+,",
+     "settings", true},
+    {PaletteAction::ToggleSaveTools, "Tools", "Save Tools", "Save inspection/export helpers.", nullptr, "save tools", true},
+    {PaletteAction::ToggleTimeMachine, "Tools", "Time Machine", "State history + diffs (debug / analysis).", "Ctrl+Shift+D",
+     "time machine", true},
+    {PaletteAction::ToggleOmniSearch, "Tools", "OmniSearch", "Search the live game JSON and run commands.", "Ctrl+F",
+     "omnisearch", true},
+    {PaletteAction::ToggleJsonExplorer, "Tools", "JSON Explorer", "Browse the live game JSON tree.", nullptr,
+     "json explorer", true},
+    {PaletteAction::ToggleContentValidation, "Tools", "Content Validation", "Validate content bundle errors/warnings.", "Ctrl+Shift+V",
+     "content validation", true},
+    {PaletteAction::ToggleStateDoctor, "Tools", "State Doctor", "Validate/fix save integrity; preview merge patch.", "Ctrl+Shift+K",
+     "state doctor", true},
+    {PaletteAction::ToggleEntityInspector, "Tools", "Entity Inspector", "Resolve an entity id and inspect inbound refs.", "Ctrl+G",
+     "entity inspector", true},
+    {PaletteAction::ToggleReferenceGraph, "Tools", "Reference Graph", "Visualize entity id relationships.", "Ctrl+Shift+G",
+     "reference graph", true},
+
+    {PaletteAction::ToggleWatchboard, "Tools", "Watchboard", "Pin JSON pointers/queries with history + alerts.", nullptr,
+     "watchboard", true},
+    {PaletteAction::ToggleDataLenses, "Tools", "Data Lenses", "Build tables over JSON arrays (inspect/sort/filter).", nullptr,
+     "data lenses", true},
+    {PaletteAction::ToggleDashboards, "Tools", "Dashboards", "Procedural KPI cards over JSON arrays.", nullptr,
+     "dashboards", true},
+    {PaletteAction::TogglePivotTables, "Tools", "Pivot Tables", "Group/summarize JSON arrays into pivots.", nullptr,
+     "pivot tables", true},
+    {PaletteAction::ToggleUIForge, "Tools", "UI Forge", "Build custom panels from JSON pointers/queries.", "Ctrl+Shift+U",
+     "ui forge", true},
+    {PaletteAction::ToggleLayoutProfiles, "Tools", "Layout Profiles", "Save/load dock layouts (including procedural layouts).", "Ctrl+Shift+L",
+     "layout profiles", true},
+
+    // UI
+    {PaletteAction::ToggleStatusBar, "UI", "Status Bar", "Show/hide the bottom status bar.", nullptr, "status bar", true},
+    {PaletteAction::ToggleFogOfWar, "UI", "Fog of War", "Toggle fog-of-war rendering on maps.", nullptr, "fog of war", true},
+    {PaletteAction::ToggleToasts, "UI", "Event Toasts", "Show/hide HUD toast notifications.", nullptr, "toasts", true},
+
+    // Workspace
+    {PaletteAction::WorkspaceDefault, "Workspace", "Workspace: Default", "Apply the default workspace window preset.", nullptr,
+     "workspace default", false},
+    {PaletteAction::WorkspaceMinimal, "Workspace", "Workspace: Minimal", "Apply a minimal workspace window preset.", nullptr,
+     "workspace minimal", false},
+    {PaletteAction::WorkspaceEconomy, "Workspace", "Workspace: Economy", "Apply an economy-focused workspace window preset.", nullptr,
+     "workspace economy", false},
+    {PaletteAction::WorkspaceDesign, "Workspace", "Workspace: Design", "Apply a design-focused workspace window preset.", nullptr,
+     "workspace design", false},
+    {PaletteAction::WorkspaceIntel, "Workspace", "Workspace: Intel", "Apply an intel-focused workspace window preset.", nullptr,
+     "workspace intel", false},
+
+    // Game
+    {PaletteAction::NewGameDialog, "Game", "New Game...", "Open the new-game dialog.", nullptr, "new game", false},
+    {PaletteAction::NewGameSol, "Game", "New Game (Sol)", "Start a new game using the Sol preset scenario.", nullptr,
+     "new game sol", false},
+    {PaletteAction::NewGameRandom, "Game", "New Game (Random)", "Start a new game using procedural/random parameters.", nullptr,
+     "new game random", false},
+    {PaletteAction::ReloadContent, "Game", "Reload Content Bundle", "Hot-reload content/tech JSON from disk.", nullptr,
+     "reload content", false},
+    {PaletteAction::Save, "Game", "Save game", "Save to the current save path.", "Ctrl+S", "save", false},
+    {PaletteAction::Load, "Game", "Load game", "Load from the current load path.", "Ctrl+O", "load", false},
+};
+
+const ActionMeta* find_action_meta(PaletteAction a) {
+  for (const auto& m : kActionMetas) {
+    if (m.action == a) return &m;
+  }
+  return nullptr;
+}
+
+bool action_toggle_state(const UIState& ui, PaletteAction a) {
+  switch (a) {
+    case PaletteAction::ToggleControls: return ui.show_controls_window;
+    case PaletteAction::ToggleMap: return ui.show_map_window;
+    case PaletteAction::ToggleDetails: return ui.show_details_window;
+    case PaletteAction::ToggleDirectory: return ui.show_directory_window;
+    case PaletteAction::ToggleProduction: return ui.show_production_window;
+    case PaletteAction::ToggleEconomy: return ui.show_economy_window;
+    case PaletteAction::ToggleFleetManager: return ui.show_fleet_manager_window;
+    case PaletteAction::ToggleRegions: return ui.show_regions_window;
+    case PaletteAction::ToggleAdvisor: return ui.show_advisor_window;
+    case PaletteAction::ToggleColonyProfiles: return ui.show_colony_profiles_window;
+    case PaletteAction::ToggleShipProfiles: return ui.show_ship_profiles_window;
+    case PaletteAction::ToggleAutomationCenter: return ui.show_automation_center_window;
+    case PaletteAction::ToggleShipyardTargets: return ui.show_shipyard_targets_window;
+    case PaletteAction::ToggleSurveyNetwork: return ui.show_survey_network_window;
+    case PaletteAction::ToggleTimeline: return ui.show_timeline_window;
+    case PaletteAction::ToggleDesignStudio: return ui.show_design_studio_window;
+    case PaletteAction::ToggleBalanceLab: return ui.show_balance_lab_window;
+    case PaletteAction::ToggleIntel: return ui.show_intel_window;
+    case PaletteAction::ToggleDiplomacyGraph: return ui.show_diplomacy_window;
+    case PaletteAction::ToggleSettings: return ui.show_settings_window;
+    case PaletteAction::ToggleSaveTools: return ui.show_save_tools_window;
+    case PaletteAction::ToggleOmniSearch: return ui.show_omni_search_window;
+    case PaletteAction::ToggleJsonExplorer: return ui.show_json_explorer_window;
+    case PaletteAction::ToggleContentValidation: return ui.show_content_validation_window;
+    case PaletteAction::ToggleStateDoctor: return ui.show_state_doctor_window;
+    case PaletteAction::ToggleEntityInspector: return ui.show_entity_inspector_window;
+    case PaletteAction::ToggleReferenceGraph: return ui.show_reference_graph_window;
+    case PaletteAction::ToggleTimeMachine: return ui.show_time_machine_window;
+    case PaletteAction::ToggleWatchboard: return ui.show_watchboard_window;
+    case PaletteAction::ToggleDataLenses: return ui.show_data_lenses_window;
+    case PaletteAction::ToggleDashboards: return ui.show_dashboards_window;
+    case PaletteAction::TogglePivotTables: return ui.show_pivot_tables_window;
+    case PaletteAction::ToggleUIForge: return ui.show_ui_forge_window;
+    case PaletteAction::ToggleLayoutProfiles: return ui.show_layout_profiles_window;
+    case PaletteAction::ToggleStatusBar: return ui.show_status_bar;
+    case PaletteAction::ToggleFogOfWar: return ui.fog_of_war;
+    case PaletteAction::ToggleToasts: return ui.show_event_toasts;
+    default: return false;
+  }
+}
+
+void draw_action_tooltip(const ActionMeta& m) {
+  if (!ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) return;
+
+  ImGui::BeginTooltip();
+  ImGui::TextUnformatted(m.label);
+  ImGui::Separator();
+
+  const char* tip = (m.tooltip && m.tooltip[0] != '\0') ? m.tooltip : m.label;
+  ImGui::PushTextWrapPos(ImGui::GetFontSize() * 32.0f);
+  ImGui::TextWrapped("%s", tip);
+  ImGui::PopTextWrapPos();
+
+  if (m.shortcut && m.shortcut[0] != '\0') {
+    ImGui::Spacing();
+    ImGui::TextDisabled("Shortcut: %s", m.shortcut);
+  }
+
+  if (m.keywords && m.keywords[0] != '\0') {
+    ImGui::Spacing();
+    ImGui::TextDisabled("Keywords: %s", m.keywords);
+  }
+
+  ImGui::EndTooltip();
+}
+
+int action_match_score(const ActionMeta& m, std::string_view query) {
+  if (query.empty()) return 0;
+  int sc = fuzzy_score(m.label, query);
+  if (m.keywords) sc = std::max(sc, fuzzy_score(m.keywords, query) - 10);
+  return sc;
+}
+
 } // namespace
 
 void draw_status_bar(Simulation& sim, UIState& ui, HUDState& /*hud*/, Id& selected_ship, Id& selected_colony,
@@ -661,9 +880,9 @@ void draw_status_bar(Simulation& sim, UIState& ui, HUDState& /*hud*/, Id& select
 
   VerticalSeparator();
 
-  if (ImGui::SmallButton("Palette")) ui.show_command_palette = true;
+  if (ImGui::SmallButton("Console")) ui.show_command_palette = true;
   if (ImGui::IsItemHovered()) {
-    ImGui::SetTooltip("Command Palette (Ctrl+P)");
+    ImGui::SetTooltip("Command Console (Ctrl+P)");
   }
   ImGui::SameLine();
   if (ImGui::SmallButton("Search")) ui.show_omni_search_window = true;
@@ -770,7 +989,7 @@ void draw_help_window(UIState& ui) {
   }
 
   ImGui::SeparatorText("Global shortcuts");
-  ImGui::BulletText("Ctrl+P: Command palette (search actions, systems, ships, colonies, bodies)");
+  ImGui::BulletText("Ctrl+P: Command Console (panels + search across actions, systems, ships, colonies, bodies)");
   ImGui::BulletText("Ctrl+F: OmniSearch (global game JSON search)");
   ImGui::BulletText("Ctrl+G: Entity Inspector (resolve an entity id + find inbound refs)");
   ImGui::BulletText("Ctrl+Shift+G: Reference Graph (visualize id relationships)");
@@ -778,6 +997,9 @@ void draw_help_window(UIState& ui) {
   ImGui::BulletText("Ctrl+Shift+A: Advisor (issues + quick fixes)");
   ImGui::BulletText("Ctrl+Shift+B: Colony Profiles (automation presets)");
   ImGui::BulletText("Ctrl+Shift+M: Ship Profiles (automation presets)");
+  ImGui::BulletText("Ctrl+Shift+F: Fleet Manager (fleet list + missions)");
+  ImGui::BulletText("Ctrl+Shift+R: Regions (sectors overview)");
+  ImGui::BulletText("Ctrl+Shift+C: Context Forge (context panels)");
   ImGui::BulletText("Ctrl+Shift+Y: Shipyard Targets (ship design targets)");
   ImGui::BulletText("Ctrl+Shift+J: Survey Network (jump point surveys)");
   ImGui::BulletText("Ctrl+Shift+V: Content Validation (validate content bundle errors/warnings)");
@@ -811,7 +1033,7 @@ void draw_help_window(UIState& ui) {
 
   ImGui::SeparatorText("Notes");
   ImGui::TextWrapped(
-      "The Command Palette and event toasts are UI-only helpers. They do not change the simulation; they "
+      "The Command Console and event toasts are UI-only helpers. They do not change the simulation; they "
       "just help you navigate and respond to what is happening.");
 
   ImGui::End();
@@ -826,11 +1048,11 @@ void draw_command_palette(Simulation& sim, UIState& ui, HUDState& hud, Id& selec
   const ImVec2 pos(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.18f);
 
   ImGui::SetNextWindowPos(pos, ImGuiCond_Appearing, ImVec2(0.5f, 0.0f));
-  ImGui::SetNextWindowSize(ImVec2(720, 420), ImGuiCond_Appearing);
+  ImGui::SetNextWindowSize(ImVec2(860, 560), ImGuiCond_Appearing);
 
   const ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings;
 
-  if (!ImGui::Begin("Command Palette", &ui.show_command_palette, flags)) {
+  if (!ImGui::Begin("Command Console", &ui.show_command_palette, flags)) {
     ImGui::End();
     return;
   }
@@ -849,91 +1071,49 @@ void draw_command_palette(Simulation& sim, UIState& ui, HUDState& hud, Id& selec
     hud.palette_selected_idx = 0;
   }
 
+  // Query row.
   bool enter_pressed = false;
   {
     ImGuiInputTextFlags tf = ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll;
     if (just_opened) {
       ImGui::SetKeyboardFocusHere();
     }
-    enter_pressed = ImGui::InputTextWithHint("##palette_query", "Type to search (actions, systems, ships, colonies, bodies)",
-                                             hud.palette_query, IM_ARRAYSIZE(hud.palette_query), tf);
+    enter_pressed = ImGui::InputTextWithHint(
+        "##palette_query",
+        "Search actions + entities (Shift+Enter keeps the console open)",
+        hud.palette_query,
+        IM_ARRAYSIZE(hud.palette_query),
+        tf);
   }
 
   const std::string query = trim_copy(hud.palette_query);
 
-  // Build results.
-  std::vector<PaletteItem> items;
-  items.reserve(128);
-
-  auto add_action = [&](const char* label, PaletteAction action) {
-    const int sc = query.empty() ? 500 : fuzzy_score(label, query);
-    if (query.empty() || sc >= 0) {
-      PaletteItem it;
-      it.kind = PaletteKind::Action;
-      it.action = action;
-      it.label = label;
-      it.score = sc;
-      items.push_back(std::move(it));
-    }
-  };
-
-  // Actions (always helpful).
-  add_action("[Action] Toggle Controls window", PaletteAction::ToggleControls);
-  add_action("[Action] Toggle Map window", PaletteAction::ToggleMap);
-  add_action("[Action] Toggle Details window", PaletteAction::ToggleDetails);
-  add_action("[Action] Toggle Directory window", PaletteAction::ToggleDirectory);
-  add_action("[Action] Toggle Production window", PaletteAction::ToggleProduction);
-  add_action("[Action] Toggle Economy window", PaletteAction::ToggleEconomy);
-  add_action("[Action] Toggle Regions (Sectors Overview)", PaletteAction::ToggleRegions);
-  add_action("[Action] Toggle Advisor (Issues)", PaletteAction::ToggleAdvisor);
-  add_action("[Action] Toggle Colony Profiles (Automation Presets)", PaletteAction::ToggleColonyProfiles);
-  add_action("[Action] Toggle Ship Profiles (Automation Presets)", PaletteAction::ToggleShipProfiles);
-  add_action("[Action] Toggle Shipyard Targets (Design Targets)", PaletteAction::ToggleShipyardTargets);
-  add_action("[Action] Toggle Survey Network (Jump Surveys)", PaletteAction::ToggleSurveyNetwork);
-  add_action("[Action] Toggle Timeline window", PaletteAction::ToggleTimeline);
-  add_action("[Action] Toggle Design Studio window", PaletteAction::ToggleDesignStudio);
-  add_action("[Action] Toggle Balance Lab window", PaletteAction::ToggleBalanceLab);
-  add_action("[Action] Toggle Intel window", PaletteAction::ToggleIntel);
-  add_action("[Action] Toggle Diplomacy Graph window", PaletteAction::ToggleDiplomacyGraph);
-  add_action("[Action] Open Settings", PaletteAction::ToggleSettings);
-  add_action("[Action] Toggle Save Tools window", PaletteAction::ToggleSaveTools);
-  add_action("[Action] Toggle Time Machine (State History)", PaletteAction::ToggleTimeMachine);
-  add_action("[Action] Toggle OmniSearch (Game JSON)", PaletteAction::ToggleOmniSearch);
-  add_action("[Action] Toggle JSON Explorer window", PaletteAction::ToggleJsonExplorer);
-  add_action("[Action] Toggle Content Validation window", PaletteAction::ToggleContentValidation);
-  add_action("[Action] Toggle State Doctor window", PaletteAction::ToggleStateDoctor);
-  add_action("[Action] Toggle Entity Inspector (ID Resolver)", PaletteAction::ToggleEntityInspector);
-  add_action("[Action] Toggle Reference Graph (Entity IDs)", PaletteAction::ToggleReferenceGraph);
-  add_action("[Action] Toggle Watchboard (JSON Pins)", PaletteAction::ToggleWatchboard);
-  add_action("[Action] Toggle Data Lenses window", PaletteAction::ToggleDataLenses);
-  add_action("[Action] Toggle Dashboards window", PaletteAction::ToggleDashboards);
-  add_action("[Action] Toggle Pivot Tables window", PaletteAction::TogglePivotTables);
-  add_action("[Action] Toggle UI Forge (Custom Panels)", PaletteAction::ToggleUIForge);
-  add_action("[Action] Toggle Layout Profiles window", PaletteAction::ToggleLayoutProfiles);
-  add_action("[Action] Toggle Status Bar", PaletteAction::ToggleStatusBar);
-  add_action("[Action] Toggle Fog of War", PaletteAction::ToggleFogOfWar);
-  add_action("[Action] Toggle Event Toasts", PaletteAction::ToggleToasts);
-  add_action("[Action] Workspace: Default", PaletteAction::WorkspaceDefault);
-  add_action("[Action] Workspace: Minimal", PaletteAction::WorkspaceMinimal);
-  add_action("[Action] Workspace: Economy", PaletteAction::WorkspaceEconomy);
-  add_action("[Action] Workspace: Design", PaletteAction::WorkspaceDesign);
-  add_action("[Action] Workspace: Intel", PaletteAction::WorkspaceIntel);
-  add_action("[Action] Open Event Log", PaletteAction::OpenLogTab);
-  add_action("[Action] Help / Shortcuts", PaletteAction::OpenHelp);
-  add_action("[Action] Focus System Map", PaletteAction::FocusSystemMap);
-  add_action("[Action] Focus Galaxy Map", PaletteAction::FocusGalaxyMap);
-  add_action("[Action] New Game...", PaletteAction::NewGameDialog);
-  add_action("[Action] New Game (Sol)", PaletteAction::NewGameSol);
-  add_action("[Action] New Game (Random)", PaletteAction::NewGameRandom);
-  add_action("[Action] Reload Content Bundle", PaletteAction::ReloadContent);
-  add_action("[Action] Save game", PaletteAction::Save);
-  add_action("[Action] Load game", PaletteAction::Load);
+  static std::string last_query;
+  if (query != last_query) {
+    hud.palette_selected_idx = 0;
+    last_query = query;
+  }
 
   const auto& s = sim.state();
 
-  // Only add entity hits when the user typed something.
+  // Search results (flat list) are only built when the user types a query.
+  std::vector<PaletteItem> results;
+  results.reserve(256);
+
   if (!query.empty()) {
-    // Systems
+    // Actions (metadata-driven).
+    for (const auto& m : kActionMetas) {
+      const int sc = action_match_score(m, query);
+      if (sc < 0) continue;
+      PaletteItem it;
+      it.kind = PaletteKind::Action;
+      it.action = m.action;
+      it.label = std::string("[Action] ") + m.label;
+      it.score = sc;
+      results.push_back(std::move(it));
+    }
+
+    // Entities.
     for (const auto& [sid, sys] : s.systems) {
       std::string label = "[System] " + sys.name;
       const int sc = fuzzy_score(label, query);
@@ -943,10 +1123,9 @@ void draw_command_palette(Simulation& sim, UIState& ui, HUDState& hud, Id& selec
       it.id = sid;
       it.label = std::move(label);
       it.score = sc;
-      items.push_back(std::move(it));
+      results.push_back(std::move(it));
     }
 
-    // Ships
     for (const auto& [shid, sh] : s.ships) {
       const auto* sys = find_ptr(s.systems, sh.system_id);
       std::string label = "[Ship] " + sh.name;
@@ -958,10 +1137,9 @@ void draw_command_palette(Simulation& sim, UIState& ui, HUDState& hud, Id& selec
       it.id = shid;
       it.label = std::move(label);
       it.score = sc;
-      items.push_back(std::move(it));
+      results.push_back(std::move(it));
     }
 
-    // Colonies
     for (const auto& [cid, c] : s.colonies) {
       const auto* b = (c.body_id != kInvalidId) ? find_ptr(s.bodies, c.body_id) : nullptr;
       const auto* sys = (b && b->system_id != kInvalidId) ? find_ptr(s.systems, b->system_id) : nullptr;
@@ -974,10 +1152,9 @@ void draw_command_palette(Simulation& sim, UIState& ui, HUDState& hud, Id& selec
       it.id = cid;
       it.label = std::move(label);
       it.score = sc;
-      items.push_back(std::move(it));
+      results.push_back(std::move(it));
     }
 
-    // Bodies
     for (const auto& [bid, b] : s.bodies) {
       const auto* sys = (b.system_id != kInvalidId) ? find_ptr(s.systems, b.system_id) : nullptr;
       std::string label = "[Body] " + b.name;
@@ -989,66 +1166,362 @@ void draw_command_palette(Simulation& sim, UIState& ui, HUDState& hud, Id& selec
       it.id = bid;
       it.label = std::move(label);
       it.score = sc;
-      items.push_back(std::move(it));
+      results.push_back(std::move(it));
+    }
+
+    // Sort by score (desc), then label.
+    std::sort(results.begin(), results.end(), [](const PaletteItem& a, const PaletteItem& b) {
+      if (a.score != b.score) return a.score > b.score;
+      return a.label < b.label;
+    });
+
+    constexpr int kMaxItems = 120;
+    if ((int)results.size() > kMaxItems) results.resize(kMaxItems);
+
+    // Keyboard navigation only applies to the search results list.
+    if (!results.empty()) {
+      if (ImGui::IsKeyPressed(ImGuiKey_DownArrow)) {
+        hud.palette_selected_idx = std::min(hud.palette_selected_idx + 1, (int)results.size() - 1);
+      }
+      if (ImGui::IsKeyPressed(ImGuiKey_UpArrow)) {
+        hud.palette_selected_idx = std::max(hud.palette_selected_idx - 1, 0);
+      }
+    } else {
+      hud.palette_selected_idx = 0;
     }
   }
 
-  // Sort by score (desc), then label.
-  std::sort(items.begin(), items.end(), [](const PaletteItem& a, const PaletteItem& b) {
-    if (a.score != b.score) return a.score > b.score;
-    return a.label < b.label;
-  });
+  // Shared helper: execute an action item through the existing activation switch.
+  auto run_action = [&](PaletteAction a) {
+    PaletteItem it;
+    it.kind = PaletteKind::Action;
+    it.action = a;
+    activate_palette_item(it, sim, ui, selected_ship, selected_colony, selected_body, save_path, load_path);
+  };
 
-  constexpr int kMaxItems = 80;
-  if ((int)items.size() > kMaxItems) items.resize(kMaxItems);
+  auto maybe_close = [&]() {
+    // Hold Shift while activating to keep the console open.
+    if (!io.KeyShift) ui.show_command_palette = false;
+  };
 
-  if (items.empty()) {
+  const ActionMeta* hovered_action = nullptr;
+  std::string hovered_entity_label;
+
+  const ImGuiTableFlags table_flags = ImGuiTableFlags_Resizable | ImGuiTableFlags_BordersInnerV;
+  if (ImGui::BeginTable("##cmd_console_table", 2, table_flags)) {
+    ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthStretch, 0.62f);
+    ImGui::TableSetupColumn("Details", ImGuiTableColumnFlags_WidthStretch, 0.38f);
+    ImGui::TableNextRow();
+
+    // --- Left column ---
+    ImGui::TableSetColumnIndex(0);
+    ImGui::BeginChild("##cmd_console_left", ImVec2(0, 0), false);
+
+    // Search results (query-driven).
+    if (!query.empty()) {
+      ImGui::SetNextItemOpen(true, ImGuiCond_Appearing);
+      if (ImGui::CollapsingHeader("Search Results", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (results.empty()) {
+          ImGui::TextDisabled("No matches.");
+          ImGui::TextDisabled("Tip: try a substring (e.g. 'Sol', 'Survey', 'Colony').");
+        } else {
+          const float list_h = std::min(280.0f, ImGui::GetContentRegionAvail().y * 0.55f);
+          ImGui::BeginChild("##cmd_console_results_list", ImVec2(0, list_h), true);
+
+          int clicked_idx = -1;
+          for (int i = 0; i < (int)results.size(); ++i) {
+            const bool sel = (i == hud.palette_selected_idx);
+            if (ImGui::Selectable(results[i].label.c_str(), sel)) {
+              clicked_idx = i;
+            }
+
+            // Ensure the selected row stays visible when navigating.
+            if (sel && (ImGui::IsKeyPressed(ImGuiKey_UpArrow) || ImGui::IsKeyPressed(ImGuiKey_DownArrow))) {
+              ImGui::SetScrollHereY(0.5f);
+            }
+
+            // Hover details + tooltips.
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+              hovered_entity_label = results[i].label;
+              if (results[i].kind == PaletteKind::Action) {
+                hovered_action = find_action_meta(results[i].action);
+                if (hovered_action) draw_action_tooltip(*hovered_action);
+              } else {
+                ImGui::BeginTooltip();
+                ImGui::TextUnformatted(results[i].label.c_str());
+                ImGui::EndTooltip();
+              }
+            }
+          }
+
+          ImGui::EndChild();
+
+          ImGui::TextDisabled("Enter: apply   Esc: close   ↑/↓: navigate   Shift: keep open");
+
+          const bool do_activate = enter_pressed || (clicked_idx >= 0);
+          if (do_activate) {
+            const int idx = (clicked_idx >= 0) ? clicked_idx
+                                               : std::clamp(hud.palette_selected_idx, 0, (int)results.size() - 1);
+            PaletteItem item = results[static_cast<std::size_t>(idx)];
+            activate_palette_item(item, sim, ui, selected_ship, selected_colony, selected_body, save_path, load_path);
+            maybe_close();
+
+            // Keep the query for rapid repeated use, but reset selection.
+            hud.palette_selected_idx = 0;
+          }
+        }
+      }
+
+      ImGui::Separator();
+    }
+
+    // Context-sensitive actions.
+    ImGui::SetNextItemOpen(true, ImGuiCond_Appearing);
+    if (ImGui::CollapsingHeader("Context Actions", ImGuiTreeNodeFlags_DefaultOpen)) {
+      // Selected system
+      if (s.selected_system != kInvalidId) {
+        const auto* sys = find_ptr(s.systems, s.selected_system);
+        ImGui::TextUnformatted("System");
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", sys ? sys->name.c_str() : "<unknown>");
+
+        if (ImGui::SmallButton("System Map")) {
+          ui.show_map_window = true;
+          ui.request_map_tab = MapTab::System;
+          maybe_close();
+        }
+        if (ImGui::IsItemHovered()) {
+          ImGui::SetTooltip("Open the System Map focused on the selected system.");
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Galaxy Map")) {
+          ui.show_map_window = true;
+          ui.request_map_tab = MapTab::Galaxy;
+          maybe_close();
+        }
+        if (ImGui::IsItemHovered()) {
+          ImGui::SetTooltip("Open the Galaxy Map.");
+        }
+
+        ImGui::Separator();
+      } else {
+        ImGui::TextDisabled("No system selected (pick one on the Galaxy map or via search). ");
+      }
+
+      // Selected ship
+      if (selected_ship != kInvalidId) {
+        const auto* sh = find_ptr(s.ships, selected_ship);
+        ImGui::TextUnformatted("Ship");
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", sh ? sh->name.c_str() : "<unknown>");
+
+        if (ImGui::SmallButton("Details")) {
+          PaletteItem it;
+          it.kind = PaletteKind::Ship;
+          it.id = selected_ship;
+          activate_palette_item(it, sim, ui, selected_ship, selected_colony, selected_body, save_path, load_path);
+          maybe_close();
+        }
+        if (ImGui::IsItemHovered()) {
+          ImGui::SetTooltip("Open Details + System Map for the selected ship.");
+        }
+
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Fleet")) {
+          ui.show_fleet_manager_window = true;
+          ui.selected_fleet_id = sim.fleet_for_ship(selected_ship);
+          maybe_close();
+        }
+        if (ImGui::IsItemHovered()) {
+          ImGui::SetTooltip("Open Fleet Manager focused on the ship's fleet.");
+        }
+
+        ImGui::Separator();
+      } else {
+        ImGui::TextDisabled("No ship selected.");
+      }
+
+      // Selected colony
+      if (selected_colony != kInvalidId) {
+        const auto* c = find_ptr(s.colonies, selected_colony);
+        ImGui::TextUnformatted("Colony");
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", c ? c->name.c_str() : "<unknown>");
+
+        if (ImGui::SmallButton("Details")) {
+          PaletteItem it;
+          it.kind = PaletteKind::Colony;
+          it.id = selected_colony;
+          activate_palette_item(it, sim, ui, selected_ship, selected_colony, selected_body, save_path, load_path);
+          maybe_close();
+        }
+        if (ImGui::IsItemHovered()) {
+          ImGui::SetTooltip("Open Details + System Map for the selected colony.");
+        }
+
+        ImGui::Separator();
+      } else {
+        ImGui::TextDisabled("No colony selected.");
+      }
+
+      // Selected body
+      if (selected_body != kInvalidId) {
+        const auto* b = find_ptr(s.bodies, selected_body);
+        ImGui::TextUnformatted("Body");
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", b ? b->name.c_str() : "<unknown>");
+
+        if (ImGui::SmallButton("Details")) {
+          PaletteItem it;
+          it.kind = PaletteKind::Body;
+          it.id = selected_body;
+          activate_palette_item(it, sim, ui, selected_ship, selected_colony, selected_body, save_path, load_path);
+          maybe_close();
+        }
+        if (ImGui::IsItemHovered()) {
+          ImGui::SetTooltip("Open Details + System Map for the selected body.");
+        }
+      } else {
+        ImGui::TextDisabled("No body selected.");
+      }
+
+      ImGui::Spacing();
+      ImGui::TextDisabled("Tip: use Search to jump to systems/ships/colonies/bodies.");
+    }
+
     ImGui::Spacing();
-    ImGui::TextDisabled("No matches.");
-    ImGui::TextDisabled("Tip: Try a substring (e.g. 'Sol', 'Survey', 'Colony').");
-    ImGui::End();
-    return;
-  }
 
-  // Keyboard navigation.
-  if (ImGui::IsKeyPressed(ImGuiKey_DownArrow)) {
-    hud.palette_selected_idx = std::min(hud.palette_selected_idx + 1, (int)items.size() - 1);
-  }
-  if (ImGui::IsKeyPressed(ImGuiKey_UpArrow)) {
-    hud.palette_selected_idx = std::max(hud.palette_selected_idx - 1, 0);
-  }
-
-  ImGui::Separator();
-
-  ImGui::BeginChild("##palette_results", ImVec2(0, -ImGui::GetFrameHeightWithSpacing()), true);
-
-  int clicked_idx = -1;
-  for (int i = 0; i < (int)items.size(); ++i) {
-    const bool sel = (i == hud.palette_selected_idx);
-    if (ImGui::Selectable(items[i].label.c_str(), sel)) {
-      clicked_idx = i;
+    // Browsing panels for actions.
+    bool show_browse = query.empty();
+    if (!query.empty()) {
+      ImGui::SetNextItemOpen(false, ImGuiCond_Appearing);
+      show_browse = ImGui::CollapsingHeader("Browse Actions", 0);
     }
 
-    // Ensure the selected row stays visible when navigating.
-    if (sel && (ImGui::IsKeyPressed(ImGuiKey_UpArrow) || ImGui::IsKeyPressed(ImGuiKey_DownArrow))) {
-      ImGui::SetScrollHereY(0.5f);
+    if (show_browse) {
+      auto draw_category = [&](const char* category, ImGuiTreeNodeFlags hflags) {
+        // Only show the header if there is at least one matching action.
+        bool has_any = false;
+        for (const auto& m : kActionMetas) {
+          if (std::string_view(m.category) != category) continue;
+          if (!query.empty() && action_match_score(m, query) < 0) continue;
+          has_any = true;
+          break;
+        }
+        if (!has_any) return;
+
+        if (!ImGui::CollapsingHeader(category, hflags)) return;
+
+        const bool has_save_path = save_path && save_path[0] != '\0';
+        const bool has_load_path = load_path && load_path[0] != '\0';
+
+        for (const auto& m : kActionMetas) {
+          if (std::string_view(m.category) != category) continue;
+          if (!query.empty() && action_match_score(m, query) < 0) continue;
+
+          bool enabled = true;
+          if (m.action == PaletteAction::Save) enabled = has_save_path;
+          if (m.action == PaletteAction::Load) enabled = has_load_path;
+
+          ImGui::PushID((int)m.action);
+
+          bool activated = false;
+          if (m.toggles) {
+            const bool checked = action_toggle_state(ui, m.action);
+            activated = ImGui::MenuItem(m.label, m.shortcut, checked, enabled);
+          } else {
+            activated = ImGui::MenuItem(m.label, m.shortcut, false, enabled);
+          }
+
+          if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+            hovered_action = &m;
+            draw_action_tooltip(m);
+
+            // Extra contextual hints for save/load paths.
+            if ((m.action == PaletteAction::Save || m.action == PaletteAction::Load) && !enabled) {
+              ImGui::BeginTooltip();
+              ImGui::TextUnformatted(m.label);
+              ImGui::Separator();
+              ImGui::TextWrapped("No %s path set. Use the Save Tools window to configure paths.",
+                                 (m.action == PaletteAction::Save) ? "save" : "load");
+              ImGui::EndTooltip();
+            }
+          }
+
+          if (activated) {
+            run_action(m.action);
+            maybe_close();
+            hud.palette_selected_idx = 0;
+          }
+
+          ImGui::PopID();
+        }
+      };
+
+      draw_category("Navigation", ImGuiTreeNodeFlags_DefaultOpen);
+      draw_category("Windows", ImGuiTreeNodeFlags_DefaultOpen);
+      draw_category("Automation", 0);
+      draw_category("Tools", 0);
+      draw_category("UI", 0);
+      draw_category("Workspace", 0);
+      draw_category("Game", 0);
     }
-  }
 
-  ImGui::EndChild();
+    ImGui::EndChild();
 
-  ImGui::TextDisabled("Enter: apply  |  Esc: close  |  ↑/↓: navigate");
+    // --- Right column ---
+    ImGui::TableSetColumnIndex(1);
+    ImGui::BeginChild("##cmd_console_right", ImVec2(0, 0), true);
 
-  // Activation.
-  const bool do_activate = enter_pressed || (clicked_idx >= 0);
-  if (do_activate) {
-    const int idx = (clicked_idx >= 0) ? clicked_idx : std::clamp(hud.palette_selected_idx, 0, (int)items.size() - 1);
-    PaletteItem item = items[static_cast<std::size_t>(idx)];
-    activate_palette_item(item, sim, ui, selected_ship, selected_colony, selected_body, save_path, load_path);
-    ui.show_command_palette = false;
+    // Prefer hovered item details.
+    if (hovered_action) {
+      ImGui::TextUnformatted(hovered_action->label);
+      ImGui::TextDisabled("Category: %s", hovered_action->category);
+      if (hovered_action->shortcut && hovered_action->shortcut[0] != '\0') {
+        ImGui::TextDisabled("Shortcut: %s", hovered_action->shortcut);
+      }
+      ImGui::Separator();
+      const char* tip = (hovered_action->tooltip && hovered_action->tooltip[0] != '\0') ? hovered_action->tooltip
+                                                                                        : hovered_action->label;
+      ImGui::TextWrapped("%s", tip);
+    } else if (!query.empty() && !results.empty()) {
+      // Otherwise: show the currently selected search result details.
+      const int idx = std::clamp(hud.palette_selected_idx, 0, (int)results.size() - 1);
+      const PaletteItem& it = results[static_cast<std::size_t>(idx)];
 
-    // Keep the query for rapid repeated use, but reset selection.
-    hud.palette_selected_idx = 0;
+      ImGui::TextUnformatted(it.label.c_str());
+      ImGui::Separator();
+
+      if (it.kind == PaletteKind::Action) {
+        if (const ActionMeta* m = find_action_meta(it.action)) {
+          ImGui::TextDisabled("Category: %s", m->category);
+          if (m->shortcut && m->shortcut[0] != '\0') {
+            ImGui::TextDisabled("Shortcut: %s", m->shortcut);
+          }
+          ImGui::Spacing();
+          const char* tip = (m->tooltip && m->tooltip[0] != '\0') ? m->tooltip : m->label;
+          ImGui::TextWrapped("%s", tip);
+        } else {
+          ImGui::TextWrapped("(No metadata found for this action.)");
+        }
+      } else {
+        ImGui::TextWrapped("Entity navigation: activating this will jump maps and open Details.");
+        ImGui::Spacing();
+        ImGui::TextDisabled("Tip: prefix search with a tag like 'System' or 'Ship' to narrow.");
+      }
+    } else {
+      ImGui::TextUnformatted("Command Console");
+      ImGui::Separator();
+      ImGui::BulletText("Type to search across actions and entities.");
+      ImGui::BulletText("Or browse collapsible panels (Windows/Tools/Workspace/Game). ");
+      ImGui::BulletText("Context Actions adapt to your current selection.");
+      ImGui::Spacing();
+      ImGui::TextDisabled("Shift keeps the console open after running a command.");
+    }
+
+    ImGui::EndChild();
+
+    ImGui::EndTable();
   }
 
   ImGui::End();
@@ -1112,7 +1585,7 @@ void update_event_toasts(const Simulation& sim, UIState& ui, HUDState& hud) {
     hud.last_toast_seq = newest_seq;
 
     // Cap toast backlog.
-    constexpr std::size_t kMaxToasts = 6;
+    constexpr std::size_t kMaxToasts = 10;
     if (hud.toasts.size() > kMaxToasts) {
       hud.toasts.erase(hud.toasts.begin(), hud.toasts.begin() + (hud.toasts.size() - kMaxToasts));
     }
@@ -1156,9 +1629,16 @@ void draw_event_toasts(Simulation& sim, UIState& ui, HUDState& hud, Id& selected
     ImGui::Begin(name.c_str(), nullptr, flags);
 
     // Header
-    ImGui::TextColored(event_level_color(t.level), "%s", event_level_short(t.level));
-    ImGui::SameLine();
-    ImGui::TextDisabled("#%llu", (unsigned long long)t.seq);
+    if (t.custom) {
+      ImGui::TextColored(event_level_color(t.level), "%s", "ALERT");
+      ImGui::SameLine();
+      const unsigned long long aid = (unsigned long long)(t.seq & 0x7fffffffffffffffull);
+      ImGui::TextDisabled("#A%llu", aid);
+    } else {
+      ImGui::TextColored(event_level_color(t.level), "%s", event_level_short(t.level));
+      ImGui::SameLine();
+      ImGui::TextDisabled("#%llu", (unsigned long long)t.seq);
+    }
 
     ImGui::SameLine();
     if (ImGui::SmallButton("x")) {
@@ -1177,56 +1657,90 @@ void draw_event_toasts(Simulation& sim, UIState& ui, HUDState& hud, Id& selected
     ImGui::TextWrapped("%s", t.message.c_str());
 
     ImGui::Separator();
-
     // Quick actions.
-    if (ImGui::SmallButton("Log")) {
-      ui.show_details_window = true;
-      ui.request_details_tab = DetailsTab::Log;
-    }
-    ImGui::SameLine();
-    if (ImGui::SmallButton("Timeline")) {
-      ui.show_timeline_window = true;
-      ui.request_focus_event_seq = t.seq;
-    }
-
-    auto& s = sim.state();
-
-    if (t.system_id != kInvalidId) {
-      ImGui::SameLine();
-      if (ImGui::SmallButton("View system")) {
-        s.selected_system = t.system_id;
-        ui.show_map_window = true;
-        ui.request_map_tab = MapTab::System;
+    if (!t.custom) {
+      if (ImGui::SmallButton("Log")) {
+        ui.show_details_window = true;
+        ui.request_details_tab = DetailsTab::Log;
       }
-    }
-
-    if (t.colony_id != kInvalidId) {
       ImGui::SameLine();
-      if (ImGui::SmallButton("Select colony")) {
-        selected_colony = t.colony_id;
-        if (const auto* c = find_ptr(s.colonies, t.colony_id)) {
-          selected_body = c->body_id;
-          if (const auto* b = (c->body_id != kInvalidId) ? find_ptr(s.bodies, c->body_id) : nullptr) {
-            s.selected_system = b->system_id;
+      if (ImGui::SmallButton("Timeline")) {
+        ui.show_timeline_window = true;
+        ui.request_focus_event_seq = t.seq;
+      }
+
+      auto& s = sim.state();
+
+      if (t.system_id != kInvalidId) {
+        ImGui::SameLine();
+        if (ImGui::SmallButton("View system")) {
+          s.selected_system = t.system_id;
+          ui.show_map_window = true;
+          ui.request_map_tab = MapTab::System;
+        }
+      }
+
+      if (t.colony_id != kInvalidId) {
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Select colony")) {
+          selected_colony = t.colony_id;
+          if (const auto* c = find_ptr(s.colonies, t.colony_id)) {
+            selected_body = c->body_id;
+            if (const auto* b = (c->body_id != kInvalidId) ? find_ptr(s.bodies, c->body_id) : nullptr) {
+              s.selected_system = b->system_id;
+            }
+          }
+          ui.show_details_window = true;
+          ui.request_details_tab = DetailsTab::Colony;
+        }
+      }
+
+      if (t.ship_id != kInvalidId) {
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Select ship")) {
+          selected_ship = t.ship_id;
+          ui.selected_fleet_id = sim.fleet_for_ship(t.ship_id);
+          if (const auto* sh = find_ptr(s.ships, t.ship_id)) {
+            s.selected_system = sh->system_id;
+          }
+          ui.show_details_window = true;
+          ui.request_details_tab = DetailsTab::Ship;
+        }
+      }
+    } else {
+      // Custom (UI-generated) toast actions.
+      if (ImGui::SmallButton("Watchboard")) {
+        ui.show_watchboard_window = true;
+        ui.request_watchboard_focus_id = t.watch_id;
+      }
+      ImGui::SameLine();
+      if (ImGui::SmallButton("Copy path")) {
+        if (!t.watch_path.empty()) ImGui::SetClipboardText(t.watch_path.c_str());
+      }
+
+      const std::string goto_ptr = !t.watch_rep_ptr.empty() ? t.watch_rep_ptr : t.watch_path;
+      const bool can_goto = !goto_ptr.empty() && (goto_ptr.find('*') == std::string::npos);
+      ImGui::SameLine();
+      ImGui::BeginDisabled(!can_goto);
+      if (ImGui::SmallButton("JSON Explorer")) {
+        ui.show_json_explorer_window = true;
+        ui.request_json_explorer_goto_path = goto_ptr;
+      }
+      ImGui::EndDisabled();
+
+      if (t.watch_id != 0) {
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Mute")) {
+          for (auto& w : ui.json_watch_items) {
+            if (w.id == t.watch_id) {
+              w.alert_enabled = false;
+              break;
+            }
           }
         }
-        ui.show_details_window = true;
-        ui.request_details_tab = DetailsTab::Colony;
       }
     }
 
-    if (t.ship_id != kInvalidId) {
-      ImGui::SameLine();
-      if (ImGui::SmallButton("Select ship")) {
-        selected_ship = t.ship_id;
-        ui.selected_fleet_id = sim.fleet_for_ship(t.ship_id);
-        if (const auto* sh = find_ptr(s.ships, t.ship_id)) {
-          s.selected_system = sh->system_id;
-        }
-        ui.show_details_window = true;
-        ui.request_details_tab = DetailsTab::Ship;
-      }
-    }
 
     // Advance stack.
     const ImVec2 win_sz = ImGui::GetWindowSize();

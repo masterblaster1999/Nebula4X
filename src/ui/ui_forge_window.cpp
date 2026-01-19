@@ -15,6 +15,9 @@
 #include "nebula4x/util/json_pointer.h"
 #include "nebula4x/util/json_pointer_autocomplete.h"
 #include "nebula4x/util/log.h"
+#include "nebula4x/util/strings.h"
+
+#include "ui/ui_forge_dna.h"
 
 #include "ui/dashboards_window.h"
 #include "ui/data_lenses_window.h"
@@ -404,6 +407,23 @@ struct ForgeEditorState {
   int gen_max_widgets{64};
   bool gen_replace_existing{true};
 
+  // 0 = Exhaustive (walk everything up to Depth)
+  // 1 = Curated (seeded, query-aware aggregation + grouping)
+  int gen_mode{1};
+
+  // Curated generator knobs.
+  int gen_seed{1337};
+  int gen_target_widgets{24};
+  bool gen_include_lists{true};
+  bool gen_include_strings{true};
+  bool gen_include_id_fields{false};
+  bool gen_group_separators{true};
+  bool gen_add_intro_note{true};
+
+  // Clipboard UX.
+  std::string dna_status;
+  double dna_status_time{0.0};
+
   // Optional: show live preview.
   bool show_preview{true};
 };
@@ -597,6 +617,456 @@ void generate_panel_widgets_from_root(UIState& ui, UiForgePanelConfig& panel, co
     panel.widgets.push_back(std::move(w));
   }
 }
+
+// --- Curated procedural generator ---
+//
+// The exhaustive generator is useful for discovery, but it tends to create huge panels.
+// The curated generator is intentionally opinionated:
+//   - prefers user-facing fields (name, vitals) over ids/internal keys
+//   - creates query KPIs for arrays of objects using wildcard pointers (e.g. /items/*/mass)
+//   - selects a limited set of widgets with a deterministic seed
+
+struct CuratedGenOptions {
+  int depth{2};
+  int target_widgets{24};
+  bool replace_existing{true};
+
+  bool include_lists{true};
+  bool include_strings{true};
+  bool include_id_fields{false};
+  bool group_separators{true};
+  bool add_intro_note{true};
+
+  std::uint32_t seed{1337};
+};
+
+struct CuratedCandidate {
+  int type{0}; // 0=KPI, 3=List
+  std::string label;
+  std::string path;
+
+  bool is_query{false};
+  int query_op{0};
+  bool numeric{false};
+
+  int depth{0};
+  std::string key_lc;
+  std::string group;
+  float score{0.0f};
+};
+
+bool ends_with(const std::string& s, const std::string& suffix) {
+  if (suffix.size() > s.size()) return false;
+  return std::equal(suffix.rbegin(), suffix.rend(), s.rbegin());
+}
+
+bool contains_substr(const std::string& s, const char* needle) {
+  return s.find(needle) != std::string::npos;
+}
+
+bool is_noise_key(const std::string& k) {
+  // Always-filter keys that are almost never meaningful in dashboards.
+  return (k == "_" || k == "__" || k == "hash" || k == "guid" || k == "uuid" || k == "checksum" || k == "version" ||
+          k == "revision" || k == "rev" || k == "debug" || k == "internal" || k == "last_updated" || k == "last_update" ||
+          k == "timestamp" || k == "time_stamp");
+}
+
+bool is_id_like_key(const std::string& k) {
+  if (k == "id" || k == "uid" || k == "guid") return true;
+  if (ends_with(k, "_id")) return true;
+  if (ends_with(k, "_ids")) return true;
+  if (ends_with(k, "_idx") || ends_with(k, "_index")) return true;
+  if (contains_substr(k, "id_") && k.size() <= 8) return true;
+  return false;
+}
+
+std::string classify_group(const CuratedCandidate& c) {
+  if (c.type == 3) return "Collections";
+  const std::string& k = c.key_lc;
+
+  if (k == "name" || contains_substr(k, "name") || contains_substr(k, "title") || contains_substr(k, "class") ||
+      contains_substr(k, "designation") || contains_substr(k, "hull") || contains_substr(k, "model") ||
+      contains_substr(k, "type")) {
+    return "Identity";
+  }
+
+  if (contains_substr(k, "system") || contains_substr(k, "orbit") || contains_substr(k, "pos") || contains_substr(k, "location") ||
+      k == "x" || k == "y" || k == "z" || contains_substr(k, "coord") || contains_substr(k, "sector") ||
+      contains_substr(k, "region")) {
+    return "Location";
+  }
+
+  if (contains_substr(k, "pop") || contains_substr(k, "industry") || contains_substr(k, "econ") || contains_substr(k, "wealth") ||
+      contains_substr(k, "credit") || contains_substr(k, "cost") || contains_substr(k, "income") || contains_substr(k, "output") ||
+      contains_substr(k, "prod") || contains_substr(k, "cargo") || contains_substr(k, "fuel") || contains_substr(k, "stock") ||
+      contains_substr(k, "inventory") || contains_substr(k, "mineral") || contains_substr(k, "ore") || contains_substr(k, "supply")) {
+    return "Economy";
+  }
+
+  if (contains_substr(k, "hp") || contains_substr(k, "armor") || contains_substr(k, "shield") || contains_substr(k, "weapon") ||
+      contains_substr(k, "missile") || contains_substr(k, "damage") || contains_substr(k, "range") || contains_substr(k, "combat") ||
+      contains_substr(k, "ton") || contains_substr(k, "mass") || contains_substr(k, "speed") || contains_substr(k, "thrust")) {
+    return "Combat";
+  }
+
+  if (contains_substr(k, "research") || contains_substr(k, "tech") || contains_substr(k, "lab") || contains_substr(k, "science")) {
+    return "Research";
+  }
+
+  if (contains_substr(k, "queue") || contains_substr(k, "order") || contains_substr(k, "plan") || contains_substr(k, "task") ||
+      contains_substr(k, "eta") || contains_substr(k, "time")) {
+    return "Plans";
+  }
+
+  return "General";
+}
+
+int guess_query_op_for_key(const std::string& k, const bool is_bool) {
+  // 0=count, 1=sum, 2=avg, 3=min, 4=max
+  if (is_bool) return 1; // sum bools => count(true)
+  if (contains_substr(k, "min")) return 3;
+  if (contains_substr(k, "max")) return 4;
+  if (contains_substr(k, "pct") || contains_substr(k, "ratio") || contains_substr(k, "fraction") || contains_substr(k, "chance") ||
+      contains_substr(k, "prob") || contains_substr(k, "mean") || contains_substr(k, "avg")) {
+    return 2;
+  }
+  return 1; // sum by default
+}
+
+std::uint32_t fnv1a_32(const std::string& s) {
+  std::uint32_t h = 2166136261u;
+  for (unsigned char c : s) {
+    h ^= (std::uint32_t)c;
+    h *= 16777619u;
+  }
+  return h;
+}
+
+float jitter01(std::uint32_t seed, const std::string& path) {
+  std::uint32_t h = fnv1a_32(path);
+  h ^= seed + 0x9e3779b9u + (h << 6) + (h >> 2);
+  // 0..1
+  return (float)(h & 0xFFFFu) / 65535.0f;
+}
+
+int pointer_depth(const std::string& path) {
+  try {
+    return (int)nebula4x::split_json_pointer(path, /*accept_root_slash=*/true).size();
+  } catch (...) {
+    return 0;
+  }
+}
+
+std::string last_token_lc(const std::string& path) {
+  try {
+    const auto toks = nebula4x::split_json_pointer(path, /*accept_root_slash=*/true);
+    if (toks.empty()) return "";
+    return nebula4x::to_lower(toks.back());
+  } catch (...) {
+    return "";
+  }
+}
+
+void push_candidate(std::vector<CuratedCandidate>& out, CuratedCandidate c, const CuratedGenOptions& opt) {
+  c.depth = pointer_depth(c.path);
+  c.key_lc = last_token_lc(c.path);
+
+  if (c.key_lc.empty()) return;
+  if (is_noise_key(c.key_lc)) return;
+  if (!opt.include_id_fields && is_id_like_key(c.key_lc) && c.key_lc != "name") return;
+
+  c.group = classify_group(c);
+
+  // Score heuristics.
+  float s = 0.0f;
+
+  // Type bias.
+  s += (c.type == 3) ? 12.0f : 20.0f;
+  if (c.is_query) s += 18.0f;
+  if (c.numeric) s += 16.0f;
+
+  // Prefer shallower paths.
+  s += std::max(0.0f, 80.0f - (float)c.depth * 10.0f);
+
+  // Keyword boosts.
+  const std::string& k = c.key_lc;
+  if (k == "name") s += 260.0f;
+  if (contains_substr(k, "pop")) s += 120.0f;
+  if (contains_substr(k, "fuel")) s += 110.0f;
+  if (contains_substr(k, "speed") || contains_substr(k, "vel")) s += 90.0f;
+  if (contains_substr(k, "mass") || contains_substr(k, "ton")) s += 80.0f;
+  if (contains_substr(k, "hp") || contains_substr(k, "armor") || contains_substr(k, "shield")) s += 95.0f;
+  if (contains_substr(k, "income") || contains_substr(k, "output") || contains_substr(k, "prod")) s += 75.0f;
+  if (contains_substr(k, "mineral") || contains_substr(k, "ore")) s += 65.0f;
+  if (contains_substr(k, "research") || contains_substr(k, "tech")) s += 65.0f;
+
+  // Penalties.
+  if (is_id_like_key(k)) s -= 140.0f;
+
+  // Deterministic jitter so two fields with similar scores can be varied via seed.
+  s += jitter01(opt.seed, c.path) * 10.0f;
+
+  c.score = s;
+  out.push_back(std::move(c));
+}
+
+void collect_curated_candidates(const nebula4x::json::Value& v, const std::string& path, int depth, const CuratedGenOptions& opt,
+                               std::vector<CuratedCandidate>& out, const int max_total) {
+  if ((int)out.size() >= max_total) return;
+
+  // Scalars => KPI.
+  if (v.is_null() || v.is_bool() || v.is_number() || v.is_string()) {
+    if (v.is_string() && !opt.include_strings) {
+      // Always keep 'name' even when strings are off.
+      const std::string k = last_token_lc(path);
+      if (k != "name") return;
+    }
+
+    CuratedCandidate c;
+    c.type = 0;
+    c.path = path;
+    c.label = label_from_pointer(path);
+    c.numeric = v.is_number() || v.is_bool();
+    push_candidate(out, std::move(c), opt);
+    return;
+  }
+
+  // Arrays.
+  if (const auto* a = v.as_array()) {
+    // Always include a size KPI (arrays evaluate to their length in eval_value).
+    {
+      CuratedCandidate c;
+      c.type = 0;
+      c.path = path;
+      c.label = label_from_pointer(path);
+      c.numeric = true;
+      push_candidate(out, std::move(c), opt);
+    }
+
+    if (opt.include_lists) {
+      CuratedCandidate c;
+      c.type = 3;
+      c.path = path;
+      c.label = label_from_pointer(path);
+      c.numeric = false;
+      push_candidate(out, std::move(c), opt);
+    }
+
+    if (depth > 0 && !a->empty()) {
+      const auto& e0 = (*a)[0];
+      const std::string wildcard = nebula4x::json_pointer_join(path, "*");
+
+      // Arrays of objects => query KPIs over numeric fields.
+      if (const auto* o = e0.as_object()) {
+        // Deterministic iteration improves repeatability.
+        std::vector<std::string> keys;
+        keys.reserve(o->size());
+        for (const auto& kv : *o) keys.push_back(kv.first);
+        std::sort(keys.begin(), keys.end());
+
+        for (const auto& k : keys) {
+          auto it = o->find(k);
+          if (it == o->end()) continue;
+
+          const auto& vv = it->second;
+          const bool numeric = vv.is_number() || vv.is_bool();
+          if (!numeric) continue;
+
+          CuratedCandidate q;
+          q.type = 0;
+          q.path = nebula4x::json_pointer_join(wildcard, k);
+          q.label = label_from_pointer(q.path);
+          q.is_query = true;
+          q.numeric = true;
+          q.query_op = guess_query_op_for_key(nebula4x::to_lower(k), vv.is_bool());
+          push_candidate(out, std::move(q), opt);
+
+          if ((int)out.size() >= max_total) return;
+        }
+      } else if (e0.is_number() || e0.is_bool()) {
+        // Arrays of scalars => query KPI directly.
+        CuratedCandidate q;
+        q.type = 0;
+        q.path = wildcard;
+        q.label = label_from_pointer(path);
+        q.is_query = true;
+        q.numeric = true;
+        q.query_op = guess_query_op_for_key(last_token_lc(path), e0.is_bool());
+        push_candidate(out, std::move(q), opt);
+      }
+    }
+
+    return;
+  }
+
+  // Objects.
+  if (const auto* o = v.as_object()) {
+    if (depth <= 0) {
+      // Size KPI at max depth.
+      CuratedCandidate c;
+      c.type = 0;
+      c.path = path;
+      c.label = label_from_pointer(path);
+      c.numeric = true;
+      push_candidate(out, std::move(c), opt);
+      return;
+    }
+
+    std::vector<std::string> keys;
+    keys.reserve(o->size());
+    for (const auto& kv : *o) keys.push_back(kv.first);
+    std::sort(keys.begin(), keys.end());
+
+    for (const auto& k : keys) {
+      auto it = o->find(k);
+      if (it == o->end()) continue;
+      const std::string child = nebula4x::json_pointer_join(path, k);
+      collect_curated_candidates(it->second, child, depth - 1, opt, out, max_total);
+      if ((int)out.size() >= max_total) return;
+    }
+  }
+}
+
+int group_rank(const std::string& g) {
+  // Lower is earlier.
+  if (g == "Identity") return 0;
+  if (g == "Location") return 1;
+  if (g == "Economy") return 2;
+  if (g == "Combat") return 3;
+  if (g == "Research") return 4;
+  if (g == "Plans") return 5;
+  if (g == "Collections") return 6;
+  return 7;
+}
+
+void generate_panel_widgets_curated(UIState& ui, UiForgePanelConfig& panel, const nebula4x::json::Value& root,
+                                   const CuratedGenOptions& opt_in) {
+  CuratedGenOptions opt = opt_in;
+  opt.depth = std::clamp(opt.depth, 0, 6);
+  opt.target_widgets = std::clamp(opt.target_widgets, 1, 200);
+
+  const std::string rp = normalize_json_pointer_copy(panel.root_path);
+  std::string err;
+  const auto* node = nebula4x::resolve_json_pointer(root, rp, /*accept_root_slash=*/true, &err);
+  if (!node) {
+    nebula4x::log::warn("UI Forge curated generator: root path not found: " + rp + " (" + err + ")");
+    return;
+  }
+
+  std::vector<CuratedCandidate> cand;
+  cand.reserve(256);
+
+  // Budget is a bit higher than target so we can score/select.
+  const int budget = std::clamp(opt.target_widgets * 6, 32, 900);
+  collect_curated_candidates(*node, rp, opt.depth, opt, cand, budget);
+
+  // Select.
+  std::sort(cand.begin(), cand.end(), [](const CuratedCandidate& a, const CuratedCandidate& b) {
+    if (a.score != b.score) return a.score > b.score;
+    return a.path < b.path;
+  });
+
+  std::vector<CuratedCandidate> picked;
+  picked.reserve(opt.target_widgets);
+
+  // Soft cap per group to avoid all-economy or all-ids.
+  const int max_per_group = std::max(3, opt.target_widgets / 3);
+  std::unordered_map<std::string, int> group_counts;
+  std::unordered_map<std::string, bool> used_paths;
+
+  for (const auto& c : cand) {
+    if ((int)picked.size() >= opt.target_widgets) break;
+    if (used_paths[c.path]) continue;
+
+    const int gc = group_counts[c.group];
+    if (gc >= max_per_group) continue;
+
+    picked.push_back(c);
+    used_paths[c.path] = true;
+    group_counts[c.group] = gc + 1;
+  }
+
+  // Group ordering.
+  std::sort(picked.begin(), picked.end(), [](const CuratedCandidate& a, const CuratedCandidate& b) {
+    const int ra = group_rank(a.group);
+    const int rb = group_rank(b.group);
+    if (ra != rb) return ra < rb;
+    if (a.score != b.score) return a.score > b.score;
+    return a.path < b.path;
+  });
+
+  if (opt.replace_existing) {
+    panel.widgets.clear();
+  }
+
+  const auto push_sep = [&]() {
+    UiForgeWidgetConfig w;
+    w.id = ui.next_ui_forge_widget_id++;
+    w.type = 2;
+    w.span = 2;
+    panel.widgets.push_back(std::move(w));
+  };
+
+  if (opt.add_intro_note && opt.replace_existing) {
+    UiForgeWidgetConfig note;
+    note.id = ui.next_ui_forge_widget_id++;
+    note.type = 1;
+    note.span = 2;
+    note.label = "Generated";
+    note.text = "Curated panel (seed=" + std::to_string(opt.seed) + ")\nRoot: " + rp +
+                "\nTip: Ctrl+P → Command Palette, or use Copy/Paste Panel DNA to share.";
+    panel.widgets.push_back(std::move(note));
+    push_sep();
+  }
+
+  std::string last_group;
+  for (const auto& c : picked) {
+    if (opt.group_separators && !last_group.empty() && c.group != last_group) {
+      push_sep();
+    }
+    last_group = c.group;
+
+    UiForgeWidgetConfig w;
+    w.id = ui.next_ui_forge_widget_id++;
+    w.type = c.type;
+    w.label = c.label;
+    w.path = c.path;
+    w.span = (c.type == 3) ? 2 : 1;
+
+    if (c.type == 0) {
+      w.is_query = c.is_query;
+      w.query_op = c.query_op;
+
+      w.track_history = c.numeric;
+      w.show_sparkline = true;
+      w.history_len = 120;
+    } else if (c.type == 3) {
+      w.is_query = c.is_query;
+      w.preview_rows = 8;
+    }
+
+    panel.widgets.push_back(std::move(w));
+  }
+}
+
+void generate_panel_widgets_auto(UIState& ui, UiForgePanelConfig& panel, const nebula4x::json::Value& root) {
+  if (g_ed.gen_mode == 1) {
+    CuratedGenOptions opt;
+    opt.depth = g_ed.gen_depth;
+    opt.target_widgets = g_ed.gen_target_widgets;
+    opt.replace_existing = g_ed.gen_replace_existing;
+    opt.include_lists = g_ed.gen_include_lists;
+    opt.include_strings = g_ed.gen_include_strings;
+    opt.include_id_fields = g_ed.gen_include_id_fields;
+    opt.group_separators = g_ed.gen_group_separators;
+    opt.add_intro_note = g_ed.gen_add_intro_note;
+    opt.seed = static_cast<std::uint32_t>(g_ed.gen_seed);
+    generate_panel_widgets_curated(ui, panel, root, opt);
+  } else {
+    generate_panel_widgets_from_root(ui, panel, root);
+  }
+}
+
 
 std::string representative_pointer(const UiForgeWidgetConfig& cfg, const EvalResult& ev) {
   // Choose a "representative" strict pointer for navigation actions.
@@ -916,7 +1386,11 @@ void draw_panel_contents(const Simulation& sim, UIState& ui, const UiForgePanelC
         line_w = 0.0f;
         first_in_line = true;
       }
-      ImGui::Separator();
+      if (!cfg.label.empty()) {
+        ImGui::SeparatorText(cfg.label.c_str());
+      } else {
+        ImGui::Separator();
+      }
       continue;
     }
 
@@ -1181,6 +1655,68 @@ void draw_ui_forge_window(Simulation& sim, UIState& ui, Id selected_ship, Id sel
     VerticalSeparator();
     ImGui::SameLine();
 
+    const bool have_sel_panel = (find_panel_const(ui, g_ed.selected_panel_id) != nullptr);
+    if (!have_sel_panel) ImGui::BeginDisabled();
+    if (ImGui::Button("Copy Panel DNA")) {
+      if (const auto* sel = find_panel_const(ui, g_ed.selected_panel_id)) {
+        const std::string dna = encode_ui_forge_panel_dna(*sel);
+        ImGui::SetClipboardText(dna.c_str());
+        g_ed.dna_status = "Copied panel DNA to clipboard.";
+        g_ed.dna_status_time = ImGui::GetTime();
+      }
+    }
+    if (!have_sel_panel) ImGui::EndDisabled();
+
+    ImGui::SameLine();
+    if (ImGui::Button("Paste Panel DNA")) {
+      const char* clip = ImGui::GetClipboardText();
+      std::string err;
+      UiForgePanelConfig imported;
+      imported.root_path = "/";
+      imported.desired_columns = 0;
+      imported.card_width_em = 20.0f;
+
+      if (clip && decode_ui_forge_panel_dna(clip, &imported, &err)) {
+        const bool replace = have_sel_panel && ImGui::GetIO().KeyShift;
+        if (replace) {
+          UiForgePanelConfig* tgt = find_panel(ui, g_ed.selected_panel_id);
+          if (tgt) {
+            const std::uint64_t keep_id = tgt->id;
+            const bool keep_open = tgt->open;
+            *tgt = imported;
+            tgt->id = keep_id;
+            tgt->open = keep_open;
+            for (auto& w : tgt->widgets) w.id = ui.next_ui_forge_widget_id++;
+            g_ed.dna_status = "Replaced selected panel from clipboard.";
+            g_ed.dna_status_time = ImGui::GetTime();
+          }
+        } else {
+          imported.id = ui.next_ui_forge_panel_id++;
+          if (imported.name.empty()) imported.name = "Imported Panel";
+          for (auto& w : imported.widgets) w.id = ui.next_ui_forge_widget_id++;
+          ui.ui_forge_panels.push_back(std::move(imported));
+          g_ed.selected_panel_id = ui.ui_forge_panels.back().id;
+          g_ed.dna_status = "Imported new panel from clipboard.";
+          g_ed.dna_status_time = ImGui::GetTime();
+        }
+      } else {
+        g_ed.dna_status = err.empty() ? "Clipboard does not contain panel DNA." : ("Panel DNA error: " + err);
+        g_ed.dna_status_time = ImGui::GetTime();
+      }
+    }
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip("Paste a panel from clipboard. Hold Shift to replace the selected panel.");
+    }
+
+    if (!g_ed.dna_status.empty() && (ImGui::GetTime() - g_ed.dna_status_time) < 3.5) {
+      ImGui::SameLine();
+      ImGui::TextDisabled("%s", g_ed.dna_status.c_str());
+    }
+
+    ImGui::SameLine();
+    VerticalSeparator();
+    ImGui::SameLine();
+
     ImGui::Checkbox("Show preview", &g_ed.show_preview);
 
     ImGui::SameLine();
@@ -1229,6 +1765,14 @@ void draw_ui_forge_window(Simulation& sim, UIState& ui, Id selected_ship, Id sel
           UiForgePanelConfig& np = duplicate_panel(ui, p);
           g_ed.selected_panel_id = np.id;
         }
+        ImGui::Separator();
+        if (ImGui::MenuItem("Copy DNA to clipboard")) {
+          const std::string dna = encode_ui_forge_panel_dna(p);
+          ImGui::SetClipboardText(dna.c_str());
+          g_ed.dna_status = "Copied panel DNA to clipboard.";
+          g_ed.dna_status_time = ImGui::GetTime();
+        }
+
         if (ImGui::MenuItem("Delete")) {
           const std::uint64_t id = p.id;
           ImGui::EndPopup();
@@ -1263,7 +1807,7 @@ void draw_ui_forge_window(Simulation& sim, UIState& ui, Id selected_ship, Id sel
         UiForgePanelConfig& created = ui.ui_forge_panels.back();
 
         if (set_panel_root_from_entity(ui, created, id, kind)) {
-          generate_panel_widgets_from_root(ui, created, *g_doc.root);
+          generate_panel_widgets_auto(ui, created, *g_doc.root);
         }
         g_ed.selected_panel_id = created.id;
       }
@@ -1313,12 +1857,43 @@ void draw_ui_forge_window(Simulation& sim, UIState& ui, Id selected_ship, Id sel
       }
     }
 
+    const char* modes = "Exhaustive\0Curated\0";
+    ImGui::Combo("Mode", &g_ed.gen_mode, modes);
+
     ImGui::SliderInt("Depth", &g_ed.gen_depth, 0, 6);
-    ImGui::SliderInt("Max widgets", &g_ed.gen_max_widgets, 8, 300);
+
+    if (g_ed.gen_mode == 0) {
+      ImGui::SliderInt("Max widgets", &g_ed.gen_max_widgets, 8, 300);
+    } else {
+      ImGui::InputInt("Seed", &g_ed.gen_seed);
+      ImGui::SameLine();
+      if (ImGui::SmallButton("Mutate seed")) {
+        std::uint32_t x = static_cast<std::uint32_t>(g_ed.gen_seed);
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        g_ed.gen_seed = static_cast<int>(x);
+      }
+
+      ImGui::SliderInt("Target widgets", &g_ed.gen_target_widgets, 6, 80);
+
+      ImGui::Checkbox("Include lists", &g_ed.gen_include_lists);
+      ImGui::SameLine();
+      ImGui::Checkbox("Include strings", &g_ed.gen_include_strings);
+      ImGui::SameLine();
+      ImGui::Checkbox("Include id fields", &g_ed.gen_include_id_fields);
+
+      ImGui::Checkbox("Group separators", &g_ed.gen_group_separators);
+      ImGui::SameLine();
+      ImGui::Checkbox("Intro note", &g_ed.gen_add_intro_note);
+
+      ImGui::TextDisabled("Curated mode will also create wildcard query KPIs for arrays (e.g. /items/*/mass). ");
+    }
+
     ImGui::Checkbox("Replace existing widgets", &g_ed.gen_replace_existing);
 
-    if (ImGui::Button("Auto-generate widgets")) {
-      generate_panel_widgets_from_root(ui, *panel, *g_doc.root);
+    if (ImGui::Button("Generate widgets")) {
+      generate_panel_widgets_auto(ui, *panel, *g_doc.root);
     }
 
     ImGui::SameLine();
@@ -1471,7 +2046,8 @@ void draw_ui_forge_window(Simulation& sim, UIState& ui, Id selected_ship, Id sel
         ImGui::SliderInt("Span", &w.span, 1, 6);
         ImGui::SliderInt("Preview rows", &w.preview_rows, 1, 30);
       } else if (w.type == 2) {
-        ImGui::TextDisabled("Separator has no settings.");
+        ImGui::InputText("Label", &w.label);
+        ImGui::TextDisabled("Leave empty for a plain separator.");
       }
 
       ImGui::PopID();

@@ -12,6 +12,8 @@
 #include <utility>
 #include <vector>
 
+#include "nebula4x/core/procgen_design_forge.h"
+#include "nebula4x/core/procgen_obscure.h"
 #include "nebula4x/util/strings.h"
 
 #include "ui/map_render.h"
@@ -418,6 +420,19 @@ void draw_design_studio_window(Simulation& sim, UIState& ui, Id& selected_ship, 
   static bool initialized = false;
   static std::string last_selected_id;
 
+  // Procedural design forge UI state.
+  static int forge_count = 6;
+  static int forge_seed = 0;
+  static int forge_quality = 8;
+  static int forge_mutations = 4;
+  static int forge_role_idx = 0;
+  static bool forge_prefer_missiles = false;
+  static bool forge_prefer_shields = true;
+  static bool forge_include_ecm_eccm = true;
+  static char forge_id_prefix[32] = "forge";
+  static char forge_name_prefix[64] = "Forge";
+  static std::string forge_status;
+
   if (!initialized) {
     initialized = true;
     selected_id = all_ids.front();
@@ -529,6 +544,21 @@ void draw_design_studio_window(Simulation& sim, UIState& ui, Id& selected_ship, 
       if (ImGui::IsItemHovered()) ImGui::SetTooltip("Jump to the existing Details > Design tab for editing / cloning.");
 
       ImGui::SameLine();
+      if (ImGui::SmallButton("Forge Variants")) {
+        // Reasonable defaults.
+        forge_role_idx = (design->role == ShipRole::Surveyor) ? 1 : (design->role == ShipRole::Combatant) ? 2 : 0;
+        if (forge_seed <= 0) {
+          // Stable enough for a single run; users can override for reproducibility.
+          forge_seed = (int)(sim.state().date.days_since_epoch() & 0x7fffffff);
+        }
+        std::snprintf(forge_name_prefix, sizeof(forge_name_prefix), "%s Forge", design->name.c_str());
+        ImGui::OpenPopup("Forge Variants");
+      }
+      if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Procedurally generate buildable variants using the viewer faction's unlocked components.");
+      }
+
+      ImGui::SameLine();
       ImGui::Checkbox("Grid", &ui.design_studio_show_grid);
       ImGui::SameLine();
       ImGui::Checkbox("Labels", &ui.design_studio_show_labels);
@@ -536,8 +566,143 @@ void draw_design_studio_window(Simulation& sim, UIState& ui, Id& selected_ship, 
       ImGui::Checkbox("Compare", &ui.design_studio_show_compare);
       ImGui::SameLine();
       ImGui::Checkbox("Power", &ui.design_studio_show_power_overlay);
-    ImGui::SameLine();
-    ImGui::Checkbox("Heat", &ui.design_studio_show_heat_overlay);
+      ImGui::SameLine();
+      ImGui::Checkbox("Heat", &ui.design_studio_show_heat_overlay);
+
+      // --- Procedural Design Forge ---
+      if (ImGui::BeginPopupModal("Forge Variants", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        // Resolve which faction's unlocks we should use.
+        Id viewer_id = kInvalidId;
+        if (selected_ship != kInvalidId) {
+          const auto it = sim.state().ships.find(selected_ship);
+          if (it != sim.state().ships.end()) viewer_id = it->second.faction_id;
+        }
+        if (viewer_id == kInvalidId && ui.viewer_faction_id != kInvalidId) viewer_id = ui.viewer_faction_id;
+        if (viewer_id == kInvalidId) {
+          // Fall back to the smallest faction id for determinism.
+          for (const auto& [fid, _] : sim.state().factions) {
+            viewer_id = (viewer_id == kInvalidId) ? fid : std::min(viewer_id, fid);
+          }
+        }
+
+        const Faction* viewer_f = nullptr;
+        if (viewer_id != kInvalidId) {
+          const auto it = sim.state().factions.find(viewer_id);
+          if (it != sim.state().factions.end()) viewer_f = &it->second;
+        }
+
+        ImGui::TextDisabled("Base: %s", design->name.c_str());
+        if (viewer_f) {
+          ImGui::TextDisabled("Component pool: %s", viewer_f->name.c_str());
+        } else {
+          ImGui::TextDisabled("Component pool: (all components)");
+        }
+
+        ImGui::Separator();
+
+        ImGui::SetNextItemWidth(120.0f);
+        ImGui::SliderInt("Count", &forge_count, 1, 16);
+
+        ImGui::SetNextItemWidth(120.0f);
+        ImGui::InputInt("Seed", &forge_seed);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Re-seed")) {
+          forge_seed = (int)(procgen_obscure::splitmix64((std::uint64_t)forge_seed) & 0x7fffffff);
+        }
+
+        ImGui::SetNextItemWidth(140.0f);
+        ImGui::SliderInt("Quality", &forge_quality, 1, 16);
+        ImGui::SameLine();
+        ImGui::TextDisabled("(candidates per output)");
+
+        ImGui::SetNextItemWidth(140.0f);
+        ImGui::SliderInt("Mutations", &forge_mutations, 0, 10);
+
+        const char* role_labels[] = {"Freighter", "Surveyor", "Combatant"};
+        ImGui::SetNextItemWidth(160.0f);
+        ImGui::Combo("Role", &forge_role_idx, role_labels, IM_ARRAYSIZE(role_labels));
+
+        ImGui::InputText("ID prefix", forge_id_prefix, IM_ARRAYSIZE(forge_id_prefix));
+        ImGui::InputText("Name prefix", forge_name_prefix, IM_ARRAYSIZE(forge_name_prefix));
+
+        ImGui::Checkbox("Prefer missiles", &forge_prefer_missiles);
+        ImGui::SameLine();
+        ImGui::Checkbox("Prefer shields", &forge_prefer_shields);
+        ImGui::SameLine();
+        ImGui::Checkbox("Include ECM/ECCM", &forge_include_ecm_eccm);
+
+        ImGui::Separator();
+
+        if (ImGui::Button("Forge")) {
+          std::vector<std::string> pool;
+          if (viewer_f) {
+            pool = viewer_f->unlocked_components;
+          } else {
+            pool.reserve(sim.content().components.size());
+            for (const auto& [cid, _] : sim.content().components) pool.push_back(cid);
+          }
+
+          DesignForgeOptions opt;
+          opt.desired_count = forge_count;
+          opt.candidate_multiplier = forge_quality;
+          opt.mutations_per_candidate = forge_mutations;
+          opt.prefer_missiles = forge_prefer_missiles;
+          opt.prefer_shields = forge_prefer_shields;
+          opt.include_ecm_eccm = forge_include_ecm_eccm;
+          opt.id_prefix = forge_id_prefix;
+          opt.name_prefix = forge_name_prefix;
+
+          if (forge_role_idx == 1) opt.role = ShipRole::Surveyor;
+          else if (forge_role_idx == 2) opt.role = ShipRole::Combatant;
+          else opt.role = ShipRole::Freighter;
+
+          // Mix seed with design id and viewer id for repeatable, per-faction variants.
+          std::uint64_t seed = (std::uint64_t)(std::uint32_t)forge_seed;
+          seed ^= procgen_obscure::fnv1a_64(selected_id);
+          seed ^= (std::uint64_t)viewer_id * 0x9e3779b97f4a7c15ULL;
+
+          std::string dbg;
+          const auto forged = forge_design_variants(sim.content(), pool, *design, seed, opt, &dbg);
+
+          int ok = 0;
+          int fail = 0;
+          std::string first_id;
+          for (auto fd : forged) {
+            // Ensure we don't collide with built-ins or existing custom designs.
+            for (int attempt = 0; attempt < 4; ++attempt) {
+              std::string err;
+              if (sim.upsert_custom_design(fd.design, &err)) {
+                ++ok;
+                if (first_id.empty()) first_id = fd.design.id;
+                break;
+              }
+              // Retry with a different id suffix.
+              fd.design.id = std::string(forge_id_prefix) + "_" + procgen_obscure::hex_n(
+                             procgen_obscure::splitmix64(seed ^ (std::uint64_t)attempt ^ procgen_obscure::fnv1a_64(fd.design.name)), 8);
+              if (attempt == 3) {
+                ++fail;
+              }
+            }
+          }
+
+          forge_status = dbg + "\nForged: " + std::to_string(ok) + ", failed: " + std::to_string(fail) + ".";
+          if (!first_id.empty()) {
+            ui.request_focus_design_studio_id = first_id;
+            selected_id = first_id;
+          }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Close")) {
+          ImGui::CloseCurrentPopup();
+        }
+
+        if (!forge_status.empty()) {
+          ImGui::Separator();
+          ImGui::TextWrapped("%s", forge_status.c_str());
+        }
+
+        ImGui::EndPopup();
+      }
 
       if (ui.design_studio_show_compare) {
         if (compare_id.empty() || std::find(all_ids.begin(), all_ids.end(), compare_id) == all_ids.end()) {

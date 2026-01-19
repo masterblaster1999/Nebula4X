@@ -15,6 +15,7 @@
 #include "nebula4x/util/json.h"
 #include "nebula4x/util/json_pointer.h"
 #include "nebula4x/util/json_pointer_autocomplete.h"
+#include "ui/json_watch_eval.h"
 #include "ui/dashboards_window.h"
 #include "ui/data_lenses_window.h"
 #include "ui/game_entity_index.h"
@@ -70,20 +71,6 @@ const char* query_op_func(const int op) {
   }
 }
 
-std::string trim_preview(std::string s, const int max_chars = kMaxPreviewChars) {
-  if ((int)s.size() <= max_chars) return s;
-  s.resize(std::max(0, max_chars - 3));
-  s += "...";
-  return s;
-}
-
-std::string format_number(const double x) {
-  char buf[64];
-  std::snprintf(buf, sizeof(buf), "%.6g", x);
-  return std::string(buf);
-}
-
-
 std::int64_t sim_tick_hours(const GameState& st) {
   const std::int64_t day = st.date.days_since_epoch();
   const int hod = std::clamp(st.hour_of_day, 0, 23);
@@ -108,257 +95,17 @@ void draw_autocomplete_list(const char* id, char* buf, const int buf_cap, const 
   }
 }
 
-// Coerce common JSON types into a numeric value for aggregation.
-//
-// - number: the number
-// - bool: true=1, false=0
-// - array: size
-// - object: size
-// - null/string: not numeric
-bool coerce_numeric(const nebula4x::json::Value& v, double& out) {
-  if (v.is_number()) {
-    out = v.number_value();
-    return true;
-  }
-  if (v.is_bool()) {
-    out = v.bool_value() ? 1.0 : 0.0;
-    return true;
-  }
-  if (v.is_array()) {
-    const auto* a = v.as_array();
-    out = a ? static_cast<double>(a->size()) : 0.0;
-    return true;
-  }
-  if (v.is_object()) {
-    const auto* o = v.as_object();
-    out = o ? static_cast<double>(o->size()) : 0.0;
-    return true;
-  }
-  return false;
-}
-
-struct EvalResult {
-  bool ok{false};
-  bool numeric{false};
-  float value{0.0f};
-  std::string display;
-  std::string error;
-
-  // Query-only diagnostics.
-  bool is_query{false};
-  int query_op{0};
-  int match_count{0};
-  int numeric_count{0};
-  int nodes_visited{0};
-  bool hit_match_limit{false};
-  bool hit_node_limit{false};
-  std::vector<std::string> sample_paths;
-  std::vector<std::string> sample_previews;
-};
-
-EvalResult eval_value(const nebula4x::json::Value& v) {
-  EvalResult r;
-  r.ok = true;
-
-  if (v.is_null()) {
-    r.display = "null";
-    return r;
-  }
-
-  if (v.is_bool()) {
-    const bool b = v.bool_value(false);
-    r.numeric = true;
-    r.value = b ? 1.0f : 0.0f;
-    r.display = b ? "true" : "false";
-    return r;
-  }
-
-  if (v.is_number()) {
-    const double d = v.number_value(0.0);
-    r.numeric = true;
-    r.value = static_cast<float>(d);
-    r.display = format_number(d);
-    return r;
-  }
-
-  if (v.is_string()) {
-    std::string s = v.string_value();
-    s = trim_preview(s, kMaxPreviewChars);
-    r.display = '"' + s + '"';
-    return r;
-  }
-
-  if (v.is_array()) {
-    const auto* a = v.as_array();
-    const int n = a ? static_cast<int>(a->size()) : 0;
-    r.numeric = true;
-    r.value = static_cast<float>(n);
-    char buf[64];
-    std::snprintf(buf, sizeof(buf), "[%d items]", n);
-    r.display = buf;
-    return r;
-  }
-
-  if (v.is_object()) {
-    const auto* o = v.as_object();
-    const int n = o ? static_cast<int>(o->size()) : 0;
-    r.numeric = true;
-    r.value = static_cast<float>(n);
-    char buf[64];
-    std::snprintf(buf, sizeof(buf), "{%d keys}", n);
-    r.display = buf;
-    return r;
-  }
-
-  r.display = "(unknown)";
-  return r;
-}
-
-EvalResult eval_pointer(const nebula4x::json::Value& root, const std::string& path) {
-  EvalResult r;
-  std::string err;
-  const auto* node = nebula4x::resolve_json_pointer(root, path, /*accept_root_slash=*/true, &err);
-  if (!node) {
-    r.ok = false;
-    r.display = "(missing)";
-    r.error = err;
-    return r;
-  }
-  return eval_value(*node);
-}
-
-EvalResult eval_query(const nebula4x::json::Value& root, const JsonWatchConfig& cfg, const UIState& ui) {
-  EvalResult r;
-  r.is_query = true;
-  r.query_op = std::clamp(cfg.query_op, 0, 4);
-
-  nebula4x::JsonPointerQueryStats stats;
-  std::string err;
-
-  const int max_matches = std::clamp(ui.watchboard_query_max_matches, kMinQueryMaxMatches, kMaxQueryMaxMatches);
-  const int max_nodes = std::clamp(ui.watchboard_query_max_nodes, kMinQueryMaxNodes, kMaxQueryMaxNodes);
-
-  const auto matches = nebula4x::query_json_pointer_glob(root, cfg.path, /*accept_root_slash=*/true, max_matches,
-                                                        max_nodes, &stats, &err);
-
-  r.match_count = stats.matches;
-  r.nodes_visited = stats.nodes_visited;
-  r.hit_match_limit = stats.hit_match_limit;
-  r.hit_node_limit = stats.hit_node_limit;
-
-  if (!err.empty()) {
-    r.ok = false;
-    r.display = "(error)";
-    r.error = err;
-    return r;
-  }
-
-  r.ok = true;
-
-  // Sample list for tooltips / navigation.
-  r.sample_paths.reserve(std::min<int>(kMaxSampleMatches, (int)matches.size()));
-  r.sample_previews.reserve(std::min<int>(kMaxSampleMatches, (int)matches.size()));
-
-  int num_count = 0;
-  double sum = 0.0;
-  double min_v = std::numeric_limits<double>::infinity();
-  double max_v = -std::numeric_limits<double>::infinity();
-
-  for (int i = 0; i < (int)matches.size(); ++i) {
-    const auto& m = matches[i];
-    if (m.value) {
-      double x = 0.0;
-      if (coerce_numeric(*m.value, x)) {
-        num_count++;
-        sum += x;
-        min_v = std::min(min_v, x);
-        max_v = std::max(max_v, x);
-      }
-
-      if ((int)r.sample_paths.size() < kMaxSampleMatches) {
-        r.sample_paths.push_back(m.path);
-        r.sample_previews.push_back(trim_preview(eval_value(*m.value).display, kMaxPreviewChars));
-      }
-    }
-  }
-
-  r.numeric_count = num_count;
-
-  // Aggregate.
-  switch (r.query_op) {
-    case 0: {  // count
-      r.numeric = true;
-      r.value = static_cast<float>(r.match_count);
-      r.display = std::to_string(r.match_count);
-      if (r.hit_match_limit || r.hit_node_limit) r.display += "+";
-      return r;
-    }
-    case 1: {  // sum
-      r.numeric = true;
-      r.value = static_cast<float>(sum);
-      r.display = format_number(sum);
-      return r;
-    }
-    case 2: {  // avg
-      if (num_count <= 0) {
-        r.ok = false;
-        r.display = "(no numeric)";
-        return r;
-      }
-      const double avg = sum / static_cast<double>(num_count);
-      r.numeric = true;
-      r.value = static_cast<float>(avg);
-      r.display = format_number(avg);
-      return r;
-    }
-    case 3: {  // min
-      if (num_count <= 0) {
-        r.ok = false;
-        r.display = "(no numeric)";
-        return r;
-      }
-      r.numeric = true;
-      r.value = static_cast<float>(min_v);
-      r.display = format_number(min_v);
-      return r;
-    }
-    case 4: {  // max
-      if (num_count <= 0) {
-        r.ok = false;
-        r.display = "(no numeric)";
-        return r;
-      }
-      r.numeric = true;
-      r.value = static_cast<float>(max_v);
-      r.display = format_number(max_v);
-      return r;
-    }
-    default:
-      break;
-  }
-
-  r.numeric = true;
-  r.value = static_cast<float>(r.match_count);
-  r.display = std::to_string(r.match_count);
-  return r;
-}
-
-EvalResult eval_watch(const nebula4x::json::Value& root, const JsonWatchConfig& cfg, const UIState& ui) {
-  if (cfg.is_query) return eval_query(root, cfg, ui);
-  return eval_pointer(root, cfg.path);
-}
-
 struct WatchRuntime {
   // History.
   std::int64_t last_sample_tick{-1};
-  float last_value{0.0f};
+  double last_value{0.0};
   bool has_last_value{false};
   std::vector<float> history;
 
   // Cached evaluation (expensive queries should not run every frame).
   std::uint64_t last_eval_revision{0};
   bool has_cached_eval{false};
-  EvalResult cached_eval;
+  JsonWatchEvalResult cached_eval;
 
   // Detect config changes (path/mode/op) to reset history + cache.
   std::string last_path;
@@ -690,20 +437,24 @@ void draw_watchboard_window(Simulation& sim, UIState& ui) {
       // Evaluate (cached per doc revision).
       if (st.root) {
         if (!rt.has_cached_eval || rt.last_eval_revision != st.doc_revision) {
-          rt.cached_eval = eval_watch(*st.root, cfg, ui);
+          JsonWatchEvalOptions eval_opts;
+          eval_opts.collect_samples = true;
+          eval_opts.max_sample_matches = kMaxSampleMatches;
+          eval_opts.max_preview_chars = kMaxPreviewChars;
+          rt.cached_eval = eval_json_watch(*st.root, cfg, ui, eval_opts);
           rt.last_eval_revision = st.doc_revision;
           rt.has_cached_eval = true;
         }
       } else {
-        rt.cached_eval = EvalResult{};
+        rt.cached_eval = JsonWatchEvalResult{};
         rt.has_cached_eval = true;
         rt.last_eval_revision = st.doc_revision;
       }
 
-      const EvalResult& ev = rt.cached_eval;
+      const JsonWatchEvalResult& ev = rt.cached_eval;
 
       // History sampling (once per sim tick).
-      float delta = 0.0f;
+      double delta = 0.0;
       bool has_delta = false;
 
       if (cfg.track_history && ev.ok && ev.numeric) {
@@ -718,7 +469,7 @@ void draw_watchboard_window(Simulation& sim, UIState& ui) {
           rt.last_value = ev.value;
           rt.has_last_value = true;
 
-          rt.history.push_back(ev.value);
+          rt.history.push_back(static_cast<float>(ev.value));
           const int keep = std::clamp(cfg.history_len, kMinHistLen, kMaxHistLen);
           if ((int)rt.history.size() > keep) {
             const int extra = (int)rt.history.size() - keep;
@@ -730,18 +481,16 @@ void draw_watchboard_window(Simulation& sim, UIState& ui) {
         }
       }
 
-      // Choose a "representative" strict pointer for navigation actions.
-      std::string rep_ptr = cfg.path;
-      if (cfg.is_query) {
-        if (!ev.sample_paths.empty()) {
-          rep_ptr = ev.sample_paths[0];
-        } else {
-          rep_ptr = "/";
-        }
-      }
+      // Representative strict pointer for navigation actions.
+      std::string rep_ptr = !ev.rep_ptr.empty() ? ev.rep_ptr : (cfg.path.empty() ? std::string("/") : cfg.path);
+
+      const bool focus_this = (ui.request_watchboard_focus_id != 0 && cfg.id == ui.request_watchboard_focus_id);
 
       ImGui::PushID((int)cfg.id);
       ImGui::TableNextRow();
+      if (focus_this) {
+        ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, ImGui::GetColorU32(ImGuiCol_HeaderHovered));
+      }
 
       // Label
       ImGui::TableSetColumnIndex(0);
@@ -760,6 +509,16 @@ void draw_watchboard_window(Simulation& sim, UIState& ui) {
         if (cfg.is_query) {
           ImGui::SameLine();
           ImGui::TextDisabled("[%s]", query_op_name(std::clamp(cfg.query_op, 0, 4)));
+        }
+        if (cfg.alert_enabled) {
+          ImGui::SameLine();
+          ImGui::TextDisabled("[alert]");
+        }
+
+        if (focus_this) {
+          // Scroll the focused row into view once.
+          ImGui::SetScrollHereY(0.25f);
+          ui.request_watchboard_focus_id = 0;
         }
       }
 
@@ -1003,6 +762,42 @@ void draw_watchboard_window(Simulation& sim, UIState& ui) {
             rt.history.clear();
             rt.has_last_value = false;
             rt.last_sample_tick = -1;
+          }
+
+          ImGui::Separator();
+
+          ImGui::TextDisabled("Alerts (toasts)");
+          ImGui::Checkbox("Enable alert##alert_enabled", &cfg.alert_enabled);
+          if (cfg.alert_enabled) {
+            const char* modes = "Cross above\0Cross below\0Change (abs)\0Change (%)\0Any change\0";
+            ImGui::Combo("Condition##alert_mode", &cfg.alert_mode, modes);
+            cfg.alert_mode = std::clamp(cfg.alert_mode, 0, 4);
+
+            if (cfg.alert_mode == 0 || cfg.alert_mode == 1) {
+              float thr = static_cast<float>(cfg.alert_threshold);
+              if (ImGui::InputFloat("Threshold##alert_thr", &thr, 1.0f, 10.0f, "%.6g")) {
+                cfg.alert_threshold = static_cast<double>(thr);
+              }
+            } else if (cfg.alert_mode == 2) {
+              float d = static_cast<float>(cfg.alert_delta);
+              if (ImGui::InputFloat("Delta##alert_delta", &d, 0.1f, 1.0f, "%.6g")) {
+                cfg.alert_delta = static_cast<double>(d);
+              }
+            } else if (cfg.alert_mode == 3) {
+              float pct = static_cast<float>(cfg.alert_delta * 100.0);
+              if (ImGui::InputFloat("Delta (%)##alert_pct", &pct, 1.0f, 10.0f, "%.3g%%")) {
+                cfg.alert_delta = static_cast<double>(pct / 100.0f);
+              }
+            }
+
+            const char* levels = "Info\0Warning\0Error\0";
+            ImGui::Combo("Toast level##alert_lvl", &cfg.alert_toast_level, levels);
+            cfg.alert_toast_level = std::clamp(cfg.alert_toast_level, 0, 2);
+
+            ImGui::SliderFloat("Cooldown (sec)##alert_cd", &cfg.alert_cooldown_sec, 0.0f, 30.0f, "%.1f");
+            cfg.alert_cooldown_sec = std::clamp(cfg.alert_cooldown_sec, 0.0f, 120.0f);
+
+            ImGui::TextDisabled("Alerts evaluate on sim ticks and show as HUD toasts.");
           }
 
           ImGui::Separator();

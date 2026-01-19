@@ -1,6 +1,7 @@
 #include "ui/galaxy_map.h"
 
 #include "ui/map_render.h"
+#include "ui/map_label_placer.h"
 #include "ui/galaxy_constellations.h"
 #include "ui/minimap.h"
 #include "ui/procgen_metrics.h"
@@ -38,8 +39,9 @@ ImVec2 to_screen(const Vec2& world, const ImVec2& center_px, double scale_px_per
 }
 
 Vec2 to_world(const ImVec2& screen_px, const ImVec2& center_px, double scale_px_per_unit, double zoom, const Vec2& pan) {
-  const double x = (screen_px.x - center_px.x) / (scale_px_per_unit * zoom) - pan.x;
-  const double y = (screen_px.y - center_px.y) / (scale_px_per_unit * zoom) - pan.y;
+  const double denom = std::max(1e-12, scale_px_per_unit * zoom);
+  const double x = (screen_px.x - center_px.x) / denom - pan.x;
+  const double y = (screen_px.y - center_px.y) / denom - pan.y;
   return Vec2{x, y};
 }
 
@@ -841,7 +843,7 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
 
   // Fit the farthest system into the available area.
   const double fit = std::min(avail.x, avail.y) * 0.45;
-  const double scale = fit / std::max(1.0, max_half_span);
+  const double scale = std::max(1e-9, fit / std::max(1.0, max_half_span));
 
   // ProcGen lens sources for continuous overlays (field, contours, probe).
   std::vector<LensFieldSource> lens_sources;
@@ -892,13 +894,44 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   const bool mouse_in_rect =
       (mouse.x >= origin.x && mouse.x <= origin.x + avail.x && mouse.y >= origin.y && mouse.y <= origin.y + avail.y);
 
+  // Map viewport rectangle (content area).
+  const ImVec2 view_p0 = origin;
+  const ImVec2 view_p1(origin.x + avail.x, origin.y + avail.y);
+
+  // Legend overlay rectangle (top-left). The legend is drawn later in the frame using
+  // SetCursorScreenPos/BeginChild, so we must treat this area as UI now or
+  // clicks/scrolls will 'fall through' to the map interactions.
+  const float legend_margin = 10.0f;
+  const ImVec2 legend_desired(350.0f, 320.0f);
+  const float legend_max_w = std::max(0.0f, avail.x - legend_margin * 2.0f);
+  const float legend_max_h = std::max(0.0f, avail.y - legend_margin * 2.0f);
+  ImVec2 legend_size(std::min(legend_desired.x, legend_max_w), std::min(legend_desired.y, legend_max_h));
+  // Avoid (0,0) which in BeginChild means "use remaining region".
+  legend_size.x = std::max(1.0f, legend_size.x);
+  legend_size.y = std::max(1.0f, legend_size.y);
+  const ImVec2 legend_p0(origin.x + legend_margin, origin.y + legend_margin);
+  const ImVec2 legend_p1(legend_p0.x + legend_size.x, legend_p0.y + legend_size.y);
+
+  // Clamp hit-test to visible viewport. This avoids blocking map interactions
+  // in cases where the window is smaller than the overlay and the child window
+  // is clipped by ImGui.
+  const ImVec2 legend_hit_p0(std::max(legend_p0.x, view_p0.x), std::max(legend_p0.y, view_p0.y));
+  const ImVec2 legend_hit_p1(std::min(legend_p1.x, view_p1.x), std::min(legend_p1.y, view_p1.y));
+  const bool legend_hit_valid = legend_hit_p1.x > legend_hit_p0.x && legend_hit_p1.y > legend_hit_p0.y;
+  const bool over_legend = legend_hit_valid && mouse_in_rect && point_in_rect(mouse, legend_hit_p0, legend_hit_p1);
+
   // Minimap rectangle (bottom-right overlay).
   const float mm_margin = 10.0f;
-  const float mm_w = std::clamp(avail.x * 0.28f, 150.0f, 300.0f);
-  const float mm_h = std::clamp(avail.y * 0.23f, 105.0f, 240.0f);
-  const ImVec2 mm_p1(origin.x + avail.x - mm_margin, origin.y + avail.y - mm_margin);
+  float mm_w = std::clamp(avail.x * 0.28f, 150.0f, 300.0f);
+  float mm_h = std::clamp(avail.y * 0.23f, 105.0f, 240.0f);
+  const float mm_max_w = std::max(0.0f, avail.x - mm_margin * 2.0f);
+  const float mm_max_h = std::max(0.0f, avail.y - mm_margin * 2.0f);
+  mm_w = std::min(mm_w, mm_max_w);
+  mm_h = std::min(mm_h, mm_max_h);
+  const bool minimap_has_room = (mm_w >= 10.0f && mm_h >= 10.0f);
+  const ImVec2 mm_p1(view_p1.x - mm_margin, view_p1.y - mm_margin);
   const ImVec2 mm_p0(mm_p1.x - mm_w, mm_p1.y - mm_h);
-  bool minimap_enabled = ui.galaxy_map_show_minimap;
+  bool minimap_enabled = ui.galaxy_map_show_minimap && minimap_has_room;
 
   // Keyboard shortcuts.
   if (hovered && !ImGui::GetIO().WantTextInput) {
@@ -908,14 +941,17 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
     }
     if (ImGui::IsKeyPressed(ImGuiKey_M)) {
       ui.galaxy_map_show_minimap = !ui.galaxy_map_show_minimap;
-      minimap_enabled = ui.galaxy_map_show_minimap;
+      minimap_enabled = ui.galaxy_map_show_minimap && minimap_has_room;
     }
     if (ImGui::IsKeyPressed(ImGuiKey_F)) {
       ui.galaxy_map_fuel_range = !ui.galaxy_map_fuel_range;
     }
   }
 
-  const bool over_minimap = minimap_enabled && mouse_in_rect && point_in_rect(mouse, mm_p0, mm_p1);
+  const ImVec2 mm_hit_p0(std::max(mm_p0.x, view_p0.x), std::max(mm_p0.y, view_p0.y));
+  const ImVec2 mm_hit_p1(std::min(mm_p1.x, view_p1.x), std::min(mm_p1.y, view_p1.y));
+  const bool mm_hit_valid = minimap_enabled && mm_hit_p1.x > mm_hit_p0.x && mm_hit_p1.y > mm_hit_p0.y;
+  const bool over_minimap = mm_hit_valid && mouse_in_rect && point_in_rect(mouse, mm_hit_p0, mm_hit_p1);
 
   MinimapTransform mm;
   if (minimap_enabled) {
@@ -924,7 +960,7 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
     mm = make_minimap_transform(mm_p0, mm_p1, rel_min, rel_max);
   }
 
-  if (hovered && mouse_in_rect && !over_minimap) {
+  if (hovered && mouse_in_rect && !over_minimap && !over_legend) {
     // Zoom to cursor.
     const float wheel = ImGui::GetIO().MouseWheel;
     if (wheel != 0.0f) {
@@ -939,8 +975,9 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
 
     if (ImGui::IsMouseDown(ImGuiMouseButton_Middle)) {
       const ImVec2 d = ImGui::GetIO().MouseDelta;
-      pan.x += d.x / (scale * zoom);
-      pan.y += d.y / (scale * zoom);
+      const double denom = std::max(1e-12, scale * zoom);
+      pan.x += d.x / denom;
+      pan.y += d.y / denom;
     }
   }
 
@@ -1098,7 +1135,8 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
     sb.enabled = true;
     sb.desired_px = 120.0f;
     sb.alpha = 0.85f;
-    draw_scale_bar(draw, origin, avail, 1.0 / (scale * zoom), IM_COL32(220, 220, 220, 255), sb, "u");
+    const double units_per_px = 1.0 / std::max(1e-12, scale * zoom);
+    draw_scale_bar(draw, origin, avail, units_per_px, IM_COL32(220, 220, 220, 255), sb, "u");
   }
 
   // Axes (when grid is disabled).
@@ -1614,7 +1652,7 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
         }
 
         // Hover pick: closest lane within a small pixel threshold.
-        if (hovered && mouse_in_rect && !over_minimap && !io2.WantTextInput && !ImGui::IsAnyItemHovered()) {
+        if (hovered && mouse_in_rect && !over_minimap && !over_legend && !io2.WantTextInput && !ImGui::IsAnyItemHovered()) {
           const ImVec2 mp = ImGui::GetIO().MousePos;
           const float d2 = dist2_point_segment(mp, ImVec2(pa.x, pa.y), ImVec2(pb.x, pb.y));
           const float thresh = 8.0f + thick * 1.5f;
@@ -1895,7 +1933,7 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
     pos_px[v.id] = p;
 
     // Hover detection (disabled when the mouse is over the minimap overlay).
-    if (!over_minimap) {
+    if (!over_minimap && !over_legend) {
       const float dx = mouse.x - p.x;
       const float dy = mouse.y - p.y;
       const float d2 = dx * dx + dy * dy;
@@ -1907,10 +1945,10 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   }
 
   const ImGuiIO& io = ImGui::GetIO();
-  const bool trade_pick_mode = hovered && mouse_in_rect && !over_minimap && !io.WantTextInput &&
+  const bool trade_pick_mode = hovered && mouse_in_rect && !over_minimap && !over_legend && !io.WantTextInput &&
                                (ui.show_galaxy_trade_lanes || ui.show_galaxy_trade_hubs) &&
                                ImGui::IsKeyDown(ImGuiKey_T) && !io.KeyCtrl && !io.KeyShift && !io.KeyAlt;
-  const bool route_ruler_mode = hovered && mouse_in_rect && !over_minimap && !io.WantTextInput &&
+  const bool route_ruler_mode = hovered && mouse_in_rect && !over_minimap && !over_legend && !io.WantTextInput &&
                                ImGui::IsKeyDown(ImGuiKey_D) && !io.KeyCtrl && !io.KeyShift && !io.KeyAlt;
 
   // --- Route preview (hover target) ---
@@ -2194,6 +2232,27 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
     }
   }
 
+  // Precompute colonized systems for label priority.
+  std::unordered_set<Id> colonized_systems;
+  colonized_systems.reserve(s.colonies.size() * 2 + 4);
+  for (const auto& kv : s.colonies) {
+    colonized_systems.insert(kv.second.system_id);
+  }
+
+  struct SystemLabelCandidate {
+    Id id{kInvalidId};
+    ImVec2 anchor{0.0f, 0.0f};
+    float dx{0.0f};
+    float dy{0.0f};
+    const char* text{nullptr};
+    ImU32 col{0};
+    float priority{0.0f};
+  };
+
+  std::vector<SystemLabelCandidate> label_cands;
+  label_cands.reserve(nodes.size());
+  const bool declutter_labels = !ImGui::GetIO().KeyAlt; // Alt = show all labels.
+
   // Draw nodes.
   for (const auto& n : nodes) {
     const bool is_selected = (s.selected_system == n.id);
@@ -2316,8 +2375,74 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
     }
 
     if (ui.show_galaxy_labels && n.sys) {
-      draw->AddText(ImVec2(n.p.x + base_r + 4.0f, n.p.y - base_r), IM_COL32(220, 220, 220, 255),
-                    n.sys->name.c_str());
+      float pr = 10.0f;
+      if (is_selected) pr += 1000.0f;
+      if (is_hovered) pr += 900.0f;
+      if (selected_fleet_system != kInvalidId && n.id == selected_fleet_system) pr += 800.0f;
+      if (colonized_systems.find(n.id) != colonized_systems.end()) pr += 300.0f;
+      if (ui.show_galaxy_chokepoints && !chokepoints.empty() && chokepoints.find(n.id) != chokepoints.end()) pr += 120.0f;
+      auto itc = recent_contact_count.find(n.id);
+      if (ui.show_galaxy_intel_alerts && itc != recent_contact_count.end() && itc->second > 0) pr += 240.0f;
+
+      // When very zoomed-out, keep only high-signal labels unless the user holds Alt.
+      if (declutter_labels && zoom < 0.45f && pr < 260.0f) {
+        // skip
+      } else {
+        ImU32 col = IM_COL32(220, 220, 220, 255);
+        if (is_selected) col = IM_COL32(190, 255, 220, 255);
+        else if (is_hovered) col = IM_COL32(255, 255, 255, 255);
+        else if (colonized_systems.find(n.id) != colonized_systems.end()) col = IM_COL32(225, 235, 255, 255);
+
+        SystemLabelCandidate c;
+        c.id = n.id;
+        c.anchor = n.p;
+        c.dx = base_r + 4.0f;
+        c.dy = base_r + 4.0f;
+        c.text = n.sys->name.c_str();
+        c.col = col;
+        c.priority = pr;
+        label_cands.push_back(c);
+      }
+    }
+  }
+
+  // Draw labels after nodes so they remain legible over overlays.
+  if (ui.show_galaxy_labels && !label_cands.empty()) {
+    const ImVec2 vmin = origin;
+    const ImVec2 vmax = ImVec2(origin.x + avail.x, origin.y + avail.y);
+
+    // Label budget scales with viewport area and zoom (prevents visual overload).
+    const float area = std::max(1.0f, avail.x * avail.y);
+    const float z = std::clamp(zoom, 0.35f, 2.5f);
+    const int budget = static_cast<int>(std::clamp((area / (160.0f * 40.0f)) * (0.70f + 0.90f * z), 20.0f, 900.0f));
+
+    std::stable_sort(label_cands.begin(), label_cands.end(), [](const SystemLabelCandidate& a, const SystemLabelCandidate& b) {
+      if (a.priority != b.priority) return a.priority > b.priority;
+      return a.id < b.id;
+    });
+
+    if (!declutter_labels) {
+      for (const auto& c : label_cands) {
+        const ImVec2 sz = ImGui::CalcTextSize(c.text);
+        const ImVec2 pos(c.anchor.x + c.dx, c.anchor.y - c.dy);
+        // Cheap viewport rejection (still allow slightly outside to avoid popping).
+        if (pos.x > vmax.x || pos.y > vmax.y) continue;
+        if (pos.x + sz.x < vmin.x || pos.y + sz.y < vmin.y) continue;
+        draw->AddText(ImVec2(pos.x + 1.0f, pos.y + 1.0f), IM_COL32(0, 0, 0, 170), c.text);
+        draw->AddText(pos, c.col, c.text);
+      }
+    } else {
+      LabelPlacer placer(vmin, vmax, 96.0f);
+      int placed = 0;
+      for (const auto& c : label_cands) {
+        if (placed >= budget && c.priority < 850.0f) break;
+        const ImVec2 sz = ImGui::CalcTextSize(c.text);
+        ImVec2 pos;
+        if (!placer.place_near(c.anchor, c.dx, c.dy, sz, 2.0f, /*preferred_quadrant=*/0, &pos)) continue;
+        draw->AddText(ImVec2(pos.x + 1.0f, pos.y + 1.0f), IM_COL32(0, 0, 0, 170), c.text);
+        draw->AddText(pos, c.col, c.text);
+        ++placed;
+      }
     }
   }
 
@@ -2372,7 +2497,7 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
     }
   }
 
-  if (hovered && !over_minimap && !ruler_consumed_left && !trade_consumed_left &&
+  if (hovered && !over_minimap && !over_legend && !ruler_consumed_left && !trade_consumed_left &&
       ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
     if (mouse.x >= origin.x && mouse.x <= origin.x + avail.x && mouse.y >= origin.y && mouse.y <= origin.y + avail.y) {
       if (hovered_system != kInvalidId) {
@@ -2387,7 +2512,7 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
     }
   }
 
-  if (hovered && !over_minimap && !ruler_consumed_right && !trade_consumed_right &&
+  if (hovered && !over_minimap && !over_legend && !ruler_consumed_right && !trade_consumed_right &&
       ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
     if (mouse.x >= origin.x && mouse.x <= origin.x + avail.x && mouse.y >= origin.y && mouse.y <= origin.y + avail.y) {
       if (hovered_system != kInvalidId) {
@@ -2884,7 +3009,7 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   // ProcGen lens probe (hold Alt) for continuous field visualization.
   // Only shows when not hovering a system (to avoid fighting with the system tooltip).
   if (ui.galaxy_procgen_probe && lens_active && lens_bounds_valid && lens_mode != ProcGenLensMode::Off &&
-      ImGui::GetIO().KeyAlt && hovered && mouse_in_rect && !over_minimap &&
+      ImGui::GetIO().KeyAlt && hovered && mouse_in_rect && !over_minimap && !over_legend &&
       hovered_system == kInvalidId && !lens_sources.empty() && !ImGui::IsAnyItemHovered()) {
 
     const double spacing = std::max(1e-6, lens_typical_spacing);
@@ -3003,8 +3128,8 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   }
 
   // Legend / help
-  ImGui::SetCursorScreenPos(ImVec2(origin.x + 10, origin.y + 10));
-  ImGui::BeginChild("galaxy_legend", ImVec2(350, 320), true);
+  ImGui::SetCursorScreenPos(legend_p0);
+  ImGui::BeginChild("galaxy_legend", legend_size, true);
   ImGui::Text("Galaxy map");
   ImGui::BulletText("Wheel: zoom (to cursor)");
   ImGui::BulletText("Middle drag: pan");

@@ -44,15 +44,19 @@ bool ensure_game_json_cache(const Simulation& sim, double now_sec, double min_re
   g_dirty = false;
 
   try {
-    std::string text = serialize_game_to_json(sim.state());
+    // Build an in-memory JSON DOM directly from the simulation state.
+    // This avoids a full JSON text parse (we still keep the pretty-printed text
+    // around for tools that want to copy/export it).
+    nebula4x::json::Value doc = serialize_game_to_json_value(sim.state());
+    std::string text = nebula4x::json::stringify(doc, 2);
 
-    // If the serialized snapshot is identical, keep the existing parsed doc.
+    // If the serialized snapshot is identical, keep the existing cached doc.
     if (g_cache.loaded && !g_cache.text.empty() && text == g_cache.text && g_cache.root) {
       g_cache.error.clear();
       return true;
     }
 
-    auto parsed = std::make_shared<nebula4x::json::Value>(nebula4x::json::parse(text));
+    auto parsed = std::make_shared<nebula4x::json::Value>(std::move(doc));
     g_cache.text = std::move(text);
     g_cache.root = std::move(parsed);
     g_cache.loaded = true;

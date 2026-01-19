@@ -5,6 +5,8 @@
 #include <imgui_internal.h>
 
 #include <algorithm>
+#include <cstdint>
+#include <vector>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -26,9 +28,11 @@
 #include "ui/salvage_window.h"
 #include "ui/contracts_window.h"
 #include "ui/sustainment_window.h"
+#include "ui/fleet_manager_window.h"
 #include "ui/advisor_window.h"
 #include "ui/colony_profiles_window.h"
 #include "ui/ship_profiles_window.h"
+#include "ui/automation_center_window.h"
 #include "ui/shipyard_targets_window.h"
 #include "ui/survey_network_window.h"
 #include "ui/time_warp_window.h"
@@ -52,12 +56,16 @@
 #include "ui/entity_inspector_window.h"
 #include "ui/reference_graph_window.h"
 #include "ui/watchboard_window.h"
+#include "ui/watchboard_alerts.h"
 #include "ui/data_lenses_window.h"
 #include "ui/dashboards_window.h"
 #include "ui/pivot_tables_window.h"
 #include "ui/ui_forge_window.h"
+#include "ui/context_forge_window.h"
 #include "ui/layout_profiles.h"
 #include "ui/layout_profiles_window.h"
+#include "ui/procedural_theme.h"
+#include "ui/procedural_layout.h"
 
 namespace nebula4x::ui {
 
@@ -213,7 +221,7 @@ void App::frame() {
     if (!io.WantTextInput) {
       // Command palette / help.
       if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_P)) ui_.show_command_palette = true;
-      if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_F)) ui_.show_omni_search_window = !ui_.show_omni_search_window;
+      if (io.KeyCtrl && !io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_F)) ui_.show_omni_search_window = !ui_.show_omni_search_window;
       if (io.KeyCtrl && !io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_G)) ui_.show_entity_inspector_window = !ui_.show_entity_inspector_window;
       if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_G)) ui_.show_reference_graph_window = !ui_.show_reference_graph_window;
       if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_D)) ui_.show_time_machine_window = !ui_.show_time_machine_window;
@@ -223,6 +231,7 @@ void App::frame() {
       if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Y)) ui_.show_shipyard_targets_window = !ui_.show_shipyard_targets_window;
       if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_J)) ui_.show_survey_network_window = !ui_.show_survey_network_window;
       if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_R)) ui_.show_regions_window = !ui_.show_regions_window;
+      if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_F)) ui_.show_fleet_manager_window = !ui_.show_fleet_manager_window;
       if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_V)) ui_.show_content_validation_window = !ui_.show_content_validation_window;
       if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_K)) ui_.show_state_doctor_window = !ui_.show_state_doctor_window;
       if (ImGui::IsKeyPressed(ImGuiKey_F1)) ui_.show_help_window = !ui_.show_help_window;
@@ -243,6 +252,7 @@ void App::frame() {
         ui_.show_layout_profiles_window = !ui_.show_layout_profiles_window;
       }
       if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_U)) ui_.show_ui_forge_window = !ui_.show_ui_forge_window;
+      if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_C)) ui_.show_context_forge_window = !ui_.show_context_forge_window;
 
       // Screen reader / narration.
       if (io.KeyCtrl && io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_R)) {
@@ -395,9 +405,12 @@ void App::frame() {
   if (ui_.show_contracts_window) draw_contracts_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   if (ui_.show_sustainment_window)
     draw_sustainment_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  if (ui_.show_fleet_manager_window) draw_fleet_manager_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   if (ui_.show_advisor_window) draw_advisor_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   if (ui_.show_colony_profiles_window) draw_colony_profiles_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   if (ui_.show_ship_profiles_window) draw_ship_profiles_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  if (ui_.show_automation_center_window)
+    draw_automation_center_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   if (ui_.show_shipyard_targets_window) draw_shipyard_targets_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   if (ui_.show_survey_network_window) draw_survey_network_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   if (ui_.show_time_warp_window) draw_time_warp_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
@@ -439,6 +452,13 @@ void App::frame() {
   if (ui_.show_entity_inspector_window) draw_entity_inspector_window(sim_, ui_);
   if (ui_.show_reference_graph_window) draw_reference_graph_window(sim_, ui_);
   if (ui_.show_layout_profiles_window) draw_layout_profiles_window(ui_);
+
+  if (ui_.show_context_forge_window) {
+    draw_context_forge_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  }
+
+  // Keep Context Forge panel synced (selection-following / pinned entity).
+  update_context_forge(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
 
   // UI Forge: user-defined procedural panels (custom dashboards).
   draw_ui_forge_panel_windows(sim_, ui_);
@@ -497,6 +517,7 @@ void App::frame() {
   }
 
   update_event_toasts(sim_, ui_, hud_);
+  update_watchboard_alert_toasts(sim_, ui_, hud_);
   draw_event_toasts(sim_, ui_, hud_, selected_ship_, selected_colony_, selected_body_);
 
   // Narrate selection changes (best-effort).
@@ -561,6 +582,47 @@ void App::draw_dockspace() {
   if (ImGui::Begin("##nebula4x_dockspace", nullptr, window_flags)) {
     const unsigned int dockspace_id = ImGui::GetID("Nebula4XDockSpace");
     ImGui::DockSpace(dockspace_id, ImVec2(0.0f, 0.0f), dock_flags);
+
+    // Procedural docking layout synthesizer: rebuild a workspace from a seed.
+    if (ui_.request_generate_procedural_layout) {
+      ui_.request_generate_procedural_layout = false;
+    
+      // Clear prior docking state so the generated layout is deterministic and
+      // doesn't fight persisted window placements.
+      ImGui::LoadIniSettingsFromMemory("");
+    
+      ProceduralLayoutParams p;
+      p.seed = static_cast<std::uint32_t>(ui_.ui_procedural_layout_seed);
+      p.mode = ui_.ui_procedural_layout_mode;
+      p.variation = ui_.ui_procedural_layout_variation;
+      p.include_tools = ui_.ui_procedural_layout_include_tools;
+      p.include_forge_panels = ui_.ui_procedural_layout_include_forge_panels;
+      p.max_forge_panels = ui_.ui_procedural_layout_max_forge_panels;
+      p.auto_open_windows = ui_.ui_procedural_layout_auto_open_windows;
+      p.auto_save_profile = ui_.ui_procedural_layout_autosave_profile;
+    
+      if (p.auto_open_windows) {
+        apply_procedural_layout_visibility(ui_, p);
+      }
+    
+      std::vector<std::string> extra;
+      if (p.include_forge_panels) {
+        extra = gather_ui_forge_panel_window_titles(ui_, p.max_forge_panels);
+      }
+    
+      build_procedural_dock_layout(dockspace_id, size, p, extra);
+    
+      if (p.auto_save_profile) {
+        const char* ini = io.IniFilename;
+        if (ini && ini[0] != '\0') {
+          ImGui::SaveIniSettingsToDisk(ini);
+        }
+      }
+    
+      dock_layout_initialized_ = true;
+      dock_layout_checked_ini_ = true;
+      dock_layout_has_existing_ini_ = false;
+    }
 
     // Only auto-build a default layout when there isn't already a persisted layout.
     if (!dock_layout_checked_ini_) {
@@ -853,11 +915,53 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       }
       if (auto it = obj->find("ui_style_preset"); it != obj->end()) {
         ui_.ui_style_preset = static_cast<int>(it->second.number_value(ui_.ui_style_preset));
-        ui_.ui_style_preset = std::clamp(ui_.ui_style_preset, 0, 4);
+        ui_.ui_style_preset = std::clamp(ui_.ui_style_preset, 0, 5);
       }
       if (auto it = obj->find("ui_density"); it != obj->end()) {
         ui_.ui_density = static_cast<int>(it->second.number_value(ui_.ui_density));
         ui_.ui_density = std::clamp(ui_.ui_density, 0, 2);
+      }
+
+      // Procedural theme preferences (used by ui_style_preset = 5).
+      if (auto it = obj->find("ui_procedural_theme_seed"); it != obj->end()) {
+        ui_.ui_procedural_theme_seed = static_cast<int>(it->second.number_value(ui_.ui_procedural_theme_seed));
+      }
+      if (auto it = obj->find("ui_procedural_theme_use_seed_hue"); it != obj->end()) {
+        ui_.ui_procedural_theme_use_seed_hue = it->second.bool_value(ui_.ui_procedural_theme_use_seed_hue);
+      }
+      if (auto it = obj->find("ui_procedural_theme_hue_deg"); it != obj->end()) {
+        ui_.ui_procedural_theme_hue_deg = static_cast<float>(it->second.number_value(ui_.ui_procedural_theme_hue_deg));
+        ui_.ui_procedural_theme_hue_deg = std::clamp(ui_.ui_procedural_theme_hue_deg, 0.0f, 360.0f);
+      }
+      if (auto it = obj->find("ui_procedural_theme_variant"); it != obj->end()) {
+        ui_.ui_procedural_theme_variant = static_cast<int>(it->second.number_value(ui_.ui_procedural_theme_variant));
+        ui_.ui_procedural_theme_variant = std::clamp(ui_.ui_procedural_theme_variant, 0, 3);
+      }
+      if (auto it = obj->find("ui_procedural_theme_saturation"); it != obj->end()) {
+        ui_.ui_procedural_theme_saturation = static_cast<float>(it->second.number_value(ui_.ui_procedural_theme_saturation));
+        ui_.ui_procedural_theme_saturation = std::clamp(ui_.ui_procedural_theme_saturation, 0.0f, 1.0f);
+      }
+      if (auto it = obj->find("ui_procedural_theme_value"); it != obj->end()) {
+        ui_.ui_procedural_theme_value = static_cast<float>(it->second.number_value(ui_.ui_procedural_theme_value));
+        ui_.ui_procedural_theme_value = std::clamp(ui_.ui_procedural_theme_value, 0.0f, 1.0f);
+      }
+      if (auto it = obj->find("ui_procedural_theme_bg_value"); it != obj->end()) {
+        ui_.ui_procedural_theme_bg_value = static_cast<float>(it->second.number_value(ui_.ui_procedural_theme_bg_value));
+        ui_.ui_procedural_theme_bg_value = std::clamp(ui_.ui_procedural_theme_bg_value, 0.0f, 1.0f);
+      }
+      if (auto it = obj->find("ui_procedural_theme_accent_strength"); it != obj->end()) {
+        ui_.ui_procedural_theme_accent_strength = static_cast<float>(it->second.number_value(ui_.ui_procedural_theme_accent_strength));
+        ui_.ui_procedural_theme_accent_strength = std::clamp(ui_.ui_procedural_theme_accent_strength, 0.0f, 1.0f);
+      }
+      if (auto it = obj->find("ui_procedural_theme_animate_hue"); it != obj->end()) {
+        ui_.ui_procedural_theme_animate_hue = it->second.bool_value(ui_.ui_procedural_theme_animate_hue);
+      }
+      if (auto it = obj->find("ui_procedural_theme_animate_speed_deg_per_sec"); it != obj->end()) {
+        ui_.ui_procedural_theme_animate_speed_deg_per_sec = static_cast<float>(it->second.number_value(ui_.ui_procedural_theme_animate_speed_deg_per_sec));
+        ui_.ui_procedural_theme_animate_speed_deg_per_sec = std::clamp(ui_.ui_procedural_theme_animate_speed_deg_per_sec, 0.0f, 180.0f);
+      }
+      if (auto it = obj->find("ui_procedural_theme_sync_backgrounds"); it != obj->end()) {
+        ui_.ui_procedural_theme_sync_backgrounds = it->second.bool_value(ui_.ui_procedural_theme_sync_backgrounds);
       }
 
       // Toast defaults.
@@ -994,6 +1098,35 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
         const std::string v = it->second.string_value(std::string(ui_.layout_profile));
         std::snprintf(ui_.layout_profile, sizeof(ui_.layout_profile), "%s", v.c_str());
         ui_.layout_profile[sizeof(ui_.layout_profile) - 1] = '\0';
+      }
+
+      // Procedural dock layout synthesizer (DockBuilder presets).
+      if (auto it = obj->find("ui_procedural_layout_seed"); it != obj->end()) {
+        ui_.ui_procedural_layout_seed = static_cast<int>(it->second.number_value(ui_.ui_procedural_layout_seed));
+      }
+      if (auto it = obj->find("ui_procedural_layout_mode"); it != obj->end()) {
+        ui_.ui_procedural_layout_mode = static_cast<int>(it->second.number_value(ui_.ui_procedural_layout_mode));
+        ui_.ui_procedural_layout_mode = std::clamp(ui_.ui_procedural_layout_mode, 0, 4);
+      }
+      if (auto it = obj->find("ui_procedural_layout_variation"); it != obj->end()) {
+        ui_.ui_procedural_layout_variation = static_cast<float>(it->second.number_value(ui_.ui_procedural_layout_variation));
+        ui_.ui_procedural_layout_variation = std::clamp(ui_.ui_procedural_layout_variation, 0.0f, 1.0f);
+      }
+      if (auto it = obj->find("ui_procedural_layout_include_tools"); it != obj->end()) {
+        ui_.ui_procedural_layout_include_tools = it->second.bool_value(ui_.ui_procedural_layout_include_tools);
+      }
+      if (auto it = obj->find("ui_procedural_layout_include_forge_panels"); it != obj->end()) {
+        ui_.ui_procedural_layout_include_forge_panels = it->second.bool_value(ui_.ui_procedural_layout_include_forge_panels);
+      }
+      if (auto it = obj->find("ui_procedural_layout_max_forge_panels"); it != obj->end()) {
+        ui_.ui_procedural_layout_max_forge_panels = static_cast<int>(it->second.number_value(ui_.ui_procedural_layout_max_forge_panels));
+        ui_.ui_procedural_layout_max_forge_panels = std::clamp(ui_.ui_procedural_layout_max_forge_panels, 0, 32);
+      }
+      if (auto it = obj->find("ui_procedural_layout_auto_open_windows"); it != obj->end()) {
+        ui_.ui_procedural_layout_auto_open_windows = it->second.bool_value(ui_.ui_procedural_layout_auto_open_windows);
+      }
+      if (auto it = obj->find("ui_procedural_layout_autosave_profile"); it != obj->end()) {
+        ui_.ui_procedural_layout_autosave_profile = it->second.bool_value(ui_.ui_procedural_layout_autosave_profile);
       }
 
       // Map rendering chrome.
@@ -1370,6 +1503,9 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       if (auto it = obj->find("show_sustainment_window"); it != obj->end()) {
         ui_.show_sustainment_window = it->second.bool_value(ui_.show_sustainment_window);
       }
+      if (auto it = obj->find("show_fleet_manager_window"); it != obj->end()) {
+        ui_.show_fleet_manager_window = it->second.bool_value(ui_.show_fleet_manager_window);
+      }
       if (auto it = obj->find("show_time_warp_window"); it != obj->end()) {
         ui_.show_time_warp_window = it->second.bool_value(ui_.show_time_warp_window);
       }
@@ -1447,6 +1583,31 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       if (auto it = obj->find("show_status_bar"); it != obj->end()) {
         ui_.show_status_bar = it->second.bool_value(ui_.show_status_bar);
       }
+    }
+
+    // Command Console preferences.
+    //
+    // Stored as stable command ids in ui_prefs.json.
+    {
+      auto load_string_array = [&](const char* key, std::vector<std::string>* out, int max_items) {
+        if (auto it = obj->find(key); it != obj->end()) {
+          if (const auto* arr = it->second.as_array()) {
+            out->clear();
+            out->reserve(std::min<int>(static_cast<int>(arr->size()), max_items));
+            for (const auto& e : *arr) {
+              if (static_cast<int>(out->size()) >= max_items) break;
+              std::string s = e.string_value("");
+              if (s.empty()) continue;
+              if (s.size() > 128) s.resize(128);
+              out->push_back(std::move(s));
+            }
+          }
+        }
+      };
+
+      // Optional; introduced in ui_prefs v34.
+      load_string_array("command_favorites", &ui_.command_favorites, 64);
+      load_string_array("command_recent", &ui_.command_recent, 32);
     }
 
     // OmniSearch (game JSON global search) preferences.
@@ -1625,6 +1786,29 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
             if (auto it2 = o->find("query_op"); it2 != o->end()) {
               cfg.query_op = static_cast<int>(it2->second.number_value(cfg.query_op));
               cfg.query_op = std::clamp(cfg.query_op, 0, 4);
+            }
+
+            // Alert fields (optional; introduced in ui_prefs v33).
+            if (auto it2 = o->find("alert_enabled"); it2 != o->end()) {
+              cfg.alert_enabled = it2->second.bool_value(cfg.alert_enabled);
+            }
+            if (auto it2 = o->find("alert_mode"); it2 != o->end()) {
+              cfg.alert_mode = static_cast<int>(it2->second.number_value(cfg.alert_mode));
+              cfg.alert_mode = std::clamp(cfg.alert_mode, 0, 4);
+            }
+            if (auto it2 = o->find("alert_threshold"); it2 != o->end()) {
+              cfg.alert_threshold = it2->second.number_value(cfg.alert_threshold);
+            }
+            if (auto it2 = o->find("alert_delta"); it2 != o->end()) {
+              cfg.alert_delta = it2->second.number_value(cfg.alert_delta);
+            }
+            if (auto it2 = o->find("alert_toast_level"); it2 != o->end()) {
+              cfg.alert_toast_level = static_cast<int>(it2->second.number_value(cfg.alert_toast_level));
+              cfg.alert_toast_level = std::clamp(cfg.alert_toast_level, 0, 2);
+            }
+            if (auto it2 = o->find("alert_cooldown_sec"); it2 != o->end()) {
+              cfg.alert_cooldown_sec = static_cast<float>(it2->second.number_value(cfg.alert_cooldown_sec));
+              cfg.alert_cooldown_sec = std::clamp(cfg.alert_cooldown_sec, 0.0f, 120.0f);
             }
 
             if (cfg.path.empty()) cfg.path = "/";
@@ -1900,6 +2084,50 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
         }
       }
 
+      // --- Procedural UI: Context Forge (selection-following UI Forge panel) ---
+      if (auto it = obj->find("context_forge_enabled"); it != obj->end()) {
+        ui_.context_forge_enabled = it->second.bool_value(ui_.context_forge_enabled);
+      }
+      if (auto it = obj->find("context_forge_follow_selection"); it != obj->end()) {
+        ui_.context_forge_follow_selection = it->second.bool_value(ui_.context_forge_follow_selection);
+      }
+      if (auto it = obj->find("context_forge_auto_update"); it != obj->end()) {
+        ui_.context_forge_auto_update = it->second.bool_value(ui_.context_forge_auto_update);
+      }
+      if (auto it = obj->find("context_forge_pinned_entity_id"); it != obj->end()) {
+        ui_.context_forge_pinned_entity_id = static_cast<std::uint64_t>(it->second.number_value(static_cast<double>(ui_.context_forge_pinned_entity_id)));
+      }
+      if (auto it = obj->find("context_forge_seed"); it != obj->end()) {
+        ui_.context_forge_seed = static_cast<int>(it->second.number_value(ui_.context_forge_seed));
+      }
+      if (auto it = obj->find("context_forge_max_kpis"); it != obj->end()) {
+        ui_.context_forge_max_kpis = std::clamp(static_cast<int>(it->second.number_value(ui_.context_forge_max_kpis)), 0, 80);
+      }
+      if (auto it = obj->find("context_forge_max_lists"); it != obj->end()) {
+        ui_.context_forge_max_lists = std::clamp(static_cast<int>(it->second.number_value(ui_.context_forge_max_lists)), 0, 40);
+      }
+      if (auto it = obj->find("context_forge_depth"); it != obj->end()) {
+        ui_.context_forge_depth = std::clamp(static_cast<int>(it->second.number_value(ui_.context_forge_depth)), 0, 2);
+      }
+      if (auto it = obj->find("context_forge_max_array_numeric_keys"); it != obj->end()) {
+        ui_.context_forge_max_array_numeric_keys = std::clamp(static_cast<int>(it->second.number_value(ui_.context_forge_max_array_numeric_keys)), 0, 10);
+      }
+      if (auto it = obj->find("context_forge_include_lists"); it != obj->end()) {
+        ui_.context_forge_include_lists = it->second.bool_value(ui_.context_forge_include_lists);
+      }
+      if (auto it = obj->find("context_forge_include_queries"); it != obj->end()) {
+        ui_.context_forge_include_queries = it->second.bool_value(ui_.context_forge_include_queries);
+      }
+      if (auto it = obj->find("context_forge_include_id_fields"); it != obj->end()) {
+        ui_.context_forge_include_id_fields = it->second.bool_value(ui_.context_forge_include_id_fields);
+      }
+      if (auto it = obj->find("context_forge_open_panel_on_generate"); it != obj->end()) {
+        ui_.context_forge_open_panel_on_generate = it->second.bool_value(ui_.context_forge_open_panel_on_generate);
+      }
+      if (auto it = obj->find("context_forge_panel_id"); it != obj->end()) {
+        ui_.context_forge_panel_id = static_cast<std::uint64_t>(it->second.number_value(static_cast<double>(ui_.context_forge_panel_id)));
+      }
+
       // --- Procedural UI: UI Forge (custom panels) ---
       if (auto it = obj->find("next_ui_forge_panel_id"); it != obj->end()) {
         ui_.next_ui_forge_panel_id = static_cast<std::uint64_t>(it->second.number_value(static_cast<double>(ui_.next_ui_forge_panel_id)));
@@ -1992,7 +2220,7 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     }
 
     nebula4x::json::Object o;
-    o["version"] = 30.0;
+    o["version"] = 34.0;
 
     // Theme.
     o["clear_color"] = color_to_json(ui_.clear_color);
@@ -2044,6 +2272,19 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     o["ui_scale_style"] = ui_.ui_scale_style;
     o["ui_style_preset"] = static_cast<double>(ui_.ui_style_preset);
     o["ui_density"] = static_cast<double>(ui_.ui_density);
+
+    // Procedural theme (ui_style_preset = 5).
+    o["ui_procedural_theme_seed"] = static_cast<double>(ui_.ui_procedural_theme_seed);
+    o["ui_procedural_theme_use_seed_hue"] = ui_.ui_procedural_theme_use_seed_hue;
+    o["ui_procedural_theme_hue_deg"] = static_cast<double>(ui_.ui_procedural_theme_hue_deg);
+    o["ui_procedural_theme_variant"] = static_cast<double>(ui_.ui_procedural_theme_variant);
+    o["ui_procedural_theme_saturation"] = static_cast<double>(ui_.ui_procedural_theme_saturation);
+    o["ui_procedural_theme_value"] = static_cast<double>(ui_.ui_procedural_theme_value);
+    o["ui_procedural_theme_bg_value"] = static_cast<double>(ui_.ui_procedural_theme_bg_value);
+    o["ui_procedural_theme_accent_strength"] = static_cast<double>(ui_.ui_procedural_theme_accent_strength);
+    o["ui_procedural_theme_animate_hue"] = ui_.ui_procedural_theme_animate_hue;
+    o["ui_procedural_theme_animate_speed_deg_per_sec"] = static_cast<double>(ui_.ui_procedural_theme_animate_speed_deg_per_sec);
+    o["ui_procedural_theme_sync_backgrounds"] = ui_.ui_procedural_theme_sync_backgrounds;
     o["show_event_toasts"] = ui_.show_event_toasts;
     o["event_toast_duration_sec"] = static_cast<double>(ui_.event_toast_duration_sec);
 
@@ -2105,6 +2346,16 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     // Dock layout profiles (ImGui ini files).
     o["layout_profiles_dir"] = std::string(ui_.layout_profiles_dir);
     o["layout_profile"] = std::string(ui_.layout_profile);
+
+    // Procedural dock layout synthesizer (DockBuilder presets).
+    o["ui_procedural_layout_seed"] = static_cast<double>(ui_.ui_procedural_layout_seed);
+    o["ui_procedural_layout_mode"] = static_cast<double>(ui_.ui_procedural_layout_mode);
+    o["ui_procedural_layout_variation"] = static_cast<double>(ui_.ui_procedural_layout_variation);
+    o["ui_procedural_layout_include_tools"] = ui_.ui_procedural_layout_include_tools;
+    o["ui_procedural_layout_include_forge_panels"] = ui_.ui_procedural_layout_include_forge_panels;
+    o["ui_procedural_layout_max_forge_panels"] = static_cast<double>(ui_.ui_procedural_layout_max_forge_panels);
+    o["ui_procedural_layout_auto_open_windows"] = ui_.ui_procedural_layout_auto_open_windows;
+    o["ui_procedural_layout_autosave_profile"] = ui_.ui_procedural_layout_autosave_profile;
 
     // Map rendering chrome.
     o["system_map_starfield"] = ui_.system_map_starfield;
@@ -2221,6 +2472,7 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     o["show_freight_window"] = ui_.show_freight_window;
     o["show_fuel_window"] = ui_.show_fuel_window;
     o["show_sustainment_window"] = ui_.show_sustainment_window;
+    o["show_fleet_manager_window"] = ui_.show_fleet_manager_window;
     o["show_time_warp_window"] = ui_.show_time_warp_window;
     o["show_timeline_window"] = ui_.show_timeline_window;
     o["show_design_studio_window"] = ui_.show_design_studio_window;
@@ -2246,6 +2498,31 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     o["show_pivot_tables_window"] = ui_.show_pivot_tables_window;
     o["show_ui_forge_window"] = ui_.show_ui_forge_window;
     o["show_status_bar"] = ui_.show_status_bar;
+
+    // Command Console preferences.
+    // Stored as stable command ids in ui_prefs.json.
+    {
+      constexpr int kMaxFavorites = 64;
+      nebula4x::json::Array a;
+      a.reserve(std::min<int>(static_cast<int>(ui_.command_favorites.size()), kMaxFavorites));
+      for (const auto& s : ui_.command_favorites) {
+        if (static_cast<int>(a.size()) >= kMaxFavorites) break;
+        if (s.empty()) continue;
+        a.push_back(s.substr(0, 128));
+      }
+      o["command_favorites"] = nebula4x::json::array(std::move(a));
+    }
+    {
+      constexpr int kMaxRecent = 32;
+      nebula4x::json::Array a;
+      a.reserve(std::min<int>(static_cast<int>(ui_.command_recent.size()), kMaxRecent));
+      for (const auto& s : ui_.command_recent) {
+        if (static_cast<int>(a.size()) >= kMaxRecent) break;
+        if (s.empty()) continue;
+        a.push_back(s.substr(0, 128));
+      }
+      o["command_recent"] = nebula4x::json::array(std::move(a));
+    }
 
     // OmniSearch (game JSON global search) preferences.
     o["omni_search_match_keys"] = ui_.omni_search_match_keys;
@@ -2302,6 +2579,12 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
         wo["history_len"] = static_cast<double>(w.history_len);
         wo["is_query"] = w.is_query;
         wo["query_op"] = static_cast<double>(w.query_op);
+        wo["alert_enabled"] = w.alert_enabled;
+        wo["alert_mode"] = static_cast<double>(w.alert_mode);
+        wo["alert_threshold"] = w.alert_threshold;
+        wo["alert_delta"] = w.alert_delta;
+        wo["alert_toast_level"] = static_cast<double>(w.alert_toast_level);
+        wo["alert_cooldown_sec"] = static_cast<double>(w.alert_cooldown_sec);
         a.push_back(nebula4x::json::object(std::move(wo)));
       }
       o["json_watch_items"] = nebula4x::json::array(std::move(a));
@@ -2391,6 +2674,23 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
       }
       o["json_pivots"] = nebula4x::json::array(std::move(a));
     }
+
+
+    // --- Procedural UI: Context Forge (selection-following UI Forge panel) ---
+    o["context_forge_enabled"] = ui_.context_forge_enabled;
+    o["context_forge_follow_selection"] = ui_.context_forge_follow_selection;
+    o["context_forge_auto_update"] = ui_.context_forge_auto_update;
+    o["context_forge_pinned_entity_id"] = static_cast<double>(ui_.context_forge_pinned_entity_id);
+    o["context_forge_seed"] = static_cast<double>(ui_.context_forge_seed);
+    o["context_forge_max_kpis"] = static_cast<double>(ui_.context_forge_max_kpis);
+    o["context_forge_max_lists"] = static_cast<double>(ui_.context_forge_max_lists);
+    o["context_forge_depth"] = static_cast<double>(ui_.context_forge_depth);
+    o["context_forge_max_array_numeric_keys"] = static_cast<double>(ui_.context_forge_max_array_numeric_keys);
+    o["context_forge_include_lists"] = ui_.context_forge_include_lists;
+    o["context_forge_include_queries"] = ui_.context_forge_include_queries;
+    o["context_forge_include_id_fields"] = ui_.context_forge_include_id_fields;
+    o["context_forge_open_panel_on_generate"] = ui_.context_forge_open_panel_on_generate;
+    o["context_forge_panel_id"] = static_cast<double>(ui_.context_forge_panel_id);
 
 
     // --- Procedural UI: UI Forge (custom panels) ---
@@ -2504,6 +2804,19 @@ void App::reset_ui_theme_defaults() {
   ui_.ui_scale_style = true;
   ui_.ui_style_preset = 0;
   ui_.ui_density = 0;
+
+  // Procedural theme defaults.
+  ui_.ui_procedural_theme_seed = 1337;
+  ui_.ui_procedural_theme_use_seed_hue = true;
+  ui_.ui_procedural_theme_hue_deg = 190.0f;
+  ui_.ui_procedural_theme_variant = 0;
+  ui_.ui_procedural_theme_saturation = 0.72f;
+  ui_.ui_procedural_theme_value = 0.90f;
+  ui_.ui_procedural_theme_bg_value = 0.11f;
+  ui_.ui_procedural_theme_accent_strength = 0.28f;
+  ui_.ui_procedural_theme_animate_hue = false;
+  ui_.ui_procedural_theme_animate_speed_deg_per_sec = 6.0f;
+  ui_.ui_procedural_theme_sync_backgrounds = false;
 }
 
 void App::reset_window_layout_defaults() {
@@ -2518,6 +2831,7 @@ void App::reset_window_layout_defaults() {
   ui_.show_freight_window = false;
   ui_.show_fuel_window = false;
   ui_.show_sustainment_window = false;
+  ui_.show_fleet_manager_window = false;
   ui_.show_time_warp_window = false;
   ui_.show_timeline_window = false;
   ui_.show_design_studio_window = false;
@@ -2576,7 +2890,7 @@ void App::apply_imgui_style_overrides() {
   };
 
   // Persisted UI prefs can be edited by hand; keep them within supported ranges.
-  ui_.ui_style_preset = clamp_int(ui_.ui_style_preset, 0, 4);
+  ui_.ui_style_preset = clamp_int(ui_.ui_style_preset, 0, 5);
   ui_.ui_density = clamp_int(ui_.ui_density, 0, 2);
 
   static int last_preset = -1;
@@ -2666,9 +2980,16 @@ void App::apply_imgui_style_overrides() {
     return 1.0f;
   };
 
-  // Rebuild the base style only when the preset/density change.
-  if (last_preset != ui_.ui_style_preset || last_density != ui_.ui_density) {
+  // Rebuild the base style when the preset/density change.
+  //
+  // For the Procedural preset we rebuild every frame so:
+  //  - changes to the procedural knobs are reflected immediately
+  //  - optional hue animation can update without additional invalidation plumbing
+  const bool force_rebuild = (ui_.ui_style_preset == 5);
+  if (force_rebuild || last_preset != ui_.ui_style_preset || last_density != ui_.ui_density) {
     ImGuiStyle s;
+    const float time_sec = static_cast<float>(ImGui::GetTime());
+
     switch (ui_.ui_style_preset) {
       case 0: // Dark (default)
         ImGui::StyleColorsDark(&s);
@@ -2687,6 +3008,31 @@ void App::apply_imgui_style_overrides() {
         ImGui::StyleColorsDark(&s);
         apply_high_contrast_overrides(s);
         break;
+      case 5: { // Procedural
+        ImGui::StyleColorsDark(&s);
+
+        ProceduralThemeParams p;
+        p.seed = ui_.ui_procedural_theme_seed;
+        p.use_seed_hue = ui_.ui_procedural_theme_use_seed_hue;
+        p.hue_deg = ui_.ui_procedural_theme_hue_deg;
+        p.variant = ui_.ui_procedural_theme_variant;
+        p.saturation = ui_.ui_procedural_theme_saturation;
+        p.value = ui_.ui_procedural_theme_value;
+        p.bg_value = ui_.ui_procedural_theme_bg_value;
+        p.accent_strength = ui_.ui_procedural_theme_accent_strength;
+        p.animate_hue = ui_.ui_procedural_theme_animate_hue;
+        p.animate_speed_deg_per_sec = ui_.ui_procedural_theme_animate_speed_deg_per_sec;
+        p.sync_backgrounds = ui_.ui_procedural_theme_sync_backgrounds;
+
+        apply_procedural_theme(s, p, time_sec);
+
+        if (p.sync_backgrounds) {
+          const auto pal = compute_procedural_theme_palette(p, time_sec);
+          palette_to_float4(pal.clear_color, ui_.clear_color);
+          palette_to_float4(pal.system_map_bg, ui_.system_map_bg);
+          palette_to_float4(pal.galaxy_map_bg, ui_.galaxy_map_bg);
+        }
+      } break;
       default:
         ImGui::StyleColorsDark(&s);
         break;

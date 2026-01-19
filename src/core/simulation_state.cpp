@@ -18,6 +18,7 @@
 #include "nebula4x/core/scenario.h"
 #include "nebula4x/core/ai_economy.h"
 #include "nebula4x/core/content_validation.h"
+#include "nebula4x/core/design_stats.h"
 #include "nebula4x/core/state_validation.h"
 #include "nebula4x/core/procgen_obscure.h"
 #include "nebula4x/util/log.h"
@@ -119,150 +120,9 @@ bool Simulation::upsert_custom_design(ShipDesign design, std::string* error) {
   }
   if (design.name.empty()) design.name = design.id;
 
-  double mass = 0.0;
-  double speed = 0.0;
-  double fuel_cap = 0.0;
-  double fuel_use = 0.0;
-  double cargo = 0.0;
-  double mining_rate = 0.0;
-  double sensor = 0.0;
-  double colony_cap = 0.0;
-  double troop_cap = 0.0;
-
-  // Visibility / signature multiplier (product of component multipliers).
-  // 1.0 = normal visibility; lower values are harder to detect.
-  double sig_mult = 1.0;
-
-  double weapon_damage = 0.0;
-  double weapon_range = 0.0;
-
-  // Missile weapons (discrete salvos).
-  double missile_damage = 0.0;
-  double missile_range = 0.0;
-  double missile_speed = 0.0;
-  double missile_reload = 0.0;
-  bool missile_reload_set = false;
-
-  int missile_launcher_count = 0;
-  int missile_ammo_capacity = 0;
-  bool missile_ammo_finite = true;
-
-  // Point defense (anti-missile).
-  double point_defense_damage = 0.0;
-  double point_defense_range = 0.0;
-
-  double hp_bonus = 0.0;
-  double max_shields = 0.0;
-  double shield_regen = 0.0;
-
-  // Power budgeting.
-  double power_gen = 0.0;
-  double power_use_total = 0.0;
-  double power_use_engines = 0.0;
-  double power_use_sensors = 0.0;
-  double power_use_weapons = 0.0;
-  double power_use_shields = 0.0;
-
-  for (const auto& cid : design.components) {
-    auto it = content_.components.find(cid);
-    if (it == content_.components.end()) return fail("Unknown component id: " + cid);
-    const auto& c = it->second;
-
-    mass += c.mass_tons;
-    speed = std::max(speed, c.speed_km_s);
-    fuel_cap += c.fuel_capacity_tons;
-    fuel_use += c.fuel_use_per_mkm;
-    cargo += c.cargo_tons;
-    mining_rate += c.mining_tons_per_day;
-    sensor = std::max(sensor, c.sensor_range_mkm);
-    colony_cap += c.colony_capacity_millions;
-    troop_cap += c.troop_capacity;
-
-    const double comp_sig =
-        std::clamp(std::isfinite(c.signature_multiplier) ? c.signature_multiplier : 1.0, 0.0, 1.0);
-    sig_mult *= comp_sig;
-
-    if (c.type == ComponentType::Weapon) {
-      weapon_damage += c.weapon_damage;
-      weapon_range = std::max(weapon_range, c.weapon_range_mkm);
-
-      // Missile launcher stats (optional).
-      if (c.missile_damage > 0.0) {
-        missile_damage += c.missile_damage;
-        missile_launcher_count += 1;
-        if (c.missile_ammo > 0) {
-          missile_ammo_capacity += c.missile_ammo;
-        } else {
-          // Legacy / unlimited launcher: disable ammo tracking for this design.
-          missile_ammo_finite = false;
-        }
-        missile_range = std::max(missile_range, c.missile_range_mkm);
-        missile_speed = std::max(missile_speed, c.missile_speed_mkm_per_day);
-        if (c.missile_reload_days > 0.0) {
-          missile_reload = missile_reload_set ? std::min(missile_reload, c.missile_reload_days) : c.missile_reload_days;
-          missile_reload_set = true;
-        }
-      }
-
-      // Point defense stats (optional).
-      if (c.point_defense_damage > 0.0) {
-        point_defense_damage += c.point_defense_damage;
-        point_defense_range = std::max(point_defense_range, c.point_defense_range_mkm);
-      }
-    }
-
-    if (c.type == ComponentType::Reactor) {
-      power_gen += c.power_output;
-    }
-    power_use_total += c.power_use;
-    if (c.type == ComponentType::Engine) power_use_engines += c.power_use;
-    if (c.type == ComponentType::Sensor) power_use_sensors += c.power_use;
-    if (c.type == ComponentType::Weapon) power_use_weapons += c.power_use;
-    if (c.type == ComponentType::Shield) power_use_shields += c.power_use;
-
-    hp_bonus += c.hp_bonus;
-
-    if (c.type == ComponentType::Shield) {
-      max_shields += c.shield_hp;
-      shield_regen += c.shield_regen_per_day;
-    }
-  }
-
-  design.mass_tons = mass;
-  design.speed_km_s = speed;
-  design.fuel_capacity_tons = fuel_cap;
-  design.fuel_use_per_mkm = fuel_use;
-  design.cargo_tons = cargo;
-  design.mining_tons_per_day = mining_rate;
-  design.sensor_range_mkm = sensor;
-  design.colony_capacity_millions = colony_cap;
-  design.troop_capacity = troop_cap;
-
-  // Clamp to avoid fully-undetectable ships.
-  design.signature_multiplier = std::clamp(sig_mult, 0.05, 1.0);
-
-  design.power_generation = power_gen;
-  design.power_use_total = power_use_total;
-  design.power_use_engines = power_use_engines;
-  design.power_use_sensors = power_use_sensors;
-  design.power_use_weapons = power_use_weapons;
-  design.power_use_shields = power_use_shields;
-  design.weapon_damage = weapon_damage;
-  design.weapon_range_mkm = weapon_range;
-
-  design.missile_damage = missile_damage;
-  design.missile_range_mkm = missile_range;
-  design.missile_speed_mkm_per_day = missile_speed;
-  design.missile_reload_days = missile_reload_set ? missile_reload : 0.0;
-
-  design.missile_launcher_count = missile_launcher_count;
-  design.missile_ammo_capacity = (missile_launcher_count > 0 && missile_ammo_finite) ? missile_ammo_capacity : 0;
-
-  design.point_defense_damage = point_defense_damage;
-  design.point_defense_range_mkm = point_defense_range;
-  design.max_shields = max_shields;
-  design.shield_regen_per_day = shield_regen;
-  design.max_hp = std::max(1.0, mass * 2.0 + hp_bonus);
+  // Derive computed stats (mass/speed/range/power/weapons/etc) from components.
+  const auto res = derive_ship_design_stats(content_, design);
+  if (!res.ok) return fail(res.error);
 
   state_.custom_designs[design.id] = std::move(design);
   return true;

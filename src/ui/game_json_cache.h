@@ -12,14 +12,15 @@ class Simulation;
 
 namespace nebula4x::ui {
 
-// Shared cache of a parsed JSON snapshot of the *current* in-memory game state.
+// Shared cache of a JSON snapshot of the *current* in-memory game state.
 //
 // Several procedural/debug UI windows (Watchboard, Data Lenses, Dashboards, Pivot Tables,
 // OmniSearch, JSON Explorer) need a "live" JSON representation of the running simulation.
-// Previously each window independently serialized+parsed the entire state, often multiple
-// times per second, causing redundant work and hitchy UI when multiple tools were open.
+// Previously each window independently serialized the entire state to text and then parsed
+// it back into a JSON DOM, often multiple times per second, causing redundant work and hitchy
+// UI when multiple tools were open.
 //
-// This cache centralizes that work so windows can share the same parsed document.
+// This cache centralizes that work so windows can share the same JSON document.
 // Windows are still free to *snapshot* a particular revision (via shared_ptr) so they
 // can keep stable pointers while doing incremental work across multiple frames.
 struct GameJsonCache {
@@ -30,7 +31,7 @@ struct GameJsonCache {
   // Simulation::state_generation() of the snapshot.
   std::uint64_t state_generation{0};
 
-  // True if we currently have a parsed snapshot.
+  // True if we currently have a snapshot.
   bool loaded{false};
 
   // Error from the most recent refresh attempt (empty on success).
@@ -40,7 +41,7 @@ struct GameJsonCache {
   // Kept for cheap "did it change" comparisons and for tools that want text output.
   std::string text;
 
-  // Parsed JSON root for the snapshot.
+  // JSON root for the snapshot (in-memory DOM).
   // NOTE: shared_ptr so windows can hold onto older revisions safely.
   std::shared_ptr<const nebula4x::json::Value> root;
 

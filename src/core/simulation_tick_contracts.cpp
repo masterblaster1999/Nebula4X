@@ -199,12 +199,13 @@ bool Simulation::assign_contract_to_ship(Id contract_id, Id ship_id, bool clear_
   }
   if (c.status != ContractStatus::Accepted) return fail("Contract is not Accepted");
 
-  // Assignment is a UI convenience only; fleet assignment is not yet wired.
+  // Assignment is a UI convenience only.
   c.assigned_ship_id = ship_id;
   c.assigned_fleet_id = kInvalidId;
 
   if (clear_existing_orders) {
-    state_.ship_orders[ship_id].queue.clear();
+    // Use the canonical helper so we also disable order repeating.
+    (void)clear_orders(ship_id);
   }
 
   // Issue the corresponding order.
@@ -225,6 +226,134 @@ bool Simulation::assign_contract_to_ship(Id contract_id, Id ship_id, bool clear_
     // Roll back assignment if we couldn't issue the order.
     c.assigned_ship_id = kInvalidId;
     return fail("Failed to issue contract orders");
+  }
+
+  return true;
+}
+
+bool Simulation::assign_contract_to_fleet(Id contract_id, Id fleet_id, bool clear_existing_orders,
+                                         bool restrict_to_discovered, bool push_event,
+                                         std::string* error) {
+  auto fail = [&](const std::string& msg) {
+    if (error) *error = msg;
+    return false;
+  };
+
+  // Keep fleet invariants consistent (valid members, leader, no duplicates).
+  prune_fleets();
+
+  auto it = state_.contracts.find(contract_id);
+  if (it == state_.contracts.end()) return fail("Contract not found");
+  Contract& c = it->second;
+
+  Fleet* fl = find_ptr(state_.fleets, fleet_id);
+  if (!fl) return fail("Fleet not found");
+  if (fl->ship_ids.empty()) return fail("Fleet has no ships");
+
+  if (c.assignee_faction_id != kInvalidId && fl->faction_id != c.assignee_faction_id) {
+    return fail("Fleet faction does not match contract assignee");
+  }
+
+  if (c.status == ContractStatus::Offered) {
+    // Convenience: assigning an offered contract implicitly accepts it.
+    std::string err;
+    if (!accept_contract(contract_id, push_event, &err)) {
+      return fail("Could not accept contract: " + err);
+    }
+  }
+  if (c.status != ContractStatus::Accepted) return fail("Contract is not Accepted");
+
+  // Choose a primary ship (used for UI focus + as the contract executor).
+  // Prefer the fleet leader if it can execute the contract; otherwise select
+  // the best candidate based on simple capability heuristics.
+  auto can_execute = [&](Id sid) -> bool {
+    const Ship* sh = find_ptr(state_.ships, sid);
+    if (!sh) return false;
+    if (c.assignee_faction_id != kInvalidId && sh->faction_id != c.assignee_faction_id) return false;
+    if (c.kind == ContractKind::InvestigateAnomaly) {
+      const auto* d = find_design(sh->design_id);
+      const double sensor = d ? std::max(0.0, d->sensor_range_mkm) : 0.0;
+      return sensor > 1e-9;
+    }
+    // Salvage + Survey have no hard capability gates (cargo helps salvage throughput).
+    return true;
+  };
+
+  auto score_ship = [&](Id sid) -> double {
+    const Ship* sh = find_ptr(state_.ships, sid);
+    if (!sh) return -1e300;
+    const auto* d = find_design(sh->design_id);
+    const double sp = std::max(0.0, sh->speed_km_s);
+
+    double cap = 1.0;
+    if (c.kind == ContractKind::InvestigateAnomaly) {
+      const double sensor = d ? std::max(0.0, d->sensor_range_mkm) : 0.0;
+      cap = 1.0 + sensor;
+    } else if (c.kind == ContractKind::SalvageWreck) {
+      const double cargo = d ? std::max(0.0, d->cargo_tons) : 0.0;
+      cap = 1.0 + cargo;
+    } else if (c.kind == ContractKind::SurveyJumpPoint) {
+      cap = 1.0;
+    }
+
+    // Speed is a smaller term; capability dominates.
+    return cap * 1000.0 + sp;
+  };
+
+  Id primary_ship_id = kInvalidId;
+  if (fl->leader_ship_id != kInvalidId && can_execute(fl->leader_ship_id)) {
+    primary_ship_id = fl->leader_ship_id;
+  } else {
+    double best = -1e300;
+    for (Id sid : fl->ship_ids) {
+      if (sid == kInvalidId) continue;
+      if (!can_execute(sid)) continue;
+      const double sc = score_ship(sid);
+      if (primary_ship_id == kInvalidId || sc > best + 1e-9 || (std::abs(sc - best) <= 1e-9 && sid < primary_ship_id)) {
+        primary_ship_id = sid;
+        best = sc;
+      }
+    }
+  }
+  if (primary_ship_id == kInvalidId) return fail("No suitable fleet ship can execute this contract");
+
+  // Assignment is a UI convenience only.
+  c.assigned_ship_id = primary_ship_id;
+  c.assigned_fleet_id = fleet_id;
+
+  if (clear_existing_orders) {
+    // Clear for the whole fleet so escorts participate immediately.
+    (void)clear_fleet_orders(fleet_id);
+  }
+
+  // Issue the corresponding order to the primary ship.
+  bool ok = false;
+  switch (c.kind) {
+    case ContractKind::InvestigateAnomaly:
+      ok = issue_investigate_anomaly(primary_ship_id, c.target_id, restrict_to_discovered);
+      break;
+    case ContractKind::SalvageWreck:
+      ok = issue_salvage_wreck(primary_ship_id, c.target_id, /*mineral=*/"", /*tons=*/0.0, restrict_to_discovered);
+      break;
+    case ContractKind::SurveyJumpPoint:
+      ok = issue_survey_jump_point(primary_ship_id, c.target_id, /*transit_when_done=*/false, restrict_to_discovered);
+      break;
+  }
+
+  if (!ok) {
+    // Roll back assignment if we couldn't issue the order.
+    c.assigned_ship_id = kInvalidId;
+    c.assigned_fleet_id = kInvalidId;
+    return fail("Failed to issue contract orders");
+  }
+
+  // Issue escort orders to the rest of the fleet.
+  // This keeps the fleet moving as a group without duplicating the contract action.
+  const double follow_mkm = std::max(0.0, fl->formation_spacing_mkm);
+  const double follow = (follow_mkm > 1e-9) ? follow_mkm : 1.0;
+  for (Id sid : fl->ship_ids) {
+    if (sid == kInvalidId || sid == primary_ship_id) continue;
+    (void)issue_escort_ship(sid, primary_ship_id, follow, restrict_to_discovered);
   }
 
   return true;

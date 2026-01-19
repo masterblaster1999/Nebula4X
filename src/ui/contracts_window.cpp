@@ -51,6 +51,15 @@ std::string ship_label(const GameState& st, Id ship_id) {
   return "Ship " + std::to_string((unsigned long long)ship_id);
 }
 
+std::string fleet_label(const GameState& st, Id fleet_id) {
+  if (fleet_id == kInvalidId) return "(None)";
+  if (const auto* fl = find_ptr(st.fleets, fleet_id)) {
+    if (!fl->name.empty()) return fl->name;
+    return "Fleet " + std::to_string((unsigned long long)fleet_id);
+  }
+  return "Fleet " + std::to_string((unsigned long long)fleet_id);
+}
+
 std::string contract_target_label(const GameState& st, const Contract& c) {
   if (c.target_id == kInvalidId) return "(None)";
   switch (c.kind) {
@@ -171,6 +180,29 @@ void focus_ship(Id ship_id, Simulation& sim, UIState& ui, Id& selected_ship, Id&
   ui.request_details_tab = DetailsTab::Ship;
 }
 
+void focus_fleet(Id fleet_id, Simulation& sim, UIState& ui, Id& selected_ship, Id& selected_colony, Id& selected_body) {
+  auto& st = sim.state();
+  ui.selected_fleet_id = fleet_id;
+  ui.show_details_window = true;
+  ui.request_details_tab = DetailsTab::Fleet;
+
+  selected_colony = kInvalidId;
+  selected_body = kInvalidId;
+
+  // Convenience: also focus the fleet leader (centers the system map via details tab logic).
+  const auto* fl = find_ptr(st.fleets, fleet_id);
+  if (!fl) return;
+  const Id leader = (fl->leader_ship_id != kInvalidId) ? fl->leader_ship_id
+                                                       : (!fl->ship_ids.empty() ? fl->ship_ids.front() : kInvalidId);
+  const auto* sh = (leader != kInvalidId) ? find_ptr(st.ships, leader) : nullptr;
+  if (!sh) return;
+
+  selected_ship = sh->id;
+  st.selected_system = sh->system_id;
+  ui.show_map_window = true;
+  ui.request_map_tab = MapTab::System;
+}
+
 struct ContractsWindowState {
   Id selected_contract{kInvalidId};
   bool show_offered{true};
@@ -182,6 +214,9 @@ struct ContractsWindowState {
   bool clear_orders_on_assign{true};
   bool restrict_to_discovered{true};
   Id assign_ship{kInvalidId};
+  Id assign_fleet{kInvalidId};
+  Id assign_fleet{kInvalidId};
+  Id assign_fleet{kInvalidId};
 
   // --- Auto planner (multi-contract ship assignment) ---
   bool planner_auto_refresh{false};
@@ -358,7 +393,13 @@ void draw_contracts_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& 
       ImGui::Text("%d", std::max(0, c->hops_estimate));
 
       ImGui::TableNextColumn();
-      if (c->assigned_ship_id != kInvalidId) {
+      if (c->assigned_fleet_id != kInvalidId) {
+        std::string label = "Fleet: " + fleet_label(st, c->assigned_fleet_id);
+        if (c->assigned_ship_id != kInvalidId) {
+          label += "  [lead: " + ship_label(st, c->assigned_ship_id) + "]";
+        }
+        ImGui::TextUnformatted(label.c_str());
+      } else if (c->assigned_ship_id != kInvalidId) {
         const std::string sh = ship_label(st, c->assigned_ship_id);
         ImGui::TextUnformatted(sh.c_str());
       } else {
@@ -416,6 +457,15 @@ void draw_contracts_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& 
     }
   } else {
     ImGui::TextDisabled("(No assigned ship)");
+  }
+
+  ImGui::SameLine();
+  if (c->assigned_fleet_id != kInvalidId) {
+    if (ImGui::Button("Focus Assigned Fleet")) {
+      focus_fleet(c->assigned_fleet_id, sim, ui, selected_ship, selected_colony, selected_body);
+    }
+  } else {
+    ImGui::TextDisabled("(No assigned fleet)");
   }
 
   // Accept/abandon.
@@ -500,12 +550,136 @@ void draw_contracts_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& 
   }
 
   ImGui::SameLine();
-  if (c->assigned_ship_id != kInvalidId) {
+  if (c->assigned_ship_id != kInvalidId || c->assigned_fleet_id != kInvalidId) {
     if (ImGui::Button("Clear Assignment")) {
       ws.last_error.clear();
       std::string err;
       if (!sim.clear_contract_assignment(c->id, &err)) ws.last_error = err.empty() ? "Failed to clear assignment." : err;
     }
+  }
+
+  // --- Assign to fleet ---
+  ImGui::Separator();
+  ImGui::Text("Assign to fleet");
+
+  std::vector<Id> fleet_ids;
+  fleet_ids.reserve(st.fleets.size());
+  for (const auto& [flid, fl] : st.fleets) {
+    if (fl.faction_id != fid) continue;
+    if (fl.ship_ids.empty()) continue;
+    fleet_ids.push_back(flid);
+  }
+  std::sort(fleet_ids.begin(), fleet_ids.end());
+
+  // Default selection: currently selected fleet in the UI, else first.
+  if (ws.assign_fleet == kInvalidId) {
+    if (ui.selected_fleet_id != kInvalidId) {
+      const auto* fl = find_ptr(st.fleets, ui.selected_fleet_id);
+      if (fl && fl->faction_id == fid && !fl->ship_ids.empty()) {
+        ws.assign_fleet = ui.selected_fleet_id;
+      }
+    }
+    if (ws.assign_fleet == kInvalidId && !fleet_ids.empty()) ws.assign_fleet = fleet_ids.front();
+  }
+
+  if (fleet_ids.empty()) {
+    ImGui::TextDisabled("(No fleets available)");
+  } else {
+    const std::string cur_fleet = fleet_label(st, ws.assign_fleet);
+    if (ImGui::BeginCombo("Fleet", cur_fleet.c_str())) {
+      for (Id flid : fleet_ids) {
+        const bool is_sel = (flid == ws.assign_fleet);
+        const auto* fl = find_ptr(st.fleets, flid);
+        std::string nm = fleet_label(st, flid);
+        if (fl) nm += "  (" + std::to_string((int)fl->ship_ids.size()) + ")";
+        if (ImGui::Selectable(nm.c_str(), is_sel)) ws.assign_fleet = flid;
+        if (is_sel) ImGui::SetItemDefaultFocus();
+      }
+      ImGui::EndCombo();
+    }
+
+    // Preview: which ship will execute this contract for the selected fleet?
+    auto preview_primary_ship = [&]() -> Id {
+      const auto* fl = find_ptr(st.fleets, ws.assign_fleet);
+      if (!fl) return kInvalidId;
+
+      auto can_execute = [&](Id sid) -> bool {
+        const Ship* sh = find_ptr(st.ships, sid);
+        if (!sh) return false;
+        if (sh->faction_id != fid) return false;
+        if (c->kind == ContractKind::InvestigateAnomaly) {
+          const auto* d = sim.find_design(sh->design_id);
+          const double sensor = d ? std::max(0.0, d->sensor_range_mkm) : 0.0;
+          return sensor > 1e-9;
+        }
+        return true;
+      };
+
+      auto score = [&](Id sid) -> double {
+        const Ship* sh = find_ptr(st.ships, sid);
+        if (!sh) return -1e300;
+        const auto* d = sim.find_design(sh->design_id);
+        const double sp = std::max(0.0, sh->speed_km_s);
+        double cap = 1.0;
+        if (c->kind == ContractKind::InvestigateAnomaly) {
+          const double sensor = d ? std::max(0.0, d->sensor_range_mkm) : 0.0;
+          cap = 1.0 + sensor;
+        } else if (c->kind == ContractKind::SalvageWreck) {
+          const double cargo = d ? std::max(0.0, d->cargo_tons) : 0.0;
+          cap = 1.0 + cargo;
+        }
+        return cap * 1000.0 + sp;
+      };
+
+      if (fl->leader_ship_id != kInvalidId && can_execute(fl->leader_ship_id)) return fl->leader_ship_id;
+
+      Id best_id = kInvalidId;
+      double best_sc = -1e300;
+      for (Id sid : fl->ship_ids) {
+        if (sid == kInvalidId) continue;
+        if (!can_execute(sid)) continue;
+        const double sc = score(sid);
+        if (best_id == kInvalidId || sc > best_sc + 1e-9 || (std::abs(sc - best_sc) <= 1e-9 && sid < best_id)) {
+          best_id = sid;
+          best_sc = sc;
+        }
+      }
+      return best_id;
+    };
+
+    const Id primary_ship = preview_primary_ship();
+    if (primary_ship != kInvalidId) {
+      ImGui::TextDisabled("Executor: %s", ship_label(st, primary_ship).c_str());
+
+      Id target_sys = kInvalidId;
+      Vec2 target_pos{0.0, 0.0};
+      if (contract_target_pos(st, *c, &target_sys, &target_pos) && target_sys != kInvalidId) {
+        const bool include_queued_jumps = !ws.clear_orders_on_assign;
+        const auto plan = sim.plan_jump_route_for_ship_to_pos(primary_ship, target_sys, target_pos,
+                                                             ws.restrict_to_discovered, include_queued_jumps);
+        if (plan) {
+          const std::string eta = fmt_eta_days(plan->total_eta_days);
+          const std::string arr = fmt_arrival_label(sim, plan->total_eta_days);
+          ImGui::TextDisabled("ETA (executor): %s  %s", eta.c_str(), arr.c_str());
+        } else {
+          ImGui::TextDisabled("ETA (executor): (no route)");
+        }
+      }
+    } else {
+      ImGui::TextDisabled("Executor: (no suitable ship)");
+    }
+
+    const bool can_assign_fleet = (ws.assign_fleet != kInvalidId) && (c->status == ContractStatus::Offered || c->status == ContractStatus::Accepted);
+    if (!can_assign_fleet) ImGui::BeginDisabled();
+    if (ImGui::Button("Assign Contract to Fleet")) {
+      ws.last_error.clear();
+      std::string err;
+      if (!sim.assign_contract_to_fleet(c->id, ws.assign_fleet, ws.clear_orders_on_assign,
+                                        ws.restrict_to_discovered, /*push_event=*/true, &err)) {
+        ws.last_error = err.empty() ? "Failed to assign contract to fleet." : err;
+      }
+    }
+    if (!can_assign_fleet) ImGui::EndDisabled();
   }
 
   // --- Auto planner ---

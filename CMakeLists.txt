@@ -36,6 +36,7 @@ target_sources(nebula4x_core
   PRIVATE
     src/core/content_validation.cpp
     src/core/date.cpp
+    src/core/design_stats.cpp
     src/core/enum_strings.cpp
     src/core/fleet_formation.cpp
     src/core/game_state.cpp
@@ -71,6 +72,7 @@ target_sources(nebula4x_core
     src/core/simulation_tick_combat.cpp
     src/core/simulation_tick_ground_combat.cpp
     src/core/simulation_tick_terraforming.cpp
+    src/core/procgen_design_forge.cpp
     src/core/ai_economy.cpp
     src/core/serialization.cpp
     src/core/tech.cpp
@@ -200,9 +202,13 @@ if(NEBULA4X_BUILD_UI)
     add_executable(nebula4x
     src/main.cpp
     src/ui/app.cpp
+    src/ui/procedural_theme.cpp
+    src/ui/procedural_layout.cpp
     src/ui/new_game_modal.cpp
     src/ui/hud.cpp
+    src/ui/ui_commands.cpp
     src/ui/map_render.cpp
+    src/ui/map_label_placer.cpp
     src/ui/panels.cpp
     src/ui/economy_window.cpp
     src/ui/planner_window.cpp
@@ -212,10 +218,12 @@ if(NEBULA4X_BUILD_UI)
     src/ui/salvage_window.cpp
     src/ui/contracts_window.cpp
     src/ui/sustainment_window.cpp
+    src/ui/fleet_manager_window.cpp
     src/ui/troop_window.cpp
     src/ui/advisor_window.cpp
     src/ui/colony_profiles_window.cpp
   src/ui/ship_profiles_window.cpp
+  src/ui/automation_center_window.cpp
   src/ui/shipyard_targets_window.cpp
   src/ui/survey_network_window.cpp
     src/ui/time_warp_window.cpp
@@ -223,6 +231,7 @@ if(NEBULA4X_BUILD_UI)
     src/ui/time_machine_window.cpp
     src/ui/game_json_cache.cpp
   src/ui/game_entity_index.cpp
+  src/ui/json_watch_eval.cpp
     src/ui/omni_search_window.cpp
     src/ui/json_explorer_window.cpp
     src/ui/content_validation_window.cpp
@@ -230,11 +239,14 @@ if(NEBULA4X_BUILD_UI)
   src/ui/entity_inspector_window.cpp
   src/ui/reference_graph_window.cpp
     src/ui/watchboard_window.cpp
+  src/ui/watchboard_alerts.cpp
     src/ui/data_lenses_window.cpp
     src/ui/dashboards_window.cpp
     src/ui/pivot_tables_window.cpp
     src/ui/procgen_atlas_window.cpp
     src/ui/ui_forge_window.cpp
+    src/ui/context_forge_window.cpp
+    src/ui/ui_forge_dna.cpp
     src/ui/screen_reader.cpp
     src/ui/layout_profiles.cpp
     src/ui/layout_profiles_window.cpp
