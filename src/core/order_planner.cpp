@@ -652,6 +652,42 @@ OrderPlan compute_order_plan(const Simulation& sim, Id ship_id, const OrderPlann
       } else {
         ok = travel_to_point(w->position_mkm, dock_range);
       }
+    } else if (std::holds_alternative<SalvageWreckLoop>(ord)) {
+      const auto& o = std::get<SalvageWreckLoop>(ord);
+      // Multi-trip salvage is a continuous behaviour...
+      indefinite = true;
+
+      if (o.mode == 0) {
+        const Wreck* w = find_ptr(st.wrecks, o.wreck_id);
+        if (!w) {
+          truncate("Invalid wreck target", false);
+          ok = false;
+        } else if (w->system_id != sys) {
+          truncate("Wreck is in a different system", false);
+          ok = false;
+        } else {
+          ok = travel_to_point(w->position_mkm, dock_range);
+        }
+      } else {
+        const Colony* c = find_ptr(st.colonies, o.dropoff_colony_id);
+        if (!c) {
+          truncate("Invalid salvage dropoff colony", false);
+          ok = false;
+        } else {
+          const Body* b = find_ptr(st.bodies, c->body_id);
+          if (!b || b->system_id != sys) {
+            truncate("Salvage dropoff colony is in a different system", false);
+            ok = false;
+          } else {
+            ok = travel_to_point(b->position_mkm, dock_range);
+          }
+        }
+      }
+
+      if (ok) {
+        truncate("SalvageWreckLoop completion depends on cargo/wreck depletion", true);
+      }
+
     } else if (std::holds_alternative<TransferCargoToShip>(ord)) {
       const auto& o = std::get<TransferCargoToShip>(ord);
       ok = travel_to_ship(o.target_ship_id, dock_range);

@@ -17,27 +17,19 @@
 #include "nebula4x/util/trace_events.h"
 #include "nebula4x/util/spatial_index.h"
 #include "nebula4x/util/time.h"
+#include "nebula4x/util/hash_rng.h"
 
 namespace nebula4x {
 namespace {
 using sim_internal::sorted_keys;
 using sim_internal::compute_power_allocation;
 
-// Deterministic pseudo-random generator for combat sub-systems.
-// This keeps simulation deterministic across runs while still allowing
-// probabilistic mechanics (e.g. boarding).
-static uint64_t splitmix64(uint64_t x) {
-  x += 0x9e3779b97f4a7c15ULL;
-  x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
-  x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
-  return x ^ (x >> 31);
-}
-
-static double u01_from_u64(uint64_t x) {
-  // Use the top 53 bits to build a double in [0,1).
-  const uint64_t v = x >> 11;
-  return static_cast<double>(v) * (1.0 / 9007199254740992.0); // 2^53
-}
+// Deterministic pseudo-random mixing helpers for combat sub-systems.
+//
+// Centralized in nebula4x::util to keep behavior consistent across
+// simulation modules.
+using ::nebula4x::util::splitmix64;
+using ::nebula4x::util::u01_from_u64;
 
 static double clamp01(double x) {
   if (!std::isfinite(x)) return 0.0;
@@ -101,24 +93,32 @@ void Simulation::tick_combat(double dt_days) {
   std::vector<ColonyBattery> colony_batteries;
   colony_batteries.reserve(state_.colonies.size());
 
-  for (const auto& [cid, col] : state_.colonies) {
+  for (Id cid : sorted_keys(state_.colonies)) {
+    const Colony& col = state_.colonies.at(cid);
     const auto* body = find_ptr(state_.bodies, col.body_id);
     if (!body) continue;
 
-    double dmg = 0.0;
+    long double dmg_ld = 0.0L;
     double range = 0.0;
     double sensor = 0.0;
-    for (const auto& [inst_id, count] : col.installations) {
+
+    // Iterate installations in deterministic order to keep colony battery stats
+    // stable across platforms (unordered_map iteration order is unspecified).
+    for (const auto& inst_id : sorted_keys(col.installations)) {
+      const int count = col.installations.at(inst_id);
       if (count <= 0) continue;
       const auto it = content_.installations.find(inst_id);
       if (it == content_.installations.end()) continue;
       const auto& def = it->second;
+
       sensor = std::max(sensor, std::max(0.0, def.sensor_range_mkm));
       if (def.weapon_damage <= 0.0 || def.weapon_range_mkm <= 0.0) continue;
-      dmg += def.weapon_damage * static_cast<double>(count);
-      range = std::max(range, def.weapon_range_mkm);
+
+      dmg_ld += static_cast<long double>(def.weapon_damage) * static_cast<long double>(count);
+      range = std::max(range, std::max(0.0, def.weapon_range_mkm));
     }
 
+    const double dmg = static_cast<double>(dmg_ld);
     if (dmg > 1e-9 && range > 1e-9) {
       ColonyBattery b;
       b.colony_id = cid;
@@ -2003,7 +2003,8 @@ void Simulation::tick_combat(double dt_days) {
 
         const double cargo_frac = std::clamp(cfg_.wreck_cargo_salvage_fraction, 0.0, 1.0);
         if (cargo_frac > 1e-9) {
-          for (const auto& [mineral, tons] : victim.cargo) {
+          for (const auto& mineral : sorted_keys(victim.cargo)) {
+            const double tons = victim.cargo.at(mineral);
             if (tons > 1e-9) salvage[mineral] += tons * cargo_frac;
           }
         }
@@ -2023,7 +2024,8 @@ void Simulation::tick_combat(double dt_days) {
           }
 
           if (yard && !yard->build_costs_per_ton.empty()) {
-            for (const auto& [mineral, cost_per_ton] : yard->build_costs_per_ton) {
+            for (const auto& mineral : sorted_keys(yard->build_costs_per_ton)) {
+              const double cost_per_ton = yard->build_costs_per_ton.at(mineral);
               if (cost_per_ton > 1e-12) salvage[mineral] += hull_tons * cost_per_ton;
             }
           } else {

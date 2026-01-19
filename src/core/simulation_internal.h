@@ -69,6 +69,35 @@ inline std::vector<typename Map::key_type> sorted_keys(const Map& m) {
   return keys;
 }
 
+// Deterministic reductions for unordered_map-like containers.
+//
+// Even when a reduction is mathematically commutative (sum), floating-point
+// arithmetic is not associative, and unordered_map iteration order is not
+// specified. Sorting keys first gives stable, cross-platform accumulation
+// order and makes simulation outcomes easier to reproduce.
+//
+// Returns the sum of all finite, positive mapped values in deterministic key
+// order. Uses long double for improved numeric stability.
+template <typename Map>
+inline long double stable_sum_nonneg_sorted_ld(const Map& m) {
+  long double acc = 0.0L;
+  const auto keys = sorted_keys(m);
+  for (const auto& k : keys) {
+    auto it = m.find(k);
+    if (it == m.end()) continue;
+    const long double v = static_cast<long double>(it->second);
+    const double dv = static_cast<double>(v);
+    if (std::isnan(dv) || std::isinf(dv)) continue;
+    if (dv > 0.0) acc += v;
+  }
+  return acc;
+}
+
+template <typename Map>
+inline double stable_sum_nonneg_sorted(const Map& m) {
+  return static_cast<double>(stable_sum_nonneg_sorted_ld(m));
+}
+
 // Treaty helpers.
 //
 // Treaties are stored in GameState with faction ids normalized (faction_a < faction_b).

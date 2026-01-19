@@ -1854,6 +1854,13 @@ class Simulation {
   bool issue_salvage_wreck(Id ship_id, Id wreck_id, const std::string& mineral, double tons = 0.0,
                            bool restrict_to_discovered = false);
 
+  // Salvage a wreck to completion by shuttling minerals to a friendly colony.
+  //
+  // If dropoff_colony_id is invalid, the simulation will pick the nearest
+  // reachable friendly colony (same faction) when unloading is required.
+  bool issue_salvage_wreck_loop(Id ship_id, Id wreck_id, Id dropoff_colony_id = kInvalidId,
+                               bool restrict_to_discovered = false);
+
   // Exploration anomalies.
   // Move to an anomaly and (once implemented) investigate it for rewards.
   //

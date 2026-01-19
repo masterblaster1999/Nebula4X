@@ -610,6 +610,12 @@ Value order_to_json(const Order& order) {
           obj["wreck_id"] = static_cast<double>(o.wreck_id);
           if (!o.mineral.empty()) obj["mineral"] = o.mineral;
           obj["tons"] = o.tons;
+        } else if constexpr (std::is_same_v<T, SalvageWreckLoop>) {
+          obj["type"] = std::string("salvage_wreck_loop");
+          obj["wreck_id"] = static_cast<double>(o.wreck_id);
+          if (o.dropoff_colony_id != kInvalidId) obj["dropoff_colony_id"] = static_cast<double>(o.dropoff_colony_id);
+          if (o.restrict_to_discovered) obj["restrict_to_discovered"] = true;
+          obj["mode"] = static_cast<double>(o.mode);
         } else if constexpr (std::is_same_v<T, InvestigateAnomaly>) {
           obj["type"] = std::string("investigate_anomaly");
           obj["anomaly_id"] = static_cast<double>(o.anomaly_id);
@@ -786,6 +792,21 @@ Order order_from_json(const Value& v) {
     s.wreck_id = static_cast<Id>(o.at("wreck_id").int_value(kInvalidId));
     if (auto it = o.find("mineral"); it != o.end()) s.mineral = it->second.string_value();
     if (auto it = o.find("tons"); it != o.end()) s.tons = it->second.number_value(0.0);
+    return s;
+  }
+  if (type == "salvage_wreck_loop") {
+    SalvageWreckLoop s;
+    s.wreck_id = static_cast<Id>(o.at("wreck_id").int_value(kInvalidId));
+    if (auto it = o.find("dropoff_colony_id"); it != o.end()) {
+      s.dropoff_colony_id = static_cast<Id>(it->second.int_value(kInvalidId));
+    }
+    if (auto it = o.find("restrict_to_discovered"); it != o.end()) {
+      s.restrict_to_discovered = it->second.bool_value(false);
+    }
+    if (auto it = o.find("mode"); it != o.end()) {
+      s.mode = static_cast<int>(it->second.int_value(0));
+    }
+    if (s.mode != 0 && s.mode != 1) s.mode = 0;
     return s;
   }
   if (type == "investigate_anomaly") {

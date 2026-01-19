@@ -209,6 +209,24 @@ struct SalvageWreck {
   double tons{0.0};
 };
 
+// Salvage a wreck to completion with automatic unloading to a friendly colony.
+//
+// Behaviour:
+//  - Salvage until cargo is full or the wreck is empty.
+//  - Travel to a friendly colony (same faction) and unload all minerals.
+//  - Return to the wreck and repeat until it is depleted.
+//
+// Notes:
+//  - dropoff_colony_id is optional. If invalid, the simulation will pick the
+//    nearest reachable friendly colony when unloading is required.
+//  - mode: 0 = salvage stage, 1 = unload stage
+struct SalvageWreckLoop {
+  Id wreck_id{kInvalidId};
+  Id dropoff_colony_id{kInvalidId};
+  bool restrict_to_discovered{false};
+  int mode{0};
+};
+
 // Investigate an anomaly (point of interest) in a system.
 //
 // The ship will move to the anomaly position and (once implemented) remain on
@@ -273,6 +291,7 @@ using Order = std::variant<MoveToPoint,
                            InvadeColony,
                            BombardColony,
                            SalvageWreck,
+                           SalvageWreckLoop,
                            InvestigateAnomaly,
                            TransferCargoToShip,
                            TransferFuelToShip,

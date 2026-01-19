@@ -1339,6 +1339,42 @@ bool Simulation::issue_salvage_wreck(Id ship_id, Id wreck_id, const std::string&
   return true;
 }
 
+bool Simulation::issue_salvage_wreck_loop(Id ship_id, Id wreck_id, Id dropoff_colony_id,
+                                          bool restrict_to_discovered) {
+  auto* ship = find_ptr(state_.ships, ship_id);
+  if (!ship) return false;
+  const auto* wreck = find_ptr(state_.wrecks, wreck_id);
+  if (!wreck) return false;
+
+  const Id wreck_sys = wreck->system_id;
+  if (wreck_sys == kInvalidId) return false;
+  if (!find_ptr(state_.systems, wreck_sys)) return false;
+
+  // Validate explicit dropoff if provided.
+  if (dropoff_colony_id != kInvalidId) {
+    const auto* col = find_ptr(state_.colonies, dropoff_colony_id);
+    if (!col) return false;
+    if (col->faction_id != ship->faction_id) return false;
+    const auto* body = find_ptr(state_.bodies, col->body_id);
+    if (!body) return false;
+    if (body->system_id == kInvalidId) return false;
+    if (!find_ptr(state_.systems, body->system_id)) return false;
+  }
+
+  // Ensure the ship routes to the wreck system first (queued jump legs).
+  if (!issue_travel_to_system(ship_id, wreck_sys, restrict_to_discovered, wreck->position_mkm)) return false;
+
+  auto& orders = state_.ship_orders[ship_id];
+  SalvageWreckLoop loop;
+  loop.wreck_id = wreck_id;
+  loop.dropoff_colony_id = dropoff_colony_id;
+  loop.restrict_to_discovered = restrict_to_discovered;
+  loop.mode = 0;
+  orders.queue.push_back(std::move(loop));
+  return true;
+}
+
+
 
 
 bool Simulation::issue_investigate_anomaly(Id ship_id, Id anomaly_id, bool restrict_to_discovered) {

@@ -15,26 +15,14 @@
 
 #include "nebula4x/core/simulation.h"
 #include "nebula4x/util/sorted_keys.h"
+#include "nebula4x/util/hash_rng.h"
 
 namespace nebula4x {
 namespace {
 
-// splitmix64: fast deterministic mixing suitable for procedural noise.
-// Public domain; widely used in hash seeding.
-//
-// We use it only for *tiny* deterministic perturbations, never for security.
-std::uint64_t splitmix64(std::uint64_t x) {
-  x += 0x9e3779b97f4a7c15ULL;
-  x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
-  x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
-  return x ^ (x >> 31);
-}
-
 double hash_unit01(std::uint64_t x) {
-  const std::uint64_t h = splitmix64(x);
-  // Convert top 53 bits into a [0,1) double.
-  const std::uint64_t mant = (h >> 11);
-  return static_cast<double>(mant) / static_cast<double>(1ULL << 53);
+  const std::uint64_t h = ::nebula4x::util::splitmix64(x);
+  return ::nebula4x::util::u01_from_u64(h);
 }
 
 double clamp01(double x) {
@@ -156,7 +144,8 @@ std::vector<std::vector<double>> jump_graph_distances(const GameState& s, const 
   }
 
   std::vector<std::vector<std::pair<int, double>>> adj(n);
-  for (const auto& [_, jp] : s.jump_points) {
+  for (Id jid : util::sorted_keys(s.jump_points)) {
+    const auto& jp = s.jump_points.at(jid);
     const auto* other = find_ptr(s.jump_points, jp.linked_jump_id);
     if (!other) continue;
     const auto it_a = idx.find(jp.system_id);
@@ -167,6 +156,14 @@ std::vector<std::vector<double>> jump_graph_distances(const GameState& s, const 
     if (a == b) continue;
     const double w = (pos[a] - pos[b]).length();
     adj[a].push_back({b, w});
+  }
+
+  // Ensure deterministic processing order in the shortest-path pass.
+  for (auto& edges : adj) {
+    std::sort(edges.begin(), edges.end(), [](const auto& lhs, const auto& rhs) {
+      if (lhs.first != rhs.first) return lhs.first < rhs.first;
+      return lhs.second < rhs.second;
+    });
   }
 
   // Dijkstra from each node.
@@ -239,34 +236,38 @@ TradeNetwork compute_trade_network(const Simulation& sim, const TradeNetworkOpti
   std::vector<double> colony_pop_m(n, 0.0);
 
   if (opt.include_colony_contributions) {
-    for (const auto& [cid, c] : s.colonies) {
-      (void)cid;
+    for (Id cid : util::sorted_keys(s.colonies)) {
+      const Colony& c = s.colonies.at(cid);
       const auto* b = find_ptr(s.bodies, c.body_id);
       if (!b) continue;
       const auto it = sys_index.find(b->system_id);
       if (it == sys_index.end()) continue;
       const int si = it->second;
 
-      colony_pop_m[si] += std::max(0.0, c.population_millions);
+      const double pop = std::max(0.0, c.population_millions);
+      colony_pop_m[si] += pop;
 
       // Baseline civilian demand signal.
-      const double pop = std::max(0.0, c.population_millions);
       colony_demand[si][trade_good_index(TradeGoodKind::ProcessedMetals)] += pop / 50000.0;
       colony_demand[si][trade_good_index(TradeGoodKind::ProcessedMinerals)] += pop / 60000.0;
       colony_demand[si][trade_good_index(TradeGoodKind::Fuel)] += pop / 40000.0;
 
-      for (const auto& [inst_id, count] : c.installations) {
+      // Deterministic iteration order: installations + resource maps are unordered_maps.
+      for (const auto& inst_id : util::sorted_keys(c.installations)) {
+        const int count = c.installations.at(inst_id);
         if (count <= 0) continue;
         const auto def_it = content.installations.find(inst_id);
         if (def_it == content.installations.end()) continue;
         const InstallationDef& def = def_it->second;
 
-        for (const auto& [res_id, per_day] : def.produces_per_day) {
+        for (const auto& res_id : util::sorted_keys(def.produces_per_day)) {
+          const double per_day = def.produces_per_day.at(res_id);
           if (per_day <= 0.0) continue;
           const TradeGoodKind k = kind_for_resource(content, res_id);
           colony_supply[si][trade_good_index(k)] += (per_day * static_cast<double>(count)) / std::max(1.0, opt.colony_tons_per_unit);
         }
-        for (const auto& [res_id, per_day] : def.consumes_per_day) {
+        for (const auto& res_id : util::sorted_keys(def.consumes_per_day)) {
+          const double per_day = def.consumes_per_day.at(res_id);
           if (per_day <= 0.0) continue;
           const TradeGoodKind k = kind_for_resource(content, res_id);
           colony_demand[si][trade_good_index(k)] += (per_day * static_cast<double>(count)) / std::max(1.0, opt.colony_tons_per_unit);

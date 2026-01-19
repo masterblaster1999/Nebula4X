@@ -550,7 +550,20 @@ std::vector<std::string> validate_game_state(const GameState& s, const ContentDB
                 if (!std::isfinite(ord.tons) || ord.tons < 0.0) {
                   push(errors, prefix() + join("SalvageWreck has invalid tons ", ord.tons));
                 }
-              } else if constexpr (std::is_same_v<T, InvestigateAnomaly>) {
+              } else if constexpr (std::is_same_v<T, SalvageWreckLoop>) {
+              if (ord.wreck_id == kInvalidId) {
+                push(errors, prefix() + "SalvageWreckLoop has invalid wreck_id");
+              } else if (!has_wreck(ord.wreck_id)) {
+                push(errors, prefix() + join("SalvageWreckLoop references missing wreck_id ", id_u64(ord.wreck_id)));
+              }
+              if (ord.dropoff_colony_id != kInvalidId && !has_colony(ord.dropoff_colony_id)) {
+                push(errors, prefix() + join("SalvageWreckLoop references missing dropoff_colony_id ",
+                                             id_u64(ord.dropoff_colony_id)));
+              }
+              if (ord.mode != 0 && ord.mode != 1) {
+                push(errors, prefix() + join("SalvageWreckLoop has invalid mode ", ord.mode));
+              }
+            } else if constexpr (std::is_same_v<T, InvestigateAnomaly>) {
                 if (ord.anomaly_id == kInvalidId) {
                   push(errors, prefix() + "InvestigateAnomaly has invalid anomaly_id");
                 } else if (!has_anomaly(ord.anomaly_id)) {
@@ -769,6 +782,19 @@ std::vector<std::string> validate_game_state(const GameState& s, const ContentDB
               }
               if (!std::isfinite(ord.tons) || ord.tons < 0.0) {
                 push(errors, prefix() + join("SalvageWreck has invalid tons ", ord.tons));
+              }
+            } else if constexpr (std::is_same_v<T, SalvageWreckLoop>) {
+              if (ord.wreck_id == kInvalidId) {
+                push(errors, prefix() + "SalvageWreckLoop has invalid wreck_id");
+              } else if (!has_wreck(ord.wreck_id)) {
+                push(errors, prefix() + join("SalvageWreckLoop references missing wreck_id ", id_u64(ord.wreck_id)));
+              }
+              if (ord.dropoff_colony_id != kInvalidId && !has_colony(ord.dropoff_colony_id)) {
+                push(errors, prefix() + join("SalvageWreckLoop references missing dropoff_colony_id ",
+                                             id_u64(ord.dropoff_colony_id)));
+              }
+              if (ord.mode != 0 && ord.mode != 1) {
+                push(errors, prefix() + join("SalvageWreckLoop has invalid mode ", ord.mode));
               }
             } else if constexpr (std::is_same_v<T, InvestigateAnomaly>) {
               if (ord.anomaly_id == kInvalidId) {
@@ -2252,6 +2278,21 @@ FixReport fix_game_state(GameState& s, const ContentDB* content) {
                 note(join("Fix: ", owner, " ", list_name, "[", i, "] SalvageWreck tons clamped ", ord.tons,
                           " -> 0"));
                 ord.tons = 0.0;
+              }
+            } else if constexpr (std::is_same_v<T, SalvageWreckLoop>) {
+              if (ord.wreck_id == kInvalidId || !has_wreck(ord.wreck_id)) {
+                keep = false;
+                drop(i, "SalvageWreckLoop invalid wreck_id");
+              }
+              if (ord.dropoff_colony_id != kInvalidId && !has_colony(ord.dropoff_colony_id)) {
+                note(join("Fix: ", owner, " ", list_name, "[", i, "] SalvageWreckLoop dropoff_colony_id cleared ",
+                          id_u64(ord.dropoff_colony_id)));
+                ord.dropoff_colony_id = kInvalidId;
+              }
+              if (ord.mode != 0 && ord.mode != 1) {
+                note(join("Fix: ", owner, " ", list_name, "[", i, "] SalvageWreckLoop mode clamped ", ord.mode,
+                          " -> 0"));
+                ord.mode = 0;
               }
             } else if constexpr (std::is_same_v<T, InvestigateAnomaly>) {
               if (ord.anomaly_id == kInvalidId || !has_anomaly(ord.anomaly_id)) {

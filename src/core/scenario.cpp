@@ -455,8 +455,24 @@ double rand_real(std::mt19937& rng, double lo, double hi) {
 }
 
 int rand_int(std::mt19937& rng, int lo, int hi) {
-  std::uniform_int_distribution<int> dist(lo, hi);
-  return dist(rng);
+  if (hi <= lo) return lo;
+
+  // Deterministic, unbiased integer range sampling.
+  // std::uniform_int_distribution does not specify an exact algorithm,
+  // so the same seed can produce different sequences across standard library implementations.
+  const std::int64_t lo64 = static_cast<std::int64_t>(lo);
+  const std::int64_t hi64 = static_cast<std::int64_t>(hi);
+  const std::uint64_t range = static_cast<std::uint64_t>(hi64 - lo64) + 1ULL;
+
+  const std::uint64_t umax = std::numeric_limits<std::uint64_t>::max();
+  const std::uint64_t limit = umax - (umax % range);
+
+  std::uint64_t x = 0ULL;
+  do {
+    x = (static_cast<std::uint64_t>(rng()) << 32) | static_cast<std::uint64_t>(rng());
+  } while (x >= limit);
+
+  return static_cast<int>(lo64 + static_cast<std::int64_t>(x % range));
 }
 
 // Simple Box-Muller normal sampler (deterministic given rand_unit()).
@@ -2206,16 +2222,44 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
     const std::uint64_t k = edge_key(a_idx, b_idx);
     if (!edges.insert(k).second) return false;
 
-    // Create two jump points with random positions inside each system's map.
-    auto make_pos = [&](const SysInfo& from) -> Vec2 {
-      const double r = std::max(30.0, from.max_orbit_extent_mkm * 0.35);
-      const double ang = rand_real(rng, 0.0, kTwoPi);
-      const double rad = r * (0.65 + 0.4 * rand_unit(rng));
-      return {rad * std::cos(ang), rad * std::sin(ang)};
-    };
-
     const SysInfo& sa = systems[static_cast<std::size_t>(a_idx)];
     const SysInfo& sb = systems[static_cast<std::size_t>(b_idx)];
+
+    // Use a per-edge PRNG for jump point placement so that changing the
+    // in-system placement algorithm does not perturb the lane topology.
+    const std::uint32_t lo = static_cast<std::uint32_t>(k >> 32);
+    const std::uint32_t hi = static_cast<std::uint32_t>(k & 0xffffffffu);
+    const std::uint32_t base = hash_u32(seed ^ hash_u32(lo * 0x9E3779B9u ^ hi * 0x85EBCA6Bu));
+
+    std::mt19937 prng_a(base ^ 0xA17B3E57u);
+    std::mt19937 prng_b(base ^ 0xC0FFEE77u);
+
+    // Deterministic but *directional* placement: jump points are biased toward
+    // the linked system on the galaxy map, which makes system navigation
+    // feel coherent.
+    auto make_pos = [&](const SysInfo& from, const SysInfo& to, std::mt19937& prng) -> Vec2 {
+      const double r = std::max(30.0, from.max_orbit_extent_mkm * 0.35);
+      const double rad = r * (0.65 + 0.4 * rand_unit(prng));
+
+      Vec2 dir = (to.galaxy_pos - from.galaxy_pos);
+      if (dir.length() <= 1e-9) {
+        const double ang = rand_real(prng, 0.0, kTwoPi);
+        return {rad * std::cos(ang), rad * std::sin(ang)};
+      }
+      dir = dir.normalized();
+
+      // Small angular jitter so multiple lanes don't perfectly overlap.
+      const double jitter = std::clamp(rand_normal(prng, 0.0, 0.10), -0.35, 0.35);
+      const double ca = std::cos(jitter);
+      const double sa = std::sin(jitter);
+      Vec2 d{dir.x * ca - dir.y * sa, dir.x * sa + dir.y * ca};
+      Vec2 p{-d.y, d.x};
+
+      const double lateral = std::clamp(rand_normal(prng, 0.0, r * 0.12), -r * 0.35, r * 0.35);
+      const double along = std::clamp(rand_normal(prng, 0.0, r * 0.06), -r * 0.20, r * 0.20);
+
+      return d * (rad + along) + p * lateral;
+    };
 
     const Id jp_a = allocate_id(s);
     const Id jp_b = allocate_id(s);
@@ -2223,15 +2267,15 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
     JumpPoint a;
     a.id = jp_a;
     a.system_id = sa.id;
-    a.name = "Jump Point";
-    a.position_mkm = make_pos(sa);
+    a.name = "To " + sb.name;
+    a.position_mkm = make_pos(sa, sb, prng_a);
     a.linked_jump_id = jp_b;
 
     JumpPoint b;
     b.id = jp_b;
     b.system_id = sb.id;
-    b.name = "Jump Point";
-    b.position_mkm = make_pos(sb);
+    b.name = "To " + sa.name;
+    b.position_mkm = make_pos(sb, sa, prng_b);
     b.linked_jump_id = jp_a;
 
     s.jump_points[jp_a] = a;
@@ -2417,10 +2461,11 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
 
         const int start = static_cast<int>(pairs.size() * 0.65);
         if (start < static_cast<int>(pairs.size())) {
-          std::uniform_int_distribution<int> pick(start, static_cast<int>(pairs.size()) - 1);
+          const int end = static_cast<int>(pairs.size()) - 1;
           int added = 0;
           for (int tries = 0; tries < 200 && added < long_target; ++tries) {
-            const auto& e = pairs[static_cast<std::size_t>(pick(rng))];
+            const int idx = rand_int(rng, start, end);
+            const auto& e = pairs[static_cast<std::size_t>(idx)];
             if (add_jump_link(e.a, e.b)) ++added;
           }
         }
@@ -3099,6 +3144,151 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
     }
   }
 
+  // --- Jump network analytics ---
+  //
+  // We compute a few lightweight topology metrics to place procedural
+  // content (independent outposts, anomalies, salvage) in strategically
+  // interesting locations (trade hubs, chokepoints) rather than purely
+  // random systems.
+  std::vector<double> jump_betweenness01(static_cast<std::size_t>(num_systems), 0.0);
+  std::vector<double> jump_hub01(static_cast<std::size_t>(num_systems), 0.0);
+  std::vector<char> jump_articulation(static_cast<std::size_t>(num_systems), 0);
+
+  if (num_systems > 0) {
+    std::vector<std::vector<int>> adj(static_cast<std::size_t>(num_systems));
+    for (const auto& ek : edges) {
+      const int a = static_cast<int>(ek >> 32);
+      const int b = static_cast<int>(ek & 0xffffffffu);
+      if (a < 0 || b < 0 || a >= num_systems || b >= num_systems || a == b) continue;
+      adj[static_cast<std::size_t>(a)].push_back(b);
+      adj[static_cast<std::size_t>(b)].push_back(a);
+    }
+    for (auto& v : adj) {
+      std::sort(v.begin(), v.end());
+      v.erase(std::unique(v.begin(), v.end()), v.end());
+    }
+
+    std::vector<int> deg(static_cast<std::size_t>(num_systems), 0);
+    int max_deg = 1;
+    for (int i = 0; i < num_systems; ++i) {
+      deg[static_cast<std::size_t>(i)] = static_cast<int>(adj[static_cast<std::size_t>(i)].size());
+      max_deg = std::max(max_deg, deg[static_cast<std::size_t>(i)]);
+    }
+
+    // --- Articulation points (Tarjan) ---
+    {
+      std::vector<int> disc(static_cast<std::size_t>(num_systems), -1);
+      std::vector<int> low(static_cast<std::size_t>(num_systems), -1);
+      std::vector<int> parent(static_cast<std::size_t>(num_systems), -1);
+      int timer = 0;
+
+      auto dfs = [&](auto&& self, int u) -> void {
+        disc[static_cast<std::size_t>(u)] = timer;
+        low[static_cast<std::size_t>(u)] = timer;
+        timer += 1;
+        int children = 0;
+
+        for (int v : adj[static_cast<std::size_t>(u)]) {
+          if (disc[static_cast<std::size_t>(v)] == -1) {
+            parent[static_cast<std::size_t>(v)] = u;
+            children += 1;
+            self(self, v);
+            low[static_cast<std::size_t>(u)] = std::min(low[static_cast<std::size_t>(u)], low[static_cast<std::size_t>(v)]);
+
+            if (parent[static_cast<std::size_t>(u)] == -1 && children > 1) {
+              jump_articulation[static_cast<std::size_t>(u)] = 1;
+            }
+            if (parent[static_cast<std::size_t>(u)] != -1 && low[static_cast<std::size_t>(v)] >= disc[static_cast<std::size_t>(u)]) {
+              jump_articulation[static_cast<std::size_t>(u)] = 1;
+            }
+          } else if (v != parent[static_cast<std::size_t>(u)]) {
+            low[static_cast<std::size_t>(u)] = std::min(low[static_cast<std::size_t>(u)], disc[static_cast<std::size_t>(v)]);
+          }
+        }
+      };
+
+      for (int i = 0; i < num_systems; ++i) {
+        if (disc[static_cast<std::size_t>(i)] == -1) dfs(dfs, i);
+      }
+    }
+
+    // --- Betweenness centrality (Brandes, unweighted) ---
+    {
+      std::vector<double> bc(static_cast<std::size_t>(num_systems), 0.0);
+
+      std::vector<int> q;
+      q.reserve(static_cast<std::size_t>(num_systems));
+      std::vector<int> stack;
+      stack.reserve(static_cast<std::size_t>(num_systems));
+
+      std::vector<std::vector<int>> pred(static_cast<std::size_t>(num_systems));
+      std::vector<int> dist(static_cast<std::size_t>(num_systems), -1);
+      std::vector<double> sigma(static_cast<std::size_t>(num_systems), 0.0);
+      std::vector<double> delta(static_cast<std::size_t>(num_systems), 0.0);
+
+      for (int s0 = 0; s0 < num_systems; ++s0) {
+        for (auto& v : pred) v.clear();
+        std::fill(dist.begin(), dist.end(), -1);
+        std::fill(sigma.begin(), sigma.end(), 0.0);
+        std::fill(delta.begin(), delta.end(), 0.0);
+        q.clear();
+        stack.clear();
+
+        dist[static_cast<std::size_t>(s0)] = 0;
+        sigma[static_cast<std::size_t>(s0)] = 1.0;
+        q.push_back(s0);
+        std::size_t qh = 0;
+
+        while (qh < q.size()) {
+          const int v = q[qh++];
+          stack.push_back(v);
+          const int dv = dist[static_cast<std::size_t>(v)];
+
+          for (int w : adj[static_cast<std::size_t>(v)]) {
+            if (dist[static_cast<std::size_t>(w)] < 0) {
+              dist[static_cast<std::size_t>(w)] = dv + 1;
+              q.push_back(w);
+            }
+            if (dist[static_cast<std::size_t>(w)] == dv + 1) {
+              sigma[static_cast<std::size_t>(w)] += sigma[static_cast<std::size_t>(v)];
+              pred[static_cast<std::size_t>(w)].push_back(v);
+            }
+          }
+        }
+
+        for (int si = static_cast<int>(stack.size()) - 1; si >= 0; --si) {
+          const int w = stack[static_cast<std::size_t>(si)];
+          const double sw = sigma[static_cast<std::size_t>(w)];
+          if (sw <= 0.0) continue;
+
+          for (int v : pred[static_cast<std::size_t>(w)]) {
+            const double sv = sigma[static_cast<std::size_t>(v)];
+            if (sv <= 0.0) continue;
+            delta[static_cast<std::size_t>(v)] += (sv / sw) * (1.0 + delta[static_cast<std::size_t>(w)]);
+          }
+          if (w != s0) bc[static_cast<std::size_t>(w)] += delta[static_cast<std::size_t>(w)];
+        }
+      }
+
+      // Normalize to [0,1] for easy use in content weights.
+      double max_bc = 0.0;
+      for (double v : bc) max_bc = std::max(max_bc, v);
+      if (max_bc > 1e-12) {
+        for (int i = 0; i < num_systems; ++i) {
+          jump_betweenness01[static_cast<std::size_t>(i)] = std::clamp(bc[static_cast<std::size_t>(i)] / max_bc, 0.0, 1.0);
+        }
+      }
+    }
+
+    // Hub score: combine betweenness (traffic) with local degree (redundancy).
+    for (int i = 0; i < num_systems; ++i) {
+      const double deg01 = std::clamp(static_cast<double>(deg[static_cast<std::size_t>(i)]) / static_cast<double>(max_deg), 0.0, 1.0);
+      const double bet01 = jump_betweenness01[static_cast<std::size_t>(i)];
+      jump_hub01[static_cast<std::size_t>(i)] = std::clamp(0.65 * bet01 + 0.35 * deg01, 0.0, 1.0);
+    }
+  }
+
+
 // --- Derelict wrecks / salvage sites (procedural) ---
   // Placed as stationary salvageable objects to create early exploration incentives.
   {
@@ -3216,11 +3406,14 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
       double dist{0.0};
       double nebula{0.0};
       double extent{0.0};
+      double hub01{0.0};
+      double choke01{0.0};
       std::string name;
     };
 
     std::vector<SysPick> picks;
     picks.reserve(systems.size());
+    int sys_idx = 0;
     for (const auto& si : systems) {
       SysPick p;
       p.id = si.id;
@@ -3228,8 +3421,16 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
       p.dist = (si.galaxy_pos - systems.front().galaxy_pos).length();
       p.nebula = si.nebula_density;
       p.extent = si.max_orbit_extent_mkm;
+      p.hub01 = (sys_idx >= 0 && sys_idx < static_cast<int>(jump_hub01.size()))
+                   ? jump_hub01[static_cast<std::size_t>(sys_idx)]
+                   : 0.0;
+      p.choke01 = (sys_idx >= 0 && sys_idx < static_cast<int>(jump_articulation.size()) &&
+                   jump_articulation[static_cast<std::size_t>(sys_idx)])
+                      ? 1.0
+                      : 0.0;
       p.name = si.name;
       picks.push_back(std::move(p));
+      sys_idx += 1;
     }
     std::sort(picks.begin(), picks.end(), [](const SysPick& a, const SysPick& b) { return a.dist < b.dist; });
 
@@ -3249,6 +3450,8 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
       for (int i = lo; i < hi; ++i) {
         if (used_sys.count(picks[static_cast<std::size_t>(i)].id)) continue;
         double w = 1.0 + 2.0 * clamp01(picks[static_cast<std::size_t>(i)].nebula);
+        w *= 0.85 + 0.50 * std::clamp(picks[static_cast<std::size_t>(i)].hub01, 0.0, 1.0);
+        w *= 1.0 + 0.10 * std::clamp(picks[static_cast<std::size_t>(i)].choke01, 0.0, 1.0);
         if (const auto* reg = find_ptr(s.regions, picks[static_cast<std::size_t>(i)].region_id)) {
           w *= 1.0 + 0.60 * clamp01(reg->ruins_density);
         }
@@ -3260,6 +3463,8 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
       for (int i = lo; i < hi; ++i) {
         if (used_sys.count(picks[static_cast<std::size_t>(i)].id)) continue;
         double w = 1.0 + 2.0 * clamp01(picks[static_cast<std::size_t>(i)].nebula);
+        w *= 0.85 + 0.50 * std::clamp(picks[static_cast<std::size_t>(i)].hub01, 0.0, 1.0);
+        w *= 1.0 + 0.10 * std::clamp(picks[static_cast<std::size_t>(i)].choke01, 0.0, 1.0);
         if (const auto* reg = find_ptr(s.regions, picks[static_cast<std::size_t>(i)].region_id)) {
           w *= 1.0 + 0.60 * clamp01(reg->ruins_density);
         }
@@ -3329,6 +3534,9 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
 
         const double dn = std::clamp(p.dist / max_dist, 0.0, 1.0);
         double w = (0.10 + 2.40 * ruins) * (0.55 + 0.75 * dn) * (0.85 + 0.35 * clamp01(p.nebula));
+        const double hub = std::clamp(p.hub01, 0.0, 1.0);
+        const double choke = std::clamp(p.choke01, 0.0, 1.0);
+        w *= (0.85 + 0.50 * hub) * (1.0 + 0.15 * choke);
         if (w <= 0.0) continue;
 
         cands.push_back({&p, w});
@@ -3365,7 +3573,10 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
           // Prefer placing ruins near jump points in more connected systems.
           Vec2 pos = random_offset(80.0, std::max(180.0, sp ? (sp->extent + 90.0) : 180.0));
           if (sp) {
-            if (const auto* ss = find_ptr(s.systems, sp->id); ss && !ss->jump_points.empty() && rand_unit(wrng) < 0.60) {
+            const double near_jp_p = std::clamp(0.45 + 0.35 * std::clamp(sp->hub01, 0.0, 1.0) +
+                                                    0.10 * std::clamp(sp->choke01, 0.0, 1.0),
+                                                0.25, 0.95);
+            if (const auto* ss = find_ptr(s.systems, sp->id); ss && !ss->jump_points.empty() && rand_unit(wrng) < near_jp_p) {
               const Id jpid = ss->jump_points[static_cast<std::size_t>(rand_int(wrng, 0, (int)ss->jump_points.size() - 1))];
               if (const auto* jp = find_ptr(s.jump_points, jpid)) {
                 pos = jp->position_mkm + random_offset(10.0, 36.0);
@@ -3465,6 +3676,8 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
       double ruins{0.0};
       double neb{0.0};
       double dist_norm{0.0};
+      double hub01{0.0};
+      double choke01{0.0};
       double w{0.0};
     };
 
@@ -3478,9 +3691,18 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
       if (d > max_dist) max_dist = d;
     }
 
-    for (const auto& si : systems) {
+    for (int sys_i = 0; sys_i < static_cast<int>(systems.size()); ++sys_i) {
+      const auto& si = systems[static_cast<std::size_t>(sys_i)];
       if (si.id == kInvalidId) continue;
       if (si.id == home_system) continue;
+
+      const double hub01 = (sys_i >= 0 && sys_i < static_cast<int>(jump_hub01.size()))
+                             ? jump_hub01[static_cast<std::size_t>(sys_i)]
+                             : 0.0;
+      const double choke01 = (sys_i >= 0 && sys_i < static_cast<int>(jump_articulation.size()) &&
+                              jump_articulation[static_cast<std::size_t>(sys_i)])
+                                 ? 1.0
+                                 : 0.0;
 
       const Region* reg = find_ptr(s.regions, si.region_id);
       const double ruins = reg ? clamp01(reg->ruins_density) : 0.0;
@@ -3488,9 +3710,10 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
       const double dn = std::clamp((si.galaxy_pos - home_pos).length() / max_dist, 0.0, 1.0);
 
       double w = (0.20 + 2.30 * ruins) * (0.55 + 0.85 * dn) * (0.90 + 0.40 * neb);
+      w *= std::clamp(0.85 + 0.45 * hub01 + 0.20 * choke01, 0.50, 1.80);
       if (w <= 0.0) continue;
 
-      cands.push_back({&si, ruins, neb, dn, w});
+      cands.push_back({&si, ruins, neb, dn, hub01, choke01, w});
     }
 
     // Small, safe component unlock pool (optional).
@@ -3550,10 +3773,14 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
       const double neb = cands[sel].neb;
       const double dn = cands[sel].dist_norm;
 
+      const double hub01 = cands[sel].hub01;
+      const double choke01 = cands[sel].choke01;
+      const double near_jp_p = std::clamp(0.40 + 0.45 * hub01 + 0.15 * choke01, 0.25, 0.95);
+
       // Prefer placing anomalies near jump points for discoverability.
       Vec2 pos = random_offset(70.0, std::max(180.0, si ? (si->max_orbit_extent_mkm + 90.0) : 180.0));
       if (si) {
-        if (const auto* ss = find_ptr(s.systems, si->id); ss && !ss->jump_points.empty() && rand_unit(arng) < 0.55) {
+        if (const auto* ss = find_ptr(s.systems, si->id); ss && !ss->jump_points.empty() && rand_unit(arng) < near_jp_p) {
           const Id jpid = ss->jump_points[static_cast<std::size_t>(rand_int(arng, 0, (int)ss->jump_points.size() - 1))];
           if (const auto* jp = find_ptr(s.jump_points, jpid)) {
             pos = jp->position_mkm + random_offset(10.0, 36.0);
@@ -3833,8 +4060,17 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
       const double dist = (si.galaxy_pos - center).length();
       const double central01 = 1.0 - std::clamp(dist / max_r, 0.0, 1.0);
 
-      // Prefer hubs / more connected systems, with a small centrality bonus.
-      double w = 0.25 + 0.75 * std::clamp(0.6 * deg01 + 0.4 * central01, 0.0, 1.0);
+      const double net_hub01 = (i >= 0 && i < static_cast<int>(jump_hub01.size()))
+                                 ? jump_hub01[static_cast<std::size_t>(i)]
+                                 : deg01;
+      const double choke01 = (i >= 0 && i < static_cast<int>(jump_articulation.size()) &&
+                              jump_articulation[static_cast<std::size_t>(i)])
+                                 ? 1.0
+                                 : 0.0;
+
+      // Prefer actual traffic hubs (betweenness/degree), with a small galaxy-central bonus.
+      double w = 0.20 + 0.80 * std::clamp(0.70 * net_hub01 + 0.30 * central01, 0.0, 1.0);
+      w *= 0.93 + 0.14 * choke01;
 
       // Region bias: richer + less pirate-ridden space attracts more independent settlers.
       if (si.region_id != kInvalidId) {
@@ -3904,7 +4140,8 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
     for (int k = 0; k < want; ++k) {
       if (cands.empty()) break;
       const int sel = take_weighted(cands);
-      const SysInfo si = systems[static_cast<std::size_t>(cands[static_cast<std::size_t>(sel)].idx)];
+      const int sys_i = cands[static_cast<std::size_t>(sel)].idx;
+      const SysInfo si = systems[static_cast<std::size_t>(sys_i)];
       cands.erase(cands.begin() + sel);
 
       // Choose a colonizable body in the system.
@@ -3943,7 +4180,9 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
       }
 
       const int deg = static_cast<int>(s.systems[si.id].jump_points.size());
-      const double hub01 = std::clamp(static_cast<double>(deg) / static_cast<double>(max_degree), 0.0, 1.0);
+      const double hub01 = (sys_i >= 0 && sys_i < static_cast<int>(jump_hub01.size()))
+                              ? jump_hub01[static_cast<std::size_t>(sys_i)]
+                              : std::clamp(static_cast<double>(deg) / static_cast<double>(max_degree), 0.0, 1.0);
 
       // Outpost profile: 0=Mining, 1=Refinery, 2=Smelter, 3=Processor, 4=Arsenal, 5=Freeport, 6=Enclave
       const auto pick_profile = [&]() {

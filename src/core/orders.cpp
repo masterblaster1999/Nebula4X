@@ -82,6 +82,11 @@ std::string order_to_string(const Order& order) {
           if (!o.mineral.empty()) ss << ", mineral=" << o.mineral;
           if (o.tons > 0.0) ss << ", tons=" << o.tons;
           ss << ")";
+        } else if constexpr (std::is_same_v<T, SalvageWreckLoop>) {
+          ss << "SalvageWreckLoop(wreck_id=" << o.wreck_id;
+          if (o.dropoff_colony_id != kInvalidId) ss << ", dropoff_colony_id=" << o.dropoff_colony_id;
+          if (o.restrict_to_discovered) ss << ", restrict_to_discovered=true";
+          ss << ", mode=" << o.mode << ")";
         } else if constexpr (std::is_same_v<T, InvestigateAnomaly>) {
           ss << "InvestigateAnomaly(anomaly_id=" << o.anomaly_id << ", days=" << o.duration_days
              << ", progress=" << o.progress_days << ")";

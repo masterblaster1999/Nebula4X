@@ -15,51 +15,17 @@
 #include <vector>
 
 #include "nebula4x/core/game_state.h"
+#include "nebula4x/util/hash_rng.h"
 
 namespace nebula4x::sim_procgen {
 
 // Deterministic pseudo-random helper.
 //
-// splitmix64 is a fast, high-quality mixer suitable for deriving independent
-// RNG streams from stable seeds like (day, system_id).
-inline std::uint64_t splitmix64(std::uint64_t x) {
-  x += 0x9e3779b97f4a7c15ULL;
-  x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
-  x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
-  return x ^ (x >> 31);
-}
-
-inline double u01_from_u64(std::uint64_t x) {
-  // Use the top 53 bits to build a double in [0,1).
-  const std::uint64_t v = x >> 11;
-  return static_cast<double>(v) * (1.0 / 9007199254740992.0);  // 2^53
-}
-
-struct HashRng {
-  std::uint64_t s{0};
-  explicit HashRng(std::uint64_t seed) : s(seed) {}
-
-  std::uint64_t next_u64() {
-    s = splitmix64(s);
-    return s;
-  }
-
-  double next_u01() { return u01_from_u64(next_u64()); }
-
-  double range(double lo, double hi) {
-    if (!(hi > lo)) return lo;
-    return lo + (hi - lo) * next_u01();
-  }
-
-  int range_int(int lo, int hi_inclusive) {
-    if (hi_inclusive <= lo) return lo;
-    const int span = hi_inclusive - lo + 1;
-    const double u = next_u01();
-    int v = lo + static_cast<int>(u * static_cast<double>(span));
-    if (v > hi_inclusive) v = hi_inclusive;
-    return v;
-  }
-};
+// We centralize the SplitMix64 mixer + HashRng implementation in nebula4x::util
+// so simulation/procgen/AI all share identical RNG behavior.
+using ::nebula4x::util::splitmix64;
+using ::nebula4x::util::u01_from_u64;
+using HashRng = ::nebula4x::util::HashRng;
 
 // Pick a plausible deep-space site position in a system.
 //
@@ -128,23 +94,4 @@ inline std::string pick_unlock_component_id(const ContentDB& content, const Fact
   return candidates[static_cast<std::size_t>(idx)];
 }
 
-// Pick any component id from the content database (no faction filtering).
-//
-// Used for procedural points-of-interest where the investigating faction is not
-// known at spawn time. Resolution-time logic will ignore already-known components.
-inline std::string pick_any_component_id(const ContentDB& content, HashRng& rng) {
-  if (content.components.empty()) return {};
-
-  std::vector<std::string> ids;
-  ids.reserve(content.components.size());
-  for (const auto& [cid, def] : content.components) {
-    (void)def;
-    if (!cid.empty()) ids.push_back(cid);
-  }
-  if (ids.empty()) return {};
-  std::sort(ids.begin(), ids.end());
-  const int idx = rng.range_int(0, static_cast<int>(ids.size()) - 1);
-  return ids[static_cast<std::size_t>(idx)];
-}
-
-}  // namespace nebula4x::sim_procgen
+} // namespace nebula4x::sim_procgen

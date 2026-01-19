@@ -208,6 +208,12 @@ static void hash_order(Digest64& d, const Order& ord) {
           d.add_u64(o.wreck_id);
           d.add_string(o.mineral);
           d.add_double(o.tons);
+        } else if constexpr (std::is_same_v<T, SalvageWreckLoop>) {
+          d.add_u64(24);
+          d.add_u64(o.wreck_id);
+          d.add_u64(o.dropoff_colony_id);
+          d.add_bool(o.restrict_to_discovered);
+          d.add_i64(o.mode);
         } else if constexpr (std::is_same_v<T, InvestigateAnomaly>) {
           d.add_u64(23);
           d.add_u64(o.anomaly_id);

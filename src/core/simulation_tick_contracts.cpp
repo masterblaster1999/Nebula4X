@@ -14,10 +14,12 @@
 
 #include "nebula4x/util/log.h"
 #include "nebula4x/util/trace_events.h"
+#include "nebula4x/util/hash_rng.h"
 
 namespace nebula4x {
 namespace {
 using sim_internal::sorted_keys;
+using sim_internal::stable_sum_nonneg_sorted_ld;
 
 static bool is_player_faction(const GameState& s, Id faction_id) {
   const auto* f = find_ptr(s.factions, faction_id);
@@ -28,25 +30,14 @@ static double clamp01(double v) {
   return std::clamp(v, 0.0, 1.0);
 }
 
-static std::uint64_t splitmix64(std::uint64_t& x) {
-  // Public-domain SplitMix64.
-  std::uint64_t z = (x += 0x9e3779b97f4a7c15ULL);
-  z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
-  z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
-  return z ^ (z >> 31);
-}
-
 static double rand01(std::uint64_t& s) {
-  // 53-bit mantissa.
-  const std::uint64_t v = splitmix64(s) >> 11;
-  return static_cast<double>(v) / static_cast<double>(0x1FFFFFFFFFFFFFULL);
+  const std::uint64_t v = ::nebula4x::util::next_splitmix64(s);
+  return ::nebula4x::util::u01_from_u64(v);
 }
 
 static int rand_int(std::uint64_t& s, int n) {
   if (n <= 1) return 0;
-  const double u = rand01(s);
-  const int idx = static_cast<int>(u * static_cast<double>(n));
-  return std::clamp(idx, 0, n - 1);
+  return static_cast<int>(::nebula4x::util::bounded_u64(s, static_cast<std::uint64_t>(n)));
 }
 
 struct ContractCandidate {
@@ -68,8 +59,7 @@ static std::string contract_kind_label(ContractKind k) {
 }
 
 static double anomaly_value_rp(const Anomaly& a) {
-  double minerals_total = 0.0;
-  for (const auto& [_, t] : a.mineral_reward) minerals_total += std::max(0.0, t);
+  const double minerals_total = static_cast<double>(stable_sum_nonneg_sorted_ld(a.mineral_reward));
   double value = std::max(0.0, a.research_reward);
   value += minerals_total * 0.05; // heuristic: 20t ~ 1 RP
   if (!a.unlock_component_id.empty()) value += 25.0;
@@ -77,8 +67,7 @@ static double anomaly_value_rp(const Anomaly& a) {
 }
 
 static double wreck_value_rp(const Wreck& w) {
-  double total = 0.0;
-  for (const auto& [_, t] : w.minerals) total += std::max(0.0, t);
+  const double total = static_cast<double>(stable_sum_nonneg_sorted_ld(w.minerals));
   // Wreck cargo isn't research directly, but we can treat it as an opportunity cost.
   // Conservative scaling: 50t -> 1 RP.
   return total * 0.02;
@@ -215,7 +204,7 @@ bool Simulation::assign_contract_to_ship(Id contract_id, Id ship_id, bool clear_
       ok = issue_investigate_anomaly(ship_id, c.target_id, restrict_to_discovered);
       break;
     case ContractKind::SalvageWreck:
-      ok = issue_salvage_wreck(ship_id, c.target_id, /*mineral=*/"", /*tons=*/0.0, restrict_to_discovered);
+      ok = issue_salvage_wreck_loop(ship_id, c.target_id, /*dropoff_colony_id=*/kInvalidId, restrict_to_discovered);
       break;
     case ContractKind::SurveyJumpPoint:
       ok = issue_survey_jump_point(ship_id, c.target_id, /*transit_when_done=*/false, restrict_to_discovered);
@@ -333,7 +322,7 @@ bool Simulation::assign_contract_to_fleet(Id contract_id, Id fleet_id, bool clea
       ok = issue_investigate_anomaly(primary_ship_id, c.target_id, restrict_to_discovered);
       break;
     case ContractKind::SalvageWreck:
-      ok = issue_salvage_wreck(primary_ship_id, c.target_id, /*mineral=*/"", /*tons=*/0.0, restrict_to_discovered);
+      ok = issue_salvage_wreck_loop(primary_ship_id, c.target_id, /*dropoff_colony_id=*/kInvalidId, restrict_to_discovered);
       break;
     case ContractKind::SurveyJumpPoint:
       ok = issue_survey_jump_point(primary_ship_id, c.target_id, /*transit_when_done=*/false, restrict_to_discovered);
@@ -560,7 +549,8 @@ void Simulation::tick_contracts() {
     used_wrecks.reserve(64);
     used_jumps.reserve(64);
 
-    for (const auto& [_, c] : state_.contracts) {
+    for (Id contract_id : sorted_keys(state_.contracts)) {
+      const Contract& c = state_.contracts.at(contract_id);
       if (c.assignee_faction_id != fid) continue;
       if (c.status == ContractStatus::Offered) offered_count++;
       if (c.status == ContractStatus::Offered || c.status == ContractStatus::Accepted) {
@@ -585,8 +575,17 @@ void Simulation::tick_contracts() {
     wreck.reserve(64);
     jump.reserve(64);
 
+    // Normalize discovery lists for deterministic offer generation.
+    std::vector<Id> discovered_anoms = fac->discovered_anomalies;
+    std::sort(discovered_anoms.begin(), discovered_anoms.end());
+    discovered_anoms.erase(std::unique(discovered_anoms.begin(), discovered_anoms.end()), discovered_anoms.end());
+
+    std::vector<Id> discovered_systems = fac->discovered_systems;
+    std::sort(discovered_systems.begin(), discovered_systems.end());
+    discovered_systems.erase(std::unique(discovered_systems.begin(), discovered_systems.end()), discovered_systems.end());
+
     // Anomalies (discovered but unresolved).
-    for (Id aid : fac->discovered_anomalies) {
+    for (Id aid : discovered_anoms) {
       if (used_anoms.contains(aid)) continue;
       const auto* a = find_ptr(state_.anomalies, aid);
       if (!a) continue;
@@ -619,10 +618,13 @@ void Simulation::tick_contracts() {
     }
 
     // Jump points (unsurveyed, in discovered systems).
-    for (Id sys_id : fac->discovered_systems) {
+    for (Id sys_id : discovered_systems) {
       const auto* sys = find_ptr(state_.systems, sys_id);
       if (!sys) continue;
-      for (Id jid : sys->jump_points) {
+      std::vector<Id> jump_ids = sys->jump_points;
+      std::sort(jump_ids.begin(), jump_ids.end());
+      jump_ids.erase(std::unique(jump_ids.begin(), jump_ids.end()), jump_ids.end());
+      for (Id jid : jump_ids) {
         if (jid == kInvalidId) continue;
         if (used_jumps.contains(jid)) continue;
         if (is_jump_point_surveyed_by_faction(fid, jid)) continue;
@@ -664,8 +666,8 @@ void Simulation::tick_contracts() {
         break;
       }
     }
-    if (home_sys == kInvalidId && !fac->discovered_systems.empty()) {
-      home_sys = fac->discovered_systems.front();
+    if (home_sys == kInvalidId && !discovered_systems.empty()) {
+      home_sys = discovered_systems.front();
       home_pos = Vec2{0.0, 0.0};
     }
 

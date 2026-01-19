@@ -22,57 +22,21 @@
 
 #include "nebula4x/core/entities.h"
 #include "nebula4x/core/ids.h"
+#include "nebula4x/util/hash_rng.h"
 
 namespace nebula4x::procgen_obscure {
 
 // --- low-level deterministic mixing / RNG -------------------------------------
 
 // splitmix64: fast deterministic mixing suitable for procedural noise.
-// Derived from the reference implementation by Sebastiano Vigna.
-inline std::uint64_t splitmix64(std::uint64_t x) {
-  x += 0x9e3779b97f4a7c15ULL;
-  x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
-  x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
-  return x ^ (x >> 31);
-}
+//
+// Implementation is centralized in nebula4x::util so that all simulation and
+// procedural systems share the exact same mixer.
+inline std::uint64_t splitmix64(std::uint64_t x) { return ::nebula4x::util::splitmix64(x); }
 
-inline double u01_from_u64(std::uint64_t x) {
-  // 53-bit mantissa for IEEE-754 double.
-  const std::uint64_t v = x >> 11;
-  return static_cast<double>(v) * (1.0 / 9007199254740992.0);  // 2^53
-}
+inline double u01_from_u64(std::uint64_t x) { return ::nebula4x::util::u01_from_u64(x); }
 
-struct HashRng {
-  std::uint64_t s{0};
-
-  explicit HashRng(std::uint64_t seed) : s(seed) {}
-
-  std::uint64_t next_u64() {
-    s = splitmix64(s);
-    return s;
-  }
-
-  double next_u01() { return u01_from_u64(next_u64()); }
-
-  int range_int(int lo_incl, int hi_incl) {
-    int lo = lo_incl;
-    int hi = hi_incl;
-    if (hi < lo) std::swap(lo, hi);
-    const std::uint64_t span = static_cast<std::uint64_t>(hi - lo) + 1ULL;
-    const std::uint64_t r = next_u64();
-    return lo + static_cast<int>(r % span);
-  }
-
-  double range(double lo_incl, double hi_incl) {
-    double lo = lo_incl;
-    double hi = hi_incl;
-    if (hi < lo) std::swap(lo, hi);
-    return lo + (hi - lo) * next_u01();
-  }
-
-  // Back-compat alias: some call sites use range_real().
-  double range_real(double lo_incl, double hi_incl) { return range(lo_incl, hi_incl); }
-};
+using HashRng = ::nebula4x::util::HashRng;
 
 // 64-bit FNV-1a for stable hashing of kind tags.
 inline std::uint64_t fnv1a_64(std::string_view s) {

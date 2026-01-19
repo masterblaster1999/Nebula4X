@@ -5,6 +5,8 @@
 #include "ui/minimap.h"
 #include "ui/ruler.h"
 
+#include "ui/procgen_graphics.h"
+
 #include "core/simulation_sensors.h"
 
 #include "nebula4x/core/contact_prediction.h"
@@ -1151,7 +1153,12 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
     }
 
     // Body marker.
-    draw->AddCircleFilled(p, r, color_body(b->type), 0);
+    // Use deterministic procedural glyphs for better readability / identity.
+    if (r >= 2.0f) {
+      procgen_gfx::draw_body_glyph(draw, p, r, *b, 1.0f, /*selected=*/false);
+    } else {
+      draw->AddCircleFilled(p, r, color_body(b->type), 0);
+    }
 
     // Additional styling.
     if (b->type == BodyType::GasGiant) {
@@ -1252,7 +1259,7 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
       }
     }
 
-    draw->AddCircle(p, r, col, 0, 2.0f);
+    procgen_gfx::draw_jump_glyph(draw, p, r, static_cast<std::uint32_t>(jid), col, 1.0f, surveyed);
 
     {
       float pr = 260.0f;

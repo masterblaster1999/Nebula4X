@@ -7,10 +7,12 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -22,6 +24,7 @@
 
 #include "ui/procgen_metrics.h"
 #include "ui/ui_state.h"
+#include "ui/procgen_graphics.h"
 
 namespace nebula4x::ui {
 
@@ -200,6 +203,82 @@ inline bool is_habitable_candidate(double temp_k, double atm, BodyType type) {
   return (temp_k >= 245.0 && temp_k <= 330.0 && atm >= 0.4 && atm <= 4.5);
 }
 
+
+
+// Articulation points (chokepoints) in the jump network.
+// We compute these in the atlas to visually emphasize strategically important systems.
+static std::unordered_set<Id> compute_jump_chokepoints(const GameState& s) {
+  const int n = static_cast<int>(s.systems.size());
+  std::vector<Id> ids;
+  ids.reserve(s.systems.size());
+  for (const auto& [id, _] : s.systems) ids.push_back(id);
+
+  std::unordered_map<Id, int> idx;
+  idx.reserve(ids.size() * 2 + 8);
+  for (int i = 0; i < static_cast<int>(ids.size()); ++i) idx[ids[static_cast<std::size_t>(i)]] = i;
+
+  std::vector<std::vector<int>> adj;
+  adj.resize(static_cast<std::size_t>(ids.size()));
+
+  std::unordered_set<std::uint64_t> seen;
+  seen.reserve(s.jump_points.size() * 2 + 8);
+  for (const auto& [_, jp] : s.jump_points) {
+    const JumpPoint* other = find_ptr(s.jump_points, jp.linked_jump_id);
+    if (!other) continue;
+    const Id a_id = jp.system_id;
+    const Id b_id = other->system_id;
+    if (a_id == kInvalidId || b_id == kInvalidId || a_id == b_id) continue;
+
+    auto ita = idx.find(a_id);
+    auto itb = idx.find(b_id);
+    if (ita == idx.end() || itb == idx.end()) continue;
+    const int a = ita->second;
+    const int b = itb->second;
+
+    const auto lo = static_cast<std::uint32_t>(std::min(a_id, b_id));
+    const auto hi = static_cast<std::uint32_t>(std::max(a_id, b_id));
+    const std::uint64_t key = (static_cast<std::uint64_t>(lo) << 32) | static_cast<std::uint64_t>(hi);
+    if (!seen.insert(key).second) continue;
+
+    adj[static_cast<std::size_t>(a)].push_back(b);
+    adj[static_cast<std::size_t>(b)].push_back(a);
+  }
+
+  std::vector<int> disc(n, 0);
+  std::vector<int> low(n, 0);
+  std::vector<int> parent(n, -1);
+  std::vector<bool> art(n, false);
+  int t = 0;
+
+  std::function<void(int)> dfs = [&](int u) {
+    disc[u] = low[u] = ++t;
+    int children = 0;
+    for (int v : adj[static_cast<std::size_t>(u)]) {
+      if (disc[v] == 0) {
+        parent[v] = u;
+        children++;
+        dfs(v);
+        low[u] = std::min(low[u], low[v]);
+
+        if (parent[u] == -1 && children > 1) art[u] = true;
+        if (parent[u] != -1 && low[v] >= disc[u]) art[u] = true;
+      } else if (v != parent[u]) {
+        low[u] = std::min(low[u], disc[v]);
+      }
+    }
+  };
+
+  for (int i = 0; i < n; ++i) {
+    if (disc[i] == 0) dfs(i);
+  }
+
+  std::unordered_set<Id> out;
+  out.reserve(ids.size());
+  for (int i = 0; i < n; ++i) {
+    if (art[i]) out.insert(ids[static_cast<std::size_t>(i)]);
+  }
+  return out;
+}
 
 std::string region_label(const GameState& s, const StarSystem& sys) {
   if (sys.region_id == kInvalidId) return "-";
@@ -439,6 +518,10 @@ void draw_procgen_atlas_window(Simulation& sim, UIState& ui, Id& selected_body) 
         r.star_lum = primary_star_luminosity_solar(s, sys);
         rows.push_back(std::move(r));
       }
+      const std::unordered_set<Id> chokepoints = compute_jump_chokepoints(s);
+      double max_minerals = 1.0;
+      for (const auto& rr : rows) max_minerals = std::max(max_minerals, rr.minerals);
+
 
       ImGui::InputTextWithHint("Filter", "name contains...", filter_name, sizeof(filter_name));
       ImGui::SameLine();
@@ -534,7 +617,11 @@ void draw_procgen_atlas_window(Simulation& sim, UIState& ui, Id& selected_body) 
 
             ImGui::TableSetColumnIndex(0);
             const bool is_sel = (r.id == s.selected_system);
-            if (ImGui::Selectable(r.name.c_str(), is_sel, ImGuiSelectableFlags_SpanAllColumns)) {
+            const float minerals01 = (max_minerals > 0.0) ?
+                static_cast<float>(std::log10(r.minerals + 1.0) / std::log10(max_minerals + 1.0)) : 0.0f;
+            const bool is_choke = (chokepoints.find(r.id) != chokepoints.end());
+            const std::string label = "   " + r.name;
+            if (ImGui::Selectable(label.c_str(), is_sel, ImGuiSelectableFlags_SpanAllColumns)) {
               s.selected_system = r.id;
               selected_sys = r.sys;
               // Helpful default: center galaxy map to selected system.
@@ -545,6 +632,13 @@ void draw_procgen_atlas_window(Simulation& sim, UIState& ui, Id& selected_body) 
                 ui.request_galaxy_map_center_y = selected_sys->galaxy_pos.y;
               }
             }
+
+
+            const ImVec2 item_min = ImGui::GetItemRectMin();
+            const float badge_sz = ImGui::GetTextLineHeight();
+            procgen_gfx::draw_system_badge(ImGui::GetWindowDrawList(), ImVec2(item_min.x + 2.0f, item_min.y + 1.0f),
+                                          badge_sz, static_cast<std::uint32_t>(r.id), r.jump_degree, r.nebula, r.habitable,
+                                          minerals01, is_choke, is_sel);
 
             if (ImGui::BeginPopupContextItem()) {
               if (ImGui::MenuItem("Center Galaxy Map")) {
@@ -669,10 +763,20 @@ void draw_procgen_atlas_window(Simulation& sim, UIState& ui, Id& selected_body) 
 
               ImGui::TableNextRow();
               ImGui::TableSetColumnIndex(0);
-              if (ImGui::Selectable(r.name.c_str(), is_sel, ImGuiSelectableFlags_SpanAllColumns)) {
+              const std::string label = "   " + r.name;
+              if (ImGui::Selectable(label.c_str(), is_sel, ImGuiSelectableFlags_SpanAllColumns)) {
                 selected_body = r.id;
                 ui.request_details_tab = DetailsTab::Body;
               }
+
+              // Body glyph in the name column (procedural, deterministic).
+              if (r.body) {
+                const ImVec2 item_min = ImGui::GetItemRectMin();
+                const float sz = ImGui::GetTextLineHeight();
+                const ImVec2 c(item_min.x + 2.0f + sz * 0.40f, item_min.y + 1.0f + sz * 0.50f);
+                procgen_gfx::draw_body_glyph(ImGui::GetWindowDrawList(), c, sz * 0.40f, *r.body, 1.0f, is_sel);
+              }
+
               ImGui::TableSetColumnIndex(1);
               ImGui::TextUnformatted(r.type.c_str());
               ImGui::TableSetColumnIndex(2);
@@ -723,8 +827,28 @@ void draw_procgen_atlas_window(Simulation& sim, UIState& ui, Id& selected_body) 
             ImGui::SetClipboardText(f.stamp.c_str());
           }
 
+          static int body_stamp_mode = 0;
+          ImGui::SameLine();
+          ImGui::RadioButton("Pixel##atlas", &body_stamp_mode, 0);
+          ImGui::SameLine();
+          ImGui::RadioButton("ASCII##atlas", &body_stamp_mode, 1);
+
           ImGui::BeginChild("procgen_body_stamp", ImVec2(0.0f, 180.0f), true);
-          ImGui::TextUnformatted(f.stamp.c_str());
+          if (body_stamp_mode == 0) {
+            const procgen_gfx::SurfaceStampGrid& g = procgen_gfx::cached_surface_stamp_grid(selected_body, f.stamp);
+            const procgen_gfx::SurfacePalette pal = procgen_gfx::palette_for_body(*b);
+          
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            const ImVec2 p0 = ImGui::GetCursorScreenPos();
+            const ImVec2 avail = ImGui::GetContentRegionAvail();
+            const float stamp_h = std::max(60.0f, avail.y - (f.legend.empty() ? 0.0f : 44.0f));
+            const ImVec2 sz(avail.x, stamp_h);
+            dl->AddRectFilled(p0, ImVec2(p0.x + sz.x, p0.y + sz.y), IM_COL32(0, 0, 0, 70));
+            procgen_gfx::draw_surface_stamp_pixels(dl, p0, sz, g, pal, 1.0f, true);
+            ImGui::Dummy(sz);
+          } else {
+            ImGui::TextUnformatted(f.stamp.c_str());
+          }
           if (!f.legend.empty()) {
             ImGui::Separator();
             ImGui::TextDisabled("%s", f.legend.c_str());

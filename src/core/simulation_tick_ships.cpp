@@ -825,6 +825,12 @@ void Simulation::tick_ships(double dt_days) {
       k.target_id = std::get<SalvageWreck>(ord).wreck_id;
       return k;
     }
+    if (std::holds_alternative<SalvageWreckLoop>(ord)) {
+      const auto& o = std::get<SalvageWreckLoop>(ord);
+      k.kind = CohortKind::Transfer;
+      k.target_id = (o.mode == 1 && o.dropoff_colony_id != kInvalidId) ? o.dropoff_colony_id : o.wreck_id;
+      return k;
+    }
     if (std::holds_alternative<ScrapShip>(ord)) {
       k.kind = CohortKind::Scrap;
       k.target_id = std::get<ScrapShip>(ord).colony_id;
@@ -1195,6 +1201,9 @@ void Simulation::tick_ships(double dt_days) {
     Id salvage_wreck_id = kInvalidId;
     std::string salvage_mineral;
     double salvage_tons = 0.0;
+
+    // Salvage loop ops (wreck <-> friendly colony)
+    bool is_salvage_loop_op = false;
 
     // Anomaly investigation ops (anomaly -> research reward / component unlock).
     bool is_investigate_anomaly_op = false;
@@ -1690,6 +1699,117 @@ void Simulation::tick_ships(double dt_days) {
       const auto* w = find_ptr(state_.wrecks, salvage_wreck_id);
       if (!w || w->system_id != ship.system_id) { q.erase(q.begin()); continue; }
       target = w->position_mkm;
+    } else if (std::holds_alternative<SalvageWreckLoop>(q.front())) {
+      is_salvage_loop_op = true;
+
+      auto ord = std::get<SalvageWreckLoop>(q.front()); // copy (we may rewrite it)
+      if (ord.mode != 0 && ord.mode != 1) ord.mode = 0;
+
+      auto is_valid_dropoff = [&](Id colony_id) {
+        if (colony_id == kInvalidId) return false;
+        const auto* col = find_ptr(state_.colonies, colony_id);
+        if (!col) return false;
+        if (col->faction_id != ship.faction_id) return false;
+        const auto* body = find_ptr(state_.bodies, col->body_id);
+        if (!body) return false;
+        if (body->system_id == kInvalidId) return false;
+        return true;
+      };
+
+      auto pick_best_dropoff = [&]() -> Id {
+        if (ship.system_id == kInvalidId) return kInvalidId;
+        Id best = kInvalidId;
+        double best_eta = std::numeric_limits<double>::infinity();
+        for (const auto& [cid, col] : state_.colonies) {
+          if (col.faction_id != ship.faction_id) continue;
+          const auto* body = find_ptr(state_.bodies, col.body_id);
+          if (!body || body->system_id == kInvalidId) continue;
+          const auto plan = plan_jump_route_cached(ship.system_id, ship.position_mkm, ship.faction_id, ship.speed_km_s,
+                                                   body->system_id, ord.restrict_to_discovered, body->position_mkm);
+          if (!plan) continue;
+          const double eta = std::isfinite(plan->total_eta_days) ? plan->total_eta_days : plan->total_distance_mkm;
+          if (eta < best_eta) {
+            best_eta = eta;
+            best = cid;
+          }
+        }
+        return best;
+      };
+
+      auto route_to_system_or_cancel = [&](Id target_system_id, const Vec2& goal_pos_mkm) -> bool {
+        if (target_system_id == kInvalidId || ship.system_id == kInvalidId) return false;
+        if (target_system_id == ship.system_id) return true;
+
+        const auto plan = plan_jump_route_cached(ship.system_id, ship.position_mkm, ship.faction_id, ship.speed_km_s,
+                                                 target_system_id, ord.restrict_to_discovered, goal_pos_mkm);
+        if (!plan || plan->jump_ids.empty()) return false;
+
+        std::vector<Order> legs;
+        legs.reserve(plan->jump_ids.size());
+        for (Id jid : plan->jump_ids) legs.emplace_back(TravelViaJump{jid});
+
+        q.erase(q.begin());
+        q.insert(q.begin(), legs.begin(), legs.end());
+        q.insert(q.begin() + legs.size(), ord);
+        return true; // queued travel legs
+      };
+
+      if (ord.mode == 0) {
+        const auto* w = find_ptr(state_.wrecks, ord.wreck_id);
+        if (!w) {
+          q.erase(q.begin());
+          continue;
+        }
+
+        if (w->system_id != ship.system_id) {
+          if (!route_to_system_or_cancel(w->system_id, w->position_mkm)) {
+            // No route; drop the order.
+            // (We expect issue_salvage_wreck_loop to have queued travel legs already.)
+            q.erase(q.begin());
+          }
+          continue;
+        }
+
+        target = w->position_mkm;
+
+        // Configure salvage transfer helpers.
+        salvage_wreck_id = ord.wreck_id;
+        salvage_mineral.clear();
+        salvage_tons = 0.0;
+      } else {
+        if (!is_valid_dropoff(ord.dropoff_colony_id)) {
+          ord.dropoff_colony_id = pick_best_dropoff();
+        }
+        if (!is_valid_dropoff(ord.dropoff_colony_id)) {
+          q.erase(q.begin());
+          continue;
+        }
+
+        const auto* col = find_ptr(state_.colonies, ord.dropoff_colony_id);
+        const auto* body = col ? find_ptr(state_.bodies, col->body_id) : nullptr;
+        if (!body) {
+          q.erase(q.begin());
+          continue;
+        }
+
+        if (body->system_id != ship.system_id) {
+          if (!route_to_system_or_cancel(body->system_id, body->position_mkm)) {
+            q.erase(q.begin());
+          }
+          continue;
+        }
+
+        target = body->position_mkm;
+
+        // Configure cargo transfer helpers (unload all minerals).
+        cargo_mode = 1;
+        cargo_colony_id = ord.dropoff_colony_id;
+        cargo_mineral.clear();
+        cargo_tons = 0.0;
+      }
+
+      // Persist any fix-ups (mode clamp / selected dropoff).
+      std::get<SalvageWreckLoop>(q.front()) = ord;
     } else if (std::holds_alternative<InvestigateAnomaly>(q.front())) {
       auto& ord = std::get<InvestigateAnomaly>(q.front());
       is_investigate_anomaly_op = true;
@@ -2406,6 +2526,153 @@ void Simulation::tick_ships(double dt_days) {
       return false;
     };
 
+    auto process_salvage_loop_docked = [&]() {
+      // Note: We intentionally do not allow the generic cargo/salvage completion logic
+      // to erase this order. Instead, we transition between salvage <-> unload modes.
+      auto ord = std::get<SalvageWreckLoop>(q.front());
+      if (ord.mode != 0 && ord.mode != 1) ord.mode = 0;
+
+      const auto* d = find_design(ship.design_id);
+      const double cargo_cap = d ? std::max(0.0, d->cargo_tons) : 0.0;
+
+      auto is_valid_dropoff = [&](Id colony_id) -> bool {
+        if (colony_id == kInvalidId) return false;
+        const auto* col = find_ptr(state_.colonies, colony_id);
+        if (!col) return false;
+        if (col->faction_id != ship.faction_id) return false;
+        const auto* body = find_ptr(state_.bodies, col->body_id);
+        if (!body) return false;
+        if (body->system_id == kInvalidId) return false;
+        return true;
+      };
+
+      auto pick_best_dropoff = [&]() -> Id {
+        if (ship.system_id == kInvalidId) return kInvalidId;
+        Id best = kInvalidId;
+        double best_eta = std::numeric_limits<double>::infinity();
+        for (const auto& [cid, col] : state_.colonies) {
+          if (col.faction_id != ship.faction_id) continue;
+          const auto* body = find_ptr(state_.bodies, col.body_id);
+          if (!body || body->system_id == kInvalidId) continue;
+          const auto plan = plan_jump_route_cached(ship.system_id, ship.position_mkm, ship.faction_id, ship.speed_km_s,
+                                                   body->system_id, ord.restrict_to_discovered, body->position_mkm);
+          if (!plan) continue;
+          const double eta = std::isfinite(plan->total_eta_days) ? plan->total_eta_days : plan->total_distance_mkm;
+          if (eta < best_eta) {
+            best_eta = eta;
+            best = cid;
+          }
+        }
+        return best;
+      };
+
+      auto queue_route_then_update_order = [&](Id target_system_id, const Vec2& goal_pos_mkm, int mode,
+                                              Id dropoff_colony_id) {
+        ord.mode = mode;
+        ord.dropoff_colony_id = dropoff_colony_id;
+
+        if (target_system_id == ship.system_id) {
+          std::get<SalvageWreckLoop>(q.front()) = ord;
+          return;
+        }
+        if (target_system_id == kInvalidId || ship.system_id == kInvalidId) {
+          q.erase(q.begin());
+          return;
+        }
+
+        const auto plan = plan_jump_route_cached(ship.system_id, ship.position_mkm, ship.faction_id, ship.speed_km_s,
+                                                 target_system_id, ord.restrict_to_discovered, goal_pos_mkm);
+        if (!plan || (plan->jump_ids.empty() && target_system_id != ship.system_id)) {
+          q.erase(q.begin());
+          return;
+        }
+
+        std::vector<Order> legs;
+        legs.reserve(plan->jump_ids.size());
+        for (Id jid : plan->jump_ids) legs.emplace_back(TravelViaJump{jid});
+
+        q.erase(q.begin());
+        q.insert(q.begin(), legs.begin(), legs.end());
+        q.insert(q.begin() + legs.size(), ord);
+      };
+
+      if (ord.mode == 0) {
+        // Salvage mode.
+        do_wreck_salvage();
+
+        const double used = cargo_used_tons(ship);
+        const double free = std::max(0.0, cargo_cap - used);
+        const bool cargo_has = used > 1e-9;
+
+        const auto* w = find_ptr(state_.wrecks, ord.wreck_id);
+        if (!w) {
+          // Wreck depleted (or missing). Deliver the final load if any, else finish.
+          if (!cargo_has) {
+            q.erase(q.begin());
+            return;
+          }
+
+          Id drop = is_valid_dropoff(ord.dropoff_colony_id) ? ord.dropoff_colony_id : pick_best_dropoff();
+          if (!is_valid_dropoff(drop)) {
+            q.erase(q.begin());
+            return;
+          }
+          const auto* col = find_ptr(state_.colonies, drop);
+          const auto* body = col ? find_ptr(state_.bodies, col->body_id) : nullptr;
+          if (!body) {
+            q.erase(q.begin());
+            return;
+          }
+          queue_route_then_update_order(body->system_id, body->position_mkm, /*mode=*/1, drop);
+          return;
+        }
+
+        // Still salvageable.
+        if (cargo_has && free <= 1e-9) {
+          // Cargo full; go unload.
+          Id drop = is_valid_dropoff(ord.dropoff_colony_id) ? ord.dropoff_colony_id : pick_best_dropoff();
+          if (!is_valid_dropoff(drop)) {
+            q.erase(q.begin());
+            return;
+          }
+          const auto* col = find_ptr(state_.colonies, drop);
+          const auto* body = col ? find_ptr(state_.bodies, col->body_id) : nullptr;
+          if (!body) {
+            q.erase(q.begin());
+            return;
+          }
+          queue_route_then_update_order(body->system_id, body->position_mkm, /*mode=*/1, drop);
+          return;
+        }
+
+        // Keep salvaging.
+        std::get<SalvageWreckLoop>(q.front()) = ord;
+        return;
+      }
+
+      // Unload mode.
+      const double moved = do_cargo_transfer();
+      const double used = cargo_used_tons(ship);
+      if (used <= 1e-9) {
+        // Cargo empty; return to the wreck if it still exists.
+        const auto* w = find_ptr(state_.wrecks, ord.wreck_id);
+        if (!w) {
+          q.erase(q.begin());
+          return;
+        }
+        queue_route_then_update_order(w->system_id, w->position_mkm, /*mode=*/0, ord.dropoff_colony_id);
+        return;
+      }
+
+      // If we can't move anything while unloading, avoid getting stuck forever.
+      if (moved <= 1e-9) {
+        q.erase(q.begin());
+        return;
+      }
+
+      std::get<SalvageWreckLoop>(q.front()) = ord;
+    };
+
     // --- Docking / Arrival Checks ---
 
     if (is_fuel_transfer_op && dist <= dock_range) {
@@ -2419,6 +2686,12 @@ void Simulation::tick_ships(double dt_days) {
       ship.position_mkm = target;
       const double moved = do_troop_transfer();
       if (troop_transfer_order_complete(moved)) q.erase(q.begin());
+      continue;
+    }
+
+    if (is_salvage_loop_op && dist <= dock_range) {
+      ship.position_mkm = target;
+      process_salvage_loop_docked();
       continue;
     }
 
@@ -3601,7 +3874,7 @@ void Simulation::tick_ships(double dt_days) {
       continue;
     }
 
-    if (!is_attack && !is_escort && !is_bombard && !is_jump && !is_survey_jump_op && !is_cargo_op && !is_salvage_op && !is_investigate_anomaly_op &&
+    if (!is_attack && !is_escort && !is_bombard && !is_jump && !is_survey_jump_op && !is_cargo_op && !is_salvage_op && !is_salvage_loop_op && !is_investigate_anomaly_op &&
         !is_fuel_transfer_op && !is_troop_transfer_op && !is_troop_op && !is_colonist_op && !is_mining_op && !is_body &&
         !is_orbit && !is_scrap && dist <= arrive_eps) {
       q.erase(q.begin());
@@ -3986,6 +4259,8 @@ void Simulation::tick_ships(double dt_days) {
       } else if (is_salvage_op) {
         const double moved = do_wreck_salvage();
         if (salvage_order_complete(moved)) q.erase(q.begin());
+      } else if (is_salvage_loop_op) {
+        process_salvage_loop_docked();
       } else if (is_mining_op) {
         const double mined = do_body_mining();
         if (mining_order_complete(mined)) q.erase(q.begin());

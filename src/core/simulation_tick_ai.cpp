@@ -25,6 +25,7 @@
 #include "nebula4x/util/log.h"
 #include "nebula4x/util/trace_events.h"
 #include "nebula4x/util/spatial_index.h"
+#include "nebula4x/util/hash_rng.h"
 
 namespace nebula4x {
 namespace {
@@ -35,6 +36,7 @@ using sim_internal::mkm_per_day_from_speed;
 using sim_internal::push_unique;
 using sim_internal::vec_contains;
 using sim_internal::sorted_keys;
+using sim_internal::stable_sum_nonneg_sorted_ld;
 using sim_internal::faction_has_tech;
 using sim_internal::FactionEconomyMultipliers;
 using sim_internal::compute_faction_economy_multipliers;
@@ -42,18 +44,14 @@ using sim_internal::compute_power_allocation;
 
 // Small, deterministic RNG helpers (platform-stable) for simulation-side
 // procedural events.
-static std::uint64_t splitmix64(std::uint64_t x) {
-  // https://prng.di.unimi.it/splitmix64.c
-  x += 0x9e3779b97f4a7c15ULL;
-  x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
-  x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
-  return x ^ (x >> 31);
+static double u01(std::uint64_t& s) {
+  const std::uint64_t v = ::nebula4x::util::next_splitmix64(s);
+  return ::nebula4x::util::u01_from_u64(v);
 }
 
-static double u01(std::uint64_t& s) {
-  s = splitmix64(s);
-  // Use the top 53 bits for an IEEE-754 double in [0,1).
-  return (s >> 11) * (1.0 / 9007199254740992.0);
+static std::size_t rand_index(std::uint64_t& s, std::size_t n) {
+  if (n <= 1) return 0;
+  return static_cast<std::size_t>(::nebula4x::util::bounded_u64(s, static_cast<std::uint64_t>(n)));
 }
 
 
@@ -83,9 +81,9 @@ static double effective_piracy_risk_for_system(const GameState& s, const SimConf
 }
 
 static double cargo_used_tons(const Ship& s) {
-  double used = 0.0;
-  for (const auto& [_, tons] : s.cargo) used += std::max(0.0, tons);
-  return used;
+  // Deterministic sum: cargo is an unordered_map and floating-point accumulation
+  // order can affect AI decisions near thresholds.
+  return static_cast<double>(stable_sum_nonneg_sorted_ld(s.cargo));
 }
 
 } // namespace
@@ -525,11 +523,7 @@ void Simulation::tick_ai() {
   };
 
   auto total_mineral_deposits = [&](const Body& b) -> double {
-    double total = 0.0;
-    for (const auto& [_, amt] : b.mineral_deposits) {
-      if (amt > 0.0) total += amt;
-    }
-    return total;
+    return static_cast<double>(stable_sum_nonneg_sorted_ld(b.mineral_deposits));
   };
 
   auto issue_auto_colonize = [&](Id ship_id) -> bool {
@@ -1140,6 +1134,8 @@ void Simulation::tick_ai() {
     for (const auto& ord : so.queue) {
       if (const auto* sw = std::get_if<SalvageWreck>(&ord)) {
         if (sw->wreck_id != kInvalidId) reserved_wreck_targets[ship->faction_id].insert(sw->wreck_id);
+      } else if (const auto* sl = std::get_if<SalvageWreckLoop>(&ord)) {
+        if (sl->wreck_id != kInvalidId) reserved_wreck_targets[ship->faction_id].insert(sl->wreck_id);
       }
     }
   }
@@ -1162,9 +1158,7 @@ void Simulation::tick_ai() {
     if (cap <= 1e-9) return false;
 
     auto cargo_used_tons = [&](const Ship& s) {
-      double used = 0.0;
-      for (const auto& [_, tons] : s.cargo) used += std::max(0.0, tons);
-      return used;
+      return static_cast<double>(stable_sum_nonneg_sorted_ld(s.cargo));
     };
 
     const double used = cargo_used_tons(*ship);
@@ -1293,9 +1287,7 @@ void Simulation::tick_ai() {
     if (cap <= 1e-9 || mine_rate <= 1e-9) return false;
 
     auto cargo_used_tons = [&](const Ship& s) {
-      double used = 0.0;
-      for (const auto& [_, tons] : s.cargo) used += std::max(0.0, tons);
-      return used;
+      return static_cast<double>(stable_sum_nonneg_sorted_ld(s.cargo));
     };
 
     const double used = cargo_used_tons(*ship);
@@ -5115,7 +5107,7 @@ void Simulation::tick_pirate_raids() {
     Vec2 target_pos{0.0, 0.0};
     if (!best_ships.empty()) {
       std::sort(best_ships.begin(), best_ships.end());
-      const std::size_t idx = static_cast<std::size_t>(u01(rng) * best_ships.size()) % best_ships.size();
+      const std::size_t idx = rand_index(rng, best_ships.size());
       target_ship_id = best_ships[idx];
       if (const auto* tgt = find_ptr(state_.ships, target_ship_id)) {
         target_pos = tgt->position_mkm;
@@ -5191,7 +5183,7 @@ void Simulation::tick_pirate_raids() {
       // Try a random start index, then fall back through the pool.
       const std::size_t n = design_pool.size();
       if (n == 0) return std::string();
-      const std::size_t start = static_cast<std::size_t>(u01(r) * n) % n;
+      const std::size_t start = rand_index(r, n);
       for (std::size_t i = 0; i < n; ++i) {
         const std::string& id = design_pool[(start + i) % n];
         if (find_design(id)) return id;

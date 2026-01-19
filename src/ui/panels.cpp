@@ -37,6 +37,7 @@
 
 #include "ui/procedural_theme.h"
 #include "ui/procedural_layout.h"
+#include "ui/procgen_graphics.h"
 
 namespace nebula4x::ui {
 namespace {
@@ -3087,12 +3088,24 @@ const bool can_up = (i > 0);
 
             const bool can_issue = (salvage_wreck_id != kInvalidId) && (cargo_cap > 1e-6);
             if (!can_issue) ImGui::BeginDisabled();
+
             if (ImGui::Button("Salvage")) {
               if (!sim.issue_salvage_wreck(selected_ship, salvage_wreck_id, salvage_mineral, salvage_tons,
                                            ui.fog_of_war)) {
                 nebula4x::log::warn("Couldn't queue salvage wreck order.");
               }
             }
+            ImGui::SameLine();
+            if (ImGui::Button("Salvage & Deliver")) {
+              if (!sim.issue_salvage_wreck_loop(selected_ship, salvage_wreck_id, /*dropoff_colony_id=*/kInvalidId,
+                                                ui.fog_of_war)) {
+                nebula4x::log::warn("Couldn't queue salvage loop order.");
+              }
+            }
+            if (ImGui::IsItemHovered()) {
+              ImGui::SetTooltip("Repeatedly salvages the wreck and unloads at the nearest friendly colony until depleted.");
+            }
+
             if (!can_issue) ImGui::EndDisabled();
           }
         }
@@ -6467,11 +6480,29 @@ if (colony->shipyard_queue.empty()) {
               ImGui::TextDisabled("%s", f.legend.c_str());
             }
 
+            static int stamp_view_mode = 0; // 0 = pixel, 1 = ASCII
+            ImGui::TextDisabled("Stamp:");
+            ImGui::SameLine();
+            ImGui::RadioButton("Pixel", &stamp_view_mode, 0);
+            ImGui::SameLine();
+            ImGui::RadioButton("ASCII", &stamp_view_mode, 1);
+
             const float line_h = ImGui::GetTextLineHeightWithSpacing();
             // Stamp includes a border: (h + 2) lines, plus a little breathing room.
             const float stamp_h = line_h * 15.0f;
             if (ImGui::BeginChild("procgen_surface_stamp", ImVec2(0.0f, stamp_h), true, ImGuiWindowFlags_NoScrollbar)) {
-              ImGui::TextUnformatted(f.stamp.c_str());
+              if (stamp_view_mode == 0) {
+                const procgen_gfx::SurfaceStampGrid& g = procgen_gfx::cached_surface_stamp_grid(body_id, f.stamp);
+                const procgen_gfx::SurfacePalette pal = procgen_gfx::palette_for_body(*b);
+
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                const ImVec2 p0 = ImGui::GetCursorScreenPos();
+                const ImVec2 sz = ImGui::GetContentRegionAvail();
+                dl->AddRectFilled(p0, ImVec2(p0.x + sz.x, p0.y + sz.y), IM_COL32(0, 0, 0, 70));
+                procgen_gfx::draw_surface_stamp_pixels(dl, p0, sz, g, pal, 1.0f, true);
+              } else {
+                ImGui::TextUnformatted(f.stamp.c_str());
+              }
             }
             ImGui::EndChild();
 

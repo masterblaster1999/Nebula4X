@@ -215,8 +215,6 @@ struct ContractsWindowState {
   bool restrict_to_discovered{true};
   Id assign_ship{kInvalidId};
   Id assign_fleet{kInvalidId};
-  Id assign_fleet{kInvalidId};
-  Id assign_fleet{kInvalidId};
 
   // --- Auto planner (multi-contract ship assignment) ---
   bool planner_auto_refresh{false};

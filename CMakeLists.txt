@@ -244,6 +244,7 @@ if(NEBULA4X_BUILD_UI)
     src/ui/dashboards_window.cpp
     src/ui/pivot_tables_window.cpp
     src/ui/procgen_atlas_window.cpp
+    src/ui/procgen_graphics.cpp
     src/ui/ui_forge_window.cpp
     src/ui/context_forge_window.cpp
     src/ui/ui_forge_dna.cpp
