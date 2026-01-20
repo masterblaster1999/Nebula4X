@@ -88,8 +88,7 @@ static Vec3 normalize(Vec3 a) {
 
 static Vec3 reflect(Vec3 i, Vec3 n) {
   // Reflect i around n.
-  // Use the (float * Vec3) overload so MSVC doesn't warn about an unused operator.
-  return i - (2.0f * dot(n, i)) * n;
+  return i - n * (2.0f * dot(n, i));
 }
 
 struct Color4 {

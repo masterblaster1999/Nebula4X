@@ -1,6 +1,6 @@
 #include "ui/panels.h"
 
-#include "ui/imgui_includes.h"
+#include <imgui.h>
 
 #include <algorithm>
 #include <cmath>
@@ -806,8 +806,10 @@ void draw_left_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sele
     }
     if (ImGui::IsItemHovered()) {
       ImGui::SetTooltip(
-          "Experimental combat model: beam weapons apply a transmission multiplier based on the\n"
-          "nebula microfield / storm-cell environment *along the line of fire*.\n"
+          "Experimental combat model: beam weapons apply a transmission multiplier based on the
+"
+          "nebula microfield / storm-cell environment *along the line of fire*.
+"
           "Computed via adaptive ray-marching with an SDF-style distance estimate and deterministic jitter.");
     }
 
@@ -826,7 +828,8 @@ void draw_left_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sele
       }
       if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip(
-            "Converts a fraction of medium-loss (1 - LOS multiplier) into low-intensity splash damage\n"
+            "Converts a fraction of medium-loss (1 - LOS multiplier) into low-intensity splash damage
+"
             "around the beam segment. Makes fighting inside heavy terrain more chaotic.");
       }
 
@@ -4701,8 +4704,8 @@ const bool can_up = (i > 0);
                   if (c->faction_id == fleet_mut->faction_id) {
                     label += " (own)";
                   } else if (c->faction_id != kInvalidId) {
-                    if (const auto* other_fac = find_ptr(s.factions, c->faction_id)) {
-                      label += " (" + other_fac->name + ")";
+                    if (const auto* fac = find_ptr(s.factions, c->faction_id)) {
+                      label += " (" + fac->name + ")";
                     }
                   }
 
@@ -9356,19 +9359,9 @@ void draw_settings_window(UIState& ui, char* ui_prefs_path, UIPrefActions& actio
         ImGui::SameLine();
         if (ImGui::SmallButton("Paste theme string")) {
           if (const char* clip = ImGui::GetClipboardText()) {
-            // NOTE: MSVC occasionally fails to resolve the stream extraction operator for
-            // std::string in some unity/pch configurations. Use a tiny whitespace tokenizer
-            // instead of relying on iostreams.
-            const std::string_view sv(clip);
-            std::size_t i = 0;
-            while (i < sv.size()) {
-              while (i < sv.size() && std::isspace(static_cast<unsigned char>(sv[i]))) ++i;
-              if (i >= sv.size()) break;
-              std::size_t j = i;
-              while (j < sv.size() && !std::isspace(static_cast<unsigned char>(sv[j]))) ++j;
-              std::string tok(sv.substr(i, j - i));
-              i = j;
-
+            std::istringstream iss(std::string(clip));
+            std::string tok;
+            while (iss >> tok) {
               const auto eq = tok.find('=');
               if (eq == std::string::npos) continue;
               const std::string key = tok.substr(0, eq);
