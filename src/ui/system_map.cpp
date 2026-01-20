@@ -2702,7 +2702,7 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
     const ImVec2 vmax = ImVec2(origin.x + avail.x, origin.y + avail.y);
 
     const float area = std::max(1.0f, avail.x * avail.y);
-    const float z = std::clamp(zoom, 0.35f, 3.5f);
+    const float z = std::clamp(static_cast<float>(zoom), 0.35f, 3.5f);
     const int budget = static_cast<int>(std::clamp((area / (175.0f * 44.0f)) * (0.55f + 0.75f * z), 20.0f, 650.0f));
 
     std::stable_sort(map_labels.begin(), map_labels.end(), [](const MapLabelCandidate& a, const MapLabelCandidate& b) {

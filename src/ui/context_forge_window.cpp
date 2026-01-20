@@ -552,6 +552,10 @@ void update_context_forge(Simulation& sim, UIState& ui, Id selected_ship, Id sel
 void draw_context_forge_window(Simulation& sim, UIState& ui, Id selected_ship, Id selected_colony, Id selected_body) {
   if (!ui.show_context_forge_window) return;
 
+  // The context forge window currently operates on cached state and does not
+  // directly query the simulation every frame.
+  (void)sim;
+
   ImGui::SetNextWindowSize(ImVec2(520, 520), ImGuiCond_FirstUseEver);
   if (!ImGui::Begin("Context Forge (Procedural Panels)", &ui.show_context_forge_window)) {
     ImGui::End();

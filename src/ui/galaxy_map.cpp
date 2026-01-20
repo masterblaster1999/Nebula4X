@@ -11,6 +11,7 @@
 #include <imgui.h>
 
 #include <array>
+#include <cctype>
 #include <cstdint>
 #include <algorithm>
 #include <cstdio>
@@ -19,6 +20,7 @@
 #include <optional>
 #include <utility>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
@@ -95,10 +97,25 @@ ImU32 risk_gradient_color(float t01, float alpha) {
   return ImGui::ColorConvertFloat4ToU32(c);
 }
 
+// Case-insensitive substring match (ASCII, UI convenience).
+//
+// Used for the in-map system search bar without requiring any allocations
+// beyond the search string itself.
+bool icontains_ascii(std::string_view haystack, std::string_view needle) {
+  if (needle.empty()) return true;
+  auto eq = [](char a, char b) {
+    const unsigned char ua = static_cast<unsigned char>(a);
+    const unsigned char ub = static_cast<unsigned char>(b);
+    return static_cast<char>(std::tolower(ua)) == static_cast<char>(std::tolower(ub));
+  };
+  const auto it = std::search(haystack.begin(), haystack.end(), needle.begin(), needle.end(), eq);
+  return it != haystack.end();
+}
+
 // Effective piracy risk for a system used by trade overlays.
 //
 // If the system is assigned to a region, use Region::pirate_risk dampened by
-// Region::piracy_suppression. Otherwise fall back to SimConfig's default risk.
+// Region::pirate_suppression. Otherwise fall back to SimConfig's default risk.
 double system_piracy_risk_effective(const Simulation& sim, const GameState& s, Id system_id) {
   const auto* sys = find_ptr(s.systems, system_id);
   if (!sys) return 0.0;
@@ -106,7 +123,7 @@ double system_piracy_risk_effective(const Simulation& sim, const GameState& s, I
   if (sys->region_id != kInvalidId) {
     if (const auto* reg = find_ptr(s.regions, sys->region_id)) {
       const double base = std::clamp(reg->pirate_risk, 0.0, 1.0);
-      const double sup = std::clamp(reg->piracy_suppression, 0.0, 1.0);
+      const double sup = std::clamp(reg->pirate_suppression, 0.0, 1.0);
       return std::clamp(base * (1.0 - sup), 0.0, 1.0);
     }
   }
@@ -712,6 +729,7 @@ void draw_procgen_lens_vectors(ImDrawList* draw,
 
 void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zoom, Vec2& pan) {
   auto& s = sim.state();
+  const ImGuiIO& io = ImGui::GetIO();
 
   const Ship* viewer_ship = (selected_ship != kInvalidId) ? find_ptr(s.ships, selected_ship) : nullptr;
   const Id viewer_faction_id = viewer_ship ? viewer_ship->faction_id : ui.viewer_faction_id;
@@ -784,6 +802,13 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   if (visible.empty()) {
     ImGui::TextDisabled("No systems to display");
     return;
+  }
+
+  // Quick lookup for visible systems (used by overlays/tooltips).
+  std::unordered_map<Id, const StarSystem*> visible_by_id;
+  visible_by_id.reserve(visible.size() * 2);
+  for (const auto& v : visible) {
+    visible_by_id.emplace(v.id, v.sys);
   }
 
   // --- Procedural generation lens normalization (for node coloring). ---
@@ -891,7 +916,7 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   }
 
   const bool hovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
-  const ImVec2 mouse = ImGui::GetIO().MousePos;
+  const ImVec2 mouse = io.MousePos;
   const bool mouse_in_rect =
       (mouse.x >= origin.x && mouse.x <= origin.x + avail.x && mouse.y >= origin.y && mouse.y <= origin.y + avail.y);
 
@@ -935,7 +960,7 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   bool minimap_enabled = ui.galaxy_map_show_minimap && minimap_has_room;
 
   // Keyboard shortcuts.
-  if (hovered && !ImGui::GetIO().WantTextInput) {
+  if (hovered && !io.WantTextInput) {
     if (ImGui::IsKeyPressed(ImGuiKey_R)) {
       zoom = 1.0;
       pan = Vec2{0.0, 0.0};
@@ -963,7 +988,7 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
 
   if (hovered && mouse_in_rect && !over_minimap && !over_legend) {
     // Zoom to cursor.
-    const float wheel = ImGui::GetIO().MouseWheel;
+    const float wheel = io.MouseWheel;
     if (wheel != 0.0f) {
       const Vec2 before = to_world(mouse, center_px, scale, zoom, pan);
       double new_zoom = zoom * std::pow(1.1, wheel);
@@ -975,11 +1000,23 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
     }
 
     if (ImGui::IsMouseDown(ImGuiMouseButton_Middle)) {
-      const ImVec2 d = ImGui::GetIO().MouseDelta;
+      const ImVec2 d = io.MouseDelta;
       const double denom = std::max(1e-12, scale * zoom);
       pan.x += d.x / denom;
       pan.y += d.y / denom;
     }
+  }
+
+  // Convenience transform used by several overlays.
+  const auto pos_px = [&](const Vec2& world_rel) -> ImVec2 {
+    return to_screen(world_rel, center_px, scale, zoom, pan);
+  };
+
+  // O(1) lookup for visible-system pointers by id.
+  std::unordered_map<Id, const StarSystem*> visible_by_id;
+  visible_by_id.reserve(visible.size() * 2 + 8);
+  for (const auto& v : visible) {
+    visible_by_id.emplace(v.id, v.sys);
   }
 
   // Minimap pan/teleport: click+drag to set the view center.
@@ -1647,8 +1684,8 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
 
         const Vec2 a = sysA->galaxy_pos - world_center;
         const Vec2 b = sysB->galaxy_pos - world_center;
-        const Vec2 pa = pos_px(a);
-        const Vec2 pb = pos_px(b);
+        const ImVec2 pa = to_screen(a, center_px, scale, zoom, pan);
+        const ImVec2 pb = to_screen(b, center_px, scale, zoom, pan);
 
         const double vol = std::max(0.0, lane.total_volume);
         float thick = 1.0f + 3.0f * std::clamp(static_cast<float>(std::log10(vol + 1.0) / 3.0), 0.0f, 1.0f);
@@ -1659,8 +1696,8 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
         const TradeGoodKind dom_good = lane.top_flows.empty() ? TradeGoodKind::RawMetals : lane.top_flows.front().good;
         const ImU32 lane_col = kind_col(dom_good, (pinned_match ? 0.65f : 0.40f) * alpha);
 
-        draw->AddLine(ImVec2(pa.x, pa.y), ImVec2(pb.x, pb.y), shadow, thick + 1.5f);
-        draw->AddLine(ImVec2(pa.x, pa.y), ImVec2(pb.x, pb.y), lane_col, thick);
+        draw->AddLine(pa, pb, shadow, thick + 1.5f);
+        draw->AddLine(pa, pb, lane_col, thick);
 
         // Optional risk overlay (green=safe, red=dangerous).
         double ravg = 0.0;
@@ -1668,20 +1705,22 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
           const double r0 = system_piracy_risk_effective(sim, s, lane.from_system_id);
           const double r1 = system_piracy_risk_effective(sim, s, lane.to_system_id);
           ravg = 0.5 * (r0 + r1);
-          const ImU32 risk_col = risk_gradient_color(static_cast<float>(ravg), (pinned_match ? 0.55f : 0.35f) * alpha);
-          draw->AddLine(ImVec2(pa.x, pa.y), ImVec2(pb.x, pb.y), risk_col, thick + (pinned_match ? 1.5f : 0.75f));
+          const ImU32 risk_col =
+              risk_gradient_color(static_cast<float>(ravg), (pinned_match ? 0.55f : 0.35f) * alpha);
+          draw->AddLine(pa, pb, risk_col, thick + (pinned_match ? 1.5f : 0.75f));
         }
 
         // Hover pick: closest lane within a small pixel threshold.
-        if (hovered && mouse_in_rect && !over_minimap && !over_legend && !io2.WantTextInput && !ImGui::IsAnyItemHovered()) {
-          const ImVec2 mp = ImGui::GetIO().MousePos;
-          const float d2 = dist2_point_segment(mp, ImVec2(pa.x, pa.y), ImVec2(pb.x, pb.y));
+        if (hovered && mouse_in_rect && !over_minimap && !over_legend && !io.WantTextInput &&
+            !ImGui::IsAnyItemHovered()) {
+          const ImVec2 mp = io.MousePos;
+          const float d2 = dist2_point_segment(mp, pa, pb);
           const float thresh = 8.0f + thick * 1.5f;
           if (d2 < thresh * thresh && d2 < trade_lane_hover.d2) {
             trade_lane_hover.lane = &lane;
             trade_lane_hover.d2 = d2;
-            trade_lane_hover.a = ImVec2(pa.x, pa.y);
-            trade_lane_hover.b = ImVec2(pb.x, pb.y);
+            trade_lane_hover.a = pa;
+            trade_lane_hover.b = pb;
             trade_lane_hover.thickness = thick;
             trade_lane_hover.risk_avg = ravg;
           }
@@ -2257,7 +2296,12 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   std::unordered_set<Id> colonized_systems;
   colonized_systems.reserve(s.colonies.size() * 2 + 4);
   for (const auto& kv : s.colonies) {
-    colonized_systems.insert(kv.second.system_id);
+    const Colony& c = kv.second;
+    if (c.body_id == kInvalidId) continue;
+    const auto* body = find_ptr(s.bodies, c.body_id);
+    if (!body) continue;
+    if (body->system_id == kInvalidId) continue;
+    colonized_systems.insert(body->system_id);
   }
 
   struct SystemLabelCandidate {
@@ -2272,7 +2316,7 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
 
   std::vector<SystemLabelCandidate> label_cands;
   label_cands.reserve(nodes.size());
-  const bool declutter_labels = !ImGui::GetIO().KeyAlt; // Alt = show all labels.
+  const bool declutter_labels = !io.KeyAlt; // Alt = show all labels.
 
   // Draw nodes.
   for (const auto& n : nodes) {
@@ -2434,7 +2478,7 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
 
     // Label budget scales with viewport area and zoom (prevents visual overload).
     const float area = std::max(1.0f, avail.x * avail.y);
-    const float z = std::clamp(zoom, 0.35f, 2.5f);
+    const float z = std::clamp(static_cast<float>(zoom), 0.35f, 2.5f);
     const int budget = static_cast<int>(std::clamp((area / (160.0f * 40.0f)) * (0.70f + 0.90f * z), 20.0f, 900.0f));
 
     std::stable_sort(label_cands.begin(), label_cands.end(), [](const SystemLabelCandidate& a, const SystemLabelCandidate& b) {
@@ -2849,19 +2893,19 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
           } else if (preview_is_fleet && selected_fleet != nullptr) {
             int total = (int)selected_fleet->ship_ids.size();
             int ok = 0;
-            int unknown = 0;
+            int unknown_ships = 0;
             double worst_short = 0.0;
             double min_remaining = std::numeric_limits<double>::infinity();
 
             for (Id ship_id : selected_fleet->ship_ids) {
               const auto* sh = find_ptr(s.ships, ship_id);
               if (!sh) {
-                unknown++;
+                unknown_ships++;
                 continue;
               }
               const auto* d = sim.find_design(sh->design_id);
               if (!d) {
-                unknown++;
+                unknown_ships++;
                 continue;
               }
               const double cap = std::max(0.0, d->fuel_capacity_tons);
@@ -2888,11 +2932,11 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
             }
 
             ImGui::Text("Fleet fuel: %d/%d ships OK", ok, total);
-            if (unknown > 0) {
-              ImGui::TextDisabled("%d ships: unknown fuel model", unknown);
+            if (unknown_ships > 0) {
+              ImGui::TextDisabled("%d ships: unknown fuel model", unknown_ships);
             }
 
-            if (!preview_from_queue && unknown == 0) {
+            if (!preview_from_queue && unknown_ships == 0) {
               if (ok == total) {
                 if (std::isfinite(min_remaining)) {
                   ImGui::TextDisabled("Worst arrival fuel: %.1f t", min_remaining);
@@ -3164,6 +3208,80 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   ImGui::BulletText("Ctrl+Right click: route selected fleet (Shift queues)");
   ImGui::BulletText("Ctrl+Alt+Right click: edit selected fleet patrol circuit waypoints");
   ImGui::BulletText("Hover: route preview (Shift=queued, Ctrl=fleet)");
+
+  // --- Quick system finder ---
+  // This is a lightweight navigation aid for large galaxies. It searches only
+  // among the currently visible/discovered systems (respects FoW).
+  ImGui::SeparatorText("Find system");
+  static std::array<char, 64> sys_find_buf{};
+  ImGui::PushID("sys_find");
+  ImGui::SetNextItemWidth(-70.0f);
+  ImGui::InputTextWithHint("##q", "Type a name...", sys_find_buf.data(), sys_find_buf.size());
+  ImGui::SameLine();
+  if (ImGui::SmallButton("Clear")) {
+    sys_find_buf[0] = '\0';
+  }
+
+  const std::string_view needle(sys_find_buf.data());
+  if (!needle.empty()) {
+    struct Match {
+      const StarSystem* sys{nullptr};
+      int rank{1}; // 0 = prefix match, 1 = substring match
+    };
+    std::vector<Match> matches;
+    matches.reserve(32);
+
+    auto istarts_with = [&](std::string_view s, std::string_view pref) {
+      if (pref.size() > s.size()) return false;
+      for (std::size_t i = 0; i < pref.size(); ++i) {
+        const unsigned char a = static_cast<unsigned char>(s[i]);
+        const unsigned char b = static_cast<unsigned char>(pref[i]);
+        if (static_cast<char>(std::tolower(a)) != static_cast<char>(std::tolower(b))) return false;
+      }
+      return true;
+    };
+
+    for (const auto& v : visible) {
+      if (!v.sys) continue;
+      const std::string& name = v.sys->name;
+      if (!icontains_ascii(name, needle)) continue;
+      const int rank = istarts_with(name, needle) ? 0 : 1;
+      matches.push_back(Match{v.sys, rank});
+    }
+
+    std::sort(matches.begin(), matches.end(), [](const Match& a, const Match& b) {
+      if (a.rank != b.rank) return a.rank < b.rank;
+      if (!a.sys || !b.sys) return a.sys < b.sys;
+      return a.sys->name < b.sys->name;
+    });
+
+    const int shown = std::min<int>(static_cast<int>(matches.size()), 12);
+    if (shown == 0) {
+      ImGui::TextDisabled("No matches");
+    } else {
+      ImGui::BeginChild("##results", ImVec2(0.0f, 115.0f), true);
+      for (int i = 0; i < shown; ++i) {
+        const StarSystem* sys = matches[i].sys;
+        if (!sys) continue;
+        const bool sel = (s.selected_system == sys->id);
+        if (ImGui::Selectable(sys->name.c_str(), sel)) {
+          s.selected_system = sys->id;
+          const Vec2 rel = sys->galaxy_pos - world_center;
+          pan = Vec2{-rel.x, -rel.y};
+        }
+      }
+      ImGui::EndChild();
+      if (static_cast<int>(matches.size()) > shown) {
+        ImGui::TextDisabled("%d matches (showing %d)", static_cast<int>(matches.size()), shown);
+      } else {
+        ImGui::TextDisabled("%d matches", static_cast<int>(matches.size()));
+      }
+    }
+  } else {
+    ImGui::TextDisabled("Tip: searches only discovered systems when FoW is enabled.");
+  }
+  ImGui::PopID();
+
   ImGui::SeparatorText("Overlays");
   ImGui::Checkbox("Starfield", &ui.galaxy_map_starfield);
   ImGui::SameLine();
@@ -3558,10 +3676,10 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
       }
 
       const char* unit = procgen_lens_value_unit(ui.galaxy_procgen_lens_mode);
-      const double scale = procgen_lens_display_scale(ui.galaxy_procgen_lens_mode);
+      const double disp_scale = procgen_lens_display_scale(ui.galaxy_procgen_lens_mode);
       const int dec = procgen_lens_display_decimals(ui.galaxy_procgen_lens_mode);
-      const double disp_min = lens_raw_min * scale;
-      const double disp_max = lens_raw_max * scale;
+      const double disp_min = lens_raw_min * disp_scale;
+      const double disp_max = lens_raw_max * disp_scale;
       if (ui.galaxy_procgen_lens_mode == ProcGenLensMode::MineralWealth && ui.galaxy_procgen_lens_log_scale) {
         // Mineral wealth is wide-range; keep a compact integer display.
         ImGui::TextDisabled("Min %.0f %s, Max %.0f %s (log)", disp_min, unit, disp_max, unit);
