@@ -1135,6 +1135,423 @@ double Simulation::system_sensor_environment_multiplier_at(Id system_id, const V
   return std::clamp(base * storm_mult, 0.05, 1.0);
 }
 
+double Simulation::system_sensor_environment_multiplier_los(Id system_id, const Vec2& from_mkm, const Vec2& to_mkm,
+                                                           std::uint64_t extra_seed) const {
+  if (!cfg_.enable_sensor_los_attenuation) return 1.0;
+  const auto* sys = find_ptr(state_.systems, system_id);
+  if (!sys) return 1.0;
+
+  // Only pay the cost when there is potential *spatial* variation along the ray.
+  // If the environment is uniform, endpoint multipliers already capture the effect.
+  const bool micro = (cfg_.enable_nebula_microfields && sys->nebula_density > 1e-6 && cfg_.nebula_microfield_strength > 1e-9);
+  const bool storm_cells = (cfg_.enable_nebula_storms && cfg_.enable_nebula_storm_cells && system_has_storm(system_id) &&
+                            cfg_.nebula_storm_cell_strength > 1e-9 && cfg_.nebula_storm_sensor_penalty > 1e-9);
+  if (!micro && !storm_cells) return 1.0;
+
+  const Vec2 d = to_mkm - from_mkm;
+  const double L = std::sqrt(d.x * d.x + d.y * d.y);
+  if (!std::isfinite(L) || L <= 1e-6) return 1.0;
+
+  const Vec2 dir{d.x / L, d.y / L};
+
+  auto env_at = [&](const Vec2& p) -> double {
+    return std::clamp(this->system_sensor_environment_multiplier_at(system_id, p), 0.0, 1.0);
+  };
+
+  const double env0 = env_at(from_mkm);
+  const double env1 = env_at(to_mkm);
+  double baseline = std::sqrt(std::max(0.0, env0) * std::max(0.0, env1));
+  baseline = std::clamp(baseline, 1e-6, 1.0);
+
+  // Cheap early-out: if the midpoint matches the endpoints closely, the LOS is likely uniform.
+  const Vec2 mid = from_mkm + dir * (0.5 * L);
+  const double env_mid = env_at(mid);
+  if (std::abs(env_mid - baseline) < 1e-4 && std::abs(env0 - env1) < 1e-4) return 1.0;
+
+  // Deterministic per-query seed. We quantize positions to avoid bit-level float noise.
+  auto q = [](double v) -> std::int64_t {
+    // 1/16 mkm (62,500 km) grid: stable but still responsive.
+    return static_cast<std::int64_t>(std::llround(v * 16.0));
+  };
+
+  std::uint64_t seed = 0xA5F04C9B3E11D7A1ULL;
+  seed ^= static_cast<std::uint64_t>(system_id) * 0x9E3779B97F4A7C15ULL;
+  seed ^= static_cast<std::uint64_t>(q(from_mkm.x)) * 0xBF58476D1CE4E5B9ULL;
+  seed ^= static_cast<std::uint64_t>(q(from_mkm.y)) * 0x94D049BB133111EBULL;
+  seed ^= static_cast<std::uint64_t>(q(to_mkm.x)) * 0xD6E8FEB86659FD93ULL;
+  seed ^= static_cast<std::uint64_t>(q(to_mkm.y)) * 0x2545F4914F6CDD1DULL;
+  seed ^= procgen_obscure::splitmix64(extra_seed ^ 0x3C79AC492BA7B653ULL);
+  seed = procgen_obscure::splitmix64(seed);
+
+  auto rand01 = [&](std::uint64_t salt) -> double {
+    return procgen_obscure::u01_from_u64(procgen_obscure::splitmix64(seed ^ salt));
+  };
+
+  // Config knobs (clamped to sane ranges).
+  const double iso_env = std::clamp(cfg_.sensor_los_iso_env, 0.0, 1.0);
+  const double step_scale = std::clamp(cfg_.sensor_los_sdf_step_scale, 0.05, 1.0);
+  const double min_step = std::max(1e-3, cfg_.sensor_los_min_step_mkm);
+  const double max_step = std::max(min_step, cfg_.sensor_los_max_step_mkm);
+  const double eps = std::max(1e-3, cfg_.sensor_los_grad_epsilon_mkm);
+  const int max_steps = std::clamp(cfg_.sensor_los_max_steps, 4, 512);
+  const double jitter = std::clamp(cfg_.sensor_los_sample_jitter, 0.0, 0.49);
+
+  const double min_mult = std::clamp(cfg_.sensor_los_min_multiplier, 0.0, 1.0);
+  const double max_mult = std::max(min_mult, std::clamp(cfg_.sensor_los_max_multiplier, 0.0, 4.0));
+  const double strength = std::max(0.0, cfg_.sensor_los_strength);
+
+  // Adaptive ray-march integration of env along the segment.
+  //
+  // We treat the scalar field f(p) = env_at(p) as an implicit surface via
+  // h(p) = f(p) - iso_env and use a signed-distance *estimate* sd ~= h/|grad h|.
+  // This is not a true SDF, but it provides a useful step size heuristic.
+  double sum_env_ds = 0.0;
+  double s = 0.0;
+
+  // Small deterministic start offset reduces banding when many queries share similar geometry.
+  {
+    const double off = (rand01(0xBADC0FFEEULL) - 0.5) * min_step;
+    if (std::isfinite(off)) s = std::clamp(off, 0.0, 0.75 * min_step);
+  }
+
+  for (int step = 0; step < max_steps && s < L - 1e-9; ++step) {
+    const Vec2 p = from_mkm + dir * s;
+    const double f = env_at(p);
+    const double h = f - iso_env;
+
+    // Central-difference gradient of h.
+    const double fxp = env_at(Vec2{p.x + eps, p.y});
+    const double fxm = env_at(Vec2{p.x - eps, p.y});
+    const double fyp = env_at(Vec2{p.x, p.y + eps});
+    const double fym = env_at(Vec2{p.x, p.y - eps});
+    const double gx = (fxp - fxm) / (2.0 * eps);
+    const double gy = (fyp - fym) / (2.0 * eps);
+    const double grad = std::sqrt(gx * gx + gy * gy);
+
+    double dist_est = max_step;
+    if (std::isfinite(grad) && grad > 1e-9) {
+      dist_est = std::abs(h) / grad;
+    }
+
+    double ds = std::clamp(dist_est * step_scale, min_step, max_step);
+    if (s + ds > L) ds = L - s;
+
+    // Stratified sample within the step (deterministic jitter).
+    double u = (rand01(0xC0FFEEULL + static_cast<std::uint64_t>(step)) - 0.5) * 2.0;
+    u *= jitter;
+    double t = std::clamp(0.5 + u, 0.0, 1.0);
+    const Vec2 ps = from_mkm + dir * (s + ds * t);
+
+    const double env_s = env_at(ps);
+    sum_env_ds += env_s * ds;
+
+    s += ds;
+  }
+
+  if (!std::isfinite(sum_env_ds) || sum_env_ds <= 1e-12) return 1.0;
+
+  double avg_env = sum_env_ds / L;
+  if (!std::isfinite(avg_env)) return 1.0;
+  avg_env = std::clamp(avg_env, 0.0, 1.0);
+
+  // Normalize to endpoints to avoid double-counting. Clamp by design: by default
+  // this only *reduces* detection (max_mult == 1).
+  double rel = avg_env / baseline;
+  if (!std::isfinite(rel)) rel = 1.0;
+  rel = std::clamp(rel, min_mult, max_mult);
+
+  if (strength <= 1e-9) return 1.0;
+
+  double out = std::pow(rel, strength);
+  if (!std::isfinite(out)) out = 1.0;
+  out = std::clamp(out, min_mult, max_mult);
+  return out;
+}
+
+
+
+
+
+double Simulation::system_beam_environment_multiplier_los(Id system_id, const Vec2& from_mkm, const Vec2& to_mkm,
+                                                         std::uint64_t extra_seed) const {
+  if (!cfg_.enable_beam_los_attenuation) return 1.0;
+  const auto* sys = find_ptr(state_.systems, system_id);
+  if (!sys) return 1.0;
+
+  const double strength = std::max(0.0, cfg_.beam_los_strength);
+  if (strength <= 1e-9) return 1.0;
+
+  const Vec2 d = to_mkm - from_mkm;
+  const double L = std::sqrt(d.x * d.x + d.y * d.y);
+  if (!std::isfinite(L) || L <= 1e-6) return 1.0;
+
+  // Interpret the local sensor environment multiplier field as a beam
+  // transmission field. This ensures beams "feel" the same nebula microfields
+  // / storm cells that already affect detection, without introducing a second
+  // procedural field.
+  auto env_at = [&](const Vec2& p) -> double {
+    return std::clamp(this->system_sensor_environment_multiplier_at(system_id, p), 0.0, 1.0);
+  };
+
+  // Only pay the ray-march cost when there is spatial variation along the ray.
+  // If the environment is uniform, we can use the system-wide multiplier.
+  const bool micro = (cfg_.enable_nebula_microfields && sys->nebula_density > 1e-6 && cfg_.nebula_microfield_strength > 1e-9);
+  const bool storm_cells = (cfg_.enable_nebula_storms && cfg_.enable_nebula_storm_cells && system_has_storm(system_id) &&
+                            cfg_.nebula_storm_cell_strength > 1e-9 && cfg_.nebula_storm_sensor_penalty > 1e-9);
+
+  const double min_mult = std::clamp(cfg_.beam_los_min_multiplier, 0.0, 1.0);
+  const double max_mult = std::max(min_mult, std::clamp(cfg_.beam_los_max_multiplier, 0.0, 4.0));
+
+  if (!micro && !storm_cells) {
+    double m = std::clamp(this->system_sensor_environment_multiplier(system_id), 0.0, 1.0);
+    m = std::clamp(m, min_mult, max_mult);
+    double out = std::pow(m, strength);
+    if (!std::isfinite(out)) out = 1.0;
+    return std::clamp(out, min_mult, max_mult);
+  }
+
+  const Vec2 dir{d.x / L, d.y / L};
+
+  const double env0 = env_at(from_mkm);
+  const double env1 = env_at(to_mkm);
+  double baseline = std::sqrt(std::max(0.0, env0) * std::max(0.0, env1));
+  baseline = std::clamp(baseline, min_mult, max_mult);
+
+  // Cheap early-out: if the midpoint matches the endpoints closely, the LOS is likely uniform.
+  const Vec2 mid = from_mkm + dir * (0.5 * L);
+  const double env_mid = env_at(mid);
+  if (std::abs(env_mid - baseline) < 1e-4 && std::abs(env0 - env1) < 1e-4) {
+    double out = std::pow(baseline, strength);
+    if (!std::isfinite(out)) out = 1.0;
+    return std::clamp(out, min_mult, max_mult);
+  }
+
+  // Deterministic per-query seed. We quantize positions to avoid bit-level float noise.
+  auto q = [](double v) -> std::int64_t {
+    // 1/16 mkm (62,500 km) grid: stable but still responsive.
+    return static_cast<std::int64_t>(std::llround(v * 16.0));
+  };
+
+  std::uint64_t seed = 0xBEEFBEEFCAFED00DULL;
+  seed ^= static_cast<std::uint64_t>(system_id) * 0x9E3779B97F4A7C15ULL;
+  seed ^= static_cast<std::uint64_t>(q(from_mkm.x)) * 0xBF58476D1CE4E5B9ULL;
+  seed ^= static_cast<std::uint64_t>(q(from_mkm.y)) * 0x94D049BB133111EBULL;
+  seed ^= static_cast<std::uint64_t>(q(to_mkm.x)) * 0xD6E8FEB86659FD93ULL;
+  seed ^= static_cast<std::uint64_t>(q(to_mkm.y)) * 0x2545F4914F6CDD1DULL;
+  seed ^= procgen_obscure::splitmix64(extra_seed ^ 0x4E7D73A8B9C6D2E1ULL);
+  seed = procgen_obscure::splitmix64(seed);
+
+  auto rand01 = [&](std::uint64_t salt) -> double {
+    return procgen_obscure::u01_from_u64(procgen_obscure::splitmix64(seed ^ salt));
+  };
+
+  // Config knobs (clamped to sane ranges).
+  const double iso_env = std::clamp(cfg_.beam_los_iso_env, 0.0, 1.0);
+  const double step_scale = std::clamp(cfg_.beam_los_sdf_step_scale, 0.05, 1.0);
+  const double min_step = std::max(1e-3, cfg_.beam_los_min_step_mkm);
+  const double max_step = std::max(min_step, cfg_.beam_los_max_step_mkm);
+  const double eps = std::max(1e-3, cfg_.beam_los_grad_epsilon_mkm);
+  const int max_steps = std::clamp(cfg_.beam_los_max_steps, 4, 512);
+  const double jitter = std::clamp(cfg_.beam_los_sample_jitter, 0.0, 0.49);
+
+  // Adaptive ray-march integration of transmission along the segment.
+  //
+  // We treat f(p) = env_at(p) as an implicit surface via h(p) = f(p) - iso_env
+  // and use a signed-distance *estimate* sd ~= h/|grad h| to choose conservative
+  // step sizes (sphere-tracing style). This is not a true SDF, but works well as
+  // a heuristic around sharp nebula fronts.
+  double sum_env_ds = 0.0;
+  double sum_log_env_ds = 0.0;
+  double s = 0.0;
+
+  // Small deterministic start offset reduces banding when many shots share similar geometry.
+  {
+    const double off = (rand01(0xDEADBEEFULL) - 0.5) * min_step;
+    if (std::isfinite(off)) s = std::clamp(off, 0.0, 0.75 * min_step);
+  }
+
+  for (int step = 0; step < max_steps && s < L - 1e-9; ++step) {
+    const Vec2 p = from_mkm + dir * s;
+    const double f = env_at(p);
+    const double h = f - iso_env;
+
+    // Central-difference gradient of h (same as gradient of f).
+    const double fxp = env_at(Vec2{p.x + eps, p.y});
+    const double fxm = env_at(Vec2{p.x - eps, p.y});
+    const double fyp = env_at(Vec2{p.x, p.y + eps});
+    const double fym = env_at(Vec2{p.x, p.y - eps});
+    const double gx = (fxp - fxm) / (2.0 * eps);
+    const double gy = (fyp - fym) / (2.0 * eps);
+    const double grad = std::sqrt(gx * gx + gy * gy);
+
+    double dist_est = max_step;
+    if (std::isfinite(grad) && grad > 1e-9) {
+      dist_est = std::abs(h) / grad;
+    }
+
+    double ds = std::clamp(dist_est * step_scale, min_step, max_step);
+    if (s + ds > L) ds = L - s;
+
+    // Stratified sample within the step (deterministic jitter).
+    double u = (rand01(0xC0FFEEULL + static_cast<std::uint64_t>(step)) - 0.5) * 2.0;
+    u *= jitter;
+    double t = std::clamp(0.5 + u, 0.0, 1.0);
+    const Vec2 ps = from_mkm + dir * (s + ds * t);
+
+    const double env_s = env_at(ps);
+    sum_env_ds += env_s * ds;
+
+    // Log integration gives geometric-mean transmission (multiplicative medium).
+    const double safe = std::clamp(env_s, 1e-6, 1.0);
+    sum_log_env_ds += std::log(safe) * ds;
+
+    s += ds;
+  }
+
+  double trans = baseline;
+  if (cfg_.beam_los_use_geometric_mean) {
+    if (std::isfinite(sum_log_env_ds)) {
+      const double avg_log = sum_log_env_ds / L;
+      const double gm = std::exp(avg_log);
+      if (std::isfinite(gm)) trans = std::clamp(gm, 0.0, 1.0);
+    }
+  } else {
+    if (std::isfinite(sum_env_ds) && sum_env_ds > 1e-12) {
+      double avg = sum_env_ds / L;
+      if (std::isfinite(avg)) trans = std::clamp(avg, 0.0, 1.0);
+    }
+  }
+
+  trans = std::clamp(trans, min_mult, max_mult);
+
+  double out = std::pow(trans, strength);
+  if (!std::isfinite(out)) out = 1.0;
+  out = std::clamp(out, min_mult, max_mult);
+  return out;
+}
+
+
+
+double Simulation::system_movement_environment_cost_los(Id system_id, const Vec2& from_mkm, const Vec2& to_mkm,
+                                                      std::uint64_t extra_seed) const {
+  const auto* sys = find_ptr(state_.systems, system_id);
+  const Vec2 d = to_mkm - from_mkm;
+  const double L = std::sqrt(d.x * d.x + d.y * d.y);
+  if (!sys) return (std::isfinite(L) ? L : 0.0);
+  if (!std::isfinite(L) || L <= 1e-6) return 0.0;
+
+  // Only pay the ray-march cost when there is spatial variation that can
+  // influence movement. Microfields only matter when nebula drag is enabled.
+  const bool micro = (cfg_.enable_nebula_drag && cfg_.enable_nebula_microfields && sys->nebula_density > 1e-6 &&
+                      cfg_.nebula_microfield_strength > 1e-9 && cfg_.nebula_drag_speed_penalty_at_max_density > 1e-9);
+  const bool storm_cells = (cfg_.enable_nebula_storms && cfg_.enable_nebula_storm_cells && system_has_storm(system_id) &&
+                            cfg_.nebula_storm_cell_strength > 1e-9 && cfg_.nebula_storm_speed_penalty > 1e-9);
+  if (!micro && !storm_cells) {
+    const double m = std::max(1e-6, this->system_movement_speed_multiplier(system_id));
+    return L / m;
+  }
+
+  const Vec2 dir{d.x / L, d.y / L};
+
+  auto speed_at = [&](const Vec2& p) -> double {
+    return std::clamp(this->system_movement_speed_multiplier_at(system_id, p), 0.05, 1.0);
+  };
+
+  // Cheap early-out: if the midpoint matches endpoints closely, the segment is
+  // likely uniform enough that a simple average is sufficient.
+  const double m0 = speed_at(from_mkm);
+  const double m1 = speed_at(to_mkm);
+  const double baseline = std::clamp(std::sqrt(m0 * m1), 0.05, 1.0);
+  const Vec2 mid = from_mkm + dir * (0.5 * L);
+  const double mm = speed_at(mid);
+  if (std::abs(mm - baseline) < 1e-4 && std::abs(m0 - m1) < 1e-4) {
+    return L / baseline;
+  }
+
+  // Deterministic per-query seed. We quantize positions to avoid bit-level float noise.
+  auto q = [](double v) -> std::int64_t {
+    // 1/16 mkm (62,500 km) grid: stable but still responsive.
+    return static_cast<std::int64_t>(std::llround(v * 16.0));
+  };
+
+  std::uint64_t seed = 0x3D2C0A8F1B6E5D9BULL;
+  seed ^= static_cast<std::uint64_t>(system_id) * 0x9E3779B97F4A7C15ULL;
+  seed ^= static_cast<std::uint64_t>(q(from_mkm.x)) * 0xBF58476D1CE4E5B9ULL;
+  seed ^= static_cast<std::uint64_t>(q(from_mkm.y)) * 0x94D049BB133111EBULL;
+  seed ^= static_cast<std::uint64_t>(q(to_mkm.x)) * 0xD6E8FEB86659FD93ULL;
+  seed ^= static_cast<std::uint64_t>(q(to_mkm.y)) * 0x2545F4914F6CDD1DULL;
+  seed ^= procgen_obscure::splitmix64(extra_seed ^ 0x8E1D9C0B7A53F241ULL);
+  seed = procgen_obscure::splitmix64(seed);
+
+  auto rand01 = [&](std::uint64_t salt) -> double {
+    return procgen_obscure::u01_from_u64(procgen_obscure::splitmix64(seed ^ salt));
+  };
+
+  // Config knobs (clamped to sane ranges).
+  const double iso = std::clamp(cfg_.terrain_nav_iso_speed, 0.05, 1.0);
+  const double step_scale = std::clamp(cfg_.terrain_nav_sdf_step_scale, 0.05, 1.0);
+  const double min_step = std::max(1e-3, cfg_.terrain_nav_min_step_mkm);
+  const double max_step = std::max(min_step, cfg_.terrain_nav_max_step_mkm);
+  const double eps = std::max(1e-3, cfg_.terrain_nav_grad_epsilon_mkm);
+  const int max_steps = std::clamp(cfg_.terrain_nav_max_steps, 4, 512);
+  const double jitter = std::clamp(cfg_.terrain_nav_sample_jitter, 0.0, 0.49);
+
+  // Adaptive ray-march integration of movement *time* cost along the segment.
+  //
+  // We treat the scalar field f(p) = speed_at(p) as an implicit surface via
+  // h(p) = f(p) - iso and use a signed-distance *estimate* sd ~= h/|grad h| to
+  // set a conservative step size (sphere-tracing style). This is not a true SDF
+  // but works well as a heuristic around sharp fronts.
+  double sum_ds_over_m = 0.0;
+  double s = 0.0;
+
+  // Small deterministic start offset reduces banding when many queries share similar geometry.
+  {
+    const double off = (rand01(0xD15EA5EULL) - 0.5) * min_step;
+    if (std::isfinite(off)) s = std::clamp(off, 0.0, 0.75 * min_step);
+  }
+
+  for (int step = 0; step < max_steps && s < L - 1e-9; ++step) {
+    const Vec2 p = from_mkm + dir * s;
+    const double f = speed_at(p);
+    const double h = f - iso;
+
+    // Central-difference gradient of h.
+    const double fxp = speed_at(Vec2{p.x + eps, p.y});
+    const double fxm = speed_at(Vec2{p.x - eps, p.y});
+    const double fyp = speed_at(Vec2{p.x, p.y + eps});
+    const double fym = speed_at(Vec2{p.x, p.y - eps});
+    const double gx = (fxp - fxm) / (2.0 * eps);
+    const double gy = (fyp - fym) / (2.0 * eps);
+    const double grad = std::sqrt(gx * gx + gy * gy);
+
+    double dist_est = max_step;
+    if (std::isfinite(grad) && grad > 1e-9) {
+      dist_est = std::abs(h) / grad;
+    }
+
+    double ds = std::clamp(dist_est * step_scale, min_step, max_step);
+    if (s + ds > L) ds = L - s;
+
+    // Stratified sample within the step (deterministic jitter).
+    double u = (rand01(0xC0FFEEULL + static_cast<std::uint64_t>(step)) - 0.5) * 2.0;
+    u *= jitter;
+    double t = std::clamp(0.5 + u, 0.0, 1.0);
+    const Vec2 ps = from_mkm + dir * (s + ds * t);
+
+    const double m = std::max(0.05, speed_at(ps));
+    sum_ds_over_m += ds / m;
+
+    s += ds;
+  }
+
+  if (!std::isfinite(sum_ds_over_m) || sum_ds_over_m <= 1e-12) {
+    return L / baseline;
+  }
+
+  return sum_ds_over_m;
+}
+
 double Simulation::system_movement_speed_multiplier_at(Id system_id, const Vec2& pos_mkm) const {
   const auto* sys = find_ptr(state_.systems, system_id);
   if (!sys) return 1.0;
@@ -2522,7 +2939,58 @@ bool Simulation::is_ship_detected_by_faction(Id viewer_faction_id, Id target_shi
   const auto* d = find_design(tgt->design_id);
   const double sig = sim_sensors::effective_signature_multiplier(*this, *tgt, d);
   const double ecm = d ? std::max(0.0, d->ecm_strength) : 0.0;
-  return any_source_detects(sources, tgt->position_mkm, sig, ecm);
+
+  // Fast path: legacy behavior.
+  bool use_los = cfg_.enable_sensor_los_attenuation;
+  if (use_los) {
+    const auto* sys = find_ptr(state_.systems, tgt->system_id);
+    if (!sys) {
+      use_los = false;
+    } else {
+      const bool micro = (cfg_.enable_nebula_microfields && sys->nebula_density > 1e-6 && cfg_.nebula_microfield_strength > 1e-9);
+      const bool storm_cells = (cfg_.enable_nebula_storms && cfg_.enable_nebula_storm_cells && system_has_storm(tgt->system_id) &&
+                                cfg_.nebula_storm_cell_strength > 1e-9 && cfg_.nebula_storm_sensor_penalty > 1e-9);
+      if (!micro && !storm_cells) use_los = false;
+    }
+  }
+
+  if (!use_los) {
+    return any_source_detects(sources, tgt->position_mkm, sig, ecm);
+  }
+
+  // LOS path: same base sensor math, but with an extra relative LOS multiplier.
+  double sig01 = std::isfinite(sig) ? sig : 1.0;
+  if (sig01 < 0.0) sig01 = 0.0;
+  double ecm01 = std::isfinite(ecm) ? ecm : 0.0;
+  if (ecm01 < 0.0) ecm01 = 0.0;
+
+  for (const auto& src : sources) {
+    if (src.range_mkm <= 0.0) continue;
+
+    double eccm = std::isfinite(src.eccm_strength) ? src.eccm_strength : 0.0;
+    if (eccm < 0.0) eccm = 0.0;
+
+    double ew_mult = (1.0 + eccm) / (1.0 + ecm01);
+    if (!std::isfinite(ew_mult)) ew_mult = 1.0;
+    ew_mult = std::clamp(ew_mult, 0.1, 10.0);
+
+    const double r_base = src.range_mkm * sig01 * ew_mult;
+    if (r_base <= 1e-9) continue;
+
+    const Vec2 dp = tgt->position_mkm - src.pos_mkm;
+    const double d2 = dp.x * dp.x + dp.y * dp.y;
+    if (d2 > r_base * r_base + 1e-9) continue;
+
+    const std::uint64_t extra_seed = procgen_obscure::splitmix64(static_cast<std::uint64_t>(src.ship_id) * 0x9E3779B97F4A7C15ULL ^
+                                                            static_cast<std::uint64_t>(target_ship_id) * 0xBF58476D1CE4E5B9ULL);
+    const double los = this->system_sensor_environment_multiplier_los(tgt->system_id, src.pos_mkm, tgt->position_mkm, extra_seed);
+    const double r = r_base * los;
+    if (r <= 1e-9) continue;
+
+    if (d2 <= r * r + 1e-9) return true;
+  }
+
+  return false;
 }
 
 std::vector<Id> Simulation::detected_hostile_ships_in_system(Id viewer_faction_id, Id system_id) const {
@@ -2532,6 +3000,14 @@ std::vector<Id> Simulation::detected_hostile_ships_in_system(Id viewer_faction_i
 
   const auto sources = gather_sensor_sources(*this, viewer_faction_id, system_id);
   if (sources.empty()) return out;
+
+  bool use_los = cfg_.enable_sensor_los_attenuation;
+  if (use_los) {
+    const bool micro = (cfg_.enable_nebula_microfields && sys->nebula_density > 1e-6 && cfg_.nebula_microfield_strength > 1e-9);
+    const bool storm_cells = (cfg_.enable_nebula_storms && cfg_.enable_nebula_storm_cells && system_has_storm(system_id) &&
+                              cfg_.nebula_storm_cell_strength > 1e-9 && cfg_.nebula_storm_sensor_penalty > 1e-9);
+    if (!micro && !storm_cells) use_los = false;
+  }
 
   // Use a spatial index to avoid scanning every ship for every query.
   SpatialIndex2D idx;
@@ -2578,7 +3054,17 @@ std::vector<Id> Simulation::detected_hostile_ships_in_system(Id viewer_faction_i
       if (eff <= 1e-9) continue;
       const double dx = sh->position_mkm.x - src.pos_mkm.x;
       const double dy = sh->position_mkm.y - src.pos_mkm.y;
-      if (dx * dx + dy * dy > eff * eff + 1e-9) continue;
+      const double d2 = dx * dx + dy * dy;
+      if (d2 > eff * eff + 1e-9) continue;
+
+      if (use_los) {
+        const std::uint64_t extra_seed = procgen_obscure::splitmix64(static_cast<std::uint64_t>(src.ship_id) * 0xD6E8FEB86659FD93ULL ^
+                                                                static_cast<std::uint64_t>(sid) * 0x2545F4914F6CDD1DULL);
+        const double los = this->system_sensor_environment_multiplier_los(system_id, src.pos_mkm, sh->position_mkm, extra_seed);
+        const double eff_los = eff * los;
+        if (eff_los <= 1e-9) continue;
+        if (d2 > eff_los * eff_los + 1e-9) continue;
+      }
 
       out.push_back(sid);
     }

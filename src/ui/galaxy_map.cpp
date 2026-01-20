@@ -5,6 +5,7 @@
 #include "ui/galaxy_constellations.h"
 #include "ui/minimap.h"
 #include "ui/procgen_metrics.h"
+#include "ui/raymarch_nebula.h"
 #include "ui/ruler.h"
 
 #include <imgui.h>
@@ -1015,15 +1016,35 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
 
   // Map chrome.
   {
+    const float pan_px_x = static_cast<float>(-pan.x * scale * zoom);
+    const float pan_px_y = static_cast<float>(-pan.y * scale * zoom);
+    const std::uint32_t chrome_seed = static_cast<std::uint32_t>(viewer_faction_id == kInvalidId ? 0xC0FFEEu : viewer_faction_id);
+
+    // Experimental: ray-marched SDF nebula background.
+    if (ui.map_raymarch_nebula && ui.map_raymarch_nebula_alpha > 0.0f) {
+      RaymarchNebulaStyle rs;
+      rs.enabled = true;
+      rs.alpha = ui.map_raymarch_nebula_alpha;
+      rs.parallax = ui.map_raymarch_nebula_parallax;
+      rs.max_depth = ui.map_raymarch_nebula_max_depth;
+      rs.error_threshold = ui.map_raymarch_nebula_error_threshold;
+      rs.spp = ui.map_raymarch_nebula_spp;
+      rs.max_steps = ui.map_raymarch_nebula_max_steps;
+      rs.animate = ui.map_raymarch_nebula_animate;
+      rs.time_scale = ui.map_raymarch_nebula_time_scale;
+      rs.debug_overlay = ui.map_raymarch_nebula_debug;
+
+      RaymarchNebulaStats stats;
+      draw_raymarched_nebula(draw, origin, avail, bg, pan_px_x, pan_px_y, chrome_seed ^ 0x8F00DBA5u, rs,
+                             rs.debug_overlay ? &stats : nullptr);
+    }
+
     StarfieldStyle sf;
     sf.enabled = ui.galaxy_map_starfield;
     sf.density = ui.map_starfield_density;
     sf.parallax = ui.map_starfield_parallax;
     sf.alpha = 1.0f;
-    const float pan_px_x = static_cast<float>(-pan.x * scale * zoom);
-    const float pan_px_y = static_cast<float>(-pan.y * scale * zoom);
-    draw_starfield(draw, origin, avail, bg, pan_px_x, pan_px_y,
-                   static_cast<std::uint32_t>(viewer_faction_id == kInvalidId ? 0xC0FFEEu : viewer_faction_id), sf);
+    draw_starfield(draw, origin, avail, bg, pan_px_x, pan_px_y, chrome_seed, sf);
 
     // Procedural lens *field* overlay (optional).
     // Draw behind the grid/region boundaries so the map stays readable.

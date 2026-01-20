@@ -208,6 +208,8 @@ if(NEBULA4X_BUILD_UI)
     src/ui/hud.cpp
     src/ui/ui_commands.cpp
     src/ui/map_render.cpp
+    src/ui/raymarch_nebula.cpp
+    src/ui/raytrace_sensor_heatmap.cpp
     src/ui/map_label_placer.cpp
     src/ui/panels.cpp
     src/ui/economy_window.cpp

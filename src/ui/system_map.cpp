@@ -3,6 +3,8 @@
 #include "ui/map_render.h"
 #include "ui/map_label_placer.h"
 #include "ui/minimap.h"
+#include "ui/raymarch_nebula.h"
+#include "ui/raytrace_sensor_heatmap.h"
 #include "ui/ruler.h"
 
 #include "ui/procgen_graphics.h"
@@ -505,6 +507,10 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
 
   int sensor_sources_drawn = 0;
 
+  // Stats for the experimental LOS ray-traced sensor heatmap.
+  SensorRaytraceHeatmapStats sensor_rt_stats;
+  bool sensor_rt_stats_valid = false;
+
   // Hostile threat sources for the tactical threat heatmap.
   std::vector<HeatmapSource> threat_sources;
   if (ui.system_map_threat_heatmap && viewer_faction_id != kInvalidId) {
@@ -863,15 +869,35 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
 
   // Map chrome.
   {
+    const float pan_px_x = static_cast<float>(-pan.x * scale * zoom);
+    const float pan_px_y = static_cast<float>(-pan.y * scale * zoom);
+    const std::uint32_t chrome_seed = hash_u32(static_cast<std::uint32_t>(sys->id) ^ 0xA3C59AC3u);
+
+    // Experimental: ray-marched SDF nebula background.
+    if (ui.map_raymarch_nebula && ui.map_raymarch_nebula_alpha > 0.0f) {
+      RaymarchNebulaStyle rs;
+      rs.enabled = true;
+      rs.alpha = ui.map_raymarch_nebula_alpha;
+      rs.parallax = ui.map_raymarch_nebula_parallax;
+      rs.max_depth = ui.map_raymarch_nebula_max_depth;
+      rs.error_threshold = ui.map_raymarch_nebula_error_threshold;
+      rs.spp = ui.map_raymarch_nebula_spp;
+      rs.max_steps = ui.map_raymarch_nebula_max_steps;
+      rs.animate = ui.map_raymarch_nebula_animate;
+      rs.time_scale = ui.map_raymarch_nebula_time_scale;
+      rs.debug_overlay = ui.map_raymarch_nebula_debug;
+
+      RaymarchNebulaStats stats;
+      draw_raymarched_nebula(draw, origin, avail, bg, pan_px_x, pan_px_y, chrome_seed ^ 0xD1CEB00Bu, rs,
+                             rs.debug_overlay ? &stats : nullptr);
+    }
+
     StarfieldStyle sf;
     sf.enabled = ui.system_map_starfield;
     sf.density = ui.map_starfield_density;
     sf.parallax = ui.map_starfield_parallax;
     sf.alpha = 1.0f;
-    const float pan_px_x = static_cast<float>(-pan.x * scale * zoom);
-    const float pan_px_y = static_cast<float>(-pan.y * scale * zoom);
-    draw_starfield(draw, origin, avail, bg, pan_px_x, pan_px_y,
-                   hash_u32(static_cast<std::uint32_t>(sys->id) ^ 0xA3C59AC3u), sf);
+    draw_starfield(draw, origin, avail, bg, pan_px_x, pan_px_y, chrome_seed, sf);
 
     // Nebula microfield overlay: shows local pockets/filaments of nebula density.
     // Drawn after the starfield but before heatmaps/grid.
@@ -905,20 +931,53 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
       const int cells_y = std::clamp(static_cast<int>(std::round(static_cast<float>(cells_x) * aspect)), 8, 200);
 
       if (ui.system_map_sensor_heatmap && viewer_faction_id != kInvalidId && !sensor_sources.empty()) {
-        std::vector<HeatmapSource> srcs;
-        srcs.reserve(sensor_sources.size());
-        for (const auto& ssrc : sensor_sources) {
-          const double r = ssrc.range_mkm * sensor_coverage_sig;
-          if (r <= 1e-6) continue;
-          HeatmapSource hs;
-          hs.pos_mkm = ssrc.pos_mkm;
-          hs.range_mkm = r;
-          hs.weight = 1.0f;
-          srcs.push_back(hs);
-        }
+        // Two modes:
+        //  - Fast grid (legacy)
+        //  - Experimental LOS ray-traced shading (UI-only)
+        if (ui.system_map_sensor_heatmap_raytrace) {
+          std::vector<RaytraceSensorSource> srcs;
+          srcs.reserve(sensor_sources.size());
+          for (const auto& ssrc : sensor_sources) {
+            const double r = ssrc.range_mkm * sensor_coverage_sig;
+            if (r <= 1e-6) continue;
+            RaytraceSensorSource hs;
+            hs.pos_mkm = ssrc.pos_mkm;
+            hs.range_mkm = r;
+            hs.weight = 1.0f;
+            hs.env_src_multiplier = sim.system_sensor_environment_multiplier_at(sys->id, ssrc.pos_mkm);
+            srcs.push_back(hs);
+          }
 
-        draw_heatmap(draw, origin, avail, center, scale, zoom, pan, cells_x, cells_y, srcs,
-                     IM_COL32(0, 170, 255, 255), ui.system_map_heatmap_opacity * 0.65f);
+          SensorRaytraceHeatmapSettings hset;
+          hset.max_depth = std::clamp(ui.system_map_sensor_raytrace_max_depth, 0, 10);
+          hset.error_threshold = std::clamp(ui.system_map_sensor_raytrace_error_threshold, 0.0f, 0.5f);
+          hset.spp = std::clamp(ui.system_map_sensor_raytrace_spp, 1, 16);
+          hset.los_samples = std::clamp(ui.system_map_sensor_raytrace_los_samples, 1, 64);
+          hset.los_strength = std::clamp(ui.system_map_sensor_raytrace_los_strength, 0.0f, 1.0f);
+          hset.debug = ui.system_map_sensor_raytrace_debug;
+
+          sensor_rt_stats = SensorRaytraceHeatmapStats{};
+          draw_raytraced_sensor_heatmap(draw, origin, avail, center, scale, zoom, pan, sim, sys->id, srcs,
+                                       IM_COL32(0, 170, 255, 255), ui.system_map_heatmap_opacity * 0.65f,
+                                       chrome_seed ^ 0x51C0F00Du, hset,
+                                       ui.system_map_sensor_raytrace_debug ? &sensor_rt_stats : nullptr);
+          sensor_rt_stats_valid = ui.system_map_sensor_raytrace_debug;
+        } else {
+          std::vector<HeatmapSource> srcs;
+          srcs.reserve(sensor_sources.size());
+          for (const auto& ssrc : sensor_sources) {
+            const double r = ssrc.range_mkm * sensor_coverage_sig;
+            if (r <= 1e-6) continue;
+            HeatmapSource hs;
+            hs.pos_mkm = ssrc.pos_mkm;
+            hs.range_mkm = r;
+            hs.weight = 1.0f;
+            srcs.push_back(hs);
+          }
+
+          draw_heatmap(draw, origin, avail, center, scale, zoom, pan, cells_x, cells_y, srcs,
+                       IM_COL32(0, 170, 255, 255), ui.system_map_heatmap_opacity * 0.65f);
+        }
       }
 
       if (ui.system_map_threat_heatmap && viewer_faction_id != kInvalidId && !threat_sources.empty()) {
@@ -2991,6 +3050,37 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
   ImGui::Checkbox("Threat##heatmap", &ui.system_map_threat_heatmap);
   ImGui::SameLine();
   ImGui::Checkbox("Sensor##heatmap", &ui.system_map_sensor_heatmap);
+
+  if (ui.system_map_sensor_heatmap) {
+    ImGui::SameLine();
+    ImGui::Checkbox("LOS raytrace##heatmap", &ui.system_map_sensor_heatmap_raytrace);
+    if (ui.system_map_sensor_heatmap_raytrace) {
+      ImGui::TextDisabled("Experimental LOS shading (visual-only)");
+
+      ui.system_map_sensor_raytrace_los_strength =
+          std::clamp(ui.system_map_sensor_raytrace_los_strength, 0.0f, 1.0f);
+      ui.system_map_sensor_raytrace_los_samples =
+          std::clamp(ui.system_map_sensor_raytrace_los_samples, 1, 64);
+      ui.system_map_sensor_raytrace_spp = std::clamp(ui.system_map_sensor_raytrace_spp, 1, 16);
+      ui.system_map_sensor_raytrace_max_depth = std::clamp(ui.system_map_sensor_raytrace_max_depth, 0, 10);
+      ui.system_map_sensor_raytrace_error_threshold =
+          std::clamp(ui.system_map_sensor_raytrace_error_threshold, 0.0f, 0.5f);
+
+      ImGui::SliderFloat("LOS strength##heatmap", &ui.system_map_sensor_raytrace_los_strength, 0.0f, 1.0f, "%.2f");
+      ImGui::SliderInt("LOS samples##heatmap", &ui.system_map_sensor_raytrace_los_samples, 1, 32);
+      ImGui::SliderInt("Adaptive depth##heatmap", &ui.system_map_sensor_raytrace_max_depth, 0, 10);
+      ImGui::SliderFloat("Detail threshold##heatmap", &ui.system_map_sensor_raytrace_error_threshold, 0.0f, 0.25f, "%.3f");
+      ImGui::SliderInt("Stochastic spp##heatmap", &ui.system_map_sensor_raytrace_spp, 1, 8);
+      ImGui::Checkbox("Debug quads##heatmap", &ui.system_map_sensor_raytrace_debug);
+      ImGui::TextDisabled("(Does not change sim detection yet)");
+
+      if (ui.system_map_sensor_raytrace_debug && sensor_rt_stats_valid) {
+        ImGui::TextDisabled("Quads: tested %d  leaf %d", sensor_rt_stats.quads_tested, sensor_rt_stats.quads_leaf);
+        ImGui::TextDisabled("Point evals: %d", sensor_rt_stats.point_evals);
+        ImGui::TextDisabled("LOS env samples: %d", sensor_rt_stats.los_env_samples);
+      }
+    }
+  }
 
   ui.system_map_heatmap_opacity = std::clamp(ui.system_map_heatmap_opacity, 0.0f, 1.0f);
   ui.system_map_heatmap_resolution = std::clamp(ui.system_map_heatmap_resolution, 16, 200);

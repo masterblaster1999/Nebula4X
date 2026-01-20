@@ -773,6 +773,136 @@ void draw_left_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sele
     }
   }
 
+  {
+    bool los = sim.sensor_los_attenuation_enabled();
+    if (ImGui::Checkbox("Sensor LOS attenuation", &los)) {
+      sim.set_sensor_los_attenuation_enabled(los);
+    }
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip(
+          "Experimental sensor model: applies an extra line-of-sight occlusion factor by\n"
+          "ray-marching the local nebula microfield / storm-cell environment between\n"
+          "sensor source and target. Uses an SDF-style distance estimate (f/|grad f|)\n"
+          "for adaptive step sizes and deterministic jitter to reduce sampling artifacts.");
+    }
+
+    if (los) {
+      double strength = sim.sensor_los_strength();
+      if (ImGui::SliderDouble("LOS strength", &strength, 0.0, 3.0, "%.2f")) {
+        sim.set_sensor_los_strength(strength);
+      }
+      if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Higher values make dense pockets block sensors more aggressively.");
+      }
+    }
+  }
+
+
+
+  {
+    bool beam = sim.beam_los_attenuation_enabled();
+    if (ImGui::Checkbox("Beam LOS attenuation", &beam)) {
+      sim.set_beam_los_attenuation_enabled(beam);
+    }
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip(
+          "Experimental combat model: beam weapons apply a transmission multiplier based on the
+"
+          "nebula microfield / storm-cell environment *along the line of fire*.
+"
+          "Computed via adaptive ray-marching with an SDF-style distance estimate and deterministic jitter.");
+    }
+
+    if (beam) {
+      double strength = sim.beam_los_strength();
+      if (ImGui::SliderDouble("Beam LOS strength", &strength, 0.0, 3.0, "%.2f")) {
+        sim.set_beam_los_strength(strength);
+      }
+      if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("0 disables attenuation even when enabled. Higher values make dense pockets more punishing.");
+      }
+
+      bool scatter = sim.beam_scatter_splash_enabled();
+      if (ImGui::Checkbox("Beam scatter splash", &scatter)) {
+        sim.set_beam_scatter_splash_enabled(scatter);
+      }
+      if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(
+            "Converts a fraction of medium-loss (1 - LOS multiplier) into low-intensity splash damage
+"
+            "around the beam segment. Makes fighting inside heavy terrain more chaotic.");
+      }
+
+      if (scatter) {
+        double frac = sim.beam_scatter_fraction_of_lost();
+        if (ImGui::SliderDouble("Scatter fraction", &frac, 0.0, 0.75, "%.2f")) {
+          sim.set_beam_scatter_fraction_of_lost(frac);
+        }
+        if (ImGui::IsItemHovered()) {
+          ImGui::SetTooltip("Fraction of (1 - LOS) damage converted into splash (rest is absorbed/lost).");
+        }
+
+        double rad = sim.beam_scatter_radius_mkm();
+        if (ImGui::SliderDouble("Scatter radius (mkm)", &rad, 0.05, 2.0, "%.2f")) {
+          sim.set_beam_scatter_radius_mkm(rad);
+        }
+
+        bool ff = sim.beam_scatter_can_hit_friendly();
+        if (ImGui::Checkbox("Scatter friendly fire", &ff)) {
+          sim.set_beam_scatter_can_hit_friendly(ff);
+        }
+      }
+    }
+  }
+
+  {
+    bool nav = sim.terrain_aware_navigation_enabled();
+    if (ImGui::Checkbox("Terrain-aware navigation", &nav)) {
+      sim.set_terrain_aware_navigation_enabled(nav);
+    }
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip(
+          "Experimental movement steering: casts a small fan of candidate headings (rays) around\n"
+          "the direct-to-target vector and chooses the lowest estimated travel-time path through\n"
+          "nebula microfields / storm cells. Uses SDF-style adaptive ray steps (f/|grad f|) and\n"
+          "deterministic jitter for stable stochastic sampling.");
+    }
+
+    if (nav) {
+      ImGui::Indent();
+
+      double strength = sim.terrain_nav_strength();
+      if (ImGui::SliderDouble("Nav strength", &strength, 0.0, 1.0, "%.2f")) {
+        sim.set_terrain_nav_strength(strength);
+      }
+
+      double look = sim.terrain_nav_lookahead_mkm();
+      if (ImGui::SliderDouble("Lookahead (mkm)", &look, 25.0, 6000.0, "%.0f")) {
+        sim.set_terrain_nav_lookahead_mkm(look);
+      }
+
+      int rays = sim.terrain_nav_rays();
+      if (ImGui::SliderInt("Candidate rays", &rays, 3, 21)) {
+        sim.set_terrain_nav_rays(rays);
+      }
+
+      double ang = sim.terrain_nav_max_angle_deg();
+      if (ImGui::SliderDouble("Max angle (deg)", &ang, 5.0, 85.0, "%.0f")) {
+        sim.set_terrain_nav_max_angle_deg(ang);
+      }
+
+      double tp = sim.terrain_nav_turn_penalty();
+      if (ImGui::SliderDouble("Turn penalty", &tp, 0.0, 2.0, "%.2f")) {
+        sim.set_terrain_nav_turn_penalty(tp);
+      }
+
+      ImGui::TextDisabled(
+          "Tip: enable Microfields + Storm cells overlays in the System map to see what the nav is avoiding.");
+
+      ImGui::Unindent();
+    }
+  }
+
   ImGui::Separator();
   if (ImGui::Button("+1 day")) sim.advance_days(1);
   ImGui::SameLine();
@@ -9321,6 +9451,38 @@ void draw_settings_window(UIState& ui, char* ui_prefs_path, UIPrefActions& actio
       ImGui::Unindent();
     }
 
+    ImGui::SeparatorText("System heatmaps");
+    ImGui::Checkbox("System: sensor heatmap", &ui.system_map_sensor_heatmap);
+    ImGui::SameLine();
+    ImGui::Checkbox("Threat heatmap", &ui.system_map_threat_heatmap);
+
+    ui.system_map_heatmap_opacity = std::clamp(ui.system_map_heatmap_opacity, 0.0f, 1.0f);
+    ui.system_map_heatmap_resolution = std::clamp(ui.system_map_heatmap_resolution, 16, 200);
+    ImGui::SliderFloat("Heatmap opacity", &ui.system_map_heatmap_opacity, 0.0f, 1.0f, "%.2f");
+    ImGui::SliderInt("Heatmap resolution", &ui.system_map_heatmap_resolution, 16, 160);
+    ImGui::TextDisabled("Shortcut: H (threat) / Shift+H (sensor)  —  also configurable in the system-map legend.");
+
+    ImGui::Checkbox("Sensor: LOS raytrace heatmap (experimental)", &ui.system_map_sensor_heatmap_raytrace);
+    if (ui.system_map_sensor_heatmap_raytrace) {
+      ImGui::Indent();
+      ui.system_map_sensor_raytrace_los_strength =
+          std::clamp(ui.system_map_sensor_raytrace_los_strength, 0.0f, 1.0f);
+      ui.system_map_sensor_raytrace_los_samples =
+          std::clamp(ui.system_map_sensor_raytrace_los_samples, 1, 64);
+      ui.system_map_sensor_raytrace_spp = std::clamp(ui.system_map_sensor_raytrace_spp, 1, 16);
+      ui.system_map_sensor_raytrace_max_depth = std::clamp(ui.system_map_sensor_raytrace_max_depth, 0, 10);
+      ui.system_map_sensor_raytrace_error_threshold =
+          std::clamp(ui.system_map_sensor_raytrace_error_threshold, 0.0f, 0.5f);
+      ImGui::SliderFloat("LOS strength", &ui.system_map_sensor_raytrace_los_strength, 0.0f, 1.0f, "%.2f");
+      ImGui::SliderInt("LOS samples", &ui.system_map_sensor_raytrace_los_samples, 1, 32);
+      ImGui::SliderInt("Adaptive depth", &ui.system_map_sensor_raytrace_max_depth, 0, 10);
+      ImGui::SliderFloat("Detail threshold", &ui.system_map_sensor_raytrace_error_threshold, 0.0f, 0.25f, "%.3f");
+      ImGui::SliderInt("Stochastic spp", &ui.system_map_sensor_raytrace_spp, 1, 8);
+      ImGui::Checkbox("Debug quads", &ui.system_map_sensor_raytrace_debug);
+      ImGui::TextDisabled("UI-only visualization: samples nebula/storm environment along the LOS ray.");
+      ImGui::Unindent();
+    }
+
     ImGui::Checkbox("System: weapon range rings (selected)", &ui.show_selected_weapon_range);
     ImGui::SameLine();
     ImGui::Checkbox("Fleet", &ui.show_fleet_weapon_ranges);
@@ -9368,6 +9530,33 @@ void draw_settings_window(UIState& ui, char* ui_prefs_path, UIPrefActions& actio
     ui.map_starfield_density = std::clamp(ui.map_starfield_density, 0.0f, 4.0f);
     ImGui::SliderFloat("Starfield parallax", &ui.map_starfield_parallax, 0.0f, 1.0f, "%.2f");
     ui.map_starfield_parallax = std::clamp(ui.map_starfield_parallax, 0.0f, 1.0f);
+
+    ImGui::SeparatorText("Ray-marched nebula (SDF)");
+    ImGui::Checkbox("Enable ray-marched nebula", &ui.map_raymarch_nebula);
+    if (ui.map_raymarch_nebula) {
+      ImGui::Indent();
+      ImGui::SliderFloat("Nebula alpha", &ui.map_raymarch_nebula_alpha, 0.0f, 1.0f, "%.2f");
+      ui.map_raymarch_nebula_alpha = std::clamp(ui.map_raymarch_nebula_alpha, 0.0f, 1.0f);
+      ImGui::SliderFloat("Nebula parallax", &ui.map_raymarch_nebula_parallax, 0.0f, 1.0f, "%.2f");
+      ui.map_raymarch_nebula_parallax = std::clamp(ui.map_raymarch_nebula_parallax, 0.0f, 1.0f);
+      ImGui::SliderInt("Adaptive depth", &ui.map_raymarch_nebula_max_depth, 0, 10);
+      ui.map_raymarch_nebula_max_depth = std::clamp(ui.map_raymarch_nebula_max_depth, 0, 10);
+      ImGui::SliderFloat("Detail threshold", &ui.map_raymarch_nebula_error_threshold, 0.0f, 0.25f, "%.3f");
+      ui.map_raymarch_nebula_error_threshold = std::clamp(ui.map_raymarch_nebula_error_threshold, 0.0f, 0.5f);
+      ImGui::SliderInt("Samples (stochastic)", &ui.map_raymarch_nebula_spp, 1, 8);
+      ui.map_raymarch_nebula_spp = std::clamp(ui.map_raymarch_nebula_spp, 1, 8);
+      ImGui::SliderInt("Ray steps", &ui.map_raymarch_nebula_max_steps, 8, 160);
+      ui.map_raymarch_nebula_max_steps = std::clamp(ui.map_raymarch_nebula_max_steps, 8, 160);
+      ImGui::Checkbox("Animate", &ui.map_raymarch_nebula_animate);
+      if (ui.map_raymarch_nebula_animate) {
+        ImGui::SliderFloat("Time scale", &ui.map_raymarch_nebula_time_scale, 0.0f, 3.0f, "%.2f");
+        ui.map_raymarch_nebula_time_scale = std::clamp(ui.map_raymarch_nebula_time_scale, 0.0f, 3.0f);
+      }
+      ImGui::Checkbox("Debug overlay", &ui.map_raymarch_nebula_debug);
+      ImGui::TextDisabled("Sphere-traced SDF shells with stochastic sampling + adaptive subdivision.\n"
+                          "Turn on Debug overlay to see quad/ray/step counts.");
+      ImGui::Unindent();
+    }
     ImGui::SliderFloat("Grid opacity", &ui.map_grid_opacity, 0.0f, 1.0f, "%.2f");
     ui.map_grid_opacity = std::clamp(ui.map_grid_opacity, 0.0f, 1.0f);
     ImGui::SliderFloat("Route opacity", &ui.map_route_opacity, 0.0f, 1.0f, "%.2f");

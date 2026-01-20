@@ -565,6 +565,88 @@ double ship_maintenance_breakdown_subsystem_damage_max{0.20};
   // 1 => target signature is fully multiplied by the local environment factor
   double nebula_target_signature_env_weight{0.50};
 
+  // --- Sensor line-of-sight attenuation (experimental) ---
+  //
+  // In addition to local environmental multipliers at the sensor source and
+  // target (nebula density, storms, microfields), optionally apply an extra
+  // *line-of-sight* attenuation factor derived by ray-marching the environment
+  // field between the two points.
+  //
+  // Implementation notes:
+  //  - Uses an SDF-style distance estimate (f/|grad f|) on the local sensor
+  //    environment multiplier field to take adaptive steps along the ray.
+  //  - Uses deterministic, seeded jitter for stochastic sampling stability.
+  //
+  // The returned LOS multiplier is *relative* to the endpoints so uniform
+  // environments produce ~1.0 (avoids double-counting source/target penalties).
+  bool enable_sensor_los_attenuation{false};
+  // Strength exponent for the LOS multiplier.
+  // 0 => disabled (multiplier 1.0), 1 => linear, >1 => stronger occlusion.
+  double sensor_los_strength{1.35};
+  // Iso-threshold (in sensor environment multiplier space) for the implicit
+  // surface used to estimate a signed distance bound along the ray.
+  // Values closer to 1 treat mild haze as an occluder; values closer to 0
+  // only treat the densest pockets as occluders.
+  double sensor_los_iso_env{0.78};
+  // Sphere-tracing safety scale on the distance estimate (<=1).
+  double sensor_los_sdf_step_scale{0.90};
+  // Adaptive step controls (million-km).
+  double sensor_los_min_step_mkm{60.0};
+  double sensor_los_max_step_mkm{900.0};
+  // Finite-difference epsilon for gradient estimation (million-km).
+  double sensor_los_grad_epsilon_mkm{40.0};
+  // Maximum number of adaptive steps along a single LOS query.
+  int sensor_los_max_steps{48};
+  // Stratified sample jitter within each step (0..0.5 recommended).
+  double sensor_los_sample_jitter{0.35};
+  // Clamp bounds for the final relative LOS multiplier (before exponent).
+  // Min keeps the game stable in extreme occlusion; max defaults to 1 (no boost).
+  double sensor_los_min_multiplier{0.25};
+  double sensor_los_max_multiplier{1.00};
+
+  // --- Terrain-aware navigation (experimental) ---
+  //
+  // When enabled, ships steering toward a target can optionally perform a small
+  // deterministic "ray-probe" search around the straight-line direction to
+  // find faster lanes through nebula microfields / storm cells.
+  //
+  // Implementation notes:
+  //  - Evaluates candidate headings by integrating movement cost along short
+  //    lookahead rays: cost ~= \int (ds / speed_multiplier(p)).
+  //  - Uses an SDF-style distance estimate (f/|grad f|) on the local movement
+  //    speed multiplier field for adaptive step sizes.
+  //  - Uses deterministic jitter for stratified sampling stability.
+  //
+  // This is a lightweight receding-horizon controller (no persistent waypoints).
+  bool enable_terrain_aware_navigation{false};
+
+  // 0..1 blend between straight-line steering (0) and best-ray steering (1).
+  double terrain_nav_strength{0.75};
+
+  // How far ahead to evaluate candidate rays (million-km).
+  double terrain_nav_lookahead_mkm{900.0};
+
+  // Number of candidate rays to test (odd recommended).
+  int terrain_nav_rays{9};
+
+  // Max angular deviation from the direct-to-target heading (degrees).
+  double terrain_nav_max_angle_deg{55.0};
+
+  // Penalize large turns away from the goal (0..2 typical).
+  double terrain_nav_turn_penalty{0.35};
+
+  // --- Terrain nav ray integration knobs ---
+  // Iso-threshold (in movement speed multiplier space) for the implicit surface
+  // used to estimate an SDF-like distance bound.
+  double terrain_nav_iso_speed{0.80};
+  double terrain_nav_sdf_step_scale{0.85};
+  double terrain_nav_min_step_mkm{80.0};
+  double terrain_nav_max_step_mkm{900.0};
+  double terrain_nav_grad_epsilon_mkm{50.0};
+  int terrain_nav_max_steps{24};
+  double terrain_nav_sample_jitter{0.35};
+
+
   // Shield drain per day at storm intensity 1.0 (applied when shields are online).
   double nebula_storm_shield_drain_per_day_at_intensity1{4.0};
 
@@ -822,6 +904,48 @@ double ship_maintenance_breakdown_subsystem_damage_max{0.20};
   // Reference angular velocity for colony beam batteries (radians/day).
   // Colonies are assumed to have slightly better fire control than ships at equal sensor level.
   double colony_beam_tracking_ref_ang_per_day{0.80};
+
+
+  // --- Beam line-of-fire attenuation / scattering (experimental) ---
+  //
+  // When enabled, beam weapons apply an additional transmission multiplier based
+  // on the nebula/storm environment *along the line of fire* between attacker
+  // and target.
+  //
+  // Implementation notes:
+  //  - Uses an SDF-style distance estimate (f/|grad f|) on the local sensor
+  //    environment multiplier field to take adaptive steps along the ray.
+  //  - Integrates log(transmission) along the ray to estimate a geometric-mean
+  //    transmittance (better matches multiplicative absorption).
+  //  - Uses deterministic, seeded jitter for stochastic sampling stability.
+  //
+  // The resulting multiplier is clamped and exponentiated by beam_los_strength.
+  bool enable_beam_los_attenuation{false};
+  double beam_los_strength{1.00};
+  double beam_los_iso_env{0.80};
+  double beam_los_sdf_step_scale{0.90};
+  double beam_los_min_step_mkm{60.0};
+  double beam_los_max_step_mkm{900.0};
+  double beam_los_grad_epsilon_mkm{40.0};
+  int beam_los_max_steps{48};
+  double beam_los_sample_jitter{0.35};
+  double beam_los_min_multiplier{0.10};
+  double beam_los_max_multiplier{1.00};
+  bool beam_los_use_geometric_mean{true};
+
+  // Optional: convert a portion of the energy "lost" to the medium into
+  // low-intensity splash damage near the beam segment.
+  //
+  // This models turbulent scattering / bloom in dense nebula pockets and makes
+  // fighting inside heavy terrain more chaotic (optionally including friendly fire).
+  bool enable_beam_scatter_splash{false};
+  // Fraction of (1 - beam_los_multiplier) damage that becomes splash.
+  double beam_scatter_fraction_of_lost{0.35};
+  // Splash radius around the beam segment (million-km).
+  double beam_scatter_radius_mkm{0.35};
+  // If true, splash can damage non-hostile ships too.
+  bool beam_scatter_can_hit_friendly{false};
+
 
   // --- Missile guidance / homing ---
   //
@@ -1667,6 +1791,50 @@ class Simulation {
   bool ship_subsystem_damage_enabled() const { return cfg_.enable_ship_subsystem_damage; }
   void set_ship_subsystem_damage_enabled(bool enabled) { cfg_.enable_ship_subsystem_damage = enabled; }
 
+  bool sensor_los_attenuation_enabled() const { return cfg_.enable_sensor_los_attenuation; }
+  void set_sensor_los_attenuation_enabled(bool enabled) { cfg_.enable_sensor_los_attenuation = enabled; }
+
+  double sensor_los_strength() const { return cfg_.sensor_los_strength; }
+  void set_sensor_los_strength(double strength) { cfg_.sensor_los_strength = strength; }
+
+
+  bool beam_los_attenuation_enabled() const { return cfg_.enable_beam_los_attenuation; }
+  void set_beam_los_attenuation_enabled(bool enabled) { cfg_.enable_beam_los_attenuation = enabled; }
+
+  double beam_los_strength() const { return cfg_.beam_los_strength; }
+  void set_beam_los_strength(double strength) { cfg_.beam_los_strength = strength; }
+
+  bool beam_scatter_splash_enabled() const { return cfg_.enable_beam_scatter_splash; }
+  void set_beam_scatter_splash_enabled(bool enabled) { cfg_.enable_beam_scatter_splash = enabled; }
+
+  double beam_scatter_fraction_of_lost() const { return cfg_.beam_scatter_fraction_of_lost; }
+  void set_beam_scatter_fraction_of_lost(double v) { cfg_.beam_scatter_fraction_of_lost = v; }
+
+  double beam_scatter_radius_mkm() const { return cfg_.beam_scatter_radius_mkm; }
+  void set_beam_scatter_radius_mkm(double v) { cfg_.beam_scatter_radius_mkm = v; }
+
+  bool beam_scatter_can_hit_friendly() const { return cfg_.beam_scatter_can_hit_friendly; }
+  void set_beam_scatter_can_hit_friendly(bool enabled) { cfg_.beam_scatter_can_hit_friendly = enabled; }
+
+
+  bool terrain_aware_navigation_enabled() const { return cfg_.enable_terrain_aware_navigation; }
+  void set_terrain_aware_navigation_enabled(bool enabled) { cfg_.enable_terrain_aware_navigation = enabled; }
+
+  double terrain_nav_strength() const { return cfg_.terrain_nav_strength; }
+  void set_terrain_nav_strength(double strength) { cfg_.terrain_nav_strength = strength; }
+
+  double terrain_nav_lookahead_mkm() const { return cfg_.terrain_nav_lookahead_mkm; }
+  void set_terrain_nav_lookahead_mkm(double v) { cfg_.terrain_nav_lookahead_mkm = v; }
+
+  int terrain_nav_rays() const { return cfg_.terrain_nav_rays; }
+  void set_terrain_nav_rays(int v) { cfg_.terrain_nav_rays = v; }
+
+  double terrain_nav_max_angle_deg() const { return cfg_.terrain_nav_max_angle_deg; }
+  void set_terrain_nav_max_angle_deg(double deg) { cfg_.terrain_nav_max_angle_deg = deg; }
+
+  double terrain_nav_turn_penalty() const { return cfg_.terrain_nav_turn_penalty; }
+  void set_terrain_nav_turn_penalty(double v) { cfg_.terrain_nav_turn_penalty = v; }
+
   // --- Ship heat query helpers ---
   // Returns current heat as a fraction of the ship's heat capacity. If the
   // ship has no capacity or heat is disabled, returns 0.
@@ -2341,7 +2509,44 @@ bool move_construction_order(Id colony_id, int from_index, int to_index);
   // When microfields are disabled, these reduce to the system-wide versions.
   double system_nebula_density_at(Id system_id, const Vec2& pos_mkm) const;
   double system_sensor_environment_multiplier_at(Id system_id, const Vec2& pos_mkm) const;
+  // Relative line-of-sight sensor multiplier between two points in the same system.
+  //
+  // This is an *additional* multiplier intended to model occlusion from dense
+  // nebula pockets/filaments between the endpoints. It is computed by adaptive
+  // ray-marching through the local sensor environment field using an SDF-style
+  // distance estimate (f/|grad f|) and deterministic stochastic jitter.
+  //
+  // Important: The result is normalized to the endpoints so a uniform
+  // environment produces ~1.0 (avoids double-counting source/target penalties).
+  //
+  // extra_seed can be used by callers to decorrelate jitter for different
+  // queries with the same endpoints while remaining deterministic.
+  double system_sensor_environment_multiplier_los(Id system_id, const Vec2& from_mkm, const Vec2& to_mkm,
+                                                  std::uint64_t extra_seed = 0) const;
+
+
+  // Absolute line-of-fire beam transmission multiplier between two points in the same system.
+  //
+  // Uses an SDF-style adaptive ray-march on the local sensor environment multiplier field
+  // (interpreted as a beam transmission field) with deterministic jitter.
+  //
+  // Unlike system_sensor_environment_multiplier_los(), this returns an *absolute*
+  // transmission multiplier (uniform environments yield that environment multiplier, not ~1).
+  double system_beam_environment_multiplier_los(Id system_id, const Vec2& from_mkm, const Vec2& to_mkm,
+                                                std::uint64_t extra_seed = 0) const;
+
   double system_movement_speed_multiplier_at(Id system_id, const Vec2& pos_mkm) const;
+
+  // Environment-adjusted movement cost (million-km) along the segment from -> to.
+  //
+  // This approximates the travel-time distance integral:
+  //   cost ~= \int (ds / speed_multiplier(p))
+  // so cost is >= Euclidean distance when speed_multiplier <= 1.
+  //
+  // Uses an SDF-style adaptive ray-march (f/|grad f|) with deterministic
+  // jitter, similar to system_sensor_environment_multiplier_los().
+  double system_movement_environment_cost_los(Id system_id, const Vec2& from_mkm, const Vec2& to_mkm,
+                                             std::uint64_t extra_seed = 0) const;
 
   // --- Jump route planning (query-only) ---
   // Plan a path through the jump network without mutating ship orders.

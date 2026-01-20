@@ -849,6 +849,18 @@ struct UIState {
   // hundreds of individual circles. These are UI-only preferences.
   bool system_map_sensor_heatmap{false};
   bool system_map_threat_heatmap{false};
+  // Experimental: a line-of-sight shaded sensor heatmap that samples the
+  // nebula/storm environment along the ray from each sensor source.
+  //
+  // This is currently visualization-only (it does not change simulation
+  // detection mechanics).
+  bool system_map_sensor_heatmap_raytrace{false};
+  int system_map_sensor_raytrace_max_depth{6};
+  float system_map_sensor_raytrace_error_threshold{0.06f};
+  int system_map_sensor_raytrace_spp{1};
+  int system_map_sensor_raytrace_los_samples{8};
+  float system_map_sensor_raytrace_los_strength{0.85f};
+  bool system_map_sensor_raytrace_debug{false};
   // Global opacity multiplier for heatmaps (0..1).
   float system_map_heatmap_opacity{0.35f};
   // Approximate number of cells across the map width (higher = sharper, slower).
@@ -881,6 +893,21 @@ struct UIState {
   float map_starfield_parallax{0.15f};
   float map_grid_opacity{1.0f};
   float map_route_opacity{1.0f};
+
+  // --- Map ray-marched nebula (experimental) ---
+  // A signed-distance-field (SDF) raymarch renderer used as subtle background
+  // chrome. It uses adaptive subdivision and deterministic stochastic sampling
+  // so it stays stable while panning/zooming.
+  bool map_raymarch_nebula{false};
+  float map_raymarch_nebula_alpha{0.18f};
+  float map_raymarch_nebula_parallax{0.06f};
+  int map_raymarch_nebula_max_depth{6};
+  float map_raymarch_nebula_error_threshold{0.05f};
+  int map_raymarch_nebula_spp{1};
+  int map_raymarch_nebula_max_steps{48};
+  bool map_raymarch_nebula_animate{true};
+  float map_raymarch_nebula_time_scale{0.20f};
+  bool map_raymarch_nebula_debug{false};
 
   // Optional: override ImGui window background (ImGuiCol_WindowBg/ChildBg).
   bool override_window_bg{false};

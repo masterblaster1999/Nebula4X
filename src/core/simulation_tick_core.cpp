@@ -1002,6 +1002,11 @@ void Simulation::tick_contacts(double dt_days, bool emit_contact_lost_events) {
     }
     const double sweep_pad = swept ? (2.0 * max_speed_mkm_per_day * dt_days) : 0.0;
 
+    const bool use_los = cfg_.enable_sensor_los_attenuation &&
+                         ((cfg_.enable_nebula_microfields && sys->nebula_density > 1e-6 && cfg_.nebula_microfield_strength > 1e-9) ||
+                          (cfg_.enable_nebula_storms && cfg_.enable_nebula_storm_cells && system_has_storm(sys_id) &&
+                           cfg_.nebula_storm_cell_strength > 1e-9 && cfg_.nebula_storm_sensor_penalty > 1e-9));
+
     for (Id fid : faction_ids) {
       const auto& sources = sources_for(fid, sys_id);
       if (sources.empty()) continue;
@@ -1070,17 +1075,33 @@ void Simulation::tick_contacts(double dt_days, bool emit_contact_lost_events) {
             t_seen = (d2_end <= eff2 + 1e-9) ? 1.0 : t_closest;
           }
 
+          const double tt = std::clamp(t_seen, 0.0, 1.0);
+          const Vec2 srcp = have_swept_endpoints ? (src0 + (src1 - src0) * tt) : src.pos_mkm;
+          const Vec2 tgtp = have_swept_endpoints ? (tgt0 + (tgt1 - tgt0) * tt) : sh->position_mkm;
+          const Vec2 dd = tgtp - srcp;
+          const double d2_seen = dd.x * dd.x + dd.y * dd.y;
+          const double d_mkm = std::sqrt(d2_seen);
+
+          // Apply additional LOS occlusion in environments with spatially varying
+          // attenuation. This is a *relative* multiplier (normalized to endpoints)
+          // so uniform nebulas do not get double-counted.
+          double eff_used = eff;
+          if (use_los) {
+            const std::uint64_t extra_seed = (static_cast<std::uint64_t>(src.ship_id) * 0x9E3779B97F4A7C15ULL) ^
+                                             (static_cast<std::uint64_t>(ship_id) * 0xBF58476D1CE4E5B9ULL) ^
+                                             (static_cast<std::uint64_t>(fid) * 0x94D049BB133111EBULL);
+            const double los = this->system_sensor_environment_multiplier_los(sys_id, srcp, tgtp, extra_seed);
+            eff_used = eff * los;
+            if (eff_used <= 1e-9) continue;
+            if (d2_seen > eff_used * eff_used + 1e-9) continue;
+          }
+
           // --- Seed contact uncertainty estimate ---
           double unc_mkm = 0.0;
           if (enable_uncertainty) {
-            const double tt = std::clamp(t_seen, 0.0, 1.0);
-            const Vec2 srcp = have_swept_endpoints ? (src0 + (src1 - src0) * tt) : src.pos_mkm;
-            const Vec2 tgtp = have_swept_endpoints ? (tgt0 + (tgt1 - tgt0) * tt) : sh->position_mkm;
-            const Vec2 dd = tgtp - srcp;
-            const double d_mkm = std::sqrt(dd.x * dd.x + dd.y * dd.y);
             double frac = unc_frac_lo;
-            if (eff > 1e-9) {
-              const double u = std::clamp(d_mkm / eff, 0.0, 1.0);
+            if (eff_used > 1e-9) {
+              const double u = std::clamp(d_mkm / eff_used, 0.0, 1.0);
               frac = unc_frac_lo + (unc_frac_hi - unc_frac_lo) * u;
             }
             // Model measurement error as a fraction of *distance*, scaled by
@@ -1305,6 +1326,12 @@ void Simulation::tick_contacts(double dt_days, bool emit_contact_lost_events) {
       if (itv == anomalies_by_system.end()) continue;
       const auto& anom_ids = itv->second;
 
+      const auto* sys = find_ptr(state_.systems, sys_id);
+      const bool use_los = cfg_.enable_sensor_los_attenuation && sys &&
+                           ((cfg_.enable_nebula_microfields && sys->nebula_density > 1e-6 && cfg_.nebula_microfield_strength > 1e-9) ||
+                            (cfg_.enable_nebula_storms && cfg_.enable_nebula_storm_cells && system_has_storm(sys_id) &&
+                             cfg_.nebula_storm_cell_strength > 1e-9 && cfg_.nebula_storm_sensor_penalty > 1e-9));
+
       for (Id fid : faction_ids) {
         const auto& sources = sources_for(fid, sys_id);
         if (sources.empty()) continue;
@@ -1332,6 +1359,8 @@ void Simulation::tick_contacts(double dt_days, bool emit_contact_lost_events) {
             const double r2 = r * r;
 
             bool detected = false;
+            double d2_seen = std::numeric_limits<double>::infinity();
+            Vec2 srcp = src.pos_mkm;
 
             // Swept check for fast-moving ships: did we pass within range at
             // any time during this tick?
@@ -1342,16 +1371,29 @@ void Simulation::tick_contacts(double dt_days, bool emit_contact_lost_events) {
               if (sh) src0 = src1 - sh->velocity_mkm_per_day * dt_days;
 
               double t = 1.0;
-              const double d2 = min_dist_sq_and_t(src0, src1, tgt, tgt, &t);
-              detected = (d2 <= r2);
+              d2_seen = min_dist_sq_and_t(src0, src1, tgt, tgt, &t);
+              detected = (d2_seen <= r2);
+              const double tt = std::clamp(t, 0.0, 1.0);
+              srcp = src0 + (src1 - src0) * tt;
             } else {
               const double dx = tgt.x - src.pos_mkm.x;
               const double dy = tgt.y - src.pos_mkm.y;
-              const double d2 = dx * dx + dy * dy;
-              detected = (d2 <= r2);
+              d2_seen = dx * dx + dy * dy;
+              detected = (d2_seen <= r2);
             }
 
             if (!detected) continue;
+
+            if (use_los) {
+              const std::uint64_t extra_seed = (static_cast<std::uint64_t>(src.ship_id) * 0x9E3779B97F4A7C15ULL) ^
+                                               (static_cast<std::uint64_t>(aid) * 0xBF58476D1CE4E5B9ULL) ^
+                                               (static_cast<std::uint64_t>(fid) * 0x94D049BB133111EBULL);
+              const double los = this->system_sensor_environment_multiplier_los(sys_id, srcp, tgt, extra_seed);
+              const double r_los = r * los;
+              if (r_los <= 1e-9) continue;
+              if (d2_seen > r_los * r_los + 1e-9) continue;
+            }
+
             detected_any = true;
 
             // Prefer the smallest ship_id for deterministic attribution.

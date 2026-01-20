@@ -42,6 +42,17 @@ using sim_procgen::pick_site_position_mkm;
 using sim_procgen::generate_mineral_bundle;
 using sim_procgen::pick_unlock_component_id;
 
+
+inline double dot(const Vec2& a, const Vec2& b) { return a.x * b.x + a.y * b.y; }
+
+inline Vec2 rotate_vec2(const Vec2& v, double ang_rad) {
+  const double c = std::cos(ang_rad);
+  const double s = std::sin(ang_rad);
+  return Vec2{v.x * c - v.y * s, v.x * s + v.y * c};
+}
+
+inline double deg_to_rad(double deg) { return deg * (3.14159265358979323846 / 180.0); }
+
 // --- Procedural exploration leads (anomaly chains) ---------------------------------
 //
 // The base game already supports anomalies with rewards and hazards. This layer
@@ -4618,7 +4629,102 @@ void Simulation::tick_ships(double dt_days) {
       continue;
     }
 
-    const Vec2 dir = delta.normalized();
+    Vec2 dir = delta.normalized();
+
+    // Experimental: terrain-aware navigation.
+    //
+    // Ships can optionally "ray-probe" a small fan of candidate headings around
+    // the direct-to-target vector and pick the one with the lowest estimated
+    // travel-time cost through nebula microfields / storm cells.
+    //
+    // This is intentionally a lightweight receding-horizon controller: it does
+    // not create persistent waypoints and therefore remains robust to moving
+    // targets (escort/attack) and to coarse time steps.
+    if (cfg_.enable_terrain_aware_navigation && dist > std::max(arrive_eps, 1e-6) * 4.0) {
+      const auto* sys = find_ptr(state_.systems, ship.system_id);
+      if (sys) {
+        const bool micro = (cfg_.enable_nebula_drag && cfg_.enable_nebula_microfields && sys->nebula_density > 1e-6 &&
+                            cfg_.nebula_microfield_strength > 1e-9 &&
+                            cfg_.nebula_drag_speed_penalty_at_max_density > 1e-9);
+        const bool storm_cells = (cfg_.enable_nebula_storms && cfg_.enable_nebula_storm_cells &&
+                                  system_has_storm(ship.system_id) && cfg_.nebula_storm_cell_strength > 1e-9 &&
+                                  cfg_.nebula_storm_speed_penalty > 1e-9);
+
+        // Only steer when the environment has meaningful *spatial* variation.
+        if (micro || storm_cells) {
+          const double strength = std::clamp(cfg_.terrain_nav_strength, 0.0, 1.0);
+          const int rays = std::clamp(cfg_.terrain_nav_rays, 3, 31);
+          const double max_ang = deg_to_rad(std::clamp(cfg_.terrain_nav_max_angle_deg, 1.0, 89.0));
+          const double lookahead = std::clamp(cfg_.terrain_nav_lookahead_mkm, 25.0, 20000.0);
+          const double turn_pen = std::max(0.0, cfg_.terrain_nav_turn_penalty);
+
+          // Limit lookahead so we don't over-fit to very local structure when
+          // closing on a target.
+          const double L = std::min(dist, lookahead);
+
+          // Deterministic per-ship/per-tick seed for tie-breaking and jitter decorrelation.
+          auto qpos = [](double v) -> std::int64_t { return static_cast<std::int64_t>(std::llround(v * 16.0)); };
+          std::uint64_t seed = splitmix64(static_cast<std::uint64_t>(state_.date.days_since_epoch()));
+          seed = splitmix64(seed ^ static_cast<std::uint64_t>(state_.hour_of_day));
+          seed = splitmix64(seed ^ static_cast<std::uint64_t>(ship_id));
+          seed = splitmix64(seed ^ static_cast<std::uint64_t>(ship.system_id));
+          seed = splitmix64(seed ^ (static_cast<std::uint64_t>(qpos(ship.position_mkm.x)) * 0x9E3779B97F4A7C15ULL));
+          seed = splitmix64(seed ^ (static_cast<std::uint64_t>(qpos(ship.position_mkm.y)) * 0xBF58476D1CE4E5B9ULL));
+          seed = splitmix64(seed ^ (static_cast<std::uint64_t>(qpos(target.x)) * 0x94D049BB133111EBULL));
+          seed = splitmix64(seed ^ (static_cast<std::uint64_t>(qpos(target.y)) * 0xD6E8FEB86659FD93ULL));
+
+          auto tiny_noise = [&](int i) -> double {
+            const std::uint64_t h = splitmix64(seed ^ (0xA5A5A5A5A5A5A5A5ULL + static_cast<std::uint64_t>(i)));
+            return u01_from_u64(h) * 1e-6;
+          };
+
+          // Evaluate candidate headings.
+          Vec2 best_dir = dir;
+          double best_score = std::numeric_limits<double>::infinity();
+
+          const int n = rays;
+          for (int i = 0; i < n; ++i) {
+            const double t = (n <= 1) ? 0.0 : (static_cast<double>(i) / static_cast<double>(n - 1)) * 2.0 - 1.0;
+            const double ang = t * max_ang;
+            const Vec2 cand = rotate_vec2(dir, ang).normalized();
+
+            // Don't consider headings that would move away from the goal.
+            const double forward = dot(cand, dir);
+            if (forward <= 1e-4) continue;
+
+            const Vec2 end = ship.position_mkm + cand * L;
+
+            // Estimated local travel-time cost (environment-adjusted distance).
+            const double local_cost = this->system_movement_environment_cost_los(
+                ship.system_id, ship.position_mkm, end, seed ^ (0xC0DEC0FFEEULL + static_cast<std::uint64_t>(i)));
+
+            // Heuristic remainder: straight-line to goal from the ray endpoint.
+            const Vec2 rem = target - end;
+            const double rem_len = rem.length();
+            const double m_end = std::clamp(this->system_movement_speed_multiplier_at(ship.system_id, end), 0.05, 1.0);
+            const double rem_cost = rem_len / m_end;
+
+            double score = local_cost + rem_cost;
+            score *= (1.0 + turn_pen * (1.0 - forward));
+            score += tiny_noise(i);
+
+            if (score < best_score) {
+              best_score = score;
+              best_dir = cand;
+            }
+          }
+
+          if (std::isfinite(best_score)) {
+            // Blend for smoothness.
+            const Vec2 blended = Vec2{dir.x * (1.0 - strength) + best_dir.x * strength,
+                                      dir.y * (1.0 - strength) + best_dir.y * strength};
+            const Vec2 nd = blended.normalized();
+            if (nd.length_squared() > 1e-12) dir = nd;
+          }
+        }
+      }
+    }
+
     ship.position_mkm += dir * step;
     burn_fuel(step);
   }

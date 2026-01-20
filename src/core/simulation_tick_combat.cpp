@@ -36,6 +36,25 @@ static double clamp01(double x) {
   return std::clamp(x, 0.0, 1.0);
 }
 
+
+static double point_segment_distance(const Vec2& p, const Vec2& a, const Vec2& b, double* out_t = nullptr) {
+  const Vec2 ab = b - a;
+  const double ab2 = ab.x * ab.x + ab.y * ab.y;
+  if (ab2 <= 1e-18) {
+    if (out_t) *out_t = 0.0;
+    return (p - a).length();
+  }
+
+  const Vec2 ap = p - a;
+  double t = (ap.x * ab.x + ap.y * ab.y) / ab2;
+  t = std::clamp(t, 0.0, 1.0);
+  if (out_t) *out_t = t;
+
+  const Vec2 proj = a + ab * t;
+  return (p - proj).length();
+}
+
+
 } // namespace
 
 void Simulation::tick_combat(double dt_days) {
@@ -1510,13 +1529,114 @@ void Simulation::tick_combat(double dt_days) {
       hit *= std::max(0.0, 1.0 + crew_grade_bonus(attacker));
       hit = std::clamp(hit, cfg_.beam_min_hit_chance, 1.0);
 
-      const double dmg = std::max(0.0, ad->weapon_damage) * maintenance_combat_mult(attacker) *
-                         ship_heat_weapon_output_multiplier(attacker) * weapon_integrity * dt_days * hit;
-      if (dmg > 1e-12) {
-        incoming_damage[chosen] += dmg;
-        attackers_for_target[chosen].push_back(aid);
-        crew_intensity[aid] += dmg;
-        crew_intensity[chosen] += dmg;
+      const double base_dmg = std::max(0.0, ad->weapon_damage) * maintenance_combat_mult(attacker) *
+                              ship_heat_weapon_output_multiplier(attacker) * weapon_integrity * dt_days * hit;
+
+      if (base_dmg > 1e-12) {
+        // Beam line-of-fire attenuation through nebula microfields / storm cells.
+        double los_mult = 1.0;
+        if (cfg_.enable_beam_los_attenuation && tgt) {
+          std::uint64_t extra =
+              splitmix64(static_cast<std::uint64_t>(aid) ^ (static_cast<std::uint64_t>(chosen) << 32));
+          extra ^= static_cast<std::uint64_t>(state_.date.days_since_epoch());
+          los_mult = system_beam_environment_multiplier_los(attacker.system_id, attacker.position_mkm, tgt->position_mkm,
+                                                           extra);
+        }
+        los_mult = std::clamp(los_mult, 0.0, 4.0);
+
+        const double dmg = base_dmg * los_mult;
+        if (dmg > 1e-12) {
+          incoming_damage[chosen] += dmg;
+          attackers_for_target[chosen].push_back(aid);
+          crew_intensity[aid] += dmg;
+          crew_intensity[chosen] += dmg;
+        }
+
+        // Beam scatter splash: convert a fraction of medium-loss into low intensity
+        // side damage around the beam segment (optionally including friendly fire).
+        if (cfg_.enable_beam_scatter_splash && tgt) {
+          const double frac = std::clamp(cfg_.beam_scatter_fraction_of_lost, 0.0, 1.0);
+          const double radius = std::max(0.0, cfg_.beam_scatter_radius_mkm);
+          if (frac > 1e-9 && radius > 1e-9) {
+            const double lost = base_dmg * std::clamp(1.0 - los_mult, 0.0, 1.0);
+            const double scatter_total = lost * frac;
+
+            if (scatter_total > 1e-12) {
+              auto& idx = index_for_system(attacker.system_id);
+
+              const Vec2 a = attacker.position_mkm;
+              const Vec2 b = tgt->position_mkm;
+              const Vec2 ab = b - a;
+              const double seg_len = ab.length();
+              if (seg_len > 1e-9) {
+                // Sample along the segment and union nearby ships (cheap segment-radius query).
+                const double spacing = std::max(1e-3, radius * 3.0);
+                int samples = static_cast<int>(std::ceil(seg_len / spacing)) + 1;
+                samples = std::clamp(samples, 2, 24);
+
+                std::unordered_set<Id> candidates;
+                candidates.reserve(static_cast<std::size_t>(samples) * 8);
+
+                for (int si = 0; si < samples; ++si) {
+                  const double t = (samples <= 1) ? 0.0 : static_cast<double>(si) / static_cast<double>(samples - 1);
+                  const Vec2 p = a + ab * t;
+                  const auto near = idx.query_radius(p, radius, 0.0);
+                  for (Id cid : near) candidates.insert(cid);
+                }
+
+                struct W {
+                  Id id{kInvalidId};
+                  double w{0.0};
+                };
+                std::vector<W> weights;
+                weights.reserve(candidates.size());
+
+                double wsum = 0.0;
+                for (Id cid : candidates) {
+                  if (cid == aid || cid == chosen) continue;
+
+                  const auto* other = find_ptr(state_.ships, cid);
+                  if (!other || other->hp <= 0.0) continue;
+                  if (other->system_id != attacker.system_id) continue;
+
+                  if (!cfg_.beam_scatter_can_hit_friendly &&
+                      !are_factions_hostile(attacker.faction_id, other->faction_id)) {
+                    continue;
+                  }
+
+                  double tproj = 0.0;
+                  const double dist = point_segment_distance(other->position_mkm, a, b, &tproj);
+                  if (dist > radius + 1e-9) continue;
+
+                  double w = 1.0 - dist / radius;
+                  w = std::max(0.0, w);
+                  w *= w; // quadratic falloff
+
+                  // Favor the mid segment (bloom/scatter accumulates mid-flight).
+                  const double mid_fade = 1.0 - std::abs(tproj - 0.5) * 2.0;
+                  w *= std::clamp(mid_fade, 0.0, 1.0);
+
+                  if (w <= 1e-12) continue;
+                  weights.push_back(W{cid, w});
+                  wsum += w;
+                }
+
+                if (wsum > 1e-12 && !weights.empty()) {
+                  for (const auto& w : weights) {
+                    const double sdmg = scatter_total * (w.w / wsum);
+                    if (sdmg <= 1e-12) continue;
+
+                    incoming_damage[w.id] += sdmg;
+                    attackers_for_target[w.id].push_back(aid);
+
+                    crew_intensity[aid] += sdmg;
+                    crew_intensity[w.id] += sdmg;
+                  }
+                }
+              }
+            }
+          }
+        }
       }
     }
   }
@@ -1557,11 +1677,102 @@ void Simulation::tick_combat(double dt_days) {
                                                cfg_.colony_beam_tracking_ref_ang_per_day, bat.weapon_range_mkm,
                                                *tgt, td, chosen_dist)
                              : 1.0;
-      const double dmg = std::max(0.0, bat.weapon_damage) * dt_days * hit;
-      if (dmg > 1e-12) {
-        incoming_damage[chosen] += dmg;
-        colony_attackers_for_target[chosen].push_back(bat.colony_id);
-        crew_intensity[chosen] += dmg;
+      const double base_dmg = std::max(0.0, bat.weapon_damage) * dt_days * hit;
+      if (base_dmg > 1e-12) {
+        double los_mult = 1.0;
+        if (cfg_.enable_beam_los_attenuation && tgt) {
+          std::uint64_t extra =
+              splitmix64(static_cast<std::uint64_t>(bat.colony_id) ^ (static_cast<std::uint64_t>(chosen) << 32));
+          extra ^= static_cast<std::uint64_t>(state_.date.days_since_epoch());
+          los_mult = system_beam_environment_multiplier_los(bat.system_id, bat.position_mkm, tgt->position_mkm, extra);
+        }
+        los_mult = std::clamp(los_mult, 0.0, 4.0);
+
+        const double dmg = base_dmg * los_mult;
+        if (dmg > 1e-12) {
+          incoming_damage[chosen] += dmg;
+          colony_attackers_for_target[chosen].push_back(bat.colony_id);
+          crew_intensity[chosen] += dmg;
+        }
+
+        if (cfg_.enable_beam_scatter_splash && tgt) {
+          const double frac = std::clamp(cfg_.beam_scatter_fraction_of_lost, 0.0, 1.0);
+          const double radius = std::max(0.0, cfg_.beam_scatter_radius_mkm);
+          if (frac > 1e-9 && radius > 1e-9) {
+            const double lost = base_dmg * std::clamp(1.0 - los_mult, 0.0, 1.0);
+            const double scatter_total = lost * frac;
+
+            if (scatter_total > 1e-12) {
+              auto& idx2 = index_for_system(bat.system_id);
+
+              const Vec2 a = bat.position_mkm;
+              const Vec2 b = tgt->position_mkm;
+              const Vec2 ab = b - a;
+              const double seg_len = ab.length();
+              if (seg_len > 1e-9) {
+                const double spacing = std::max(1e-3, radius * 3.0);
+                int samples = static_cast<int>(std::ceil(seg_len / spacing)) + 1;
+                samples = std::clamp(samples, 2, 24);
+
+                std::unordered_set<Id> candidates;
+                candidates.reserve(static_cast<std::size_t>(samples) * 8);
+
+                for (int si = 0; si < samples; ++si) {
+                  const double t = (samples <= 1) ? 0.0 : static_cast<double>(si) / static_cast<double>(samples - 1);
+                  const Vec2 p = a + ab * t;
+                  const auto near = idx2.query_radius(p, radius, 0.0);
+                  for (Id cid : near) candidates.insert(cid);
+                }
+
+                struct W {
+                  Id id{kInvalidId};
+                  double w{0.0};
+                };
+                std::vector<W> weights;
+                weights.reserve(candidates.size());
+
+                double wsum = 0.0;
+                for (Id cid : candidates) {
+                  if (cid == chosen) continue;
+
+                  const auto* other = find_ptr(state_.ships, cid);
+                  if (!other || other->hp <= 0.0) continue;
+                  if (other->system_id != bat.system_id) continue;
+
+                  if (!cfg_.beam_scatter_can_hit_friendly && !are_factions_hostile(bat.faction_id, other->faction_id)) {
+                    continue;
+                  }
+
+                  double tproj = 0.0;
+                  const double dist = point_segment_distance(other->position_mkm, a, b, &tproj);
+                  if (dist > radius + 1e-9) continue;
+
+                  double w = 1.0 - dist / radius;
+                  w = std::max(0.0, w);
+                  w *= w;
+
+                  const double mid_fade = 1.0 - std::abs(tproj - 0.5) * 2.0;
+                  w *= std::clamp(mid_fade, 0.0, 1.0);
+
+                  if (w <= 1e-12) continue;
+                  weights.push_back(W{cid, w});
+                  wsum += w;
+                }
+
+                if (wsum > 1e-12 && !weights.empty()) {
+                  for (const auto& w : weights) {
+                    const double sdmg = scatter_total * (w.w / wsum);
+                    if (sdmg <= 1e-12) continue;
+
+                    incoming_damage[w.id] += sdmg;
+                    colony_attackers_for_target[w.id].push_back(bat.colony_id);
+                    crew_intensity[w.id] += sdmg;
+                  }
+                }
+              }
+            }
+          }
+        }
       }
     }
   }

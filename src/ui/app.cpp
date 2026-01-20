@@ -1184,6 +1184,37 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
             static_cast<int>(it->second.number_value(ui_.system_map_heatmap_resolution));
         ui_.system_map_heatmap_resolution = std::clamp(ui_.system_map_heatmap_resolution, 16, 200);
       }
+
+      // Experimental: LOS ray-traced sensor heatmap (UI-only).
+      if (auto it = obj->find("system_map_sensor_heatmap_raytrace"); it != obj->end()) {
+        ui_.system_map_sensor_heatmap_raytrace = it->second.bool_value(ui_.system_map_sensor_heatmap_raytrace);
+      }
+      if (auto it = obj->find("system_map_sensor_raytrace_max_depth"); it != obj->end()) {
+        ui_.system_map_sensor_raytrace_max_depth = static_cast<int>(it->second.number_value(ui_.system_map_sensor_raytrace_max_depth));
+        ui_.system_map_sensor_raytrace_max_depth = std::clamp(ui_.system_map_sensor_raytrace_max_depth, 0, 10);
+      }
+      if (auto it = obj->find("system_map_sensor_raytrace_error_threshold"); it != obj->end()) {
+        ui_.system_map_sensor_raytrace_error_threshold =
+            static_cast<float>(it->second.number_value(ui_.system_map_sensor_raytrace_error_threshold));
+        ui_.system_map_sensor_raytrace_error_threshold = std::clamp(ui_.system_map_sensor_raytrace_error_threshold, 0.0f, 0.5f);
+      }
+      if (auto it = obj->find("system_map_sensor_raytrace_spp"); it != obj->end()) {
+        ui_.system_map_sensor_raytrace_spp = static_cast<int>(it->second.number_value(ui_.system_map_sensor_raytrace_spp));
+        ui_.system_map_sensor_raytrace_spp = std::clamp(ui_.system_map_sensor_raytrace_spp, 1, 16);
+      }
+      if (auto it = obj->find("system_map_sensor_raytrace_los_samples"); it != obj->end()) {
+        ui_.system_map_sensor_raytrace_los_samples =
+            static_cast<int>(it->second.number_value(ui_.system_map_sensor_raytrace_los_samples));
+        ui_.system_map_sensor_raytrace_los_samples = std::clamp(ui_.system_map_sensor_raytrace_los_samples, 1, 64);
+      }
+      if (auto it = obj->find("system_map_sensor_raytrace_los_strength"); it != obj->end()) {
+        ui_.system_map_sensor_raytrace_los_strength =
+            static_cast<float>(it->second.number_value(ui_.system_map_sensor_raytrace_los_strength));
+        ui_.system_map_sensor_raytrace_los_strength = std::clamp(ui_.system_map_sensor_raytrace_los_strength, 0.0f, 1.0f);
+      }
+      if (auto it = obj->find("system_map_sensor_raytrace_debug"); it != obj->end()) {
+        ui_.system_map_sensor_raytrace_debug = it->second.bool_value(ui_.system_map_sensor_raytrace_debug);
+      }
       if (auto it = obj->find("system_map_nebula_microfield_overlay"); it != obj->end()) {
         ui_.system_map_nebula_microfield_overlay = it->second.bool_value(ui_.system_map_nebula_microfield_overlay);
       }
@@ -1242,6 +1273,47 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       if (auto it = obj->find("map_route_opacity"); it != obj->end()) {
         ui_.map_route_opacity = static_cast<float>(it->second.number_value(ui_.map_route_opacity));
         ui_.map_route_opacity = std::clamp(ui_.map_route_opacity, 0.0f, 1.0f);
+      }
+
+      // Ray-marched SDF nebula (map background chrome).
+      if (auto it = obj->find("map_raymarch_nebula"); it != obj->end()) {
+        ui_.map_raymarch_nebula = it->second.bool_value(ui_.map_raymarch_nebula);
+      }
+      if (auto it = obj->find("map_raymarch_nebula_alpha"); it != obj->end()) {
+        ui_.map_raymarch_nebula_alpha = static_cast<float>(it->second.number_value(ui_.map_raymarch_nebula_alpha));
+        ui_.map_raymarch_nebula_alpha = std::clamp(ui_.map_raymarch_nebula_alpha, 0.0f, 1.0f);
+      }
+      if (auto it = obj->find("map_raymarch_nebula_parallax"); it != obj->end()) {
+        ui_.map_raymarch_nebula_parallax = static_cast<float>(it->second.number_value(ui_.map_raymarch_nebula_parallax));
+        ui_.map_raymarch_nebula_parallax = std::clamp(ui_.map_raymarch_nebula_parallax, 0.0f, 1.0f);
+      }
+      if (auto it = obj->find("map_raymarch_nebula_max_depth"); it != obj->end()) {
+        ui_.map_raymarch_nebula_max_depth = static_cast<int>(it->second.number_value(ui_.map_raymarch_nebula_max_depth));
+        ui_.map_raymarch_nebula_max_depth = std::clamp(ui_.map_raymarch_nebula_max_depth, 0, 10);
+      }
+      if (auto it = obj->find("map_raymarch_nebula_error_threshold"); it != obj->end()) {
+        ui_.map_raymarch_nebula_error_threshold =
+            static_cast<float>(it->second.number_value(ui_.map_raymarch_nebula_error_threshold));
+        ui_.map_raymarch_nebula_error_threshold = std::clamp(ui_.map_raymarch_nebula_error_threshold, 0.0f, 0.5f);
+      }
+      if (auto it = obj->find("map_raymarch_nebula_spp"); it != obj->end()) {
+        ui_.map_raymarch_nebula_spp = static_cast<int>(it->second.number_value(ui_.map_raymarch_nebula_spp));
+        ui_.map_raymarch_nebula_spp = std::clamp(ui_.map_raymarch_nebula_spp, 1, 8);
+      }
+      if (auto it = obj->find("map_raymarch_nebula_max_steps"); it != obj->end()) {
+        ui_.map_raymarch_nebula_max_steps = static_cast<int>(it->second.number_value(ui_.map_raymarch_nebula_max_steps));
+        ui_.map_raymarch_nebula_max_steps = std::clamp(ui_.map_raymarch_nebula_max_steps, 8, 160);
+      }
+      if (auto it = obj->find("map_raymarch_nebula_animate"); it != obj->end()) {
+        ui_.map_raymarch_nebula_animate = it->second.bool_value(ui_.map_raymarch_nebula_animate);
+      }
+      if (auto it = obj->find("map_raymarch_nebula_time_scale"); it != obj->end()) {
+        ui_.map_raymarch_nebula_time_scale =
+            static_cast<float>(it->second.number_value(ui_.map_raymarch_nebula_time_scale));
+        ui_.map_raymarch_nebula_time_scale = std::clamp(ui_.map_raymarch_nebula_time_scale, 0.0f, 3.0f);
+      }
+      if (auto it = obj->find("map_raymarch_nebula_debug"); it != obj->end()) {
+        ui_.map_raymarch_nebula_debug = it->second.bool_value(ui_.map_raymarch_nebula_debug);
       }
 
       // Combat / tactical overlays.
@@ -2374,6 +2446,15 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     o["system_map_threat_heatmap"] = ui_.system_map_threat_heatmap;
     o["system_map_heatmap_opacity"] = static_cast<double>(ui_.system_map_heatmap_opacity);
     o["system_map_heatmap_resolution"] = static_cast<double>(ui_.system_map_heatmap_resolution);
+
+    // Experimental: LOS ray-traced sensor heatmap (UI-only).
+    o["system_map_sensor_heatmap_raytrace"] = ui_.system_map_sensor_heatmap_raytrace;
+    o["system_map_sensor_raytrace_max_depth"] = static_cast<double>(ui_.system_map_sensor_raytrace_max_depth);
+    o["system_map_sensor_raytrace_error_threshold"] = static_cast<double>(ui_.system_map_sensor_raytrace_error_threshold);
+    o["system_map_sensor_raytrace_spp"] = static_cast<double>(ui_.system_map_sensor_raytrace_spp);
+    o["system_map_sensor_raytrace_los_samples"] = static_cast<double>(ui_.system_map_sensor_raytrace_los_samples);
+    o["system_map_sensor_raytrace_los_strength"] = static_cast<double>(ui_.system_map_sensor_raytrace_los_strength);
+    o["system_map_sensor_raytrace_debug"] = ui_.system_map_sensor_raytrace_debug;
     o["system_map_nebula_microfield_overlay"] = ui_.system_map_nebula_microfield_overlay;
     o["system_map_nebula_overlay_opacity"] = static_cast<double>(ui_.system_map_nebula_overlay_opacity);
     o["system_map_nebula_overlay_resolution"] = static_cast<double>(ui_.system_map_nebula_overlay_resolution);
@@ -2389,6 +2470,18 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     o["map_starfield_parallax"] = static_cast<double>(ui_.map_starfield_parallax);
     o["map_grid_opacity"] = static_cast<double>(ui_.map_grid_opacity);
     o["map_route_opacity"] = static_cast<double>(ui_.map_route_opacity);
+
+    // Ray-marched SDF nebula (experimental).
+    o["map_raymarch_nebula"] = ui_.map_raymarch_nebula;
+    o["map_raymarch_nebula_alpha"] = static_cast<double>(ui_.map_raymarch_nebula_alpha);
+    o["map_raymarch_nebula_parallax"] = static_cast<double>(ui_.map_raymarch_nebula_parallax);
+    o["map_raymarch_nebula_max_depth"] = static_cast<double>(ui_.map_raymarch_nebula_max_depth);
+    o["map_raymarch_nebula_error_threshold"] = static_cast<double>(ui_.map_raymarch_nebula_error_threshold);
+    o["map_raymarch_nebula_spp"] = static_cast<double>(ui_.map_raymarch_nebula_spp);
+    o["map_raymarch_nebula_max_steps"] = static_cast<double>(ui_.map_raymarch_nebula_max_steps);
+    o["map_raymarch_nebula_animate"] = ui_.map_raymarch_nebula_animate;
+    o["map_raymarch_nebula_time_scale"] = static_cast<double>(ui_.map_raymarch_nebula_time_scale);
+    o["map_raymarch_nebula_debug"] = ui_.map_raymarch_nebula_debug;
 
     // Combat / tactical overlays.
     o["show_selected_weapon_range"] = ui_.show_selected_weapon_range;
@@ -2783,6 +2876,15 @@ void App::reset_ui_theme_defaults() {
   ui_.system_map_threat_heatmap = false;
   ui_.system_map_heatmap_opacity = 0.35f;
   ui_.system_map_heatmap_resolution = 64;
+
+  // Experimental LOS-shaded sensor heatmap defaults.
+  ui_.system_map_sensor_heatmap_raytrace = false;
+  ui_.system_map_sensor_raytrace_max_depth = 6;
+  ui_.system_map_sensor_raytrace_error_threshold = 0.06f;
+  ui_.system_map_sensor_raytrace_spp = 1;
+  ui_.system_map_sensor_raytrace_los_samples = 8;
+  ui_.system_map_sensor_raytrace_los_strength = 0.85f;
+  ui_.system_map_sensor_raytrace_debug = false;
   ui_.system_map_nebula_microfield_overlay = true;
   ui_.system_map_nebula_overlay_opacity = 0.22f;
   ui_.system_map_nebula_overlay_resolution = 84;
@@ -2799,6 +2901,18 @@ void App::reset_ui_theme_defaults() {
   ui_.map_starfield_parallax = 0.15f;
   ui_.map_grid_opacity = 1.0f;
   ui_.map_route_opacity = 1.0f;
+
+  // Ray-marched SDF nebula (experimental).
+  ui_.map_raymarch_nebula = false;
+  ui_.map_raymarch_nebula_alpha = 0.18f;
+  ui_.map_raymarch_nebula_parallax = 0.06f;
+  ui_.map_raymarch_nebula_max_depth = 6;
+  ui_.map_raymarch_nebula_error_threshold = 0.05f;
+  ui_.map_raymarch_nebula_spp = 1;
+  ui_.map_raymarch_nebula_max_steps = 48;
+  ui_.map_raymarch_nebula_animate = true;
+  ui_.map_raymarch_nebula_time_scale = 0.20f;
+  ui_.map_raymarch_nebula_debug = false;
 
   ui_.ui_scale = 1.0f;
   ui_.ui_scale_style = true;
