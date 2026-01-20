@@ -227,8 +227,6 @@ TradeNetwork compute_trade_network(const Simulation& sim, const TradeNetworkOpti
     max_degree = std::max(max_degree, static_cast<int>(sys->jump_points.size()));
   }
 
-  // Jump-graph distances for travel-cost decay.
-  const auto dist = jump_graph_distances(s, system_ids);
 
   // Aggregate colony contributions per system.
   std::vector<std::array<double, kTradeGoodKindCount>> colony_supply(n);
@@ -386,6 +384,15 @@ TradeNetwork compute_trade_network(const Simulation& sim, const TradeNetworkOpti
 
     out.nodes.push_back(std::move(node));
   }
+
+  if (opt.max_lanes <= 0) {
+    // Node summaries are still useful for UI overlays and economy hooks, but
+    // lane computation can be expensive (all-pairs shortest paths).
+    return out;
+  }
+
+  // Jump-graph distances for travel-cost decay.
+  const auto dist = jump_graph_distances(s, system_ids);
 
   // Lanes.
   struct LaneKey {

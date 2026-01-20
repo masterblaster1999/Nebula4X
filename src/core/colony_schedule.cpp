@@ -609,10 +609,19 @@ ColonySchedule estimate_colony_schedule(const Simulation& sim, Id colony_id, con
   };
 
   const FactionEconomyMultipliers my_mult = mult_for(colony.faction_id);
+
+  // Trade prosperity bonus mirrors Simulation tick for output projections.
+  const double prosperity = sim.trade_prosperity_output_multiplier_for_colony(colony.id);
+  FactionEconomyMultipliers eff_mult = my_mult;
+  eff_mult.industry *= prosperity;
+  eff_mult.research *= prosperity;
+  eff_mult.construction *= prosperity;
+  eff_mult.shipyard *= prosperity;
+
   out.mining_multiplier = my_mult.mining;
-  out.industry_multiplier = my_mult.industry;
-  out.construction_multiplier = my_mult.construction;
-  out.shipyard_multiplier = my_mult.shipyard;
+  out.industry_multiplier = eff_mult.industry;
+  out.construction_multiplier = eff_mult.construction;
+  out.shipyard_multiplier = eff_mult.shipyard;
 
   out.construction_cp_per_day_start = sim.construction_points_per_day(colony);
 
@@ -628,7 +637,7 @@ ColonySchedule estimate_colony_schedule(const Simulation& sim, Id colony_id, con
       return std::max(0, it->second);
     }();
     out.shipyard_tons_per_day_start = shipyard_def->build_rate_tons_per_day * static_cast<double>(yards) *
-                                      std::max(0.0, my_mult.shipyard);
+                                      std::max(0.0, eff_mult.shipyard);
   }
 
   // Copy body deposits for mining simulation.
@@ -752,13 +761,13 @@ ColonySchedule estimate_colony_schedule(const Simulation& sim, Id colony_id, con
     if (colony.body_id != kInvalidId) {
       any_change = simulate_mining_day(sim, fac_mult, colony_id, colony, deposits, 1.0) || any_change;
     }
-    any_change = simulate_industry_day(sim.content(), colony, std::max(0.0, my_mult.industry), 1.0) || any_change;
+    any_change = simulate_industry_day(sim.content(), colony, std::max(0.0, eff_mult.industry), 1.0) || any_change;
 
     // 2) tick_shipyards
     if (opt.include_shipyard && shipyard_def) {
       bool hard_block = false;
       std::string hard_reason;
-      const bool prog = simulate_shipyard_day(sim, colony, my_mult, *shipyard_def, day, out.events, hard_block, hard_reason);
+      const bool prog = simulate_shipyard_day(sim, colony, eff_mult, *shipyard_def, day, out.events, hard_block, hard_reason);
       any_progress = any_progress || prog;
       if (hard_block) {
         out.ok = true;

@@ -300,7 +300,9 @@ void Simulation::tick_colonies(double dt_days, bool emit_daily_events) {
   for (Id cid : sorted_keys(state_.colonies)) {
     Colony& colony = state_.colonies.at(cid);
 
-    const double industry_mult = std::max(0.0, mult_for(colony.faction_id).industry);
+    double industry_mult = std::max(0.0, mult_for(colony.faction_id).industry);
+    // Trade prosperity bonus (market access / hub activity), reduced by piracy/blockade disruption.
+    industry_mult *= trade_prosperity_output_multiplier_for_colony(colony.id);
 
     // Deterministic processing: installation iteration order of unordered_map is unspecified.
     std::vector<std::string> inst_ids;
@@ -622,6 +624,8 @@ void Simulation::tick_research(double dt_days) {
     }
     if (rp_per_day <= 0.0) continue;
     rp_per_day *= std::max(0.0, mult_for(col.faction_id).research);
+    // Trade prosperity bonus (system market access / hub activity).
+    rp_per_day *= trade_prosperity_output_multiplier_for_colony(col.id);
     if (rp_per_day <= 0.0) continue;
     auto fit = state_.factions.find(col.faction_id);
     if (fit == state_.factions.end()) continue;
@@ -990,7 +994,8 @@ void Simulation::tick_shipyards(double dt_days) {
       const auto it_yard = colony.installations.find("shipyard");
       const int yards = (it_yard != colony.installations.end()) ? it_yard->second : 0;
       const double shipyard_mult = std::max(0.0, mult_for(fid).shipyard);
-      const double rate = base_rate * static_cast<double>(yards) * shipyard_mult;
+      const double prosperity = trade_prosperity_output_multiplier_for_colony(cid2);
+      const double rate = base_rate * static_cast<double>(yards) * shipyard_mult * prosperity;
       if (rate <= 1e-9) return std::numeric_limits<double>::infinity();
 
       double load_tons = 0.0;
@@ -1081,7 +1086,8 @@ void Simulation::tick_shipyards(double dt_days) {
     if (colony.shipyard_queue.empty()) continue;
 
     const double shipyard_mult = std::max(0.0, mult_for(colony.faction_id).shipyard);
-    const double per_team_capacity_tons = base_rate * shipyard_mult * dt_days;
+    const double prosperity = trade_prosperity_output_multiplier_for_colony(colony.id);
+    const double per_team_capacity_tons = base_rate * shipyard_mult * prosperity * dt_days;
     if (per_team_capacity_tons <= 1e-9) continue;
 
     // Pre-clean invalid orders so they don't permanently stall shipyard progress.

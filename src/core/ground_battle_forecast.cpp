@@ -13,6 +13,17 @@ namespace {
 
 double clamp_nonneg(double x) { return (x < 0.0) ? 0.0 : x; }
 
+// Match Simulation::tick_ground_combat fatigue multiplier.
+double ground_combat_fatigue_multiplier(const SimConfig& cfg, int days_fought) {
+  const double k = std::max(0.0, cfg.ground_combat_fatigue_per_day);
+  if (k <= 1e-12) return 1.0;
+  const double min_mult = std::clamp(cfg.ground_combat_fatigue_min_multiplier, 0.0, 1.0);
+  const int d = std::max(0, days_fought);
+  double mult = 1.0 / (1.0 + k * static_cast<double>(d));
+  if (!std::isfinite(mult)) mult = 1.0;
+  return std::clamp(mult, min_mult, 1.0);
+}
+
 } // namespace
 
 const char* ground_battle_winner_label(GroundBattleWinner w) {
@@ -77,12 +88,12 @@ GroundBattleForecast forecast_ground_battle(const SimConfig& cfg, double attacke
   out.defender_start = def;
   out.fort_points = forts;
 
-  const double loss_factor = std::max(0.0, cfg.ground_combat_loss_factor);
+  const double base_loss_factor = std::max(0.0, cfg.ground_combat_loss_factor);
   const double fort_def_scale = std::max(0.0, cfg.fortification_defense_scale);
   const double fort_atk_scale = std::max(0.0, cfg.fortification_attack_scale);
   const double arty_strength_per_weapon =
       std::max(0.0, cfg.ground_combat_defender_artillery_strength_per_weapon_damage);
-  const double fort_damage_rate =
+  const double base_fort_damage_rate =
       std::max(0.0, cfg.ground_combat_fortification_damage_per_attacker_strength_day);
 
   const double base_arty_weapon = clamp_nonneg(defender_artillery_weapon_damage_per_day);
@@ -132,11 +143,15 @@ GroundBattleForecast forecast_ground_battle(const SimConfig& cfg, double attacke
     const double defense_bonus = 1.0 + eff_forts * fort_def_scale;
     const double offense_bonus = 1.0 + eff_forts * fort_atk_scale;
 
+    const double fatigue_mult = ground_combat_fatigue_multiplier(cfg, day);
+    const double loss_factor = base_loss_factor * fatigue_mult;
+    const double fort_damage_rate = base_fort_damage_rate * fatigue_mult;
+
     double fort_integrity = 1.0;
     if (forts > 1e-9) fort_integrity = std::clamp(eff_forts / forts, 0.0, 1.0);
 
     const double arty_weapon = base_arty_weapon * fort_integrity;
-    const double arty_loss = arty_weapon * arty_strength_per_weapon;
+    const double arty_loss = arty_weapon * arty_strength_per_weapon * fatigue_mult;
 
     double attacker_loss = loss_factor * def * offense_bonus + arty_loss;
     double defender_loss = (defense_bonus > 1e-9)

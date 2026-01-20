@@ -647,6 +647,129 @@ void Simulation::tick_ships(double dt_days) {
     pre_sys.emplace(sid, sh->system_id);
   }
 
+  // --- Invasion orbital control cache ---
+  //
+  // Troop landings at hostile colonies are throughput-limited. When blockades
+  // are enabled, we additionally scale *invasion* landing throughput by a
+  // lightweight "orbital control" fraction derived from nearby combat power.
+  //
+  // This is computed using the *pre-move* positions captured above to keep the
+  // result deterministic within a tick (independent of ship processing order).
+
+  struct InvasionOrbitalKey {
+    Id colony_id{kInvalidId};
+    Id attacker_faction_id{kInvalidId};
+
+    bool operator==(const InvasionOrbitalKey& o) const {
+      return colony_id == o.colony_id && attacker_faction_id == o.attacker_faction_id;
+    }
+  };
+
+  struct InvasionOrbitalKeyHash {
+    size_t operator()(const InvasionOrbitalKey& k) const {
+      std::uint64_t h = 1469598103934665603ull;
+      auto mix = [&](std::uint64_t v) {
+        h ^= v;
+        h *= 1099511628211ull;
+      };
+      mix(k.colony_id);
+      mix(k.attacker_faction_id);
+      return static_cast<size_t>(h);
+    }
+  };
+
+  std::unordered_map<InvasionOrbitalKey, double, InvasionOrbitalKeyHash> invasion_orbital_control_cache;
+  invasion_orbital_control_cache.reserve(32);
+
+  auto invasion_orbital_control = [&](Id colony_id, Id attacker_faction_id) -> double {
+    if (!cfg_.enable_blockades) return 1.0;
+    if (colony_id == kInvalidId || attacker_faction_id == kInvalidId) return 0.0;
+
+    const InvasionOrbitalKey key{colony_id, attacker_faction_id};
+    if (auto it = invasion_orbital_control_cache.find(key); it != invasion_orbital_control_cache.end()) {
+      return it->second;
+    }
+
+    const Colony* col = find_ptr(state_.colonies, colony_id);
+    const Body* body = col ? find_ptr(state_.bodies, col->body_id) : nullptr;
+    const Id sys_id = body ? body->system_id : kInvalidId;
+    if (!col || !body || sys_id == kInvalidId) {
+      invasion_orbital_control_cache.emplace(key, 0.0);
+      return 0.0;
+    }
+
+    const Vec2 anchor = body->position_mkm;
+    const double radius_mkm = std::max(0.0, cfg_.blockade_radius_mkm);
+    const double base_resist = std::max(0.0, cfg_.blockade_base_resistance_power);
+
+    auto ship_power = [&](const Ship& sh) -> double {
+      if (sh.hp <= 1e-9) return 0.0;
+      const ShipDesign* d = find_design(sh.design_id);
+      if (!d) return 0.0;
+      const double w = std::max(0.0, d->weapon_damage) + std::max(0.0, d->missile_damage) +
+                       0.5 * std::max(0.0, d->point_defense_damage);
+      if (w <= 1e-9) return 0.0;
+      const double dur = 0.05 * (std::max(0.0, sh.hp) + std::max(0.0, sh.shields));
+      const double sen = 0.25 * std::max(0.0, d->sensor_range_mkm);
+      return w + dur + sen;
+    };
+
+    double attacker_power = 0.0;
+    double defender_power = 0.0;
+
+    // Ships near the target at the start of the tick.
+    for (Id sid : ship_ids) {
+      const Ship* sh = find_ptr(state_.ships, sid);
+      if (!sh) continue;
+      if (sh->faction_id == kInvalidId) continue;
+
+      auto its = pre_sys.find(sid);
+      if (its == pre_sys.end() || its->second != sys_id) continue;
+
+      if (radius_mkm > 1e-9) {
+        auto itp = pre_pos_mkm.find(sid);
+        if (itp == pre_pos_mkm.end()) continue;
+        if ((itp->second - anchor).length() > radius_mkm + 1e-9) continue;
+      }
+
+      const double p = ship_power(*sh);
+      if (p <= 1e-9) continue;
+
+      if (sh->faction_id == attacker_faction_id) {
+        attacker_power += p;
+      } else if (sh->faction_id == col->faction_id || are_factions_trade_partners(col->faction_id, sh->faction_id)) {
+        defender_power += p;
+      } else {
+        // Third parties are ignored for this simple orbital-control estimator.
+      }
+    }
+
+    // Static weapons contribute to defender orbital resistance.
+    double static_power = 0.0;
+    for (const auto& [inst_id, count] : col->installations) {
+      if (count <= 0) continue;
+      const auto it = content_.installations.find(inst_id);
+      if (it == content_.installations.end()) continue;
+      const double wd = std::max(0.0, it->second.weapon_damage);
+      const double pd = std::max(0.0, it->second.point_defense_damage);
+      const double w = wd + 0.5 * pd;
+      if (w <= 1e-9) continue;
+      static_power += w * static_cast<double>(count);
+    }
+    defender_power += static_power;
+
+    attacker_power = std::max(0.0, attacker_power);
+    defender_power = std::max(0.0, defender_power);
+
+    const double denom = attacker_power + defender_power + base_resist;
+    double control = (denom > 1e-9) ? (attacker_power / denom) : 0.0;
+    if (!std::isfinite(control)) control = 0.0;
+    control = std::clamp(control, 0.0, 1.0);
+
+    invasion_orbital_control_cache.emplace(key, control);
+    return control;
+  };
+
   auto can_refill_from_repeat = [](const ShipOrders& so) {
     return so.repeat && !so.repeat_template.empty() && so.repeat_count_remaining != 0;
   };
@@ -1112,7 +1235,16 @@ void Simulation::tick_ships(double dt_days) {
       }
 
       // Shared formation solver (used by UI previews as well).
-      const auto offsets = compute_fleet_formation_offsets(fl->formation, spacing, leader_id, leader_pos, raw_target, members);
+      std::unordered_map<Id, Vec2> member_pos;
+      member_pos.reserve(members.size() * 2);
+      for (Id sid : members) {
+        if (const auto* sh = find_ptr(state_.ships, sid)) {
+          member_pos.emplace(sid, sh->position_mkm);
+        }
+      }
+
+      const auto offsets = compute_fleet_formation_offsets(fl->formation, spacing, leader_id, leader_pos, raw_target,
+                                                           members, &member_pos);
       for (const auto& [sid, off] : offsets) {
         formation_offset_mkm[sid] = off;
       }
@@ -1308,7 +1440,8 @@ void Simulation::tick_ships(double dt_days) {
       auto& ord = std::get<AttackShip>(q.front());
       const Id target_id = ord.target_ship_id;
       const auto* tgt = find_ptr(state_.ships, target_id);
-      if (!tgt || tgt->system_id != ship.system_id) {
+      if (!tgt) {
+        // Target destroyed. Keep state-validation invariants by removing the order.
         q.erase(q.begin());
         continue;
       }
@@ -1336,7 +1469,12 @@ void Simulation::tick_ships(double dt_days) {
         continue;
       }
 
+      const int now = static_cast<int>(state_.date.days_since_epoch());
+
       attack_has_contact = is_ship_detected_by_faction(ship.faction_id, target_id);
+      // Be defensive: detection is only meaningful when both ships are in the same system.
+      if (attack_has_contact && tgt->system_id != ship.system_id) attack_has_contact = false;
+
       // An explicit AttackShip order acts as a de-facto declaration of hostilities if needed.
       if (attack_has_contact && !are_factions_hostile(ship.faction_id, tgt->faction_id)) {
         set_diplomatic_status(ship.faction_id, tgt->faction_id, DiplomacyStatus::Hostile, /*reciprocal=*/true,
@@ -1348,6 +1486,9 @@ void Simulation::tick_ships(double dt_days) {
         target = tgt->position_mkm;
         ord.last_known_position_mkm = target;
         ord.has_last_known = true;
+        ord.last_known_system_id = ship.system_id;
+        ord.last_known_day = now;
+        ord.pursuit_hops = 0;
         const auto* d = find_design(ship.design_id);
         const double beam_range = d ? std::max(0.0, d->weapon_range_mkm) : 0.0;
         const double missile_range = d ? std::max(0.0, d->missile_range_mkm) : 0.0;
@@ -1415,8 +1556,50 @@ void Simulation::tick_ships(double dt_days) {
           }
         }
       } else {
+        // Seed missing tracking metadata for backward compatibility with older
+        // saves/templates that only stored a position.
+        if (ord.has_last_known) {
+          if (ord.last_known_system_id == kInvalidId) ord.last_known_system_id = ship.system_id;
+          if (ord.last_known_day == 0) ord.last_known_day = now;
+        }
+
         if (!ord.has_last_known) {
           q.erase(q.begin());
+          continue;
+        }
+
+        // Give up on pursuit when the last reliable sighting is too stale.
+        // (This mirrors how contact prediction is bounded, and prevents
+        //  AttackShip from roaming indefinitely on dead leads.)
+        if (cfg_.contact_prediction_max_days > 0) {
+          const int age = std::max(0, now - ord.last_known_day);
+          if (age > cfg_.contact_prediction_max_days) {
+            q.erase(q.begin());
+            continue;
+          }
+        }
+
+        // If the ship is not currently in the system where the last-known
+        // position is defined, route back there (unrestricted).
+        if (ord.last_known_system_id != kInvalidId && ship.system_id != ord.last_known_system_id) {
+          const auto plan = plan_jump_route_for_ship_to_pos(ship_id, ord.last_known_system_id,
+                                                          ord.last_known_position_mkm,
+                                                          /*restrict_to_discovered=*/false,
+                                                          /*include_queued_jumps=*/false);
+          if (plan && !plan->jump_ids.empty()) {
+            AttackShip next = ord;
+            std::vector<Order> prefix;
+            prefix.reserve(plan->jump_ids.size() + 1);
+            for (Id jid : plan->jump_ids) prefix.push_back(TravelViaJump{jid});
+            prefix.push_back(next);
+
+            q.erase(q.begin());
+            q.insert(q.begin(), prefix.begin(), prefix.end());
+            continue;
+          }
+          // No route available; hold position but keep the order.
+          target = ship.position_mkm;
+          desired_range = 0.0;
           continue;
         }
 
@@ -1427,15 +1610,71 @@ void Simulation::tick_ships(double dt_days) {
         bool has_track_v = false;
         int track_age_days = 0;
         const Contact* track_contact = nullptr;
-        const int now = static_cast<int>(state_.date.days_since_epoch());
         if (const auto* fac = find_ptr(state_.factions, ship.faction_id)) {
           if (auto contact_it = fac->ship_contacts.find(target_id); contact_it != fac->ship_contacts.end()) {
-            const auto pred = predict_contact_position(contact_it->second, now, cfg_.contact_prediction_max_days);
-            ord.last_known_position_mkm = pred.predicted_position_mkm;
-            track_v_mkm_per_day = pred.velocity_mkm_per_day;
-            has_track_v = pred.has_velocity && (std::abs(track_v_mkm_per_day.x) > 1e-9 || std::abs(track_v_mkm_per_day.y) > 1e-9);
-            track_age_days = pred.age_days;
-            track_contact = &contact_it->second;
+            // Only use contact track data when it's in the same coordinate
+            // frame. (AttackShip can pursue hypothesized jump transits across
+            // systems, so the target ship's true system may differ.)
+            if (contact_it->second.system_id == ship.system_id) {
+              const auto pred = predict_contact_position(contact_it->second, now, cfg_.contact_prediction_max_days);
+              ord.last_known_position_mkm = pred.predicted_position_mkm;
+              ord.last_known_system_id = contact_it->second.system_id;
+              ord.last_known_day = contact_it->second.last_seen_day;
+
+              track_v_mkm_per_day = pred.velocity_mkm_per_day;
+              has_track_v = pred.has_velocity &&
+                            (std::abs(track_v_mkm_per_day.x) > 1e-9 || std::abs(track_v_mkm_per_day.y) > 1e-9);
+              track_age_days = pred.age_days;
+              track_contact = &contact_it->second;
+            }
+          }
+        }
+
+        // Jump-chase heuristic: if the last seen position was essentially on a
+        // jump point, and we lost contact recently, follow the same jump.
+        //
+        // This enables cross-system pursuit without omniscient knowledge of
+        // the target ship's current location.
+        if (track_contact && track_contact->system_id == ship.system_id) {
+          const int contact_age = std::max(0, now - track_contact->last_seen_day);
+          const int hop_limit = 4;
+          if (contact_age <= 1 && ord.pursuit_hops < hop_limit) {
+            const auto* sys = find_ptr(state_.systems, ship.system_id);
+            if (sys) {
+              Id best_jump_id = kInvalidId;
+              double best_dist = 1e300;
+              for (Id jid : sys->jump_points) {
+                if (jid == kInvalidId) continue;
+                const auto* jp = find_ptr(state_.jump_points, jid);
+                if (!jp) continue;
+                if (jp->linked_jump_id == kInvalidId) continue;
+                const double d = (jp->position_mkm - track_contact->last_seen_position_mkm).length();
+                if (d < best_dist) {
+                  best_dist = d;
+                  best_jump_id = jid;
+                }
+              }
+
+              // Require the contact to have been essentially on the jump point.
+              const double thresh = std::max(0.0, dock_range) * 1.25;
+              if (best_jump_id != kInvalidId && best_dist <= thresh + 1e-9) {
+                const auto* jp = find_ptr(state_.jump_points, best_jump_id);
+                const auto* dst = jp ? find_ptr(state_.jump_points, jp->linked_jump_id) : nullptr;
+                if (jp && dst && dst->system_id != kInvalidId) {
+                  AttackShip next = ord;
+                  next.has_last_known = true;
+                  next.last_known_system_id = dst->system_id;
+                  next.last_known_position_mkm = dst->position_mkm;
+                  next.last_known_day = now;
+                  next.pursuit_hops = ord.pursuit_hops + 1;
+
+                  q.erase(q.begin());
+                  q.insert(q.begin(), TravelViaJump{best_jump_id});
+                  q.insert(q.begin() + 1, next);
+                  continue;
+                }
+              }
+            }
           }
         }
 
@@ -1456,11 +1695,25 @@ void Simulation::tick_ships(double dt_days) {
           }
         }
 
-        // Add a deterministic "search" offset within the current contact
-        // uncertainty radius. This prevents perfect tail-chasing of stale
-        // tracks and makes reacquisition depend on sensors + time.
-        if (track_contact && cfg_.enable_contact_uncertainty && cfg_.contact_search_offset_fraction > 1e-9) {
-          const double unc = contact_uncertainty_radius_mkm(*track_contact, now);
+        // Add a deterministic "search" offset within an uncertainty radius.
+        //
+        // - With a valid contact track, use the computed contact uncertainty.
+        // - Otherwise, fall back to a ship-speed-based growth model around the
+        //   last known position (useful after jump-chasing).
+        if (cfg_.enable_contact_uncertainty && cfg_.contact_search_offset_fraction > 1e-9) {
+          double unc = 0.0;
+          if (track_contact && track_contact->system_id == ship.system_id) {
+            unc = contact_uncertainty_radius_mkm(*track_contact, now);
+          } else {
+            const int age = std::max(0, now - ord.last_known_day);
+            const double sp = mkm_per_day_from_speed(ship.speed_km_s, cfg_.seconds_per_day);
+            const double gmin = std::max(0.0, cfg_.contact_uncertainty_growth_min_mkm_per_day);
+            const double gfrac = std::max(0.0, cfg_.contact_uncertainty_growth_fraction_of_speed);
+            const double growth = std::max(gmin, gfrac * sp);
+            unc = cfg_.contact_uncertainty_min_mkm + static_cast<double>(age) * growth;
+            unc = std::clamp(unc, cfg_.contact_uncertainty_min_mkm, cfg_.contact_uncertainty_max_mkm);
+          }
+
           const double rad = std::max(0.0, unc) * std::max(0.0, cfg_.contact_search_offset_fraction);
           if (rad > 1e-6) {
             // Stable pseudo-random point inside a circle (biased toward center).
@@ -1620,37 +1873,50 @@ void Simulation::tick_ships(double dt_days) {
     } else if (std::holds_alternative<InvadeColony>(q.front())) {
       auto& ord = std::get<InvadeColony>(q.front());
       is_troop_op = true;
-      troop_mode = 2;
       troop_colony_id = ord.colony_id;
+
       const auto* colony = find_ptr(state_.colonies, troop_colony_id);
       if (!colony) { q.erase(q.begin()); continue; }
-      if (colony->faction_id == ship.faction_id) { q.erase(q.begin()); continue; }
+
       const auto* body = find_ptr(state_.bodies, colony->body_id);
       if (!body || body->system_id != ship.system_id) { q.erase(q.begin()); continue; }
 
-      // An explicit invasion is an act of hostility, but an active treaty requires an explicit
-      // diplomatic break (cancel treaty / declare war) first.
-      TreatyType tt = TreatyType::Ceasefire;
-      if (strongest_active_treaty_between(state_, ship.faction_id, colony->faction_id, &tt)) {
-        std::ostringstream oss;
-        oss << "Invasion order cancelled due to active treaty between factions.";
-        EventContext ctx;
-        ctx.faction_id = ship.faction_id;
-        ctx.faction_id2 = colony->faction_id;
-        ctx.ship_id = ship_id;
-        ctx.colony_id = troop_colony_id;
-        ctx.system_id = ship.system_id;
-        this->push_event(EventLevel::Warn, EventCategory::Diplomacy, oss.str(), ctx);
-        q.erase(q.begin());
-        continue;
-      }
+      const bool target_is_friendly = (colony->faction_id == ship.faction_id);
 
-      // An explicit invasion is an act of hostility.
-      if (!are_factions_hostile(ship.faction_id, colony->faction_id)) {
-        set_diplomatic_status(ship.faction_id, colony->faction_id, DiplomacyStatus::Hostile, /*reciprocal=*/true,
-                             /*push_event_on_change=*/true);
+      // If the colony already belongs to us (e.g. capture happened earlier this tick),
+      // treat the invasion order as an unload-to-garrison operation so transports don't
+      // cancel and keep their troops embarked.
+      if (target_is_friendly) {
+        troop_mode = 1;
+        troop_strength = 0.0; // unload as much as possible
+        target = body->position_mkm;
+      } else {
+        troop_mode = 2;
+
+        // An explicit invasion is an act of hostility, but an active treaty requires an explicit
+        // diplomatic break (cancel treaty / declare war) first.
+        TreatyType tt = TreatyType::Ceasefire;
+        if (strongest_active_treaty_between(state_, ship.faction_id, colony->faction_id, &tt)) {
+          std::ostringstream oss;
+          oss << "Invasion order cancelled due to active treaty between factions.";
+          EventContext ctx;
+          ctx.faction_id = ship.faction_id;
+          ctx.faction_id2 = colony->faction_id;
+          ctx.ship_id = ship_id;
+          ctx.colony_id = troop_colony_id;
+          ctx.system_id = ship.system_id;
+          this->push_event(EventLevel::Warn, EventCategory::Diplomacy, oss.str(), ctx);
+          q.erase(q.begin());
+          continue;
+        }
+
+        // An explicit invasion is an act of hostility.
+        if (!are_factions_hostile(ship.faction_id, colony->faction_id)) {
+          set_diplomatic_status(ship.faction_id, colony->faction_id, DiplomacyStatus::Hostile, /*reciprocal=*/true,
+                               /*push_event_on_change=*/true);
+        }
+        target = body->position_mkm;
       }
-      target = body->position_mkm;
     } else if (std::holds_alternative<BombardColony>(q.front())) {
       auto& ord = std::get<BombardColony>(q.front());
       const auto* colony = find_ptr(state_.colonies, ord.colony_id);
@@ -3454,70 +3720,135 @@ void Simulation::tick_ships(double dt_days) {
         continue;
       }
 
+      // Troop transfers are throughput-limited (especially in sub-day tick modes).
+      double landing_factor = 1.0;
+      if (troop_mode == 2 && cfg_.enable_blockades) {
+        const double control = invasion_orbital_control(troop_colony_id, ship.faction_id);
+        constexpr double kFullControl = 0.5;
+        landing_factor = (kFullControl > 1e-9) ? std::clamp(control / kFullControl, 0.0, 1.0) : 1.0;
+
+        // If we have *no* ability to establish orbital control (e.g. no armed presence),
+        // keep the order queued but don't unload troops.
+        if (landing_factor <= 1e-9 && ship.troops > 1e-9) {
+          const auto* fac = find_ptr(state_.factions, ship.faction_id);
+          if (fac && fac->control == FactionControl::Player && state_.hour_of_day == 0) {
+            std::ostringstream oss;
+            oss << "Landing stalled at " << col->name << ": insufficient orbital control to disembark troops.";
+            EventContext ctx;
+            ctx.faction_id = ship.faction_id;
+            ctx.faction_id2 = col->faction_id;
+            ctx.ship_id = ship_id;
+            ctx.colony_id = col->id;
+            ctx.system_id = ship.system_id;
+            this->push_event(EventLevel::Warn, EventCategory::Combat, oss.str(), ctx);
+          }
+          continue;
+        }
+      }
+
+      double throughput_limit = 1e300;
+      if (dt_days > 0.0) {
+        const double per_cap = std::max(0.0, cfg_.troop_transfer_strength_per_day_per_troop_cap);
+        const double min_rate = std::max(0.0, cfg_.troop_transfer_strength_per_day_min);
+        const double rate_per_day = std::max(min_rate, cap * per_cap);
+        throughput_limit = rate_per_day * dt_days * landing_factor;
+      }
+
       auto transfer_amount = [&](double want, double available, double free_cap) -> double {
         double take = (want <= 0.0) ? 1e300 : want;
         take = std::min(take, available);
         take = std::min(take, free_cap);
+        take = std::min(take, throughput_limit);
         if (take < 0.0) take = 0.0;
         return take;
       };
 
+      constexpr double kEps = 1e-9;
+      bool complete = false;
+
       if (troop_mode == 0) {
         // Load from colony garrison.
+        double want = load_troops_ord ? load_troops_ord->strength : troop_strength;
         const double free_cap = std::max(0.0, cap - ship.troops);
-        const double moved = transfer_amount(load_troops_ord ? load_troops_ord->strength : troop_strength,
-                                             std::max(0.0, col->ground_forces), free_cap);
-        if (moved > 1e-9) {
+        const double moved = transfer_amount(want, std::max(0.0, col->ground_forces), free_cap);
+        if (moved > kEps) {
           ship.troops += moved;
           col->ground_forces = std::max(0.0, col->ground_forces - moved);
           if (auto itb = state_.ground_battles.find(col->id); itb != state_.ground_battles.end()) {
             itb->second.defender_strength = col->ground_forces;
           }
         }
+
+        if (want <= 0.0) {
+          // "As much as possible": complete when we can't move any more.
+          complete = (moved <= kEps);
+        } else {
+          if (load_troops_ord) {
+            load_troops_ord->strength = std::max(0.0, load_troops_ord->strength - moved);
+            want = load_troops_ord->strength;
+          }
+          complete = (want <= kEps) || (moved <= kEps);
+        }
       } else if (troop_mode == 1) {
         // Unload into colony garrison.
-        const double moved = transfer_amount(unload_troops_ord ? unload_troops_ord->strength : troop_strength,
-                                             std::max(0.0, ship.troops), 1e300);
-        if (moved > 1e-9) {
+        double want = unload_troops_ord ? unload_troops_ord->strength : troop_strength;
+        const double moved = transfer_amount(want, std::max(0.0, ship.troops), 1e300);
+        if (moved > kEps) {
           ship.troops = std::max(0.0, ship.troops - moved);
           col->ground_forces += moved;
           if (auto itb = state_.ground_battles.find(col->id); itb != state_.ground_battles.end()) {
             itb->second.defender_strength = col->ground_forces;
           }
         }
-      } else if (troop_mode == 2) {
-        // Invade (disembark all or requested troops into attacker strength).
-        if (ship.troops <= 1e-9) {
-          q.erase(q.begin());
-          continue;
-        }
-        const double moved = ship.troops;
-        ship.troops = 0.0;
 
-        GroundBattle& b = state_.ground_battles[col->id];
-        if (b.colony_id == kInvalidId) {
-          b.colony_id = col->id;
-          b.system_id = ship.system_id;
-          b.attacker_faction_id = ship.faction_id;
-          b.defender_faction_id = col->faction_id;
-          b.attacker_strength = 0.0;
-          b.defender_strength = std::max(0.0, col->ground_forces);
-          b.fortification_damage_points = 0.0;
-          b.days_fought = 0;
+        if (want <= 0.0) {
+          complete = (moved <= kEps);
+        } else {
+          if (unload_troops_ord) {
+            unload_troops_ord->strength = std::max(0.0, unload_troops_ord->strength - moved);
+            want = unload_troops_ord->strength;
+          }
+          complete = (want <= kEps) || (moved <= kEps);
         }
-        // Reinforcement: if attacker changes, treat as a new battle by replacing.
-        if (b.attacker_faction_id != ship.faction_id) {
-          b.attacker_faction_id = ship.faction_id;
-          b.defender_faction_id = col->faction_id;
-          b.attacker_strength = 0.0;
-          b.defender_strength = std::max(0.0, col->ground_forces);
-          b.fortification_damage_points = 0.0;
-          b.days_fought = 0;
+      } else if (troop_mode == 2) {
+        // Invade: disembark troops into attacker strength over time.
+        if (ship.troops <= kEps) {
+          complete = true;
+        } else {
+          const double moved = std::min(std::max(0.0, ship.troops), throughput_limit);
+          if (moved > kEps) {
+            ship.troops = std::max(0.0, ship.troops - moved);
+
+            GroundBattle& b = state_.ground_battles[col->id];
+            if (b.colony_id == kInvalidId) {
+              b.colony_id = col->id;
+              b.system_id = ship.system_id;
+              b.attacker_faction_id = ship.faction_id;
+              b.defender_faction_id = col->faction_id;
+              b.attacker_strength = 0.0;
+              b.defender_strength = std::max(0.0, col->ground_forces);
+              b.fortification_damage_points = 0.0;
+              b.days_fought = 0;
+            }
+            // Reinforcement: if attacker changes, treat as a new battle by replacing.
+            if (b.attacker_faction_id != ship.faction_id) {
+              b.attacker_faction_id = ship.faction_id;
+              b.defender_faction_id = col->faction_id;
+              b.attacker_strength = 0.0;
+              b.defender_strength = std::max(0.0, col->ground_forces);
+              b.fortification_damage_points = 0.0;
+              b.days_fought = 0;
+            }
+            b.attacker_strength += moved;
+          }
+          complete = (ship.troops <= kEps);
         }
-        b.attacker_strength += moved;
+      } else {
+        // Unknown mode.
+        complete = true;
       }
 
-      q.erase(q.begin());
+      if (complete) q.erase(q.begin());
       continue;
     }
 
@@ -4146,7 +4477,9 @@ void Simulation::tick_ships(double dt_days) {
         }
       } else {
         if (dist <= arrive_eps) {
-          q.erase(q.begin());
+          // Lost-contact pursuit is a *search* operation; do not complete the
+          // order just because we've reached one candidate search point.
+          ship.position_mkm = target;
           continue;
         }
       }
@@ -4250,7 +4583,8 @@ void Simulation::tick_ships(double dt_days) {
           if (!escort_is_jump_leg) q.erase(q.begin());
         }
       } else if (is_attack) {
-        if (!attack_has_contact) q.erase(q.begin());
+        // AttackShip remains active while pursuing a lost contact; completion is
+        // governed by staleness checks rather than reaching a single search point.
       } else if (is_bombard) {
         // Bombardment executes in tick_combat; keep the order.
       } else if (is_cargo_op) {

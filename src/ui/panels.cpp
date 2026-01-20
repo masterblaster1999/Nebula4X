@@ -1235,15 +1235,32 @@ if (sim.cfg().enable_ship_maintenance) {
           {
             double gp = sh->crew_grade_points;
             if (!std::isfinite(gp) || gp < 0.0) gp = sim.cfg().crew_initial_grade_points;
-            const double bonus = sim.crew_grade_bonus_for_points(gp);
+
+            double comp = sh->crew_complement;
+            if (!std::isfinite(comp) || comp < 0.0) comp = 1.0;
+            comp = std::clamp(comp, 0.0, 1.0);
+
+            const double base_bonus = sim.crew_grade_bonus_for_points(gp);
+            const double eff_bonus = sim.crew_grade_bonus(*sh);
+
             const char* tier = (gp < 100.0)  ? "Green"
                                : (gp < 400.0)  ? "Regular"
                                : (gp < 900.0)  ? "Trained"
                                : (gp < 1600.0) ? "Veteran"
                                : "Elite";
-            ImGui::Text("Crew: %.0f pts  (%s, %+0.1f%% combat)", gp, tier, bonus * 100.0);
+
+            if (sim.cfg().enable_crew_casualties) {
+              ImGui::Text("Crew: %.0f pts  (%s, %+0.1f%% base, %.0f%% complement, %+0.1f%% effective)", gp, tier,
+                          base_bonus * 100.0, comp * 100.0, eff_bonus * 100.0);
+            } else {
+              ImGui::Text("Crew: %.0f pts  (%s, %+0.1f%% combat)", gp, tier, base_bonus * 100.0);
+            }
+
             if (!sim.cfg().enable_crew_experience) {
               ImGui::TextDisabled("Crew experience disabled in SimConfig");
+            }
+            if (!sim.cfg().enable_crew_casualties) {
+              ImGui::TextDisabled("Crew casualties disabled in SimConfig");
             }
           }
 
@@ -4869,6 +4886,27 @@ const bool can_up = (i > 0);
                                 bs.hostile_ships, bs.hostile_power, bs.defender_ships, bs.defender_power);
           } else {
             ImGui::TextDisabled("Blockade: none");
+          }
+        }
+
+        // Trade prosperity (if enabled).
+        if (sim.cfg().enable_trade_prosperity) {
+          const auto tp = sim.trade_prosperity_status_for_colony(colony->id);
+          const double bonus_pct = tp.output_bonus * 100.0;
+          if (bonus_pct > 0.05) {
+            ImGui::TextDisabled("Trade prosperity: +%.1f%% output (x%.3f)", bonus_pct, tp.output_multiplier);
+          } else {
+            ImGui::TextDisabled("Trade prosperity: none");
+          }
+          if (ImGui::IsItemHovered()) {
+            ImGui::BeginTooltip();
+            ImGui::Text("Market size: %.2f (factor %.2f)", tp.market_size, tp.market_factor);
+            ImGui::Text("Hub score: %.2f", tp.hub_score);
+            ImGui::Text("Population factor: %.2f", tp.pop_factor);
+            ImGui::Text("Piracy risk: %.2f", tp.piracy_risk);
+            ImGui::Text("Blockade pressure: %.2f", tp.blockade_pressure);
+            ImGui::Text("Max bonus: +%.0f%%", sim.cfg().trade_prosperity_max_output_bonus * 100.0);
+            ImGui::EndTooltip();
           }
         }
 

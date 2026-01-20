@@ -80,6 +80,21 @@ struct AttackShip {
   // - When contact is lost, ships will move to last_known_position_mkm.
   bool has_last_known{false};
   Vec2 last_known_position_mkm{0.0, 0.0};
+
+  // System containing last_known_position_mkm.
+  //
+  // This makes AttackShip robust when the target transits a jump point: ships
+  // can continue pursuing a contact track without requiring omniscient
+  // knowledge of which system the target is currently in.
+  Id last_known_system_id{kInvalidId};
+
+  // Date::days_since_epoch() when last_known_position_mkm was last refreshed by
+  // an actual detection (or by pursuit heuristics such as jump-chasing).
+  int last_known_day{0};
+
+  // Safety valve: how many times this order has pursued a hypothesized jump.
+  // Prevents infinite bouncing when the target repeatedly slips away.
+  int pursuit_hops{0};
 };
 
 // Escort a friendly ship.

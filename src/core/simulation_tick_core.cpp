@@ -961,6 +961,23 @@ void Simulation::tick_contacts(double dt_days, bool emit_contact_lost_events) {
   const double unc_ecm_mult = std::max(0.0, cfg_.contact_uncertainty_ecm_strength_multiplier);
   const double unc_cap_mkm = cfg_.contact_uncertainty_max_mkm;
 
+
+  const bool enable_fusion = cfg_.enable_contact_sensor_fusion;
+  const bool enable_identity_fog = cfg_.enable_contact_identity_fog;
+  const double reveal_design_unc = std::max(0.0, cfg_.contact_identity_reveal_design_uncertainty_mkm);
+  const double reveal_name_unc = std::max(0.0, cfg_.contact_identity_reveal_name_uncertainty_mkm);
+
+  auto contact_label_for = [&](const Contact& c) -> std::string {
+    if (!c.last_seen_name.empty()) return c.last_seen_name;
+    if (!c.last_seen_design_id.empty()) {
+      if (const auto* d = this->find_design(c.last_seen_design_id)) {
+        if (!d->name.empty()) return "Unknown " + d->name;
+      }
+      return "Unknown " + c.last_seen_design_id;
+    }
+    return "Unknown contact";
+  };
+
   for (Id sys_id : system_ids) {
     const auto* sys = find_ptr(state_.systems, sys_id);
     if (!sys) continue;
@@ -1066,9 +1083,20 @@ void Simulation::tick_contacts(double dt_days, bool emit_contact_lost_events) {
               const double u = std::clamp(d_mkm / eff, 0.0, 1.0);
               frac = unc_frac_lo + (unc_frac_hi - unc_frac_lo) * u;
             }
-            unc_mkm = std::max(unc_min_mkm, frac * eff);
+            // Model measurement error as a fraction of *distance*, scaled by
+            // how close we are to the effective detection limit (u = d/eff).
+            //
+            // This makes stealth/ECM matter in a more intuitive direction:
+            // at the same absolute range, weaker detections (higher u) yield
+            // larger uncertainty.
+            unc_mkm = std::max(unc_min_mkm, frac * d_mkm);
+
+            // Residual EW impact on measurement quality. Detection range already
+            // accounts for ECCM vs ECM; here we only apply additional error from
+            // target ECM, mitigated by the source ECCM.
             if (unc_ecm_mult > 0.0) {
-              unc_mkm *= (1.0 + ecm * unc_ecm_mult);
+              const double ecm_eff = (eccm > 0.0) ? (ecm / (1.0 + eccm)) : ecm;
+              unc_mkm *= (1.0 + ecm_eff * unc_ecm_mult);
             }
             if (!std::isfinite(unc_mkm) || unc_mkm < 0.0) unc_mkm = 0.0;
             if (std::isfinite(unc_cap_mkm) && unc_cap_mkm > 0.0) {
@@ -1088,9 +1116,53 @@ void Simulation::tick_contacts(double dt_days, bool emit_contact_lost_events) {
     if (a.t != b.t) return a.t > b.t;
     return a.uncertainty_mkm < b.uncertainty_mkm;
   });
-  detections.erase(std::unique(detections.begin(), detections.end(), [](const DetectionRecord& a, const DetectionRecord& b) {
-    return a.ship_id == b.ship_id && a.viewer_faction_id == b.viewer_faction_id;
-  }), detections.end());
+
+  // Collapse per-source detections into a single record per (ship, viewer faction).
+  //
+  // When multiple sources detect the same target at effectively the same time
+  // (usually the end of the tick), we fuse their uncertainty estimates as if
+  // they were independent measurements: sigma_fused = 1 / sqrt(sum(1/sigma_i^2)).
+  //
+  // This is deterministic (ordering is stable after sort) and makes overlapping
+  // sensor networks meaningfully improve fog-of-war contact quality.
+  if (enable_fusion) {
+    std::vector<DetectionRecord> fused;
+    fused.reserve(detections.size());
+
+    constexpr double kTEps = 1e-6;
+    for (std::size_t i = 0; i < detections.size();) {
+      const Id ship_id = detections[i].ship_id;
+      const Id viewer_id = detections[i].viewer_faction_id;
+      const double t_ref = detections[i].t;
+
+      double inv_var_sum = 0.0;
+      std::size_t j = i;
+      for (; j < detections.size(); ++j) {
+        const auto& d = detections[j];
+        if (d.ship_id != ship_id) break;
+        if (d.viewer_faction_id != viewer_id) break;
+        if (std::abs(d.t - t_ref) > kTEps) continue;
+
+        const double sigma = std::max(1e-6, d.uncertainty_mkm);
+        inv_var_sum += 1.0 / (sigma * sigma);
+      }
+
+      double fused_unc = detections[i].uncertainty_mkm;
+      if (inv_var_sum > 1e-18) {
+        fused_unc = std::sqrt(1.0 / inv_var_sum);
+      }
+      if (!std::isfinite(fused_unc) || fused_unc < 0.0) fused_unc = 0.0;
+
+      fused.push_back(DetectionRecord{ship_id, viewer_id, t_ref, fused_unc});
+      i = j;
+    }
+
+    detections.swap(fused);
+  } else {
+    detections.erase(std::unique(detections.begin(), detections.end(), [](const DetectionRecord& a, const DetectionRecord& b) {
+      return a.ship_id == b.ship_id && a.viewer_faction_id == b.viewer_faction_id;
+    }), detections.end());
+  }
 
   // Apply today's detections to each faction's contact list.
   for (const auto& det : detections) {
@@ -1147,9 +1219,23 @@ void Simulation::tick_contacts(double dt_days, bool emit_contact_lost_events) {
     if (!std::isfinite(c.last_seen_position_uncertainty_mkm) || c.last_seen_position_uncertainty_mkm < 0.0) {
       c.last_seen_position_uncertainty_mkm = 0.0;
     }
-    c.last_seen_name = sh->name;
-    c.last_seen_design_id = sh->design_id;
     c.last_seen_faction_id = sh->faction_id;
+
+    // Optional contact identity fog-of-war.
+    //
+    // Contacts are always tracked by ship_id, but the *UI-facing* identity (name/design)
+    // can be gated by measurement quality. This makes stealth/ECM meaningfully delay
+    // identification without requiring a fully separate "track id" system.
+    const double unc_det = c.last_seen_position_uncertainty_mkm;
+    if (!enable_identity_fog || unc_det <= reveal_design_unc + 1e-9) {
+      c.last_seen_design_id = sh->design_id;
+    }
+    if (!enable_identity_fog || unc_det <= reveal_name_unc + 1e-9) {
+      c.last_seen_name = sh->name;
+    }
+
+    const std::string contact_label = contact_label_for(c);
+
     fac->ship_contacts[det.ship_id] = std::move(c);
 
     if (is_new || was_stale) {
@@ -1166,9 +1252,9 @@ void Simulation::tick_contacts(double dt_days, bool emit_contact_lost_events) {
 
       std::string msg;
       if (is_new) {
-        msg = "New contact for " + fac->name + ": " + sh->name + " (" + other_name + ") in " + sys_name;
+        msg = "New contact for " + fac->name + ": " + contact_label + " (" + other_name + ") in " + sys_name;
       } else {
-        msg = "Contact reacquired for " + fac->name + ": " + sh->name + " (" + other_name + ") in " + sys_name;
+        msg = "Contact reacquired for " + fac->name + ": " + contact_label + " (" + other_name + ") in " + sys_name;
       }
 
       // Don't spam intel events for mutually Friendly factions (allies).
@@ -1316,8 +1402,8 @@ void Simulation::tick_contacts(double dt_days, bool emit_contact_lost_events) {
       ctx.system_id = c.system_id;
       ctx.ship_id = c.ship_id;
 
-      const std::string ship_name = c.last_seen_name.empty() ? ("Ship " + std::to_string(c.ship_id)) : c.last_seen_name;
-      const std::string msg = "Contact lost for " + fac->name + ": " + ship_name + " (" + other_name + ") in " + sys_name;
+      const std::string ship_label = contact_label_for(c);
+      const std::string msg = "Contact lost for " + fac->name + ": " + ship_label + " (" + other_name + ") in " + sys_name;
 
       if (are_factions_mutual_friendly(fac->id, c.last_seen_faction_id)) continue;
       push_event(EventLevel::Info, EventCategory::Intel, msg, ctx);

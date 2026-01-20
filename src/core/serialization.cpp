@@ -556,6 +556,15 @@ Value order_to_json(const Order& order) {
           if (o.has_last_known) {
             obj["has_last_known"] = true;
             obj["last_known_position_mkm"] = vec2_to_json(o.last_known_position_mkm);
+            if (o.last_known_system_id != kInvalidId) {
+              obj["last_known_system_id"] = static_cast<double>(o.last_known_system_id);
+            }
+            if (o.last_known_day != 0) {
+              obj["last_known_day"] = static_cast<double>(o.last_known_day);
+            }
+            if (o.pursuit_hops > 0) {
+              obj["pursuit_hops"] = static_cast<double>(o.pursuit_hops);
+            }
           }
         } else if constexpr (std::is_same_v<T, EscortShip>) {
           obj["type"] = std::string("escort_ship");
@@ -695,6 +704,15 @@ Order order_from_json(const Value& v) {
     }
     if (auto hk_it = o.find("has_last_known"); hk_it != o.end()) {
       a.has_last_known = hk_it->second.bool_value(a.has_last_known);
+    }
+    if (auto it = o.find("last_known_system_id"); it != o.end()) {
+      a.last_known_system_id = static_cast<Id>(it->second.int_value(kInvalidId));
+    }
+    if (auto it = o.find("last_known_day"); it != o.end()) {
+      a.last_known_day = static_cast<int>(it->second.int_value(0));
+    }
+    if (auto it = o.find("pursuit_hops"); it != o.end()) {
+      a.pursuit_hops = static_cast<int>(it->second.int_value(0));
     }
     return a;
   }
@@ -1336,6 +1354,7 @@ json::Value serialize_game_to_json_value(const GameState& s) {
     o["hp"] = sh.hp;
     if (std::abs(sh.maintenance_condition - 1.0) > 1e-9) o["maintenance"] = sh.maintenance_condition;
     if (sh.crew_grade_points >= 0.0 && std::abs(sh.crew_grade_points - 100.0) > 1e-9) o["crew_grade_points"] = sh.crew_grade_points;
+    if (std::abs(sh.crew_complement - 1.0) > 1e-9) o["crew_complement"] = sh.crew_complement;
     o["missile_cooldown_days"] = sh.missile_cooldown_days;
     if (sh.missile_ammo >= 0) o["missile_ammo"] = static_cast<double>(sh.missile_ammo);
     if (sh.boarding_cooldown_days > 0.0) o["boarding_cooldown_days"] = sh.boarding_cooldown_days;
@@ -2264,6 +2283,9 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     if (auto it = o.find("crew_grade_points"); it != o.end()) {
       sh.crew_grade_points = it->second.number_value(sh.crew_grade_points);
     }
+    if (auto it = o.find("crew_complement"); it != o.end()) {
+      sh.crew_complement = it->second.number_value(sh.crew_complement);
+    }
     if (auto it = o.find("missile_cooldown_days"); it != o.end()) {
       sh.missile_cooldown_days = it->second.number_value(0.0);
     }
@@ -2286,6 +2308,7 @@ GameState deserialize_game_from_json(const std::string& json_text) {
       if (!std::isfinite(x)) return 1.0;
       return std::clamp(x, 0.0, 1.0);
     };
+    sh.crew_complement = clamp01(sh.crew_complement);
     sh.engines_integrity = clamp01(sh.engines_integrity);
     sh.weapons_integrity = clamp01(sh.weapons_integrity);
     sh.sensors_integrity = clamp01(sh.sensors_integrity);

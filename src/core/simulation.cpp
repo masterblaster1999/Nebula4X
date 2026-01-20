@@ -23,6 +23,7 @@
 #include "nebula4x/core/procgen_nebula_stormfield.h"
 #include "nebula4x/core/procgen_jump_phenomena.h"
 #include "nebula4x/core/ai_economy.h"
+#include "nebula4x/core/trade_network.h"
 #include "nebula4x/util/log.h"
 #include "nebula4x/util/spatial_index.h"
 
@@ -86,14 +87,25 @@ struct JumpRouteNodeHash {
 };
 
 struct JumpRouteDist {
+  // Dijkstra cost used for route selection.
+  //
+  // This is an environment-adjusted distance (mkm / speed_multiplier), so routes
+  // that traverse slow nebula/storm systems are naturally penalized.
   double cost_mkm{0.0};
+
+  // Physical distance traveled inside systems (ignores environment multipliers).
+  double distance_mkm{0.0};
+
   int hops{0};
 };
 
 bool dist_better(const JumpRouteDist& a, const JumpRouteDist& b) {
   constexpr double kEps = 1e-9;
   if (a.cost_mkm + kEps < b.cost_mkm) return true;
-  if (std::fabs(a.cost_mkm - b.cost_mkm) <= kEps && a.hops < b.hops) return true;
+  if (std::fabs(a.cost_mkm - b.cost_mkm) <= kEps) {
+    if (a.hops < b.hops) return true;
+    if (a.hops == b.hops && a.distance_mkm + kEps < b.distance_mkm) return true;
+  }
   return false;
 }
 
@@ -107,6 +119,7 @@ struct JumpRoutePQComp {
     // priority_queue is max-heap; return true if a should come after b.
     if (a.d.cost_mkm != b.d.cost_mkm) return a.d.cost_mkm > b.d.cost_mkm;
     if (a.d.hops != b.d.hops) return a.d.hops > b.d.hops;
+    if (a.d.distance_mkm != b.d.distance_mkm) return a.d.distance_mkm > b.d.distance_mkm;
     if (a.node.system_id != b.node.system_id) return a.node.system_id > b.node.system_id;
     return a.node.entry_jump_id > b.node.entry_jump_id;
   }
@@ -124,13 +137,17 @@ static void update_jump_route_eta(JumpRoutePlan& plan, double speed_km_s, double
   // Keep totals consistent even if callers only set distance_mkm/final_leg_mkm.
   plan.total_distance_mkm = plan.distance_mkm + plan.final_leg_mkm;
 
+  // Keep environment-adjusted totals consistent as well.
+  plan.effective_total_distance_mkm = plan.effective_distance_mkm + plan.effective_final_leg_mkm;
+
   const double mkm_per_day = mkm_per_day_from_speed(speed_km_s, seconds_per_day);
   if (mkm_per_day <= 0.0) {
     plan.eta_days = std::numeric_limits<double>::infinity();
     plan.total_eta_days = std::numeric_limits<double>::infinity();
   } else {
-    plan.eta_days = plan.distance_mkm / mkm_per_day;
-    plan.total_eta_days = plan.total_distance_mkm / mkm_per_day;
+    // eta_days and total_eta_days are derived from environment-adjusted distance.
+    plan.eta_days = plan.effective_distance_mkm / mkm_per_day;
+    plan.total_eta_days = plan.effective_total_distance_mkm / mkm_per_day;
   }
 }
 
@@ -187,11 +204,15 @@ std::optional<JumpRoutePlan> compute_jump_route_plan(const Simulation& sim, Id s
     JumpRoutePlan plan;
     plan.systems = {start_system_id};
     plan.distance_mkm = 0.0;
+    plan.effective_distance_mkm = 0.0;
     plan.has_goal_pos = has_goal;
     plan.arrival_pos_mkm = start_pos_mkm;
     if (has_goal) {
       plan.goal_pos_mkm = *goal_pos_mkm;
       plan.final_leg_mkm = (plan.goal_pos_mkm - plan.arrival_pos_mkm).length();
+
+      const double env = std::clamp(sim.system_movement_speed_multiplier(start_system_id), 0.05, 1.0);
+      plan.effective_final_leg_mkm = plan.final_leg_mkm / env;
     }
     update_jump_route_eta(plan, speed_km_s, sim.cfg().seconds_per_day);
     return plan;
@@ -222,7 +243,7 @@ std::optional<JumpRoutePlan> compute_jump_route_plan(const Simulation& sim, Id s
   std::unordered_map<JumpRouteNode, Id, JumpRouteNodeHash> prev_jump;
 
   const JumpRouteNode start{start_system_id, kInvalidId};
-  dist[start] = JumpRouteDist{0.0, 0};
+  dist[start] = JumpRouteDist{0.0, 0.0, 0};
   prev[start] = JumpRouteNode{kInvalidId, kInvalidId};
   pq.push(JumpRoutePQItem{dist[start], start});
 
@@ -235,12 +256,16 @@ std::optional<JumpRoutePlan> compute_jump_route_plan(const Simulation& sim, Id s
   auto goal_better = [&](double total_cost, const JumpRouteDist& cand_dist, const JumpRouteNode& cand_node) {
     if (total_cost + kEps < best_goal_total_cost) return true;
     if (std::fabs(total_cost - best_goal_total_cost) <= kEps) {
-      // Tie-breaker: fewer hops, then lower jump-network cost, then deterministic ids.
+      // Tie-breaker: fewer hops, then lower travel-time cost, then shorter physical distance,
+      // then deterministic ids.
       if (cand_dist.hops < best_goal_dist.hops) return true;
       if (cand_dist.hops == best_goal_dist.hops) {
         if (cand_dist.cost_mkm + kEps < best_goal_dist.cost_mkm) return true;
         if (std::fabs(cand_dist.cost_mkm - best_goal_dist.cost_mkm) <= kEps) {
-          if (cand_node.entry_jump_id < best_goal.entry_jump_id) return true;
+          if (cand_dist.distance_mkm + kEps < best_goal_dist.distance_mkm) return true;
+          if (std::fabs(cand_dist.distance_mkm - best_goal_dist.distance_mkm) <= kEps) {
+            if (cand_node.entry_jump_id < best_goal.entry_jump_id) return true;
+          }
         }
       }
     }
@@ -272,7 +297,11 @@ std::optional<JumpRoutePlan> compute_jump_route_plan(const Simulation& sim, Id s
     }
 
     if (cur.node.system_id == target_system_id) {
-      const double terminal = has_goal ? (cur_pos - *goal_pos_mkm).length() : 0.0;
+      double terminal = has_goal ? (cur_pos - *goal_pos_mkm).length() : 0.0;
+      if (terminal > 0.0) {
+        const double env = std::clamp(sim.system_movement_speed_multiplier(target_system_id), 0.05, 1.0);
+        terminal /= env;
+      }
       const double total_cost = cur.d.cost_mkm + terminal;
 
       if (best_goal.system_id == kInvalidId || goal_better(total_cost, cur.d, cur.node)) {
@@ -307,8 +336,13 @@ std::optional<JumpRoutePlan> compute_jump_route_plan(const Simulation& sim, Id s
       const Vec2 jp_pos = jp->position_mkm;
       const double leg = (jp_pos - cur_pos).length();
 
+      // Approximate environmental speed penalties (nebula + storms) at the
+      // system level so routing & ETA estimates are consistent with real movement.
+      const double env = std::clamp(sim.system_movement_speed_multiplier(cur.node.system_id), 0.05, 1.0);
+      const double eff_leg = leg / env;
+
       const JumpRouteNode nxt{next_sys, dest_jp->id};
-      const JumpRouteDist cand{cur.d.cost_mkm + leg, cur.d.hops + 1};
+      const JumpRouteDist cand{cur.d.cost_mkm + eff_leg, cur.d.distance_mkm + leg, cur.d.hops + 1};
 
       auto it = dist.find(nxt);
       if (it == dist.end() || dist_better(cand, it->second)) {
@@ -354,7 +388,10 @@ std::optional<JumpRoutePlan> compute_jump_route_plan(const Simulation& sim, Id s
 
   // Best-known distance is stored in dist for the goal node.
   const auto it_goal = dist.find(best_goal);
-  if (it_goal != dist.end()) plan.distance_mkm = it_goal->second.cost_mkm;
+  if (it_goal != dist.end()) {
+    plan.distance_mkm = it_goal->second.distance_mkm;
+    plan.effective_distance_mkm = it_goal->second.cost_mkm;
+  }
 
   // Arrival position: the entry jump in the destination system.
   plan.arrival_pos_mkm = start_pos_mkm;
@@ -371,6 +408,10 @@ std::optional<JumpRoutePlan> compute_jump_route_plan(const Simulation& sim, Id s
     plan.goal_pos_mkm = *goal_pos_mkm;
     plan.final_leg_mkm = (plan.goal_pos_mkm - plan.arrival_pos_mkm).length();
   }
+
+  // Environment adjustment for the final in-system leg (0 when has_goal == false).
+  const double env_dest = std::clamp(sim.system_movement_speed_multiplier(target_system_id), 0.05, 1.0);
+  plan.effective_final_leg_mkm = plan.final_leg_mkm / env_dest;
 
   update_jump_route_eta(plan, speed_km_s, sim.cfg().seconds_per_day);
   return plan;
@@ -459,6 +500,9 @@ double Simulation::construction_points_per_day(const Colony& colony) const {
     const double trade = trade_agreement_output_multiplier(state_, fac->id);
     total *= std::max(0.0, m.construction) * std::max(0.0, trade);
   }
+
+  // Interstellar trade prosperity bonus (system market access / hub activity).
+  total *= trade_prosperity_output_multiplier_for_colony(colony.id);
 
   return std::max(0.0, total);
 }
@@ -1114,6 +1158,76 @@ double Simulation::system_movement_speed_multiplier_at(Id system_id, const Vec2&
 }
 
 
+void Simulation::ensure_piracy_presence_cache_current() const {
+  const std::int64_t day = state_.date.days_since_epoch();
+  const int hour = std::clamp(state_.hour_of_day, 0, 23);
+
+  if (piracy_presence_cache_valid_ && piracy_presence_cache_day_ == day && piracy_presence_cache_hour_ == hour &&
+      piracy_presence_cache_state_generation_ == state_generation_ &&
+      piracy_presence_cache_content_generation_ == content_generation_) {
+    return;
+  }
+
+  piracy_presence_cache_valid_ = true;
+  piracy_presence_cache_day_ = day;
+  piracy_presence_cache_hour_ = hour;
+  piracy_presence_cache_state_generation_ = state_generation_;
+  piracy_presence_cache_content_generation_ = content_generation_;
+
+  piracy_presence_cache_.clear();
+  piracy_presence_cache_.reserve(state_.systems.size() * 2 + 8);
+
+  const double scale = std::max(1e-6, cfg_.pirate_suppression_power_scale);
+
+  auto pirate_threat_for_design = [&](const ShipDesign& d, bool is_hideout) -> double {
+    double weapons = std::max(0.0, d.weapon_damage) +
+                     std::max(0.0, d.missile_damage) +
+                     0.50 * std::max(0.0, d.point_defense_damage);
+
+    double durability = 0.05 * (std::max(0.0, d.max_hp) + std::max(0.0, d.max_shields));
+
+    double sensors = 0.02 * std::max(0.0, d.sensor_range_mkm);
+
+    double threat = weapons + durability + sensors;
+    if (is_hideout) threat *= 1.5;
+    return std::max(0.0, threat);
+  };
+
+  for (const auto& [sid, ship] : state_.ships) {
+    (void)sid;
+    if (ship.hp <= 0.0) continue;
+    if (ship.system_id == kInvalidId) continue;
+
+    const auto* fac = find_ptr(state_.factions, ship.faction_id);
+    if (!fac || fac->control != FactionControl::AI_Pirate) continue;
+
+    const auto* d = find_design(ship.design_id);
+    if (!d) continue;
+
+    const bool is_hideout = (ship.design_id == "pirate_hideout");
+    const double threat = pirate_threat_for_design(*d, is_hideout);
+    if (threat <= 1e-12) continue;
+
+    auto& info = piracy_presence_cache_[ship.system_id];
+    info.pirate_threat += threat;
+    if (is_hideout) {
+      ++info.pirate_hideouts;
+    } else {
+      ++info.pirate_ships;
+    }
+  }
+
+  for (auto& [sys_id, info] : piracy_presence_cache_) {
+    (void)sys_id;
+    const double t = std::max(0.0, info.pirate_threat);
+    // Convert threat into a [0,1] disruption risk. We reuse the suppression
+    // power scale to keep tuning intuitive.
+    info.presence_risk = 1.0 - std::exp(-t / scale);
+    info.presence_risk = std::clamp(info.presence_risk, 0.0, 1.0);
+  }
+}
+
+
 void Simulation::ensure_blockade_cache_current() const {
   if (!cfg_.enable_blockades) {
     invalidate_blockade_cache();
@@ -1248,6 +1362,44 @@ void Simulation::invalidate_blockade_cache() const {
   blockade_cache_content_generation_ = content_generation_;
 }
 
+double Simulation::ambient_piracy_risk_for_system(Id system_id) const {
+  const auto* sys = find_ptr(state_.systems, system_id);
+  if (!sys) return 0.0;
+
+  double risk = std::clamp(cfg_.pirate_raid_default_system_risk, 0.0, 1.0);
+  double suppression = 0.0;
+
+  if (sys->region_id != kInvalidId) {
+    if (const auto* reg = find_ptr(state_.regions, sys->region_id)) {
+      risk = std::clamp(reg->pirate_risk, 0.0, 1.0);
+      if (cfg_.enable_pirate_suppression) {
+        suppression = std::clamp(reg->pirate_suppression, 0.0, 1.0);
+      }
+    }
+  }
+
+  risk *= (1.0 - suppression);
+  return std::clamp(risk, 0.0, 1.0);
+}
+
+double Simulation::pirate_presence_risk_for_system(Id system_id) const {
+  if (system_id == kInvalidId) return 0.0;
+  ensure_piracy_presence_cache_current();
+  auto it = piracy_presence_cache_.find(system_id);
+  if (it == piracy_presence_cache_.end()) return 0.0;
+  return std::clamp(it->second.presence_risk, 0.0, 1.0);
+}
+
+double Simulation::piracy_risk_for_system(Id system_id) const {
+  const double ambient = ambient_piracy_risk_for_system(system_id);
+  const double presence = pirate_presence_risk_for_system(system_id);
+  // Combine as a probabilistic union so either component can dominate without
+  // exceeding 1.
+  const double combined = 1.0 - (1.0 - ambient) * (1.0 - presence);
+  return std::clamp(combined, 0.0, 1.0);
+}
+
+
 BlockadeStatus Simulation::blockade_status_for_colony(Id colony_id) const {
   if (colony_id == kInvalidId) return BlockadeStatus{};
   if (!cfg_.enable_blockades) {
@@ -1274,12 +1426,122 @@ double Simulation::blockade_output_multiplier_for_colony(Id colony_id) const {
 }
 
 
+void Simulation::ensure_trade_prosperity_cache_current() const {
+  if (!cfg_.enable_trade_prosperity) {
+    invalidate_trade_prosperity_cache();
+    return;
+  }
+
+  const std::int64_t day = state_.date.days_since_epoch();
+
+  if (trade_prosperity_cache_valid_ && trade_prosperity_cache_day_ == day &&
+      trade_prosperity_cache_state_generation_ == state_generation_ &&
+      trade_prosperity_cache_content_generation_ == content_generation_) {
+    return;
+  }
+
+  trade_prosperity_system_cache_.clear();
+  trade_prosperity_system_cache_.reserve(state_.systems.size() * 2 + 8);
+
+  TradeNetworkOptions opt;
+  opt.max_lanes = 0;
+  // Keep other defaults: include_uncolonized_markets + include_colony_contributions.
+  const TradeNetwork tn = compute_trade_network(*this, opt);
+
+  for (const auto& node : tn.nodes) {
+    TradeProsperitySystemInfo info;
+    info.market_size = std::max(0.0, node.market_size);
+    info.hub_score = std::clamp(node.hub_score, 0.0, 1.0);
+    trade_prosperity_system_cache_[node.system_id] = info;
+  }
+
+  trade_prosperity_cache_valid_ = true;
+  trade_prosperity_cache_day_ = day;
+  trade_prosperity_cache_state_generation_ = state_generation_;
+  trade_prosperity_cache_content_generation_ = content_generation_;
+}
+
+void Simulation::invalidate_trade_prosperity_cache() const {
+  trade_prosperity_cache_valid_ = false;
+  trade_prosperity_system_cache_.clear();
+  trade_prosperity_cache_day_ = state_.date.days_since_epoch();
+  trade_prosperity_cache_state_generation_ = state_generation_;
+  trade_prosperity_cache_content_generation_ = content_generation_;
+}
+
+TradeProsperityStatus Simulation::trade_prosperity_status_for_colony(Id colony_id) const {
+  TradeProsperityStatus st;
+  st.colony_id = colony_id;
+  st.output_multiplier = 1.0;
+  st.output_bonus = 0.0;
+
+  if (colony_id == kInvalidId) return st;
+  if (!cfg_.enable_trade_prosperity) return st;
+
+  const Colony* col = find_ptr(state_.colonies, colony_id);
+  if (!col) return st;
+
+  Id sys_id = kInvalidId;
+  if (const Body* b = find_ptr(state_.bodies, col->body_id)) {
+    sys_id = b->system_id;
+  }
+
+  ensure_trade_prosperity_cache_current();
+
+  if (sys_id != kInvalidId) {
+    auto it = trade_prosperity_system_cache_.find(sys_id);
+    if (it != trade_prosperity_system_cache_.end()) {
+      st.market_size = std::max(0.0, it->second.market_size);
+      st.hub_score = std::clamp(it->second.hub_score, 0.0, 1.0);
+    }
+  }
+
+  const double half_market = std::max(1e-9, cfg_.trade_prosperity_market_size_half_bonus);
+  st.market_factor = std::clamp(st.market_size / (st.market_size + half_market), 0.0, 1.0);
+
+  const double pop = std::max(0.0, col->population_millions);
+  const double half_pop = std::max(1e-9, cfg_.trade_prosperity_pop_half_bonus_millions);
+  st.pop_factor = std::clamp(pop / (pop + half_pop), 0.0, 1.0);
+
+  const double hub_infl = std::clamp(cfg_.trade_prosperity_hub_influence, 0.0, 1.0);
+  const double hub_term = std::clamp((1.0 - hub_infl) + hub_infl * st.hub_score, 0.0, 1.0);
+
+  const double max_bonus = std::max(0.0, cfg_.trade_prosperity_max_output_bonus);
+  double base_bonus = max_bonus * st.market_factor * st.pop_factor * hub_term;
+  base_bonus = std::clamp(base_bonus, 0.0, max_bonus);
+
+  // Piracy disruption (ambient risk + active pirate presence).
+  st.piracy_risk = piracy_risk_for_system(sys_id);
+
+
+  // Blockade disruption (reuses cached blockade pressure when enabled).
+  st.blockade_pressure = std::clamp(blockade_status_for_colony(colony_id).pressure, 0.0, 1.0);
+
+  const double piracy_w = std::clamp(cfg_.trade_prosperity_piracy_risk_penalty, 0.0, 1.0);
+  const double blockade_w = std::clamp(cfg_.trade_prosperity_blockade_pressure_penalty, 0.0, 1.0);
+
+  double penalty = piracy_w * st.piracy_risk + blockade_w * st.blockade_pressure;
+  penalty = std::clamp(penalty, 0.0, 1.0);
+
+  const double bonus = std::clamp(base_bonus * (1.0 - penalty), 0.0, max_bonus);
+  st.output_bonus = bonus;
+  st.output_multiplier = 1.0 + bonus;
+  return st;
+}
+
+double Simulation::trade_prosperity_output_multiplier_for_colony(Id colony_id) const {
+  return std::max(0.0, trade_prosperity_status_for_colony(colony_id).output_multiplier);
+}
+
+
 void Simulation::ensure_jump_route_cache_current() const {
   const std::int64_t day = state_.date.days_since_epoch();
-  if (!jump_route_cache_day_valid_ || jump_route_cache_day_ != day) {
+  const int hour = state_.hour_of_day;
+  if (!jump_route_cache_day_valid_ || jump_route_cache_day_ != day || jump_route_cache_hour_ != hour) {
     jump_route_cache_.clear();
     jump_route_cache_lru_.clear();
     jump_route_cache_day_ = day;
+    jump_route_cache_hour_ = hour;
     jump_route_cache_day_valid_ = true;
   }
 }
@@ -1288,6 +1550,7 @@ void Simulation::invalidate_jump_route_cache() const {
   jump_route_cache_.clear();
   jump_route_cache_lru_.clear();
   jump_route_cache_day_ = state_.date.days_since_epoch();
+  jump_route_cache_hour_ = state_.hour_of_day;
   jump_route_cache_day_valid_ = true;
 }
 
@@ -2374,6 +2637,14 @@ double Simulation::contact_uncertainty_radius_mkm(const Contact& c, int now_day)
       }
     }
   }
+
+  // If we still don't have a speed estimate (unknown design and no velocity track),
+  // fall back to a conservative assumed speed so uncertainty continues to grow.
+  if (sp_mkm_per_day <= 1e-12) {
+    const double sp_km_s = std::max(0.0, cfg_.contact_uncertainty_unknown_speed_km_s);
+    sp_mkm_per_day = mkm_per_day_from_speed(sp_km_s, cfg_.seconds_per_day);
+  }
+
   if (!std::isfinite(sp_mkm_per_day) || sp_mkm_per_day < 0.0) sp_mkm_per_day = 0.0;
 
   double growth = std::max(0.0, cfg_.contact_uncertainty_growth_fraction_of_speed) * sp_mkm_per_day;

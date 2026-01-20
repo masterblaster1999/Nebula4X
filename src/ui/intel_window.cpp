@@ -556,7 +556,8 @@ void draw_intel_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& sele
 
         if (ui.intel_radar_labels && radar.zoom >= 2.4) {
           char buf[128];
-          std::snprintf(buf, sizeof(buf), "%s (%dd)", c.last_seen_name.c_str(), age);
+          const char* nm = c.last_seen_name.empty() ? "Unknown" : c.last_seen_name.c_str();
+          std::snprintf(buf, sizeof(buf), "%s (%dd)", nm, age);
           draw->AddText(ImVec2(p.x + 6.0f, p.y - 10.0f), modulate_alpha(col, 0.95f), buf);
         }
       }
@@ -726,7 +727,9 @@ void draw_intel_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& sele
 
         ImGui::TableNextColumn();
         const bool selected = (r.c.ship_id == ui.selected_contact_ship_id);
-        if (ImGui::Selectable(r.c.last_seen_name.c_str(), selected, ImGuiSelectableFlags_SpanAllColumns)) {
+        const char* disp_name = r.c.last_seen_name.empty() ? "Unknown" : r.c.last_seen_name.c_str();
+        std::string sel_label = std::string(disp_name) + "##contact_" + std::to_string(r.c.ship_id);
+        if (ImGui::Selectable(sel_label.c_str(), selected, ImGuiSelectableFlags_SpanAllColumns)) {
           ui.selected_contact_ship_id = r.c.ship_id;
           // Jump context when selecting from an "all systems" list.
           if (scope_idx == 1) {
@@ -744,7 +747,7 @@ void draw_intel_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& sele
         ImGui::Text("%s", r.detected ? "Yes" : "No");
 
         ImGui::TableNextColumn();
-        ImGui::Text("%s", r.c.last_seen_design_id.c_str());
+        ImGui::Text("%s", r.c.last_seen_design_id.empty() ? "(unknown)" : r.c.last_seen_design_id.c_str());
 
         ImGui::TableNextColumn();
         ImGui::Text("%.0f", r.dist_mkm);
@@ -768,11 +771,11 @@ void draw_intel_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& sele
         const Vec2 pred_pos = pred.predicted_position_mkm;
 
         ImGui::SeparatorText("Selected");
-        ImGui::Text("%s", c.last_seen_name.c_str());
+        ImGui::Text("%s", c.last_seen_name.empty() ? "Unknown contact" : c.last_seen_name.c_str());
         ImGui::TextDisabled("Faction: %s", fac2 ? fac2->name.c_str() : "?");
         ImGui::TextDisabled("System: %s", sys2 ? sys2->name.c_str() : "?");
         ImGui::TextDisabled("Age: %d days", age);
-        ImGui::TextDisabled("Design: %s", c.last_seen_design_id.c_str());
+        ImGui::TextDisabled("Design: %s", c.last_seen_design_id.empty() ? "(unknown)" : c.last_seen_design_id.c_str());
 
         if (const auto* d = sim.find_design(c.last_seen_design_id)) {
           double sig0 = std::isfinite(d->signature_multiplier) ? d->signature_multiplier : 1.0;

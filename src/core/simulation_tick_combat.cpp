@@ -1610,6 +1610,38 @@ void Simulation::tick_combat(double dt_days) {
 
       tgt->hp -= remaining;
 
+      // Crew casualties / complement (optional).
+      // Hull damage can reduce crew_complement, which represents the fraction of
+      // required crew currently available. This is replenished while docked via
+      // tick_crew_training().
+      if (cfg_.enable_crew_casualties && hull_applied > 1e-9 && tgt->hp > 0.0) {
+        const auto* d = find_design(tgt->design_id);
+        double max_hp = std::max(1e-9, (d && d->max_hp > 1e-9) ? d->max_hp : std::max(1.0, pre_hp[tid]));
+        const double hull_frac = std::clamp(hull_applied / max_hp, 0.0, 1.0);
+        const double loss_full = std::clamp(cfg_.crew_casualty_fraction_per_full_hull_damage, 0.0, 1.0);
+        const double loss = hull_frac * loss_full;
+        if (loss > 1e-12) {
+          double before = tgt->crew_complement;
+          if (!std::isfinite(before) || before < 0.0) before = 1.0;
+          before = std::clamp(before, 0.0, 1.0);
+          const double after = std::clamp(before - loss, 0.0, 1.0);
+          tgt->crew_complement = after;
+
+          const double min_evt = std::max(0.0, cfg_.crew_casualty_event_min_loss_fraction);
+          if (min_evt > 1e-12 && (before - after) + 1e-12 >= min_evt) {
+            EventContext ctx;
+            ctx.faction_id = tgt->faction_id;
+            ctx.system_id = tgt->system_id;
+            ctx.ship_id = tid;
+
+            std::string msg = "Crew casualties: " + ship_label(*tgt) + " lost " +
+                              fmt1((before - after) * 100.0) + "% crew (now " + fmt1(after * 100.0) +
+                              "%)";
+            push_event(EventLevel::Warn, EventCategory::Combat, msg, ctx);
+          }
+        }
+      }
+
       // Subsystem critical hits (optional): hull damage can degrade key systems.
       if (cfg_.enable_ship_subsystem_damage && hull_applied > 1e-9 && tgt->hp > 0.0) {
         const auto* d = find_design(tgt->design_id);

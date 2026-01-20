@@ -750,6 +750,15 @@ struct Ship {
   // initialized to SimConfig::crew_initial_grade_points when design stats are applied.
   double crew_grade_points{-1.0};
 
+  // Crew complement (0..1), representing the fraction of the ship's intended crew currently present.
+  //
+  // This is reduced by combat hull damage (crew casualties) and replenished while docked
+  // at colonies with crew training capacity. Under-crewed ships fight less effectively
+  // even if their remaining crew is highly experienced.
+  //
+  // A non-finite value is treated as 1.0.
+  double crew_complement{1.0};
+
   // Missile weapon cooldown (days until the ship can launch another salvo).
   // 0 = ready.
   double missile_cooldown_days{0.0};

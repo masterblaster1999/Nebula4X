@@ -1222,15 +1222,19 @@ bool Simulation::issue_attack_ship(Id attacker_ship_id, Id target_ship_id, bool 
   }
 
   const bool detected = is_ship_detected_by_faction(attacker->faction_id, target_ship_id);
+  const int now_day = static_cast<int>(state_.date.days_since_epoch());
 
   AttackShip ord;
   ord.target_ship_id = target_ship_id;
+  ord.pursuit_hops = 0;
 
   Id target_system_id = kInvalidId;
 
   if (detected) {
     ord.has_last_known = true;
     ord.last_known_position_mkm = target->position_mkm;
+    ord.last_known_system_id = target->system_id;
+    ord.last_known_day = now_day;
     target_system_id = target->system_id;
   } else {
     const auto* fac = find_ptr(state_.factions, attacker->faction_id);
@@ -1241,15 +1245,21 @@ bool Simulation::issue_attack_ship(Id attacker_ship_id, Id target_ship_id, bool 
 
     // If we have a 2-point contact track, extrapolate a better last-known
     // position to pursue under fog-of-war.
-    const int now = static_cast<int>(state_.date.days_since_epoch());
-    const auto pred = predict_contact_position(it->second, now, cfg_.contact_prediction_max_days);
+    const auto pred = predict_contact_position(it->second, now_day, cfg_.contact_prediction_max_days);
     ord.last_known_position_mkm = pred.predicted_position_mkm;
+
+    ord.last_known_system_id = it->second.system_id;
+    ord.last_known_day = it->second.last_seen_day;
 
     target_system_id = it->second.system_id;
   }
 
   if (target_system_id == kInvalidId) return false;
   if (!find_ptr(state_.systems, target_system_id)) return false;
+
+  // Ensure cross-system pursuit logic always knows which coordinate frame the
+  // last-known position is expressed in.
+  if (ord.last_known_system_id == kInvalidId) ord.last_known_system_id = target_system_id;
 
   if (!issue_travel_to_system(attacker_ship_id, target_system_id, restrict_to_discovered,
                             ord.last_known_position_mkm)) return false;
@@ -1696,7 +1706,20 @@ double Simulation::crew_grade_bonus_for_points(double grade_points) const {
 }
 
 double Simulation::crew_grade_bonus(const Ship& ship) const {
-  return crew_grade_bonus_for_points(ship.crew_grade_points);
+  const double base_bonus = crew_grade_bonus_for_points(ship.crew_grade_points);
+
+  if (!cfg_.enable_crew_casualties) return base_bonus;
+
+  double comp = ship.crew_complement;
+  if (!std::isfinite(comp)) comp = 1.0;
+  comp = std::clamp(comp, 0.0, 1.0);
+
+  const double exp = std::max(0.0, cfg_.crew_complement_exponent);
+  if (exp <= 1e-12) return base_bonus;
+
+  const double comp_mult = (comp <= 0.0) ? 0.0 : std::pow(comp, exp);
+  const double mult = comp_mult * std::max(0.0, 1.0 + base_bonus);
+  return mult - 1.0;
 }
 
 bool Simulation::issue_transfer_cargo_to_ship(Id ship_id, Id target_ship_id, const std::string& mineral, double tons,

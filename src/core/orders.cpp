@@ -33,8 +33,11 @@ std::string order_to_string(const Order& order) {
         } else if constexpr (std::is_same_v<T, AttackShip>) {
           ss << "AttackShip(target_id=" << o.target_ship_id;
           if (o.has_last_known) {
+            if (o.last_known_system_id != kInvalidId) ss << ", last_sys=" << o.last_known_system_id;
             ss << ", last=(" << o.last_known_position_mkm.x << ", " << o.last_known_position_mkm.y << ")";
+            if (o.last_known_day != 0) ss << ", last_day=" << o.last_known_day;
           }
+          if (o.pursuit_hops > 0) ss << ", hops=" << o.pursuit_hops;
           ss << ")";
         } else if constexpr (std::is_same_v<T, EscortShip>) {
           ss << "EscortShip(target_id=" << o.target_ship_id << ", follow_mkm=" << o.follow_distance_mkm;

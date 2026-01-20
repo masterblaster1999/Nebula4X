@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -232,6 +233,61 @@ std::string best_colonizer_design(const Simulation& sim, Id faction_id) {
   for (const auto& id : sorted_keys(sim.state().custom_designs)) consider(id, sim.state().custom_designs.at(id));
 
   return best;
+}
+
+// --- AI ship modernization helpers ---
+//
+// The core shipbuilding AI already keeps a small pipeline of new hulls flowing.
+// However, without refits, older ships can become permanently obsolete as tech
+// advances. These helpers allow AI factions to opportunistically modernize
+// existing ships when they are idle and docked.
+
+double design_score_for_colonizer(const ShipDesign& d) {
+  return d.colony_capacity_millions * 1000.0 + d.speed_km_s * 20.0 + d.cargo_tons * 0.1;
+}
+
+bool design_is_troop_transport(const ShipDesign& d) {
+  // Treat any ship with troop capacity (but not a colony ship) as a transport hull.
+  return d.troop_capacity > 0.0 && d.colony_capacity_millions <= 1e-9;
+}
+
+double design_score_for_troop_transport(const ShipDesign& d) {
+  // Prefer raw troop lift, then speed, with a small tie-break on cargo capacity.
+  return d.troop_capacity * 1000.0 + d.speed_km_s * 20.0 + d.cargo_tons * 0.5;
+}
+
+std::string best_troop_transport_design(const Simulation& sim, Id faction_id) {
+  std::string best;
+  double best_score = -1.0;
+
+  auto consider = [&](const std::string& id, const ShipDesign& d) {
+    if (!design_is_troop_transport(d)) return;
+    if (!sim.is_design_buildable_for_faction(faction_id, id)) return;
+
+    const double score = design_score_for_troop_transport(d);
+    if (best.empty() || score > best_score + 1e-9 || (std::abs(score - best_score) <= 1e-9 && id < best)) {
+      best = id;
+      best_score = score;
+    }
+  };
+
+  for (const auto& id : sorted_keys(sim.content().designs)) consider(id, sim.content().designs.at(id));
+  for (const auto& id : sorted_keys(sim.state().custom_designs)) consider(id, sim.state().custom_designs.at(id));
+
+  return best;
+}
+
+double cargo_used_tons_simple(const Ship& s) {
+  double used = 0.0;
+  for (const auto& [_, tons] : s.cargo) used += std::max(0.0, tons);
+  return used;
+}
+
+bool ship_is_empty_for_refit(const Ship& s) {
+  if (cargo_used_tons_simple(s) > 1e-6) return false;
+  if (std::max(0.0, s.troops) > 1e-6) return false;
+  if (std::max(0.0, s.colonists_millions) > 1e-6) return false;
+  return true;
 }
 
 void prune_research_queue(const ContentDB& content, Faction& f) {
@@ -572,6 +628,191 @@ void ensure_shipbuilding_pipeline(Simulation& sim, Id faction_id, const Faction&
   }
 }
 
+struct RefitCandidate {
+  Id ship_id{kInvalidId};
+  std::string target_design_id;
+  double urgency{0.0};
+  double improvement_frac{0.0};
+};
+
+bool ship_orders_empty(const Simulation& sim, Id ship_id) {
+  const auto it = sim.state().ship_orders.find(ship_id);
+  if (it == sim.state().ship_orders.end()) return true;
+  return it->second.queue.empty();
+}
+
+bool compute_refit_candidate(const Simulation& sim,
+                             Id faction_id,
+                             const Faction& f,
+                             const Ship& sh,
+                             const ShipDesign& cur_design,
+                             RefitCandidate* out) {
+  if (!out) return false;
+
+  std::string target;
+  double cur_score = 0.0;
+  double tgt_score = 0.0;
+  double min_improve = 0.15;
+  double role_weight = 1.0;
+
+  // Category selection: colonizers/transports are special-cased even if their
+  // role is Freighter in content.
+  const bool is_colonizer = design_is_colonizer(cur_design);
+  const bool is_transport = (!is_colonizer && design_is_troop_transport(cur_design));
+
+  if (is_colonizer) {
+    target = best_colonizer_design(sim, faction_id);
+    if (target.empty()) return false;
+    const ShipDesign* td = sim.find_design(target);
+    if (!td) return false;
+    cur_score = design_score_for_colonizer(cur_design);
+    tgt_score = design_score_for_colonizer(*td);
+    min_improve = 0.10;
+    role_weight = (f.control == FactionControl::AI_Explorer) ? 2.0 : 1.0;
+  } else if (is_transport) {
+    target = best_troop_transport_design(sim, faction_id);
+    if (target.empty()) return false;
+    const ShipDesign* td = sim.find_design(target);
+    if (!td) return false;
+    cur_score = design_score_for_troop_transport(cur_design);
+    tgt_score = design_score_for_troop_transport(*td);
+    min_improve = 0.10;
+    role_weight = (f.control == FactionControl::AI_Pirate) ? 1.5 : 1.0;
+  } else {
+    const ShipRole role = cur_design.role;
+    target = best_design_for_role(sim, faction_id, role);
+    if (target.empty()) return false;
+    const ShipDesign* td = sim.find_design(target);
+    if (!td) return false;
+
+    cur_score = design_score_for_role(cur_design, role);
+    tgt_score = design_score_for_role(*td, role);
+
+    if (role == ShipRole::Combatant) min_improve = 0.15;
+    if (role == ShipRole::Surveyor) min_improve = 0.10;
+    if (role == ShipRole::Freighter) min_improve = 0.15;
+
+    if (f.control == FactionControl::AI_Pirate) {
+      role_weight = (role == ShipRole::Combatant) ? 3.0 : 1.0;
+    } else if (f.control == FactionControl::AI_Explorer) {
+      if (role == ShipRole::Surveyor) role_weight = 2.0;
+      if (role == ShipRole::Freighter) role_weight = 1.5;
+      if (role == ShipRole::Combatant) role_weight = 1.0;
+    }
+  }
+
+  if (target.empty()) return false;
+  if (target == sh.design_id) return false;
+
+  const double denom = std::max(1.0, std::fabs(cur_score));
+  const double improvement_frac = (tgt_score - cur_score) / denom;
+  if (improvement_frac < min_improve) return false;
+
+  out->ship_id = sh.id;
+  out->target_design_id = target;
+  out->improvement_frac = improvement_frac;
+  out->urgency = improvement_frac * role_weight;
+  return true;
+}
+
+void ensure_ship_refit_pipeline(Simulation& sim, Id faction_id, const Faction& f) {
+  const Id colony_id = primary_shipyard_colony(sim, faction_id);
+  if (colony_id == kInvalidId) return;
+
+  Colony* col = find_ptr(sim.state().colonies, colony_id);
+  if (!col) return;
+
+  const int yards = col->installations.count("shipyard") ? col->installations.at("shipyard") : 0;
+  if (yards <= 0) return;
+
+  // Avoid spamming refits: allow at most one pending refit for this faction at a time.
+  int pending_refits = 0;
+  for (const auto& [_, c] : sim.state().colonies) {
+    if (c.faction_id != faction_id) continue;
+    for (const auto& bo : c.shipyard_queue) {
+      if (bo.is_refit()) pending_refits += 1;
+    }
+  }
+  if (pending_refits >= 1) return;
+
+  // Keep the shipyard queue from exploding; refits should be opportunistic.
+  constexpr std::size_t kMaxQueue = 5;
+  if (col->shipyard_queue.size() >= kMaxQueue) return;
+
+  const auto ship_ids = sorted_keys(sim.state().ships);
+
+  // 1) Prefer refitting ships that are already docked at the primary shipyard.
+  RefitCandidate best;
+  for (Id sid : ship_ids) {
+    const Ship* sh = find_ptr(sim.state().ships, sid);
+    if (!sh) continue;
+    if (sh->faction_id != faction_id) continue;
+    if (sh->hp <= 1e-9) continue;
+    if (!ship_is_empty_for_refit(*sh)) continue;
+
+    if (sim.fleet_for_ship(sid) != kInvalidId) continue;
+
+    if (!sim.is_ship_docked_at_colony(sid, colony_id)) continue;
+
+    const ShipDesign* cur = sim.find_design(sh->design_id);
+    if (!cur) continue;
+
+    RefitCandidate cand;
+    if (!compute_refit_candidate(sim, faction_id, f, *sh, *cur, &cand)) continue;
+
+    if (best.ship_id == kInvalidId || cand.urgency > best.urgency + 1e-9 ||
+        (std::abs(cand.urgency - best.urgency) <= 1e-9 && sid < best.ship_id)) {
+      best = cand;
+    }
+  }
+
+  if (best.ship_id != kInvalidId && !best.target_design_id.empty()) {
+    std::string err;
+    (void)sim.enqueue_refit(colony_id, best.ship_id, best.target_design_id, &err);
+    return;
+  }
+
+  // 2) If nothing is docked and eligible, recall a single idle outdated ship to the shipyard
+  //    so it can be refit in a future tick.
+  const Body* body = find_ptr(sim.state().bodies, col->body_id);
+  if (!body) return;
+  const Id yard_sys = body->system_id;
+  if (yard_sys == kInvalidId) return;
+
+  RefitCandidate recall;
+  for (Id sid : ship_ids) {
+    const Ship* sh = find_ptr(sim.state().ships, sid);
+    if (!sh) continue;
+    if (sh->faction_id != faction_id) continue;
+    if (sh->hp <= 1e-9) continue;
+    if (!ship_is_empty_for_refit(*sh)) continue;
+
+    if (sim.fleet_for_ship(sid) != kInvalidId) continue;
+
+    if (sim.is_ship_docked_at_colony(sid, colony_id)) continue;
+    if (!ship_orders_empty(sim, sid)) continue;
+
+    const ShipDesign* cur = sim.find_design(sh->design_id);
+    if (!cur) continue;
+
+    RefitCandidate cand;
+    if (!compute_refit_candidate(sim, faction_id, f, *sh, *cur, &cand)) continue;
+
+    if (recall.ship_id == kInvalidId || cand.urgency > recall.urgency + 1e-9 ||
+        (std::abs(cand.urgency - recall.urgency) <= 1e-9 && sid < recall.ship_id)) {
+      recall = cand;
+    }
+  }
+
+  if (recall.ship_id != kInvalidId) {
+    // Best-effort return-to-shipyard path. We keep this conservative and do not
+    // clear orders for active ships; only idle ships are eligible here.
+    (void)sim.issue_travel_to_system(recall.ship_id, yard_sys, /*restrict_to_discovered=*/true, body->position_mkm);
+    (void)sim.issue_move_to_body(recall.ship_id, body->id, /*restrict_to_discovered=*/true);
+    (void)sim.issue_orbit_body(recall.ship_id, body->id, /*duration_days=*/-1, /*restrict_to_discovered=*/true);
+  }
+}
+
 }  // namespace
 
 void tick_ai_economy(Simulation& sim) {
@@ -610,6 +851,9 @@ void tick_ai_economy(Simulation& sim) {
 
     // Maintain a small shipbuilding pipeline at the primary shipyard.
     ensure_shipbuilding_pipeline(sim, fid, *f);
+
+    // Opportunistically refit idle/docked ships to keep the AI fleet modern as tech advances.
+    ensure_ship_refit_pipeline(sim, fid, *f);
   }
 }
 

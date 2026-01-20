@@ -60,25 +60,6 @@ static bool is_player_faction(const GameState& s, Id faction_id) {
   return fac && fac->control == FactionControl::Player;
 }
 
-static double effective_piracy_risk_for_system(const GameState& s, const SimConfig& cfg, Id system_id) {
-  const auto* sys = find_ptr(s.systems, system_id);
-  if (!sys) return 0.0;
-
-  double risk = std::clamp(cfg.pirate_raid_default_system_risk, 0.0, 1.0);
-  double suppression = 0.0;
-
-  if (sys->region_id != kInvalidId) {
-    if (const auto* reg = find_ptr(s.regions, sys->region_id)) {
-      risk = std::clamp(reg->pirate_risk, 0.0, 1.0);
-      if (cfg.enable_pirate_suppression) {
-        suppression = std::clamp(reg->pirate_suppression, 0.0, 1.0);
-      }
-    }
-  }
-
-  risk *= (1.0 - suppression);
-  return std::clamp(risk, 0.0, 1.0);
-}
 
 static double cargo_used_tons(const Ship& s) {
   // Deterministic sum: cargo is an unordered_map and floating-point accumulation
@@ -1853,7 +1834,7 @@ void Simulation::tick_ai() {
                 const double vol_share = lane.total_volume / static_cast<double>(plan->systems.size());
                 for (Id sys_id : plan->systems) {
                   if (sys_id == kInvalidId) continue;
-                  const double risk = effective_piracy_risk_for_system(state_, cfg_, sys_id);
+                  const double risk = piracy_risk_for_system(sys_id);
                   double need = vol_share * (0.20 + risk_w * risk);
                   if (own_colony_systems.contains(sys_id)) need *= own_w;
                   need_by_system[sys_id] += need;
@@ -4625,8 +4606,8 @@ void Simulation::tick_civilian_trade_convoys() {
 
     // Convoys bias toward safer corridors. Risk is endpoint-weighted (cheap,
     // deterministic) and automatically responds to piracy suppression.
-    const double ra = effective_piracy_risk_for_system(state_, cfg_, l.from_system_id);
-    const double rb = effective_piracy_risk_for_system(state_, cfg_, l.to_system_id);
+    const double ra = piracy_risk_for_system(l.from_system_id);
+    const double rb = piracy_risk_for_system(l.to_system_id);
     double risk = 0.5 * (ra + rb);
 
     // Blockade disruption also deters civilian traffic.
@@ -4897,7 +4878,98 @@ void Simulation::tick_pirate_raids() {
     }
   };
 
-    struct SysAcc {
+  // --- Trade exposure (piracy target bias) ---
+  // Pirates gravitate toward rich markets and high-throughput trade corridors.
+  // We precompute lightweight per-system trade signals once per tick and use
+  // them to amplify target scores (without creating targets out of nothing).
+  std::unordered_map<Id, double> trade_market_size;
+  std::unordered_map<Id, double> trade_hub_score;
+  std::unordered_map<Id, double> trade_traffic;
+
+  // Hub positions for route planning: pick the most populous colony body per system.
+  std::unordered_map<Id, Vec2> system_hub_pos;
+  std::unordered_map<Id, double> system_hub_pop;
+
+  system_hub_pos.reserve(state_.systems.size() * 2 + 8);
+  system_hub_pop.reserve(state_.systems.size() * 2 + 8);
+
+  for (const auto& [cid, col] : state_.colonies) {
+    (void)cid;
+    const auto* body = find_ptr(state_.bodies, col.body_id);
+    if (!body) continue;
+    if (body->system_id == kInvalidId) continue;
+    const double pop = std::max(0.0, col.population_millions);
+    auto it = system_hub_pop.find(body->system_id);
+    if (it == system_hub_pop.end() || pop > it->second + 1e-9) {
+      system_hub_pop[body->system_id] = pop;
+      system_hub_pos[body->system_id] = body->position_mkm;
+    }
+  }
+
+  {
+    TradeNetworkOptions opt;
+    opt.include_uncolonized_markets = false;
+    opt.max_lanes = 64;
+    TradeNetwork tn = compute_trade_network(*this, opt);
+
+    trade_market_size.reserve(tn.nodes.size() * 2 + 8);
+    trade_hub_score.reserve(tn.nodes.size() * 2 + 8);
+    for (const auto& n : tn.nodes) {
+      trade_market_size[n.system_id] = std::max(0.0, n.market_size);
+      trade_hub_score[n.system_id] = std::clamp(n.hub_score, 0.0, 1.0);
+    }
+
+    // Approximate corridor traffic by distributing top lane volumes across their
+    // planned jump routes. This biases raids toward choke points (not just endpoints).
+    if (!tn.lanes.empty()) {
+      std::vector<const TradeLane*> lanes;
+      lanes.reserve(tn.lanes.size());
+      for (const auto& l : tn.lanes) lanes.push_back(&l);
+
+      const std::size_t cap = std::min<std::size_t>(24, lanes.size());
+      std::partial_sort(lanes.begin(), lanes.begin() + cap, lanes.end(),
+                        [&](const TradeLane* a, const TradeLane* b) {
+                          if (std::abs(a->total_volume - b->total_volume) > 1e-9) {
+                            return a->total_volume > b->total_volume;
+                          }
+                          if (a->from_system_id != b->from_system_id) return a->from_system_id < b->from_system_id;
+                          return a->to_system_id < b->to_system_id;
+                        });
+
+      trade_traffic.reserve(cap * 4 + 8);
+
+      for (std::size_t i = 0; i < cap; ++i) {
+        const TradeLane& l = *lanes[i];
+        if (l.from_system_id == kInvalidId || l.to_system_id == kInvalidId) continue;
+        if (l.from_system_id == l.to_system_id) continue;
+        const double vol = std::max(0.0, l.total_volume);
+        if (!(vol > 1e-9)) continue;
+
+        Vec2 start_pos{0.0, 0.0};
+        if (auto it = system_hub_pos.find(l.from_system_id); it != system_hub_pos.end()) {
+          start_pos = it->second;
+        }
+        std::optional<Vec2> goal_pos;
+        if (auto it = system_hub_pos.find(l.to_system_id); it != system_hub_pos.end()) {
+          goal_pos = it->second;
+        }
+
+        const auto plan = plan_jump_route_cached(l.from_system_id, start_pos, /*faction_id=*/kInvalidId,
+                                                 /*speed_km_s=*/1000.0, l.to_system_id,
+                                                 /*restrict_to_discovered=*/false, goal_pos);
+        if (!plan) continue;
+        if (plan->systems.empty()) continue;
+
+        for (Id sys_id : plan->systems) {
+          if (sys_id == kInvalidId) continue;
+          trade_traffic[sys_id] += vol;
+        }
+      }
+    }
+  }
+
+
+  struct SysAcc {
     double score{0.0};
 
     // Mobile pirate ships currently present in the system (raiders, etc).
@@ -4978,6 +5050,34 @@ void Simulation::tick_pirate_raids() {
       a.score += 8.0 + std::sqrt(pop) * 0.25;
     }
 
+
+    // Amplify target scores based on trade wealth / corridor throughput.
+    // This nudges pirates toward rich hubs and busy lanes without creating targets
+    // in otherwise empty systems.
+    if (!trade_market_size.empty() || !trade_hub_score.empty() || !trade_traffic.empty()) {
+      for (auto& [sys_id, a] : acc) {
+        if (a.score <= 1e-9) continue;
+
+        double market = 0.0;
+        if (auto it = trade_market_size.find(sys_id); it != trade_market_size.end()) market = it->second;
+
+        double hub = 0.0;
+        if (auto it = trade_hub_score.find(sys_id); it != trade_hub_score.end()) hub = it->second;
+        hub = std::clamp(hub, 0.0, 1.0);
+
+        double traffic = 0.0;
+        if (auto it = trade_traffic.find(sys_id); it != trade_traffic.end()) traffic = it->second;
+
+        // Normalize with saturating curves to avoid runaway weights.
+        const double market_norm = market / (market + 10.0);
+        const double traffic_norm = traffic / (traffic + 20.0);
+
+        double mult = 1.0 + 0.75 * market_norm + 0.60 * traffic_norm + 0.35 * hub;
+        mult = std::clamp(mult, 1.0, 3.0);
+        a.score *= mult;
+      }
+    }
+
     if (max_total > 0 && pirate_ship_count >= max_total) continue;
 
     // Build candidate target systems.
@@ -5014,7 +5114,7 @@ void Simulation::tick_pirate_raids() {
       if (a.score <= 1e-9) continue;
       if (a.pirate_ships > max_pirates_in_sys) continue;
 
-      const double risk = effective_piracy_risk_for_system(state_, cfg_, sys_id);
+      const double risk = ambient_piracy_risk_for_system(sys_id);
       if (risk <= 1e-6) continue;
 
       double weight = std::pow(risk, risk_exp) * a.score;
@@ -5765,7 +5865,7 @@ void Simulation::tick_ship_maintenance_failures() {
 
 void Simulation::tick_crew_training(double dt_days) {
   if (dt_days <= 0.0) return;
-  if (!cfg_.enable_crew_experience) return;
+  if (!cfg_.enable_crew_experience && !cfg_.enable_crew_casualties) return;
   NEBULA4X_TRACE_SCOPE("tick_crew_training", "sim.crew");
 
   const double dock_range = std::max(0.0, cfg_.docking_range_mkm);
@@ -5802,14 +5902,47 @@ void Simulation::tick_crew_training(double dt_days) {
     if (per_ship <= 1e-12) continue;
 
     const double cap = std::max(0.0, cfg_.crew_grade_points_cap);
+    const double rep_points_full = std::max(0.0, cfg_.crew_replacement_training_points_per_full_complement);
     for (Id sid : docked) {
       Ship& sh = state_.ships.at(sid);
+
+      // Normalize legacy / modded state.
       if (!std::isfinite(sh.crew_grade_points) || sh.crew_grade_points < 0.0) {
         sh.crew_grade_points = cfg_.crew_initial_grade_points;
       }
       sh.crew_grade_points = std::max(0.0, sh.crew_grade_points);
-      sh.crew_grade_points += per_ship;
-      if (cap > 0.0) sh.crew_grade_points = std::min(cap, sh.crew_grade_points);
+
+      if (!std::isfinite(sh.crew_complement) || sh.crew_complement < 0.0) sh.crew_complement = 1.0;
+      sh.crew_complement = std::clamp(sh.crew_complement, 0.0, 1.0);
+
+      double points = per_ship;
+
+      // Crew replacement draws from the same pool as training.
+      if (cfg_.enable_crew_casualties && rep_points_full > 1e-9 && sh.crew_complement + 1e-12 < 1.0 && points > 1e-12) {
+        const double comp_before = sh.crew_complement;
+        const double missing = std::clamp(1.0 - comp_before, 0.0, 1.0);
+        const double need = missing * rep_points_full;
+        const double use = std::min(points, need);
+        const double delta = use / rep_points_full;
+        const double comp_after = std::clamp(comp_before + delta, 0.0, 1.0);
+        sh.crew_complement = comp_after;
+        points -= use;
+
+        // Dilute average grade points by mixing in green replacements.
+        const double delta_c = comp_after - comp_before;
+        if (delta_c > 1e-12 && comp_after > 1e-12) {
+          const double gp0 = cfg_.crew_initial_grade_points;
+          const double gp_before = sh.crew_grade_points;
+          const double gp_after = (gp_before * comp_before + gp0 * delta_c) / comp_after;
+          sh.crew_grade_points = std::max(0.0, gp_after);
+        }
+      }
+
+      // Remaining points go to training if enabled.
+      if (cfg_.enable_crew_experience && points > 1e-12) {
+        sh.crew_grade_points += points;
+        if (cap > 0.0) sh.crew_grade_points = std::min(cap, sh.crew_grade_points);
+      }
     }
   }
 }

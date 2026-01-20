@@ -17,11 +17,16 @@ namespace nebula4x {
 //   the leader) sorted and de-duplicated.
 // - "leader_id" should be the desired leader ship ID. If that ship isn't in
 //   the cohort, the first member is treated as leader.
+// - If "member_positions_mkm" is provided, the solver will attempt a
+//   deterministic "best fit" assignment of ships to formation slots that
+//   minimizes total repositioning from their current locations.
+//   (This reduces slot-swapping and formation crossing for large fleets.)
 //
 // The returned map includes an entry for the leader with offset {0,0}.
 std::unordered_map<Id, Vec2> compute_fleet_formation_offsets(FleetFormation formation, double spacing_mkm,
                                                              Id leader_id, const Vec2& leader_pos_mkm,
                                                              const Vec2& raw_target_mkm,
-                                                             const std::vector<Id>& members_sorted_unique);
+                                                             const std::vector<Id>& members_sorted_unique,
+                                                             const std::unordered_map<Id, Vec2>* member_positions_mkm = nullptr);
 
 } // namespace nebula4x

@@ -106,6 +106,12 @@ void Simulation::apply_design_stats_to_ship(Ship& ship) {
   const double crew_cap = std::max(0.0, cfg_.crew_grade_points_cap);
   if (crew_cap > 0.0) ship.crew_grade_points = std::clamp(ship.crew_grade_points, 0.0, crew_cap);
   else ship.crew_grade_points = std::max(0.0, ship.crew_grade_points);
+
+  // Crew complement initialization / clamping (older saves / newly created ships).
+  if (!std::isfinite(ship.crew_complement) || ship.crew_complement < 0.0) {
+    ship.crew_complement = 1.0;
+  }
+  ship.crew_complement = std::clamp(ship.crew_complement, 0.0, 1.0);
 }
 
 bool Simulation::upsert_custom_design(ShipDesign design, std::string* error) {

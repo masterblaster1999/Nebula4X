@@ -1552,6 +1552,19 @@ FixReport fix_game_state(GameState& s, const ContentDB* content) {
       }
     }
 
+    // Clamp persisted crew_complement (0..1).
+    {
+      if (!std::isfinite(sh.crew_complement) || sh.crew_complement < 0.0) {
+        note(join("Fix: Ship ", id_u64(sid), " had NaN/inf crew_complement; set to 1.0"));
+        sh.crew_complement = 1.0;
+      }
+      const double before = sh.crew_complement;
+      sh.crew_complement = std::clamp(sh.crew_complement, 0.0, 1.0);
+      if (sh.crew_complement != before) {
+        note(join("Fix: Ship ", id_u64(sid), " had out-of-range crew_complement; clamped"));
+      }
+    }
+
     // Clamp persisted auto_* thresholds.
     {
       if (!std::isfinite(sh.auto_refuel_threshold_fraction)) {

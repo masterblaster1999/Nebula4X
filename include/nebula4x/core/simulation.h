@@ -356,6 +356,33 @@ double ship_maintenance_breakdown_subsystem_damage_max{0.20};
   // Global multiplier applied to colony crew_training_points_per_day.
   double crew_training_points_multiplier{1.0};
 
+  // Crew casualties / complement (optional extension).
+  //
+  // When enabled, combat hull damage can reduce a ship's crew_complement (fraction of
+  // required crew remaining). Under-crewed ships suffer a combat penalty even if their
+  // surviving crew is experienced.
+  bool enable_crew_casualties{true};
+
+  // Fraction of full crew lost when the ship takes hull damage equal to its max HP.
+  //
+  // Example: 0.15 means that a hit that removes 20% of max HP causes ~3% crew loss.
+  double crew_casualty_fraction_per_full_hull_damage{0.15};
+
+  // Training points required to restore a ship from 0% -> 100% crew complement while docked
+  // at a colony. Crew replacement draws from the same pool as crew training, so heavy
+  // losses slow experience growth until crews are rebuilt.
+  double crew_replacement_training_points_per_full_complement{1500.0};
+
+  // Exponent applied to crew_complement to compute the combat performance multiplier.
+  //
+  // Effective multiplier = pow(crew_complement, exponent) * (1 + grade_bonus).
+  // exponent < 1 softens the penalty (default sqrt).
+  double crew_complement_exponent{0.5};
+
+  // Only emit a crew-casualty warning event when a single tick reduces complement by
+  // at least this fraction.
+  double crew_casualty_event_min_loss_fraction{0.05};
+
   // --- Ship heat / thermal management (optional) ---
   //
   // When enabled, ships accumulate heat based on online power usage and
@@ -726,6 +753,30 @@ double ship_maintenance_breakdown_subsystem_damage_max{0.20};
   // 0 disables the search offset (pure tail-chasing).
   double contact_search_offset_fraction{0.5};
 
+  // --- Intel / sensor fusion ---
+  //
+  // When enabled, simultaneous detections from multiple sensor sources are fused
+  // into a single contact update per viewer. This reduces position uncertainty
+  // in overlapping sensor networks in a deterministic way (no RNG).
+  bool enable_contact_sensor_fusion{true};
+
+  // --- Intel / contact identity fog-of-war ---
+  //
+  // Contacts are always tracked by internal ship_id, but the *revealed identity*
+  // (design/name) can be gated by measurement uncertainty. This makes stealth/ECM
+  // meaningfully delay identification without requiring a full track-id system.
+  bool enable_contact_identity_fog{true};
+
+  // Reveal thresholds based on the contact's uncertainty at detection time.
+  // If the uncertainty is above these thresholds, the corresponding field may
+  // remain unknown until a better detection is achieved.
+  double contact_identity_reveal_design_uncertainty_mkm{30.0};
+  double contact_identity_reveal_name_uncertainty_mkm{10.0};
+
+  // Fallback assumed target speed (km/s) used for uncertainty growth when we have
+  // neither a velocity estimate nor a known design for the contact.
+  double contact_uncertainty_unknown_speed_km_s{100.0};
+
   // Master toggle for space combat.
   //
   // When disabled, tick_combat() is skipped. Ships will still move and can still
@@ -944,6 +995,40 @@ double ship_maintenance_breakdown_subsystem_damage_max{0.20};
   //
   // Set to 0 to disable fortification degradation.
   double ground_combat_fortification_damage_per_attacker_strength_day{0.005};
+
+  // Ground combat fatigue / intensity.
+  //
+  // As a ground battle drags on, both sides tend to dig in and casualty rates
+  // drop. This multiplier scales the daily loss factor (and fortification
+  // damage rate) as a function of battle days fought:
+  //   mult(day) = max(ground_combat_fatigue_min_multiplier,
+  //                   1 / (1 + ground_combat_fatigue_per_day * day))
+  //
+  // Set ground_combat_fatigue_per_day to 0 to disable.
+  double ground_combat_fatigue_per_day{0.03};
+  double ground_combat_fatigue_min_multiplier{0.25};
+
+  // Collateral damage from ground combat (installations + civilian population).
+  //
+  // Each day, collateral damage is derived from the total ground strength lost
+  // that day (attacker_loss + defender_loss).
+  //
+  // Installations: casualties generate 'damage points' which are applied to
+  // colony installations (excluding fortification installations). Installation
+  // HP uses the same cost-derived model as orbital bombardment
+  // (bombard_installation_hp_per_construction_cost).
+  //
+  // Population: casualties directly translate into civilian population loss.
+  //
+  // Set to 0 to disable either effect.
+  double ground_combat_installation_damage_per_strength_lost{0.01};
+  double ground_combat_population_millions_per_strength_lost{0.0002};
+
+  // Safety cap on the number of non-fortification installations that can be
+  // destroyed per colony per day by collateral damage.
+  //
+  // Set to -1 for unlimited.
+  int ground_combat_collateral_max_installations_destroyed_per_day{20};
 
   // --- Terraforming ---
   // Temperature change (Kelvin) per terraforming point per day.
@@ -1250,6 +1335,40 @@ double ship_maintenance_breakdown_subsystem_damage_max{0.20};
   double ai_trade_security_patrol_risk_weight{1.2};
 
 
+  // --- Trade prosperity (economy bonus) ---
+  //
+  // When enabled, colonies receive a small output bonus derived from their
+  // star system's trade market size and hub score (see TradeNetwork).
+  // The bonus scales with colony population and is reduced by local piracy
+  // risk and blockade pressure.
+  //
+  // This multiplier applies to:
+  //  - non-mining industry production
+  //  - research point generation
+  //  - shipyard throughput
+  //  - construction point generation
+  bool enable_trade_prosperity{true};
+
+  // Maximum additive output bonus (e.g. 0.20 => up to +20% output).
+  double trade_prosperity_max_output_bonus{0.20};
+
+  // Trade market size at which the market factor reaches 50% (half-saturation).
+  double trade_prosperity_market_size_half_bonus{0.45};
+
+  // Population (millions) at which the population factor reaches 50%.
+  double trade_prosperity_pop_half_bonus_millions{2500.0};
+
+  // Weight of hub score in the base bonus (0..1).
+  // 0 => hub score ignored; 1 => hub score fully gates the base bonus.
+  double trade_prosperity_hub_influence{0.35};
+
+  // Penalty applied from piracy risk (0..1). Higher => piracy more disruptive.
+  double trade_prosperity_piracy_risk_penalty{0.85};
+
+  // Penalty applied from blockade pressure (0..1). Higher => blockades more disruptive.
+  double trade_prosperity_blockade_pressure_penalty{1.0};
+
+
   // --- Pirate hideouts (persistent pirate bases) ---
   //
   // When enabled, pirate factions can establish stealthy "hideout" bases inside
@@ -1420,6 +1539,29 @@ struct BlockadeStatus {
   int defender_ships{0};
 };
 
+// Colony trade prosperity status.
+//
+// Trade prosperity is a lightweight economy modifier derived from the procedural
+// trade network (market size + hub score), with disruption penalties for piracy
+// risk and blockade pressure.
+struct TradeProsperityStatus {
+  Id colony_id{kInvalidId};
+
+  // 1 + output_bonus
+  double output_multiplier{1.0};
+
+  // Additive bonus fraction (e.g. 0.05 => +5%).
+  double output_bonus{0.0};
+
+  // Diagnostics for UI/tooling.
+  double market_size{0.0};
+  double hub_score{0.0};
+  double market_factor{0.0};
+  double pop_factor{0.0};
+  double piracy_risk{0.0};
+  double blockade_pressure{0.0};
+};
+
 // Notes:
 // - jump_ids are the *source-side* jump points to traverse (i.e. the ids that
 //   would be enqueued as TravelViaJump orders).
@@ -1436,6 +1578,17 @@ struct JumpRoutePlan {
   // Jump transit itself is instantaneous in the prototype, so distance/eta ignore the
   // "jump" and account only for movement to reach the jump points.
   double distance_mkm{0.0};
+
+  // Environment-adjusted distance used for ETA estimation.
+  //
+  // Ships slow down inside nebulae and storms (see system_movement_speed_multiplier()).
+  // To keep planners (auto-routing, freight/fuel/salvage planners, etc.) consistent
+  // with real movement, we also store an "effective" distance where each in-system
+  // leg is scaled by 1 / environment_speed_multiplier.
+  //
+  // eta_days is derived from effective_distance_mkm, not distance_mkm.
+  double effective_distance_mkm{0.0};
+
   double eta_days{0.0};
 
   // Optional goal position support:
@@ -1451,8 +1604,12 @@ struct JumpRoutePlan {
   // Additional in-system distance from arrival_pos_mkm to goal_pos_mkm.
   double final_leg_mkm{0.0};
 
-  // Convenience totals (distance_mkm + final_leg_mkm) and their ETA.
+  // Environment-adjusted final leg distance in the destination system.
+  double effective_final_leg_mkm{0.0};
+
+  // Convenience totals.
   double total_distance_mkm{0.0};
+  double effective_total_distance_mkm{0.0};
   double total_eta_days{0.0};
 };
 
@@ -1939,12 +2096,31 @@ class Simulation {
   double crew_training_points_per_day(const Colony& colony) const;
   double fortification_points(const Colony& colony) const;
 
+  // Piracy risk query helpers.
+  //
+  // Ambient piracy risk is region-based (after suppression). Effective piracy
+  // risk also incorporates the combat presence of active pirate ships and
+  // hideouts in the system.
+  //
+  // All values are normalized to [0,1].
+  double ambient_piracy_risk_for_system(Id system_id) const;
+  double pirate_presence_risk_for_system(Id system_id) const;
+  double piracy_risk_for_system(Id system_id) const;
+
   // Blockade query helpers.
   //
   // These are pure queries (no save-game persistence). The implementation caches
   // per-colony pressure for the current day/hour to avoid repeated scans.
   BlockadeStatus blockade_status_for_colony(Id colony_id) const;
   double blockade_output_multiplier_for_colony(Id colony_id) const;
+
+  // Trade prosperity query helpers.
+  //
+  // Trade prosperity is a lightweight economy bonus derived from the procedural
+  // interstellar trade network (market size + hub score). The bonus scales with
+  // colony population and is reduced by piracy risk and blockade pressure.
+  TradeProsperityStatus trade_prosperity_status_for_colony(Id colony_id) const;
+  double trade_prosperity_output_multiplier_for_colony(Id colony_id) const;
 
   // Crew grade helpers.
   // Returns a signed bonus fraction (e.g. +0.10 = +10%).
@@ -2278,11 +2454,37 @@ bool move_construction_order(Id colony_id, int from_index, int to_index);
   // This is a curated story layer over the raw event log.
   void push_journal_entry(Id faction_id, JournalEntry entry);
 
+  // --- Piracy presence cache (performance) ---
+  //
+  // Computes a per-system pirate combat presence signal used by convoy routing,
+  // trade prosperity disruption, and AI/security planning. Cached per hour.
+  void ensure_piracy_presence_cache_current() const;
+
+  struct PiracyPresenceInfo {
+    double pirate_threat{0.0};
+    double presence_risk{0.0};
+    int pirate_ships{0};
+    int pirate_hideouts{0};
+  };
+
+  mutable bool piracy_presence_cache_valid_{false};
+  mutable std::int64_t piracy_presence_cache_day_{0};
+  mutable int piracy_presence_cache_hour_{0};
+  mutable std::uint64_t piracy_presence_cache_state_generation_{0};
+  mutable std::uint64_t piracy_presence_cache_content_generation_{0};
+  mutable std::unordered_map<Id, PiracyPresenceInfo> piracy_presence_cache_;
+
   // --- Blockade cache (performance) ---
   // Blockade pressure queries may be called frequently (UI + multiple tick
   // systems). Cache per-colony pressure for the current day/hour.
   void ensure_blockade_cache_current() const;
   void invalidate_blockade_cache() const;
+
+  // --- Trade prosperity cache (performance) ---
+  // Trade prosperity queries may be called frequently (UI + economy ticks). Cache
+  // per-system market size + hub score for the current simulation day.
+  void ensure_trade_prosperity_cache_current() const;
+  void invalidate_trade_prosperity_cache() const;
 
 // --- Jump route planning cache (performance) ---
 // Route planning can be called frequently from the UI (hover previews) and from AI logistics.
@@ -2351,6 +2553,7 @@ void touch_jump_route_cache_entry(JumpRouteCacheMap::iterator it) const;
 static constexpr std::size_t kJumpRouteCacheCapacity = 256;
 mutable bool jump_route_cache_day_valid_{false};
 mutable std::int64_t jump_route_cache_day_{0};
+mutable int jump_route_cache_hour_{0};
 
 mutable std::list<JumpRouteCacheKey> jump_route_cache_lru_;
 mutable JumpRouteCacheMap jump_route_cache_;
@@ -2364,6 +2567,19 @@ mutable int blockade_cache_hour_{0};
 mutable std::uint64_t blockade_cache_state_generation_{0};
 mutable std::uint64_t blockade_cache_content_generation_{0};
 mutable std::unordered_map<Id, BlockadeStatus> blockade_cache_;
+
+
+// --- Trade prosperity cache ---
+mutable bool trade_prosperity_cache_valid_{false};
+mutable std::int64_t trade_prosperity_cache_day_{0};
+mutable std::uint64_t trade_prosperity_cache_state_generation_{0};
+mutable std::uint64_t trade_prosperity_cache_content_generation_{0};
+
+struct TradeProsperitySystemInfo {
+  double market_size{0.0};
+  double hub_score{0.0};
+};
+mutable std::unordered_map<Id, TradeProsperitySystemInfo> trade_prosperity_system_cache_;
 
 
 

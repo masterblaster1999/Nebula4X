@@ -1732,9 +1732,17 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
         }
       }
 
+      std::unordered_map<Id, Vec2> member_pos;
+      member_pos.reserve(c.members.size() * 2);
+      for (Id sid : c.members) {
+        if (const auto* sh = find_ptr(s.ships, sid)) {
+          member_pos.emplace(sid, sh->position_mkm);
+        }
+      }
+
       const auto offsets = compute_fleet_formation_offsets(selected_fleet->formation,
                                                            selected_fleet->formation_spacing_mkm, leader_id,
-                                                           leader_pos, raw_target, c.members);
+                                                           leader_pos, raw_target, c.members, &member_pos);
       if (offsets.empty()) continue;
 
       // Raw target marker.
