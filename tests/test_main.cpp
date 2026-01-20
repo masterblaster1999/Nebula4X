@@ -69,6 +69,7 @@ int test_procgen_surface();
 int test_nebula_microfields();
 int test_nebula_storm_cells();
 int test_jump_transit_hazards();
+int test_dynamic_poi_spawns();
 int test_fleets();
 int test_ai_economy();
 namespace nebula4x {
@@ -248,6 +249,7 @@ int main(int argc, char** argv) {
       {"nebula_microfields", test_nebula_microfields},
       {"nebula_storm_cells", test_nebula_storm_cells},
       {"jump_transit_hazards", test_jump_transit_hazards},
+      {"dynamic_poi_spawns", test_dynamic_poi_spawns},
       {"missile_components", test_missile_components},
       {"auto_tanker", test_auto_tanker},
     {"auto_refuel", test_auto_refuel},

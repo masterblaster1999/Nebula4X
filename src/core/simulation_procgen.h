@@ -94,4 +94,28 @@ inline std::string pick_unlock_component_id(const ContentDB& content, const Fact
   return candidates[static_cast<std::size_t>(idx)];
 }
 
+// Pick any known component id from content.
+//
+// Used when procedural generation needs a plausible reward without faction
+// context (for example, anomalies that exist before any faction discovers
+// them).
+//
+// Returns an empty string if there are no components.
+inline std::string pick_any_component_id(const ContentDB& content, HashRng& rng) {
+  if (content.components.empty()) return {};
+
+  std::vector<std::string> candidates;
+  candidates.reserve(content.components.size());
+  for (const auto& [cid, def] : content.components) {
+    (void)def;
+    if (cid.empty()) continue;
+    candidates.push_back(cid);
+  }
+  if (candidates.empty()) return {};
+
+  std::sort(candidates.begin(), candidates.end());
+  const int idx = rng.range_int(0, static_cast<int>(candidates.size()) - 1);
+  return candidates[static_cast<std::size_t>(idx)];
+}
+
 } // namespace nebula4x::sim_procgen

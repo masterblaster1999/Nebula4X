@@ -381,6 +381,7 @@ if(NEBULA4X_BUILD_TESTS)
     tests/test_nebula_microfields.cpp
     tests/test_nebula_storm_cells.cpp
     tests/test_jump_transit_hazards.cpp
+    tests/test_dynamic_poi_spawns.cpp
     tests/test_missile_components.cpp
     tests/test_auto_tanker.cpp
   tests/test_auto_refuel.cpp

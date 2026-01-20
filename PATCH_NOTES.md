@@ -1,3 +1,18 @@
+## r93: Dynamic procedural points-of-interest (ambient anomalies + hidden caches)
+
+- **Exploration**: star systems now spawn a small stream of **dynamic anomalies** and **mineral cache wrecks** over time.
+  - Spawns are biased by **region factors** (ruins density, pirate risk, salvage richness) and local **nebula conditions**.
+  - Placement uses a microfield-aware, soft **blue-noise** sampler around jump points so POIs feel connected to travel lanes.
+  - Dynamic POIs are fully **deterministic** per-day/per-system (seeded), making saves reproducible and testable.
+- **Config**: new `SimConfig` knobs:
+  - `enable_dynamic_poi_spawns`
+  - `dynamic_anomaly_spawn_chance_per_system_per_day`, `dynamic_cache_spawn_chance_per_system_per_day`
+  - `dynamic_poi_max_unresolved_anomalies_total`, `dynamic_poi_max_active_caches_total`
+  - `dynamic_poi_max_unresolved_anomalies_per_system`, `dynamic_poi_max_active_caches_per_system`
+- **Bugfix**: restored missing `sim_procgen::pick_any_component_id()` helper (used by procgen anomaly rewards).
+- **Tests**: added a deterministic unit test that validates daily dynamic POI spawns.
+
+
 ## r92: Procedural anomaly leads (exploration chains + star charts + hidden caches)
 
 - **Exploration**: resolving an anomaly can now (optionally) generate a **procedural lead** that forms a lightweight exploration chain:
