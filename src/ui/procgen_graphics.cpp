@@ -346,8 +346,11 @@ void draw_surface_stamp_pixels(ImDrawList* dl, ImVec2 p0, ImVec2 size, const Sur
   if (draw_border) {
     const ImU32 border = ImGui::GetColorU32(ImGuiCol_Border);
     const ImU32 bg = ImGui::GetColorU32(ImGuiCol_FrameBg);
-    dl->AddRectFilled(o - ImVec2(3, 3), o + total + ImVec2(3, 3), modulate_alpha(bg, 0.75f * alpha), 4.0f);
-    dl->AddRect(o - ImVec2(3, 3), o + total + ImVec2(3, 3), modulate_alpha(border, 0.9f * alpha), 4.0f, 0, 1.0f);
+    const ImVec2 pad(3.0f, 3.0f);
+    const ImVec2 a(o.x - pad.x, o.y - pad.y);
+    const ImVec2 b(o.x + total.x + pad.x, o.y + total.y + pad.y);
+    dl->AddRectFilled(a, b, modulate_alpha(bg, 0.75f * alpha), 4.0f);
+    dl->AddRect(a, b, modulate_alpha(border, 0.9f * alpha), 4.0f, 0, 1.0f);
   }
 
   for (int y = 0; y < g.h; ++y) {
@@ -681,7 +684,9 @@ void draw_system_badge(ImDrawList* dl, ImVec2 p0, float sz, std::uint32_t seed, 
   }
 
   if (chokepoint) {
-    dl->AddRect(p0 + ImVec2(1, 1), p1 - ImVec2(1, 1), IM_COL32(190, 120, 255, 220), 3.0f, 0, 1.5f);
+    const ImVec2 a(p0.x + 1.0f, p0.y + 1.0f);
+    const ImVec2 b(p1.x - 1.0f, p1.y - 1.0f);
+    dl->AddRect(a, b, IM_COL32(190, 120, 255, 220), 3.0f, 0, 1.5f);
   }
 
   const ImU32 outline = selected ? IM_COL32(255, 255, 255, 200) : IM_COL32(0, 0, 0, 90);

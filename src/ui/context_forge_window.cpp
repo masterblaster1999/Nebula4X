@@ -646,29 +646,20 @@ void draw_context_forge_window(Simulation& sim, UIState& ui, Id selected_ship, I
       if (ImGui::Button("Paste Panel DNA")) {
         const char* clip = ImGui::GetClipboardText();
         if (clip && clip[0]) {
-          UiForgePanelDNA dna;
           std::string derr;
-          if (decode_ui_forge_panel_dna(std::string(clip), dna, &derr)) {
-            // Replace existing panel widgets.
-            panel->widgets.clear();
-            panel->name = dna.name.empty() ? panel->name : dna.name;
-            panel->root_path = dna.root_path.empty() ? panel->root_path : dna.root_path;
-            for (const auto& w : dna.widgets) {
-              UiForgeWidgetConfig cfg;
-              cfg.id = ui.next_ui_forge_widget_id++;
-              cfg.type = w.type;
-              cfg.label = w.label;
-              cfg.path = w.path;
-              cfg.text = w.text;
-              cfg.is_query = w.is_query;
-              cfg.query_op = w.query_op;
-              cfg.track_history = w.track_history;
-              cfg.show_sparkline = w.show_sparkline;
-              cfg.history_len = w.history_len;
-              cfg.span = w.span;
-              cfg.preview_rows = w.preview_rows;
-              panel->widgets.push_back(std::move(cfg));
-            }
+
+          // Decode into a temporary config, then replace the existing panel while
+          // keeping its id + open state.
+          UiForgePanelConfig imported = *panel;
+          if (decode_ui_forge_panel_dna(clip, &imported, &derr)) {
+            const std::uint64_t keep_id = panel->id;
+            const bool keep_open = panel->open;
+            *panel = std::move(imported);
+            panel->id = keep_id;
+            panel->open = keep_open;
+
+            for (auto& w : panel->widgets) w.id = ui.next_ui_forge_widget_id++;
+
             ui.context_forge_last_error.clear();
             ui.context_forge_last_success_time = ImGui::GetTime();
           } else {
