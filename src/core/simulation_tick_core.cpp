@@ -299,6 +299,15 @@ void Simulation::tick_one_tick_hours(int hours) {
     }
   }
 
+// Colony conditions tick (durations + event rolls). This is done after all
+// colony-affecting processes for the interval have been applied.
+if (cfg_.enable_subday_economy) {
+  tick_colony_conditions(dt_days, day_advanced);
+} else if (day_advanced) {
+  tick_colony_conditions(1.0, /*day_advanced=*/true);
+}
+
+
   // Victory conditions are evaluated on day boundaries so that all daily
   // effects (combat, invasion results, economy) have already been applied.
   if (day_advanced) {

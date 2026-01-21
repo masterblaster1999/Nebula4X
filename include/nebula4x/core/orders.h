@@ -113,6 +113,12 @@ struct EscortShip {
   // When true, cross-system routing will only traverse systems discovered by
   // the escort's faction.
   bool restrict_to_discovered{false};
+
+  // When true, allow escorting neutral (non-friendly) ships as long as the
+  // factions are not Hostile toward each other.
+  //
+  // This is primarily used for escort contracts involving civilian convoys.
+  bool allow_neutral{false};
 };
 
 // Wait / do nothing for N simulation days.

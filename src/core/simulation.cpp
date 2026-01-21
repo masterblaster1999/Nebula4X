@@ -504,6 +504,9 @@ double Simulation::construction_points_per_day(const Colony& colony) const {
   // Interstellar trade prosperity bonus (system market access / hub activity).
   total *= trade_prosperity_output_multiplier_for_colony(colony.id);
 
+  // Local temporary conditions (strikes, accidents, festivals, etc.).
+  total *= colony_condition_multipliers(colony).construction;
+
   return std::max(0.0, total);
 }
 
@@ -1779,6 +1782,113 @@ void Simulation::invalidate_blockade_cache() const {
   blockade_cache_content_generation_ = content_generation_;
 }
 
+
+void Simulation::ensure_civilian_shipping_loss_cache_current() const {
+  // The shipping-loss metric is derived from wrecks; if wrecks are disabled or
+  // memory is disabled, treat it as inactive.
+  if (!cfg_.enable_wrecks || cfg_.civilian_shipping_loss_memory_days <= 0) {
+    invalidate_civilian_shipping_loss_cache();
+    return;
+  }
+
+  const std::int64_t day = state_.date.days_since_epoch();
+
+  if (civilian_shipping_loss_cache_valid_ && civilian_shipping_loss_cache_day_ == day &&
+      civilian_shipping_loss_cache_state_generation_ == state_generation_ &&
+      civilian_shipping_loss_cache_content_generation_ == content_generation_) {
+    return;
+  }
+
+  civilian_shipping_loss_cache_valid_ = true;
+  civilian_shipping_loss_cache_day_ = day;
+  civilian_shipping_loss_cache_state_generation_ = state_generation_;
+  civilian_shipping_loss_cache_content_generation_ = content_generation_;
+
+  civilian_shipping_loss_cache_.clear();
+  civilian_shipping_loss_cache_.reserve(state_.systems.size() * 2 + 8);
+
+  // Locate the Merchant Guild faction id (neutral civilians).
+  Id merchant_fid = kInvalidId;
+  for (const auto& [fid, fac] : state_.factions) {
+    if (fac.control == FactionControl::AI_Passive && fac.name == "Merchant Guild") {
+      merchant_fid = fid;
+      break;
+    }
+  }
+
+  if (merchant_fid == kInvalidId) return;
+  if (state_.wrecks.empty()) return;
+
+  const double memory_days = std::max(1.0, static_cast<double>(cfg_.civilian_shipping_loss_memory_days));
+  const double scale = std::max(1e-6, cfg_.civilian_shipping_loss_pressure_scale);
+
+  // Aggregate raw loss "scores" per system (sum of decayed wreck weights).
+  std::unordered_map<Id, double> score;
+  std::unordered_map<Id, int> count;
+  score.reserve(state_.systems.size() * 2 + 8);
+  count.reserve(state_.systems.size() * 2 + 8);
+
+  const std::int64_t now = day;
+  for (const auto& [wid, w] : state_.wrecks) {
+    (void)wid;
+    if (w.system_id == kInvalidId) continue;
+    if (w.kind != WreckKind::Ship) continue;
+    if (w.source_faction_id != merchant_fid) continue;
+
+    const std::int64_t created = w.created_day;
+    if (created <= 0) continue;
+
+    const double age = static_cast<double>(std::max<std::int64_t>(0, now - created));
+    if (age > memory_days + 1e-9) continue;
+
+    // Linear decay: 1 at age=0, 0 at age=memory_days.
+    const double wt = std::clamp(1.0 - age / memory_days, 0.0, 1.0);
+    if (wt <= 1e-9) continue;
+
+    score[w.system_id] += wt;
+    count[w.system_id] += 1;
+  }
+
+  for (const auto& [sys_id, sc] : score) {
+    CivilianShippingLossStatus st;
+    st.system_id = sys_id;
+    st.score = std::max(0.0, sc);
+    st.recent_wrecks = 0;
+    if (auto itc = count.find(sys_id); itc != count.end()) st.recent_wrecks = itc->second;
+
+    // Map score -> pressure in [0,1].
+    st.pressure = 1.0 - std::exp(-st.score / scale);
+    st.pressure = std::clamp(st.pressure, 0.0, 1.0);
+
+    civilian_shipping_loss_cache_[sys_id] = st;
+  }
+}
+
+void Simulation::invalidate_civilian_shipping_loss_cache() const {
+  civilian_shipping_loss_cache_valid_ = false;
+  civilian_shipping_loss_cache_.clear();
+  civilian_shipping_loss_cache_day_ = state_.date.days_since_epoch();
+  civilian_shipping_loss_cache_state_generation_ = state_generation_;
+  civilian_shipping_loss_cache_content_generation_ = content_generation_;
+}
+
+CivilianShippingLossStatus Simulation::civilian_shipping_loss_status_for_system(Id system_id) const {
+  CivilianShippingLossStatus st;
+  st.system_id = system_id;
+  if (system_id == kInvalidId) return st;
+  if (!cfg_.enable_wrecks || cfg_.civilian_shipping_loss_memory_days <= 0) return st;
+
+  ensure_civilian_shipping_loss_cache_current();
+  auto it = civilian_shipping_loss_cache_.find(system_id);
+  if (it != civilian_shipping_loss_cache_.end()) return it->second;
+
+  return st;
+}
+
+double Simulation::civilian_shipping_loss_pressure_for_system(Id system_id) const {
+  return std::clamp(civilian_shipping_loss_status_for_system(system_id).pressure, 0.0, 1.0);
+}
+
 double Simulation::ambient_piracy_risk_for_system(Id system_id) const {
   const auto* sys = find_ptr(state_.systems, system_id);
   if (!sys) return 0.0;
@@ -1913,8 +2023,36 @@ TradeProsperityStatus Simulation::trade_prosperity_status_for_colony(Id colony_i
     }
   }
 
+  // Treaty-driven market access boost (diplomacy).
+  //
+  // This is intentionally a lightweight proxy for the idea that more open trade
+  // relationships give your colonies access to a larger market.
+  st.trade_partner_count = 0;
+  st.treaty_market_boost = 1.0;
+  st.effective_market_size = st.market_size;
+
+  if (col->faction_id != kInvalidId) {
+    int partners = 0;
+    for (const auto& [other_id, _] : state_.factions) {
+      if (other_id == col->faction_id) continue;
+      if (are_factions_trade_partners(col->faction_id, other_id)) {
+        ++partners;
+      }
+    }
+    st.trade_partner_count = partners;
+
+    if (cfg_.enable_trade_prosperity_treaty_market_boost) {
+      const double per = std::max(0.0, cfg_.trade_prosperity_treaty_market_boost_per_trade_partner);
+      const double maxb = std::max(0.0, cfg_.trade_prosperity_treaty_market_boost_max);
+      const double boost = std::clamp(per * static_cast<double>(partners), 0.0, maxb);
+      st.treaty_market_boost = 1.0 + boost;
+      st.effective_market_size = st.market_size * st.treaty_market_boost;
+    }
+  }
+
   const double half_market = std::max(1e-9, cfg_.trade_prosperity_market_size_half_bonus);
-  st.market_factor = std::clamp(st.market_size / (st.market_size + half_market), 0.0, 1.0);
+  const double eff_market = std::max(0.0, st.effective_market_size);
+  st.market_factor = std::clamp(eff_market / (eff_market + half_market), 0.0, 1.0);
 
   const double pop = std::max(0.0, col->population_millions);
   const double half_pop = std::max(1e-9, cfg_.trade_prosperity_pop_half_bonus_millions);
@@ -1934,10 +2072,17 @@ TradeProsperityStatus Simulation::trade_prosperity_status_for_colony(Id colony_i
   // Blockade disruption (reuses cached blockade pressure when enabled).
   st.blockade_pressure = std::clamp(blockade_status_for_colony(colony_id).pressure, 0.0, 1.0);
 
+  // Shipping-loss disruption (recent civilian losses can depress trade for a
+  // while even if pirates leave).
+  st.shipping_loss_pressure = std::clamp(civilian_shipping_loss_pressure_for_system(sys_id), 0.0, 1.0);
+
   const double piracy_w = std::clamp(cfg_.trade_prosperity_piracy_risk_penalty, 0.0, 1.0);
   const double blockade_w = std::clamp(cfg_.trade_prosperity_blockade_pressure_penalty, 0.0, 1.0);
+  const double shipping_w = std::clamp(cfg_.trade_prosperity_shipping_loss_penalty, 0.0, 1.0);
 
-  double penalty = piracy_w * st.piracy_risk + blockade_w * st.blockade_pressure;
+  double penalty = piracy_w * st.piracy_risk +
+                   blockade_w * st.blockade_pressure +
+                   shipping_w * st.shipping_loss_pressure;
   penalty = std::clamp(penalty, 0.0, 1.0);
 
   const double bonus = std::clamp(base_bonus * (1.0 - penalty), 0.0, max_bonus);
@@ -1949,6 +2094,410 @@ TradeProsperityStatus Simulation::trade_prosperity_status_for_colony(Id colony_i
 double Simulation::trade_prosperity_output_multiplier_for_colony(Id colony_id) const {
   return std::max(0.0, trade_prosperity_status_for_colony(colony_id).output_multiplier);
 }
+
+namespace {
+
+struct ColonyConditionDef {
+  const char* id{nullptr};
+  const char* name{nullptr};
+  const char* description{nullptr};
+
+  bool positive{false};
+  bool resolvable{false};
+
+  // Net stability delta contributed by this condition at severity=1.
+  // (Added to ColonyStabilityStatus::stability before clamping.)
+  double stability_delta{0.0};
+
+  // Nominal output multipliers at severity=1.
+  ColonyConditionMultipliers mult;
+
+  // Baseline resolve costs (minerals). 0 => not used.
+  double resolve_duranium{0.0};
+  double resolve_tritanium{0.0};
+  double resolve_boronide{0.0};
+  double resolve_corbomite{0.0};
+};
+
+const ColonyConditionDef* colony_condition_def(const std::string& id) {
+  // NOTE: ids are intentionally stable strings to keep saves forward-compatible.
+  static const ColonyConditionDef kDefs[] = {
+      // --- Negative ---
+      {"industrial_accident",
+       "Industrial Accident",
+       "A serious incident has disrupted heavy industry and construction until repairs and safety audits are completed.",
+       /*positive=*/false,
+       /*resolvable=*/true,
+       /*stability_delta=*/-0.15,
+       /*mult=*/{/*mining=*/0.98,
+                /*industry=*/0.75,
+                /*research=*/0.98,
+                /*construction=*/0.80,
+                /*shipyard=*/0.80,
+                /*terraforming=*/0.95,
+                /*troop_training=*/0.95,
+                /*pop_growth=*/0.99},
+       /*resolve_duranium=*/250.0,
+       /*resolve_tritanium=*/120.0,
+       /*resolve_boronide=*/0.0,
+       /*resolve_corbomite=*/0.0},
+
+      {"labor_strike",
+       "Labor Strike",
+       "Organized labor action is reducing throughput as negotiations continue.",
+       /*positive=*/false,
+       /*resolvable=*/true,
+       /*stability_delta=*/-0.20,
+       /*mult=*/{/*mining=*/0.80,
+                /*industry=*/0.80,
+                /*research=*/0.95,
+                /*construction=*/0.85,
+                /*shipyard=*/0.85,
+                /*terraforming=*/0.95,
+                /*troop_training=*/0.90,
+                /*pop_growth=*/0.99},
+       /*resolve_duranium=*/180.0,
+       /*resolve_tritanium=*/0.0,
+       /*resolve_bboronide=*/0.0,
+       /*resolve_corbomite=*/60.0},
+
+      {"disease_outbreak",
+       "Disease Outbreak",
+       "A fast-spreading pathogen is reducing productivity while medical services mobilize.",
+       /*positive=*/false,
+       /*resolvable=*/true,
+       /*stability_delta=*/-0.25,
+       /*mult=*/{/*mining=*/0.95,
+                /*industry=*/0.92,
+                /*research=*/0.85,
+                /*construction=*/0.95,
+                /*shipyard=*/0.95,
+                /*terraforming=*/0.98,
+                /*troop_training=*/0.85,
+                /*pop_growth=*/0.70},
+       /*resolve_duranium=*/200.0,
+       /*resolve_tritanium=*/0.0,
+       /*resolve_boronide=*/120.0,
+       /*resolve_corbomite=*/0.0},
+
+      // --- Positive ---
+      {"cultural_festival",
+       "Cultural Festival",
+       "A major celebration is boosting morale and civic engagement across the colony.",
+       /*positive=*/true,
+       /*resolvable=*/false,
+       /*stability_delta=*/0.10,
+       /*mult=*/{/*mining=*/1.00,
+                /*industry=*/0.98,
+                /*research=*/1.10,
+                /*construction=*/1.00,
+                /*shipyard=*/1.00,
+                /*terraforming=*/1.00,
+                /*troop_training=*/1.00,
+                /*pop_growth=*/1.08},
+       /*resolve_duranium=*/0.0,
+       /*resolve_tritanium=*/0.0,
+       /*resolve_boronide=*/0.0,
+       /*resolve_corbomite=*/0.0},
+
+      {"engineering_breakthrough",
+       "Engineering Breakthrough",
+       "A wave of process innovations is accelerating construction and shipyard throughput.",
+       /*positive=*/true,
+       /*resolvable=*/false,
+       /*stability_delta=*/0.12,
+       /*mult=*/{/*mining=*/1.00,
+                /*industry=*/1.05,
+                /*research=*/1.00,
+                /*construction=*/1.25,
+                /*shipyard=*/1.20,
+                /*terraforming=*/1.00,
+                /*troop_training=*/1.00,
+                /*pop_growth=*/1.00},
+       /*resolve_duranium=*/0.0,
+       /*resolve_tritanium=*/0.0,
+       /*resolve_boronide=*/0.0,
+       /*resolve_corbomite=*/0.0},
+
+      {"terraforming_breakthrough",
+       "Terraforming Breakthrough",
+       "Unexpected synergies in environmental engineering are improving terraforming efficiency.",
+       /*positive=*/true,
+       /*resolvable=*/false,
+       /*stability_delta=*/0.08,
+       /*mult=*/{/*mining=*/1.00,
+                /*industry=*/1.00,
+                /*research=*/1.00,
+                /*construction=*/1.00,
+                /*shipyard=*/1.00,
+                /*terraforming=*/1.40,
+                /*troop_training=*/1.00,
+                /*pop_growth=*/1.00},
+       /*resolve_duranium=*/0.0,
+       /*resolve_tritanium=*/0.0,
+       /*resolve_boronide=*/0.0,
+       /*resolve_corbomite=*/0.0},
+  };
+
+  for (const auto& d : kDefs) {
+    if (d.id && id == d.id) return &d;
+  }
+  return nullptr;
+}
+
+double clamp_condition_mult(double v) {
+  if (!std::isfinite(v)) return 1.0;
+  return std::clamp(v, 0.05, 5.0);
+}
+
+} // namespace
+
+ColonyConditionMultipliers Simulation::colony_condition_multipliers_for_condition(const ColonyCondition& condition) const {
+  ColonyConditionMultipliers out;
+  if (!cfg_.enable_colony_conditions) return out;
+  if (condition.id.empty()) return out;
+
+  const auto* def = colony_condition_def(condition.id);
+  if (!def) return out;
+
+  const double sev = std::clamp(condition.severity, 0.0, 10.0);
+
+  auto scale = [&](double base) -> double {
+    base = std::max(1e-6, base);
+    const double v = std::pow(base, sev);
+    return clamp_condition_mult(v);
+  };
+
+  out.mining = scale(def->mult.mining);
+  out.industry = scale(def->mult.industry);
+  out.research = scale(def->mult.research);
+  out.construction = scale(def->mult.construction);
+  out.shipyard = scale(def->mult.shipyard);
+  out.terraforming = scale(def->mult.terraforming);
+  out.troop_training = scale(def->mult.troop_training);
+  out.pop_growth = scale(def->mult.pop_growth);
+
+  return out;
+}
+
+ColonyConditionMultipliers Simulation::colony_condition_multipliers(const Colony& colony) const {
+  ColonyConditionMultipliers total;
+  if (!cfg_.enable_colony_conditions) return total;
+
+  for (const auto& cond : colony.conditions) {
+    if (cond.remaining_days <= 1e-9) continue;
+    const ColonyConditionMultipliers m = colony_condition_multipliers_for_condition(cond);
+    total.mining *= m.mining;
+    total.industry *= m.industry;
+    total.research *= m.research;
+    total.construction *= m.construction;
+    total.shipyard *= m.shipyard;
+    total.terraforming *= m.terraforming;
+    total.troop_training *= m.troop_training;
+    total.pop_growth *= m.pop_growth;
+  }
+
+  total.mining = clamp_condition_mult(total.mining);
+  total.industry = clamp_condition_mult(total.industry);
+  total.research = clamp_condition_mult(total.research);
+  total.construction = clamp_condition_mult(total.construction);
+  total.shipyard = clamp_condition_mult(total.shipyard);
+  total.terraforming = clamp_condition_mult(total.terraforming);
+  total.troop_training = clamp_condition_mult(total.troop_training);
+  total.pop_growth = clamp_condition_mult(total.pop_growth);
+
+  return total;
+}
+
+std::string Simulation::colony_condition_display_name(const std::string& condition_id) const {
+  if (condition_id.empty()) return {};
+  if (const auto* def = colony_condition_def(condition_id)) {
+    if (def->name) return def->name;
+  }
+  return condition_id;
+}
+
+std::string Simulation::colony_condition_description(const std::string& condition_id) const {
+  if (condition_id.empty()) return {};
+  if (const auto* def = colony_condition_def(condition_id)) {
+    if (def->description) return def->description;
+  }
+  return {};
+}
+
+bool Simulation::colony_condition_is_positive(const std::string& condition_id) const {
+  if (condition_id.empty()) return false;
+  if (const auto* def = colony_condition_def(condition_id)) return def->positive;
+  return false;
+}
+
+std::unordered_map<std::string, double> Simulation::colony_condition_resolve_cost(
+    Id colony_id, const ColonyCondition& condition) const {
+  std::unordered_map<std::string, double> out;
+
+  if (!cfg_.enable_colony_conditions) return out;
+  if (colony_id == kInvalidId) return out;
+  if (condition.id.empty()) return out;
+  if (condition.remaining_days <= 1e-9) return out;
+
+  const auto* def = colony_condition_def(condition.id);
+  if (!def || !def->resolvable) return out;
+
+  const Colony* col = find_ptr(state_.colonies, colony_id);
+  if (!col) return out;
+
+  // Cost scales softly with population and severity.
+  const double pop = std::max(0.0, col->population_millions);
+  double pop_scale = 1.0 + std::sqrt(pop / 500.0);  // ~2x at 500M, ~3x at 2000M.
+  pop_scale = std::clamp(pop_scale, 1.0, 5.0);
+
+  const double sev_scale = std::clamp(condition.severity, 0.25, 3.0);
+  const double scale = pop_scale * sev_scale;
+
+  auto add = [&](const char* mineral, double base) {
+    if (!mineral) return;
+    if (!(base > 0.0)) return;
+    const double v = std::max(0.0, base * scale);
+    if (v <= 1e-6) return;
+    out[mineral] += v;
+  };
+
+  add("Duranium", def->resolve_duranium);
+  add("Tritanium", def->resolve_tritanium);
+  add("Boronide", def->resolve_boronide);
+  add("Corbomite", def->resolve_corbomite);
+
+  return out;
+}
+
+bool Simulation::resolve_colony_condition(Id colony_id, const std::string& condition_id, std::string* error) {
+  if (error) error->clear();
+
+  if (!cfg_.enable_colony_conditions) {
+    if (error) *error = "Colony conditions are disabled in simulation config.";
+    return false;
+  }
+
+  Colony* col = find_ptr(state_.colonies, colony_id);
+  if (!col) {
+    if (error) *error = "Invalid colony.";
+    return false;
+  }
+
+  auto it = std::find_if(col->conditions.begin(), col->conditions.end(),
+                         [&](const ColonyCondition& c) { return c.id == condition_id && c.remaining_days > 1e-9; });
+  if (it == col->conditions.end()) {
+    if (error) *error = "Condition not found.";
+    return false;
+  }
+
+  const auto cost = colony_condition_resolve_cost(colony_id, *it);
+  if (cost.empty()) {
+    if (error) *error = "This condition cannot be resolved manually.";
+    return false;
+  }
+
+  auto have = [&](const std::string& mineral) -> double {
+    auto mit = col->minerals.find(mineral);
+    if (mit == col->minerals.end()) return 0.0;
+    return std::max(0.0, mit->second);
+  };
+
+  // Check affordability.
+  for (const auto& [mineral, amt] : cost) {
+    if (amt <= 1e-9) continue;
+    if (have(mineral) + 1e-9 < amt) {
+      if (error) *error = "Insufficient minerals to resolve condition.";
+      return false;
+    }
+  }
+
+  // Deduct cost.
+  for (const auto& [mineral, amt] : cost) {
+    if (amt <= 1e-9) continue;
+    col->minerals[mineral] = have(mineral) - amt;
+    if (col->minerals[mineral] <= 1e-9) col->minerals.erase(mineral);
+  }
+
+  const std::string name = colony_condition_display_name(it->id);
+  col->conditions.erase(it);
+
+  EventContext ctx;
+  ctx.faction_id = col->faction_id;
+  ctx.colony_id = colony_id;
+  if (const auto* b = find_ptr(state_.bodies, col->body_id)) ctx.system_id = b->system_id;
+
+  push_event(EventLevel::Info, EventCategory::General,
+             "Resolved condition at " + col->name + ": " + name + ".", ctx);
+  return true;
+}
+
+ColonyStabilityStatus Simulation::colony_stability_status_for_colony(Id colony_id) const {
+  ColonyStabilityStatus st;
+  st.colony_id = colony_id;
+  st.stability = 1.0;
+
+  if (colony_id == kInvalidId) return st;
+
+  const Colony* col = find_ptr(state_.colonies, colony_id);
+  if (!col) return st;
+
+  st.habitability = std::clamp(body_habitability(col->body_id), 0.0, 1.0);
+
+  const double pop = std::max(0.0, col->population_millions);
+  if (pop > 1e-9) {
+    const double required = std::max(0.0, required_habitation_capacity_millions(*col));
+    const double available = std::max(0.0, habitation_capacity_millions(*col));
+    const double shortfall = std::max(0.0, required - available);
+    st.habitation_shortfall_frac = std::clamp(shortfall / pop, 0.0, 1.0);
+  } else {
+    st.habitation_shortfall_frac = 0.0;
+  }
+
+  const TradeProsperityStatus tp = trade_prosperity_status_for_colony(colony_id);
+  st.trade_bonus = std::max(0.0, tp.output_bonus);
+  st.piracy_risk = std::clamp(tp.piracy_risk, 0.0, 1.0);
+  st.blockade_pressure = std::clamp(tp.blockade_pressure, 0.0, 1.0);
+  st.shipping_loss_pressure = std::clamp(tp.shipping_loss_pressure, 0.0, 1.0);
+
+  // Conditions stability delta (additive).
+  st.condition_delta = 0.0;
+  if (cfg_.enable_colony_conditions) {
+    for (const auto& cond : col->conditions) {
+      if (cond.remaining_days <= 1e-9) continue;
+      const auto* def = colony_condition_def(cond.id);
+      if (!def) continue;
+      const double sev = std::clamp(cond.severity, 0.0, 10.0);
+      st.condition_delta += def->stability_delta * sev;
+    }
+    st.condition_delta = std::clamp(st.condition_delta, -1.0, 1.0);
+  }
+
+  // Stability model:
+  // - baseline starts reasonably high so a "normal" mature colony is stable
+  //   even before trade/hub effects are established.
+  double stability = 0.75;
+
+  stability += 0.15 * st.habitability;
+  stability -= 0.25 * st.habitation_shortfall_frac;
+
+  // Trade bonus has a small positive effect; disruption (security/blockade) has a larger negative effect.
+  stability += 0.20 * std::clamp(st.trade_bonus, 0.0, 1.0);
+
+  // Combine current piracy risk with a short memory of civilian losses. This
+  // models a "confidence" effect: even if pirates are no longer present, a
+  // streak of recent merchant losses can still depress stability.
+  const double security_risk = 1.0 - (1.0 - st.piracy_risk) * (1.0 - st.shipping_loss_pressure);
+  stability -= 0.10 * security_risk;
+  stability -= 0.25 * st.blockade_pressure;
+
+  stability += st.condition_delta;
+
+  st.stability = std::clamp(stability, 0.0, 1.0);
+  return st;
+}
+
+
 
 
 void Simulation::ensure_jump_route_cache_current() const {

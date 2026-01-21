@@ -1754,10 +1754,20 @@ void Simulation::tick_ships(double dt_days) {
         continue;
       }
 
-      // Allow escorting any mutual-friendly faction (including self).
-      if (!are_factions_mutual_friendly(ship.faction_id, tgt->faction_id)) {
-        q.erase(q.begin());
-        continue;
+      // By default, escorts only apply to mutual-friendly ships. Some
+      // contract-driven cases (e.g. civilian convoys) allow escorting neutral
+      // targets as long as neither side is Hostile.
+      if (!ord.allow_neutral) {
+        if (!are_factions_mutual_friendly(ship.faction_id, tgt->faction_id)) {
+          q.erase(q.begin());
+          continue;
+        }
+      } else {
+        if (are_factions_hostile(ship.faction_id, tgt->faction_id) ||
+            are_factions_hostile(tgt->faction_id, ship.faction_id)) {
+          q.erase(q.begin());
+          continue;
+        }
       }
 
       const double follow_mkm = std::max(0.0, ord.follow_distance_mkm);

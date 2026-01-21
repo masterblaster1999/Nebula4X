@@ -926,10 +926,13 @@ struct Anomaly {
 // - InvestigateAnomaly: target_id is an Anomaly id.
 // - SalvageWreck: target_id is a Wreck id.
 // - SurveyJumpPoint: target_id is a JumpPoint id.
+// - EscortConvoy: target_id is a Ship id (typically a neutral civilian convoy),
+//                 target_id2 is the destination system id for the escorted leg.
 enum class ContractKind : std::uint8_t {
   InvestigateAnomaly = 0,
   SalvageWreck = 1,
   SurveyJumpPoint = 2,
+  EscortConvoy = 3,
 };
 
 enum class ContractStatus : std::uint8_t {
@@ -959,6 +962,12 @@ struct Contract {
 
   // Target entity id. Interpretation depends on kind.
   Id target_id{kInvalidId};
+
+  // Optional secondary target entity id.
+  //
+  // Interpretation depends on kind:
+  // - EscortConvoy: destination system id.
+  Id target_id2{kInvalidId};
 
   // Optional assignment (UI convenience).
   Id assigned_ship_id{kInvalidId};
@@ -1094,6 +1103,29 @@ struct InstallationBuildOrder {
   double cp_remaining{0.0};
 };
 
+// A temporary colony condition (strike, accident, festival, etc.)
+//
+// Conditions are lightweight, save-game persistent modifiers that affect
+// colony outputs (mining/industry/research/etc.) for a limited duration.
+//
+// The simulation keeps this structure intentionally data-driven:
+// - id is a stable string identifier (e.g. "labor_strike").
+// - remaining_days counts down with simulation time and the condition is
+//   removed once it reaches <= 0.
+// - severity scales the condition's effects (1.0 = nominal).
+struct ColonyCondition {
+  std::string id;
+
+  // Remaining duration (days). Can be fractional when sub-day economy is enabled.
+  double remaining_days{0.0};
+
+  // Effect intensity multiplier (>= 0). 1.0 is baseline; higher is stronger.
+  double severity{1.0};
+
+  // Date::days_since_epoch() when the condition was applied (optional).
+  std::int64_t started_day{0};
+};
+
 struct Colony {
   Id id{kInvalidId};
   std::string name;
@@ -1101,6 +1133,10 @@ struct Colony {
   Id body_id{kInvalidId};
 
   double population_millions{100.0};
+
+  // Active temporary colony conditions (accidents, strikes, festivals, etc.)
+  // See ColonyCondition for semantics.
+  std::vector<ColonyCondition> conditions;
 
   // Stockpiles
   std::unordered_map<std::string, double> minerals;

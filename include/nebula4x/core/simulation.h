@@ -95,6 +95,31 @@ struct SimConfig {
   double salvage_tons_per_day_per_cargo_ton{0.2};
   double salvage_tons_per_day_min{10.0};
 
+  // --- Smart travel (fuel-aware routing) ---
+  //
+  // When enabled, the simulation exposes "smart" travel helpers that attempt to
+  // automatically insert refuel stops at trade-partner colonies so ships/fleets
+  // do not accidentally strand themselves while following long jump chains.
+  //
+  // The UI currently binds this to modifier-clicks on the galaxy map.
+  bool enable_smart_travel_refuel_stops{true};
+
+  // Number of days to remain in orbit at each refuel stop.
+  //
+  // While in orbit, tick_refuel()/tick_rearm()/maintenance can operate.
+  int smart_travel_refuel_wait_days{3};
+
+  // Minimum Fuel stockpile (tons) required for a colony to be considered as a
+  // refuel stop candidate.
+  double smart_travel_refuel_stop_min_fuel_tons{25.0};
+
+  // Hard cap on number of intermediate refuel stops inserted by smart travel.
+  int smart_travel_max_refuel_stops{4};
+
+  // Safety factor applied to maximum leg range (0..1). Example: 0.90 leaves ~10%
+  // reserve fuel.
+  double smart_travel_range_safety_factor{0.90};
+
   // --- Salvage research / reverse engineering ---
   //
   // Salvaging wrecks can optionally award research points and/or reverse
@@ -1273,6 +1298,40 @@ double ship_maintenance_breakdown_subsystem_damage_max{0.20};
   // Example: 4.0 -> up to 5x base chance.
   double geological_survey_depletion_chance_boost{4.0};
 
+// --- Colony conditions / local events ---
+//
+// Colonies can accumulate temporary conditions (strikes, accidents, festivals)
+// that modify local production for a limited duration.
+//
+// Conditions are deterministic and save-game persistent; random rolls are
+// driven by a hashed RNG seeded by (day, colony id).
+bool enable_colony_conditions{true};
+
+// When enabled, colonies periodically roll for new conditions.
+bool enable_colony_events{true};
+
+// Roll cadence for colony events (days). The default is weekly.
+int colony_event_roll_interval_days{7};
+
+// Baseline probability for a negative colony event on a roll.
+// (Further scaled by colony stability, population, and "event fatigue".)
+double colony_event_negative_chance_per_roll{0.03};
+
+// Baseline probability for a positive colony event on a roll.
+double colony_event_positive_chance_per_roll{0.02};
+
+// Hard cap on (negative + positive) probability per roll.
+double colony_event_max_combined_chance_per_roll{0.20};
+
+// Event fatigue: each existing condition multiplies event chances by this factor.
+// (0.75 means 1 condition -> 75% chance, 2 conditions -> 56%, etc.)
+double colony_event_existing_condition_chance_factor{0.75};
+
+// Safety cap: maximum number of concurrent conditions stored on a colony.
+int colony_condition_max_active{4};
+
+
+
 
   // --- Auto-tanker (fuel logistics) ---
   //
@@ -1429,6 +1488,65 @@ double ship_maintenance_breakdown_subsystem_damage_max{0.20};
   double civilian_trade_convoy_blockade_risk_weight{0.80};
 
 
+  // --- Civilian shipping loss memory (economic disruption) ---
+  //
+  // Merchant shipping does not instantly recover after a raid. Instead, the
+  // simulation can keep a short "memory" of recent civilian losses (based on
+  // Merchant Guild ship wrecks). This pressure can then influence:
+  //  - civilian convoy route selection
+  //  - trade prosperity (representing insurance and disruption)
+  //
+  // memory_days controls how long losses remain relevant. 0 disables the
+  // mechanic.
+  int civilian_shipping_loss_memory_days{60};
+
+  // Raw loss "score" (sum of decayed wreck weights) is mapped into a normalized
+  // 0..1 pressure via:
+  //   pressure = 1 - exp(-score / civilian_shipping_loss_pressure_scale)
+  // Larger scale => losses need to be more frequent to produce the same
+  // pressure.
+  double civilian_shipping_loss_pressure_scale{2.0};
+
+  // Additional risk term applied to civilian trade convoy lane weighting.
+  //
+  // Civilian endpoint risk becomes:
+  //   risk ~= piracy_risk
+  //        + (civilian_trade_convoy_blockade_risk_weight * blockade_pressure)
+  //        + (civilian_trade_convoy_shipping_loss_risk_weight * shipping_loss_pressure)
+  //
+  // 0 disables this weighting.
+  double civilian_trade_convoy_shipping_loss_risk_weight{0.90};
+
+
+  // --- Trade network diplomacy modifiers ---
+  //
+  // When enabled, TradeNetwork lane volumes are scaled based on the diplomatic
+  // relationship between the dominant factions in the origin/destination
+  // systems.
+  //
+  // This makes diplomacy feel economically meaningful (e.g. signing a trade
+  // agreement can measurably increase interstellar commerce, while wars
+  // suppress trade to a "smuggling" trickle).
+  //
+  // Note: this is intentionally approximate and meant to be a lightweight
+  // macro-economic signal. It affects:
+  //  - Trade lane overlays
+  //  - Civilian trade convoy spawning (which is driven by lane volumes)
+  bool enable_trade_network_diplomacy_multipliers{true};
+
+  // Volume multiplier applied when the dominant factions are trade partners
+  // (trade agreement / alliance / mutual friendly).
+  double trade_network_volume_mult_trade_partner{1.15};
+
+  // Volume multiplier applied when the factions are non-hostile but not trade
+  // partners.
+  double trade_network_volume_mult_neutral{0.90};
+
+  // Volume multiplier applied when the factions are hostile.
+  // Keep this > 0 if you want "smuggling" lanes to still exist.
+  double trade_network_volume_mult_hostile{0.30};
+
+
   // --- AI trade security patrols (procedural) ---
   //
   // When enabled, AI-controlled explorer empires will periodically retask their
@@ -1486,11 +1604,36 @@ double ship_maintenance_breakdown_subsystem_damage_max{0.20};
   // 0 => hub score ignored; 1 => hub score fully gates the base bonus.
   double trade_prosperity_hub_influence{0.35};
 
+  // Optional diplomacy-driven market access boost.
+  //
+  // When enabled, a faction's active trade partners increase the *effective*
+  // market size used when calculating TradeProsperityStatus::market_factor.
+  //
+  // This is intended to make trade treaties feel mechanically rewarding even
+  // before deeper inter-faction logistics are simulated.
+  bool enable_trade_prosperity_treaty_market_boost{true};
+
+  // Effective market size multiplier added per trade partner.
+  // Example: 0.10 with 3 trade partners => market_size *= (1 + 0.30).
+  double trade_prosperity_treaty_market_boost_per_trade_partner{0.10};
+
+  // Clamp on the total additive market size boost from treaties.
+  // Example: 0.50 => market_size *= (1 + min(0.50, per_partner * N)).
+  double trade_prosperity_treaty_market_boost_max{0.50};
+
   // Penalty applied from piracy risk (0..1). Higher => piracy more disruptive.
   double trade_prosperity_piracy_risk_penalty{0.85};
 
   // Penalty applied from blockade pressure (0..1). Higher => blockades more disruptive.
   double trade_prosperity_blockade_pressure_penalty{1.0};
+
+  // Penalty applied from recent civilian shipping losses (0..1).
+  //
+  // This models a lightweight "insurance + confidence" effect: after merchant
+  // losses, trade activity remains depressed for a while even if pirates leave.
+  // It uses the shipping loss pressure derived from Merchant Guild wrecks in
+  // the colony's system (see civilian_shipping_loss_memory_days).
+  double trade_prosperity_shipping_loss_penalty{0.55};
 
 
   // --- Pirate hideouts (persistent pirate bases) ---
@@ -1663,11 +1806,28 @@ struct BlockadeStatus {
   int defender_ships{0};
 };
 
+// A lightweight summary of recent civilian shipping losses in a star system.
+//
+// This is a query-only metric derived from Merchant Guild ship wrecks (see
+// Wreck::source_faction_id). It is intentionally "soft" and time-decayed,
+// modeling the idea that merchants avoid systems that have seen recent losses
+// even if the immediate pirate presence has moved on.
+//
+// pressure is normalized to [0,1]. score is a raw sum of decayed wreck weights
+// (useful for debugging and tuning).
+struct CivilianShippingLossStatus {
+  Id system_id{kInvalidId};
+
+  double pressure{0.0};
+  double score{0.0};
+  int recent_wrecks{0};
+};
+
 // Colony trade prosperity status.
 //
 // Trade prosperity is a lightweight economy modifier derived from the procedural
 // trade network (market size + hub score), with disruption penalties for piracy
-// risk and blockade pressure.
+// risk, blockade pressure, and recent civilian shipping losses.
 struct TradeProsperityStatus {
   Id colony_id{kInvalidId};
 
@@ -1679,12 +1839,64 @@ struct TradeProsperityStatus {
 
   // Diagnostics for UI/tooling.
   double market_size{0.0};
+
+  // Number of other factions considered trade partners for the colony's owning
+  // faction (trade agreements / alliances / mutual friendly).
+  int trade_partner_count{0};
+
+  // Multiplier applied to market_size from treaties (1.0 = no boost).
+  double treaty_market_boost{1.0};
+
+  // market_size * treaty_market_boost.
+  double effective_market_size{0.0};
   double hub_score{0.0};
   double market_factor{0.0};
   double pop_factor{0.0};
   double piracy_risk{0.0};
   double blockade_pressure{0.0};
+  double shipping_loss_pressure{0.0};
 };
+
+
+// Aggregated output multipliers derived from a colony's active conditions.
+//
+// All fields are multiplicative scalars (1.0 = no change).
+struct ColonyConditionMultipliers {
+  double mining{1.0};
+  double industry{1.0};
+  double research{1.0};
+  double construction{1.0};
+  double shipyard{1.0};
+  double terraforming{1.0};
+  double troop_training{1.0};
+  double pop_growth{1.0};
+};
+
+// Colony stability is a pure query derived from environmental and economic
+// factors (habitability, habitation shortfall, trade, piracy, blockade) and
+// active conditions.
+//
+// stability is normalized to [0,1] and is primarily used to scale event odds.
+struct ColonyStabilityStatus {
+  Id colony_id{kInvalidId};
+
+  double stability{1.0};
+
+  // Diagnostics for UI/tooling.
+  double habitability{1.0};
+  double habitation_shortfall_frac{0.0};
+
+  // Trade prosperity additive bonus (e.g. 0.05 => +5%).
+  double trade_bonus{0.0};
+
+  double piracy_risk{0.0};
+  double blockade_pressure{0.0};
+  double shipping_loss_pressure{0.0};
+
+  // Net stability delta contributed by active conditions.
+  double condition_delta{0.0};
+};
+
 
 // Notes:
 // - jump_ids are the *source-side* jump points to traverse (i.e. the ids that
@@ -2074,6 +2286,10 @@ class Simulation {
   bool issue_fleet_survey_jump_point(Id fleet_id, Id jump_point_id, bool transit_when_done = false,
                                     bool restrict_to_discovered = false);
   bool issue_fleet_travel_to_system(Id fleet_id, Id target_system_id, bool restrict_to_discovered = false);
+  // Fuel-aware travel helper that attempts to insert refuel stops at
+  // trade-partner colonies along the route.
+  bool issue_fleet_travel_to_system_smart(Id fleet_id, Id target_system_id,
+                                         bool restrict_to_discovered = false);
   bool issue_fleet_attack_ship(Id fleet_id, Id target_ship_id, bool restrict_to_discovered = false);
   bool issue_fleet_escort_ship(Id fleet_id, Id target_ship_id, double follow_distance_mkm = 1.0,
                                bool restrict_to_discovered = false);
@@ -2137,6 +2353,14 @@ class Simulation {
   // (useful when your next queued order is to move to a specific body/colony/ship).
   bool issue_travel_to_system(Id ship_id, Id target_system_id, bool restrict_to_discovered = false,
                             std::optional<Vec2> goal_pos_mkm = std::nullopt);
+  // Fuel-aware travel helper that attempts to insert refuel stops at
+  // trade-partner colonies along the route.
+  //
+  // When smart travel is disabled or the ship does not use fuel, this behaves
+  // like issue_travel_to_system().
+  bool issue_travel_to_system_smart(Id ship_id, Id target_system_id,
+                                   bool restrict_to_discovered = false,
+                                   std::optional<Vec2> goal_pos_mkm = std::nullopt);
   // Attack a hostile ship.
   //
   // If the target is in another system, the simulation will auto-enqueue TravelViaJump steps
@@ -2152,7 +2376,7 @@ class Simulation {
   // follow_distance_mkm:
   //  Desired separation in-system. If <= 0, the sim uses docking_range_mkm.
   bool issue_escort_ship(Id escort_ship_id, Id target_ship_id, double follow_distance_mkm = 1.0,
-                         bool restrict_to_discovered = false);
+                         bool restrict_to_discovered = false, bool allow_neutral = false);
 
   // Cargo / logistics (prototype).
   // Load/unload colony minerals into a ship's cargo hold.
@@ -2282,13 +2506,45 @@ class Simulation {
   BlockadeStatus blockade_status_for_colony(Id colony_id) const;
   double blockade_output_multiplier_for_colony(Id colony_id) const;
 
+  // Civilian shipping loss query helpers.
+  //
+  // These are pure queries derived from Merchant Guild ship wrecks. The
+  // implementation caches per-system pressure for the current day to avoid
+  // repeated scans.
+  CivilianShippingLossStatus civilian_shipping_loss_status_for_system(Id system_id) const;
+  double civilian_shipping_loss_pressure_for_system(Id system_id) const;
+
   // Trade prosperity query helpers.
   //
   // Trade prosperity is a lightweight economy bonus derived from the procedural
   // interstellar trade network (market size + hub score). The bonus scales with
-  // colony population and is reduced by piracy risk and blockade pressure.
+  // colony population and is reduced by piracy risk, blockade pressure, and
+  // a short "shipping loss" memory derived from recent merchant wrecks.
   TradeProsperityStatus trade_prosperity_status_for_colony(Id colony_id) const;
   double trade_prosperity_output_multiplier_for_colony(Id colony_id) const;
+
+// Colony condition query helpers.
+//
+// These are pure queries; conditions themselves are stored on Colony.
+ColonyConditionMultipliers colony_condition_multipliers(const Colony& colony) const;
+ColonyConditionMultipliers colony_condition_multipliers_for_condition(const ColonyCondition& condition) const;
+
+std::string colony_condition_display_name(const std::string& condition_id) const;
+std::string colony_condition_description(const std::string& condition_id) const;
+bool colony_condition_is_positive(const std::string& condition_id) const;
+
+// Returns the mineral cost to resolve a given condition immediately.
+// If the condition is not resolvable, returns an empty map.
+std::unordered_map<std::string, double> colony_condition_resolve_cost(Id colony_id,
+                                                                      const ColonyCondition& condition) const;
+
+// Resolve a condition immediately by paying its mineral cost (if any) and
+// removing it from the colony.
+bool resolve_colony_condition(Id colony_id, const std::string& condition_id, std::string* error = nullptr);
+
+// Colony stability (0..1) derived from environment/economy + conditions.
+ColonyStabilityStatus colony_stability_status_for_colony(Id colony_id) const;
+
 
   // Crew grade helpers.
   // Returns a signed bonus fraction (e.g. +0.10 = +10%).
@@ -2610,6 +2866,7 @@ bool move_construction_order(Id colony_id, int from_index, int to_index);
   void tick_one_day();
   void tick_one_tick_hours(int hours);
   void tick_colonies(double dt_days, bool emit_daily_events);
+  void tick_colony_conditions(double dt_days, bool day_advanced);
   void tick_research(double dt_days);
   void tick_shipyards(double dt_days);
   void tick_construction(double dt_days);
@@ -2684,6 +2941,13 @@ bool move_construction_order(Id colony_id, int from_index, int to_index);
   // systems). Cache per-colony pressure for the current day/hour.
   void ensure_blockade_cache_current() const;
   void invalidate_blockade_cache() const;
+
+  // --- Civilian shipping loss cache (performance) ---
+  // Civilian shipping loss queries may be called frequently (UI + trade
+  // prosperity + convoy routing). Cache per-system loss pressure for the
+  // current simulation day.
+  void ensure_civilian_shipping_loss_cache_current() const;
+  void invalidate_civilian_shipping_loss_cache() const;
 
   // --- Trade prosperity cache (performance) ---
   // Trade prosperity queries may be called frequently (UI + economy ticks). Cache
@@ -2772,6 +3036,14 @@ mutable int blockade_cache_hour_{0};
 mutable std::uint64_t blockade_cache_state_generation_{0};
 mutable std::uint64_t blockade_cache_content_generation_{0};
 mutable std::unordered_map<Id, BlockadeStatus> blockade_cache_;
+
+
+// --- Civilian shipping loss cache ---
+mutable bool civilian_shipping_loss_cache_valid_{false};
+mutable std::int64_t civilian_shipping_loss_cache_day_{0};
+mutable std::uint64_t civilian_shipping_loss_cache_state_generation_{0};
+mutable std::uint64_t civilian_shipping_loss_cache_content_generation_{0};
+mutable std::unordered_map<Id, CivilianShippingLossStatus> civilian_shipping_loss_cache_;
 
 
 // --- Trade prosperity cache ---

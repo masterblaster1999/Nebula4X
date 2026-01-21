@@ -2516,7 +2516,9 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   // Click interaction:
   // - Left click selects a system.
   // - Right click routes selected ship to the target system (Shift queues).
+  // - Alt + Right click smart-routes selected ship (adds refuel stops; Shift queues).
   // - Ctrl + right click routes selected fleet to the target system (Shift queues).
+  // - Ctrl + Shift + Alt + right click smart-routes selected fleet (adds refuel stops).
   // - Ctrl + Alt + right click toggles the hovered system as a waypoint in the
   //   selected fleet's patrol circuit.
   // Route ruler: hold D and click two systems to keep a persistent planning overlay.
@@ -2587,8 +2589,19 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
         const bool fleet_mode = ImGui::GetIO().KeyCtrl && selected_fleet != nullptr;
 
         if (fleet_mode) {
-          // Ctrl + Alt + right click: edit selected fleet's patrol circuit waypoints.
-          if (ImGui::GetIO().KeyAlt) {
+          // Ctrl + Shift + Alt + right click: smart-route selected fleet (fuel-aware, adds refuel stops).
+          // Ctrl + Alt + right click (without Shift): edit selected fleet's patrol circuit waypoints.
+          const bool smart_fleet_travel = ImGui::GetIO().KeyAlt && ImGui::GetIO().KeyShift;
+          if (smart_fleet_travel) {
+            // NOTE: Shift is part of the chord here, so we treat smart fleet travel as non-queued.
+            sim.clear_fleet_orders(selected_fleet->id);
+
+            // In fog-of-war mode, only allow routing through systems the faction already knows.
+            const bool restrict = ui.fog_of_war;
+            if (!sim.issue_fleet_travel_to_system_smart(selected_fleet->id, hovered_system, restrict)) {
+              nebula4x::log::warn("No known jump route to that system.");
+            }
+          } else if (ImGui::GetIO().KeyAlt) {
             Fleet* fl_mut = find_ptr(s.fleets, selected_fleet->id);
             if (fl_mut && (viewer_faction_id == kInvalidId || fl_mut->faction_id == viewer_faction_id)) {
               // Avoid FoW leaks: only allow adding known systems.
@@ -2639,7 +2652,11 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
 
           // In fog-of-war mode, only allow routing through systems the faction already knows.
           const bool restrict = ui.fog_of_war;
-          if (!sim.issue_travel_to_system(selected_ship, hovered_system, restrict)) {
+          const bool smart_ship_travel = ImGui::GetIO().KeyAlt;
+          const bool ok = smart_ship_travel
+                            ? sim.issue_travel_to_system_smart(selected_ship, hovered_system, restrict)
+                            : sim.issue_travel_to_system(selected_ship, hovered_system, restrict);
+          if (!ok) {
             nebula4x::log::warn("No known jump route to that system.");
           }
         } else {
@@ -3207,9 +3224,11 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   ImGui::BulletText("R: reset view");
   ImGui::BulletText("Left click: select system");
   ImGui::BulletText("Right click: route selected ship (Shift queues)");
+  ImGui::BulletText("Alt+Right click: smart-route selected ship (adds refuel stops; Shift queues)");
   ImGui::BulletText("Ctrl+Right click: route selected fleet (Shift queues)");
+  ImGui::BulletText("Ctrl+Shift+Alt+Right click: smart-route selected fleet (adds refuel stops)");
   ImGui::BulletText("Ctrl+Alt+Right click: edit selected fleet patrol circuit waypoints");
-  ImGui::BulletText("Hover: route preview (Shift=queued, Ctrl=fleet)");
+  ImGui::BulletText("Hover: route preview (Shift=queued, Ctrl=fleet, Alt=smart)");
 
   // --- System finder & favorites ---
   // Keeps everything within the *visible* system set to avoid leaking information under FoW.

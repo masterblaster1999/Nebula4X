@@ -5030,13 +5030,150 @@ const bool can_up = (i > 0);
           }
           if (ImGui::IsItemHovered()) {
             ImGui::BeginTooltip();
-            ImGui::Text("Market size: %.2f (factor %.2f)", tp.market_size, tp.market_factor);
+            if (tp.trade_partner_count > 0 && tp.treaty_market_boost > 1.0001) {
+              ImGui::Text("Market size: %.2f (effective %.2f, factor %.2f)", tp.market_size, tp.effective_market_size,
+                          tp.market_factor);
+              ImGui::Text("Trade partners: %d (treaty boost x%.2f)", tp.trade_partner_count, tp.treaty_market_boost);
+            } else {
+              ImGui::Text("Market size: %.2f (factor %.2f)", tp.market_size, tp.market_factor);
+              ImGui::Text("Trade partners: %d", tp.trade_partner_count);
+            }
             ImGui::Text("Hub score: %.2f", tp.hub_score);
             ImGui::Text("Population factor: %.2f", tp.pop_factor);
             ImGui::Text("Piracy risk: %.2f", tp.piracy_risk);
             ImGui::Text("Blockade pressure: %.2f", tp.blockade_pressure);
+            // Recent merchant losses can depress trade even if pirates have
+            // moved on (insurance / confidence effect).
+            ImGui::Text("Shipping loss pressure: %.2f", tp.shipping_loss_pressure);
+            {
+              Id sys_id = kInvalidId;
+              if (const Body* b = find_ptr(s.bodies, colony->body_id)) {
+                sys_id = b->system_id;
+              }
+              if (sys_id != kInvalidId) {
+                const auto loss = sim.civilian_shipping_loss_status_for_system(sys_id);
+                if (loss.recent_wrecks > 0) {
+                  ImGui::Text("Recent merchant wrecks: %d (score %.2f)", loss.recent_wrecks, loss.score);
+                }
+              }
+            }
             ImGui::Text("Max bonus: +%.0f%%", sim.cfg().trade_prosperity_max_output_bonus * 100.0);
             ImGui::EndTooltip();
+          }
+        }
+
+
+        if (sim.cfg().enable_colony_conditions) {
+          ImGui::Separator();
+
+          const auto stab = sim.colony_stability_status_for_colony(colony->id);
+          ImGui::Text("Stability: %.0f%%", stab.stability * 100.0);
+          if (ImGui::IsItemHovered()) {
+            ImGui::BeginTooltip();
+            ImGui::Text("Habitability: %.2f", stab.habitability);
+            ImGui::Text("Habitation shortfall: %.0f%%", stab.habitation_shortfall_frac * 100.0);
+            ImGui::Text("Trade bonus: +%.0f%%", stab.trade_bonus * 100.0);
+            ImGui::Text("Piracy risk: %.0f%%", stab.piracy_risk * 100.0);
+            ImGui::Text("Shipping loss pressure: %.0f%%", stab.shipping_loss_pressure * 100.0);
+            ImGui::Text("Blockade pressure: %.0f%%", stab.blockade_pressure * 100.0);
+            ImGui::Text("Conditions delta: %+0.2f", stab.condition_delta);
+            ImGui::EndTooltip();
+          }
+
+          ImGui::Text("Conditions");
+          if (colony->conditions.empty()) {
+            ImGui::TextDisabled("(none)");
+          } else {
+            static std::string resolve_status;
+            bool resolved_this_frame = false;
+
+            for (std::size_t i = 0; i < colony->conditions.size(); ++i) {
+              const auto& cond = colony->conditions[i];
+              if (cond.id.empty()) continue;
+
+              const std::string name = sim.colony_condition_display_name(cond.id);
+              const std::string desc = sim.colony_condition_description(cond.id);
+              const bool positive = sim.colony_condition_is_positive(cond.id);
+              const int days = static_cast<int>(std::ceil(std::max(0.0, cond.remaining_days)));
+
+              const auto cost = sim.colony_condition_resolve_cost(colony->id, cond);
+
+              bool affordable = true;
+              for (const auto& [mineral, amt] : cost) {
+                const auto it = colony->minerals.find(mineral);
+                const double have = it == colony->minerals.end() ? 0.0 : std::max(0.0, it->second);
+                if (have + 1e-9 < amt) affordable = false;
+              }
+
+              ImGui::PushID(static_cast<int>(i));
+              ImGui::Bullet();
+              ImGui::SameLine();
+              ImGui::Text("%s%s", name.c_str(), positive ? " (positive)" : "");
+              const bool hovered_name = ImGui::IsItemHovered();
+              ImGui::SameLine();
+              ImGui::TextDisabled("(%dd)", days);
+
+              if (!cost.empty()) {
+                ImGui::SameLine();
+                if (!affordable) ImGui::BeginDisabled();
+                if (ImGui::SmallButton("Resolve")) {
+                  std::string err;
+                  const std::string cond_id = cond.id;
+                  if (!sim.resolve_colony_condition(colony->id, cond_id, &err)) {
+                    resolve_status = err;
+                  } else {
+                    resolve_status.clear();
+                  }
+                  resolved_this_frame = true;
+                }
+                if (!affordable) ImGui::EndDisabled();
+              }
+
+              if (hovered_name) {
+                ImGui::BeginTooltip();
+                if (!desc.empty()) {
+                  ImGui::TextWrapped("%s", desc.c_str());
+                } else {
+                  ImGui::TextWrapped("%s", cond.id.c_str());
+                }
+
+                ImGui::Separator();
+                ImGui::Text("Remaining: %d days", days);
+                ImGui::Text("Severity: %.2f", cond.severity);
+
+                const auto eff = sim.colony_condition_multipliers_for_condition(cond);
+                ImGui::Separator();
+                ImGui::Text("Effects (multipliers)");
+                ImGui::Text("Mining:        x%.2f", eff.mining);
+                ImGui::Text("Industry:      x%.2f", eff.industry);
+                ImGui::Text("Research:      x%.2f", eff.research);
+                ImGui::Text("Construction:  x%.2f", eff.construction);
+                ImGui::Text("Shipyard:      x%.2f", eff.shipyard);
+                ImGui::Text("Terraforming:  x%.2f", eff.terraforming);
+                ImGui::Text("Troop training:x%.2f", eff.troop_training);
+                ImGui::Text("Pop growth:    x%.2f", eff.pop_growth);
+
+                if (!cost.empty()) {
+                  ImGui::Separator();
+                  ImGui::Text("Resolve cost");
+                  for (const auto& [mineral, amt] : cost) {
+                    const auto it = colony->minerals.find(mineral);
+                    const double have = it == colony->minerals.end() ? 0.0 : std::max(0.0, it->second);
+                    ImGui::Text("%s: %.0f / %.0f", mineral.c_str(), have, amt);
+                  }
+                  if (!affordable) ImGui::TextDisabled("(insufficient stockpile)");
+                }
+
+                ImGui::EndTooltip();
+              }
+
+              ImGui::PopID();
+              if (resolved_this_frame) break;
+            }
+
+            if (!resolve_status.empty()) {
+              ImGui::TextWrapped("%s", resolve_status.c_str());
+            }
           }
         }
 

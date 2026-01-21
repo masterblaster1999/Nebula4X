@@ -141,7 +141,9 @@ struct GameState {
   // v51: faction narrative journal entries.
   // v52: procedural contracts (mission board scaffolding).
   // v53: score history snapshots (victory analytics / projection).
-  int save_version{53};
+  // v54: convoy escort contracts + escort neutral flag.
+  // v55: colony conditions + colony stability/events.
+  int save_version{55};
   Date date;
 
   // Hour-of-day within the current Date (0..23).

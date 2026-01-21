@@ -972,6 +972,327 @@ bool Simulation::issue_fleet_travel_to_system(Id fleet_id, Id target_system_id, 
   return any;
 }
 
+bool Simulation::issue_fleet_travel_to_system_smart(Id fleet_id, Id target_system_id, bool restrict_to_discovered) {
+  prune_fleets();
+  const auto* fl = find_ptr(state_.fleets, fleet_id);
+  if (!fl) return false;
+
+  if (!find_ptr(state_.systems, target_system_id)) return false;
+  if (fl->ship_ids.empty()) return false;
+
+  // Feature gate: allow turning this off globally.
+  if (!cfg_.enable_smart_travel_refuel_stops) {
+    return issue_fleet_travel_to_system(fleet_id, target_system_id, restrict_to_discovered);
+  }
+
+  // Prefer routing once for the whole fleet so every ship takes the same hop sequence.
+  // If ships are not co-located (after their queued jumps), fall back to per-ship routing.
+  Id leader_id = fl->leader_ship_id;
+  const Ship* leader = (leader_id != kInvalidId) ? find_ptr(state_.ships, leader_id) : nullptr;
+  if (!leader) {
+    leader_id = kInvalidId;
+    for (Id sid : fl->ship_ids) {
+      if (const auto* sh = find_ptr(state_.ships, sid)) {
+        leader_id = sid;
+        leader = sh;
+        break;
+      }
+    }
+  }
+  if (!leader) return false;
+
+  const PredictedNavState leader_nav = predicted_nav_state_after_queued_jumps(state_, leader_id,
+                                                                              /*include_queued_jumps=*/true);
+  if (leader_nav.system_id == kInvalidId) return false;
+
+  bool colocated = true;
+  for (Id sid : fl->ship_ids) {
+    const PredictedNavState nav = predicted_nav_state_after_queued_jumps(state_, sid, /*include_queued_jumps=*/true);
+    if (nav.system_id != leader_nav.system_id) {
+      colocated = false;
+      break;
+    }
+  }
+
+  if (!colocated) {
+    bool any = false;
+    for (Id sid : fl->ship_ids) {
+      if (issue_travel_to_system_smart(sid, target_system_id, restrict_to_discovered)) any = true;
+    }
+    return any;
+  }
+
+  if (leader_nav.system_id == target_system_id) return true; // no-op
+
+  // Compute fleet-limiting range.
+  // We treat range as million-km: range_mkm = fuel_tons / burn_per_mkm.
+  // For legs after a refuel stop we assume the ship can top up to full capacity.
+  double start_leg_range_mkm = std::numeric_limits<double>::infinity();
+  double full_leg_range_mkm = std::numeric_limits<double>::infinity();
+  bool any_uses_fuel = false;
+
+  for (Id sid : fl->ship_ids) {
+    const Ship* sh = find_ptr(state_.ships, sid);
+    if (!sh) continue;
+    const ShipDesign* d = find_design(sh->design_id);
+    if (!d) continue;
+    const double burn = std::max(0.0, d->fuel_use_per_mkm);
+    const double cap = std::max(0.0, d->fuel_capacity_tons);
+    if (burn <= 1e-12 || cap <= 1e-9) continue;
+
+    any_uses_fuel = true;
+    double fuel = sh->fuel_tons;
+    if (fuel < 0.0) fuel = cap;
+    fuel = std::clamp(fuel, 0.0, cap);
+
+    const double r0 = fuel / burn;
+    const double rfull = cap / burn;
+    start_leg_range_mkm = std::min(start_leg_range_mkm, r0);
+    full_leg_range_mkm = std::min(full_leg_range_mkm, rfull);
+  }
+
+  if (!any_uses_fuel || !std::isfinite(start_leg_range_mkm) || !std::isfinite(full_leg_range_mkm)) {
+    // No fuel constraint: fall back to normal fleet travel.
+    return issue_fleet_travel_to_system(fleet_id, target_system_id, restrict_to_discovered);
+  }
+
+  const double safety = std::clamp(cfg_.smart_travel_range_safety_factor, 0.05, 1.0);
+  const int max_stops = std::max(0, cfg_.smart_travel_max_refuel_stops);
+  const int wait_days = cfg_.smart_travel_refuel_wait_days;
+  const double min_stop_fuel = std::max(0.0, cfg_.smart_travel_refuel_stop_min_fuel_tons);
+
+  // Direct feasibility check.
+  const auto direct_plan = plan_jump_route_cached(leader_nav.system_id, leader_nav.position_mkm,
+                                                  fl->faction_id, leader->speed_km_s, target_system_id,
+                                                  restrict_to_discovered);
+  if (!direct_plan) return false;
+
+  if (direct_plan->total_distance_mkm <= start_leg_range_mkm * safety + 1e-9) {
+    return issue_fleet_travel_to_system(fleet_id, target_system_id, restrict_to_discovered);
+  }
+
+  struct Node {
+    Id system_id{kInvalidId};
+    Vec2 pos_mkm{0.0, 0.0};
+    Id body_id{kInvalidId};
+    Id colony_id{kInvalidId};
+    bool is_refuel_stop{false};
+  };
+
+  std::vector<Node> nodes;
+  nodes.reserve(state_.colonies.size() + 2);
+  nodes.push_back(Node{leader_nav.system_id, leader_nav.position_mkm, kInvalidId, kInvalidId, false});
+
+  // Candidate refuel stops.
+  for (Id cid : sorted_keys(state_.colonies)) {
+    const Colony* c = find_ptr(state_.colonies, cid);
+    if (!c) continue;
+    if (!are_factions_trade_partners(fl->faction_id, c->faction_id)) continue;
+
+    const Body* b = find_ptr(state_.bodies, c->body_id);
+    if (!b) continue;
+    if (b->system_id == kInvalidId) continue;
+    if (!find_ptr(state_.systems, b->system_id)) continue;
+
+    if (restrict_to_discovered && !is_system_discovered_by_faction(fl->faction_id, b->system_id)) {
+      continue;
+    }
+
+    const double fuel_avail = [&]() {
+      if (auto it = c->minerals.find("Fuel"); it != c->minerals.end()) return std::max(0.0, it->second);
+      return 0.0;
+    }();
+    if (fuel_avail + 1e-9 < min_stop_fuel) continue;
+
+    Node n;
+    n.system_id = b->system_id;
+    n.pos_mkm = b->position_mkm;
+    n.body_id = b->id;
+    n.colony_id = cid;
+    n.is_refuel_stop = true;
+    nodes.push_back(n);
+  }
+
+  // Destination node (system only).
+  const int dest_node = static_cast<int>(nodes.size());
+  nodes.push_back(Node{target_system_id, Vec2{0.0, 0.0}, kInvalidId, kInvalidId, false});
+
+  // Dijkstra over (node, stops_used).
+  const int N = static_cast<int>(nodes.size());
+  const int K = max_stops;
+  const int total_states = N * (K + 1);
+
+  auto state_index = [&](int node, int stops_used) { return stops_used * N + node; };
+
+  std::vector<double> best(total_states, std::numeric_limits<double>::infinity());
+  std::vector<int> prev(total_states, -1);
+
+  struct QItem {
+    double cost{0.0};
+    int node{0};
+    int stops{0};
+  };
+  struct QComp {
+    bool operator()(const QItem& a, const QItem& b) const { return a.cost > b.cost; }
+  };
+  std::priority_queue<QItem, std::vector<QItem>, QComp> pq;
+
+  best[state_index(0, 0)] = 0.0;
+  pq.push(QItem{0.0, 0, 0});
+
+  int best_dest_state = -1;
+
+  while (!pq.empty()) {
+    const QItem cur = pq.top();
+    pq.pop();
+    const int cur_si = state_index(cur.node, cur.stops);
+    if (cur.cost > best[cur_si] + 1e-9) continue;
+
+    if (cur.node == dest_node) {
+      best_dest_state = cur_si;
+      break;
+    }
+
+    const Node& a = nodes[cur.node];
+    const double avail_range = (cur.node == 0 ? start_leg_range_mkm : full_leg_range_mkm) * safety;
+    if (avail_range <= 1e-9) continue;
+
+    for (int j = 1; j < N; ++j) {
+      if (j == cur.node) continue;
+      const Node& b = nodes[j];
+      const int next_stops = cur.stops + (b.is_refuel_stop ? 1 : 0);
+      if (next_stops > K) continue;
+
+      const std::optional<Vec2> goal = b.is_refuel_stop ? std::optional<Vec2>(b.pos_mkm) : std::nullopt;
+      const auto plan = plan_jump_route_cached(a.system_id, a.pos_mkm,
+                                              fl->faction_id, leader->speed_km_s,
+                                              b.system_id, restrict_to_discovered, goal);
+      if (!plan) continue;
+
+      const double dist_mkm = plan->total_distance_mkm;
+      if (dist_mkm > avail_range + 1e-9) continue;
+
+      double edge_cost = plan->total_eta_days;
+      if (b.is_refuel_stop && wait_days > 0) edge_cost += static_cast<double>(wait_days);
+
+      const int nxt_si = state_index(j, next_stops);
+      const double cand = cur.cost + edge_cost;
+      if (cand + 1e-9 < best[nxt_si]) {
+        best[nxt_si] = cand;
+        prev[nxt_si] = cur_si;
+        pq.push(QItem{cand, j, next_stops});
+      }
+    }
+  }
+
+  if (best_dest_state == -1) {
+    // No feasible refuel chain. Fall back to direct travel.
+    const Faction* fac = find_ptr(state_.factions, fl->faction_id);
+    if (fac && fac->control == FactionControl::Player) {
+      EventContext ctx;
+      ctx.faction_id = fl->faction_id;
+      ctx.system_id = leader_nav.system_id;
+      push_event(EventLevel::Warn, EventCategory::Movement,
+                 "Smart fleet travel could not find a refuel-stop route; issuing direct travel.", ctx);
+    }
+    return issue_fleet_travel_to_system(fleet_id, target_system_id, restrict_to_discovered);
+  }
+
+  // Reconstruct node path.
+  std::vector<int> path;
+  for (int si = best_dest_state; si != -1; si = prev[si]) {
+    const int node = si % N;
+    path.push_back(node);
+  }
+  std::reverse(path.begin(), path.end());
+  if (path.empty() || path.front() != 0 || path.back() != dest_node) {
+    return issue_fleet_travel_to_system(fleet_id, target_system_id, restrict_to_discovered);
+  }
+
+  // Build list of refuel stop body ids in order.
+  std::vector<Id> stop_bodies;
+  stop_bodies.reserve(path.size());
+  for (std::size_t i = 1; i + 1 < path.size(); ++i) {
+    const Node& n = nodes[path[i]];
+    if (n.is_refuel_stop && n.body_id != kInvalidId) stop_bodies.push_back(n.body_id);
+  }
+
+  // Issue orders: each leg uses the leader's hop sequence so the fleet stays coherent.
+  Id cur_sys = leader_nav.system_id;
+  Vec2 cur_pos = leader_nav.position_mkm;
+
+  auto enqueue_leg_for_all = [&](Id next_sys, std::optional<Vec2> goal_pos, std::optional<Id> orbit_body) {
+    const auto leg_plan = plan_jump_route_cached(cur_sys, cur_pos, fl->faction_id, leader->speed_km_s,
+                                                next_sys, restrict_to_discovered, goal_pos);
+    if (!leg_plan) return false;
+
+    for (Id sid : fl->ship_ids) {
+      if (!find_ptr(state_.ships, sid)) continue;
+      auto& q = state_.ship_orders[sid].queue;
+      for (Id jid : leg_plan->jump_ids) q.push_back(TravelViaJump{jid});
+      if (orbit_body && *orbit_body != kInvalidId) {
+        q.push_back(OrbitBody{*orbit_body, wait_days});
+      }
+    }
+    // Advance the assumed position for the next leg.
+    cur_sys = next_sys;
+    if (orbit_body && *orbit_body != kInvalidId) {
+      if (const Body* b = find_ptr(state_.bodies, *orbit_body)) {
+        cur_pos = b->position_mkm;
+      }
+    } else {
+      cur_pos = leg_plan->arrival_pos_mkm;
+    }
+    return true;
+  };
+
+  bool any = false;
+  for (Id body_id : stop_bodies) {
+    const Body* b = find_ptr(state_.bodies, body_id);
+    if (!b) continue;
+    if (!enqueue_leg_for_all(b->system_id, b->position_mkm, body_id)) {
+      // If we fail mid-queue, fall back to direct travel from the original start.
+      break;
+    }
+    any = true;
+  }
+
+  // Final leg to destination system.
+  if (!enqueue_leg_for_all(target_system_id, std::nullopt, std::nullopt)) {
+    return issue_fleet_travel_to_system(fleet_id, target_system_id, restrict_to_discovered);
+  }
+  any = true;
+
+  // Player-facing summary.
+  const Faction* fac = find_ptr(state_.factions, fl->faction_id);
+  if (fac && fac->control == FactionControl::Player && !stop_bodies.empty()) {
+    std::ostringstream oss;
+    oss << "Fleet " << fl->name << " smart travel: refuel stops ";
+    for (std::size_t i = 0; i < stop_bodies.size(); ++i) {
+      const Body* b = find_ptr(state_.bodies, stop_bodies[i]);
+      const Colony* c = nullptr;
+      // Try to use colony name if present.
+      if (b) {
+        for (const auto& [cid, col] : state_.colonies) {
+          if (col.body_id == b->id && are_factions_trade_partners(fl->faction_id, col.faction_id)) {
+            c = &col;
+            break;
+          }
+        }
+      }
+      const std::string name = c ? c->name : (b ? b->name : std::string("(unknown)"));
+      if (i > 0) oss << " -> ";
+      oss << name;
+    }
+    EventContext ctx;
+    ctx.faction_id = fl->faction_id;
+    ctx.system_id = leader_nav.system_id;
+    push_event(EventLevel::Info, EventCategory::Movement, oss.str(), ctx);
+  }
+
+  return any;
+}
+
 bool Simulation::issue_fleet_attack_ship(Id fleet_id, Id target_ship_id, bool restrict_to_discovered) {
   prune_fleets();
   const auto* fl = find_ptr(state_.fleets, fleet_id);
@@ -1195,6 +1516,220 @@ bool Simulation::issue_travel_to_system(Id ship_id, Id target_system_id, bool re
   return true;
 }
 
+bool Simulation::issue_travel_to_system_smart(Id ship_id, Id target_system_id, bool restrict_to_discovered,
+                                              std::optional<Vec2> goal_pos_mkm) {
+  auto* ship = find_ptr(state_.ships, ship_id);
+  if (!ship) return false;
+  if (!find_ptr(state_.systems, target_system_id)) return false;
+
+  // Feature gate: allow turning this off globally.
+  if (!cfg_.enable_smart_travel_refuel_stops) {
+    return issue_travel_to_system(ship_id, target_system_id, restrict_to_discovered, goal_pos_mkm);
+  }
+
+  const ShipDesign* d = find_design(ship->design_id);
+  if (!d) {
+    return issue_travel_to_system(ship_id, target_system_id, restrict_to_discovered, goal_pos_mkm);
+  }
+
+  const double burn = std::max(0.0, d->fuel_use_per_mkm);
+  const double cap = std::max(0.0, d->fuel_capacity_tons);
+  if (burn <= 1e-12 || cap <= 1e-9) {
+    // No meaningful fuel constraint.
+    return issue_travel_to_system(ship_id, target_system_id, restrict_to_discovered, goal_pos_mkm);
+  }
+
+  double fuel = ship->fuel_tons;
+  if (fuel < 0.0) fuel = cap;
+  fuel = std::clamp(fuel, 0.0, cap);
+
+  const double safety = std::clamp(cfg_.smart_travel_range_safety_factor, 0.05, 1.0);
+  const int max_stops = std::max(0, cfg_.smart_travel_max_refuel_stops);
+  const int wait_days = cfg_.smart_travel_refuel_wait_days;
+  const double min_stop_fuel = std::max(0.0, cfg_.smart_travel_refuel_stop_min_fuel_tons);
+
+  const PredictedNavState nav = predicted_nav_state_after_queued_jumps(state_, ship_id, /*include_queued_jumps=*/true);
+  if (nav.system_id == kInvalidId) return false;
+  if (nav.system_id == target_system_id) return true; // no-op
+
+  const auto direct_plan = plan_jump_route_cached(nav.system_id, nav.position_mkm, ship->faction_id, ship->speed_km_s,
+                                                  target_system_id, restrict_to_discovered, goal_pos_mkm);
+  if (!direct_plan) return false;
+
+  const double direct_fuel_needed = direct_plan->total_distance_mkm * burn;
+  if (direct_fuel_needed <= fuel * safety + 1e-9) {
+    return issue_travel_to_system(ship_id, target_system_id, restrict_to_discovered, goal_pos_mkm);
+  }
+
+  struct Node {
+    Id system_id{kInvalidId};
+    Vec2 pos_mkm{0.0, 0.0};
+    Id body_id{kInvalidId};
+    Id colony_id{kInvalidId};
+    bool is_refuel_stop{false};
+  };
+
+  std::vector<Node> nodes;
+  nodes.reserve(state_.colonies.size() + 2);
+  nodes.push_back(Node{nav.system_id, nav.position_mkm, kInvalidId, kInvalidId, false});
+
+  // Candidate refuel stops.
+  for (Id cid : sorted_keys(state_.colonies)) {
+    const Colony* c = find_ptr(state_.colonies, cid);
+    if (!c) continue;
+    if (!are_factions_trade_partners(ship->faction_id, c->faction_id)) continue;
+
+    const Body* b = find_ptr(state_.bodies, c->body_id);
+    if (!b) continue;
+    if (b->system_id == kInvalidId) continue;
+    if (!find_ptr(state_.systems, b->system_id)) continue;
+
+    if (restrict_to_discovered && !is_system_discovered_by_faction(ship->faction_id, b->system_id)) {
+      continue;
+    }
+
+    const double fuel_avail = [&]() {
+      if (auto it = c->minerals.find("Fuel"); it != c->minerals.end()) return std::max(0.0, it->second);
+      return 0.0;
+    }();
+    if (fuel_avail + 1e-9 < min_stop_fuel) continue;
+
+    Node n;
+    n.system_id = b->system_id;
+    n.pos_mkm = b->position_mkm;
+    n.body_id = b->id;
+    n.colony_id = cid;
+    n.is_refuel_stop = true;
+    nodes.push_back(n);
+  }
+
+  const int dest_node = static_cast<int>(nodes.size());
+  nodes.push_back(Node{target_system_id, Vec2{0.0, 0.0}, kInvalidId, kInvalidId, false});
+
+  // Dijkstra over (node, stops_used).
+  const int N = static_cast<int>(nodes.size());
+  const int K = max_stops;
+  const int total_states = N * (K + 1);
+  auto state_index = [&](int node, int stops_used) { return stops_used * N + node; };
+
+  std::vector<double> best(total_states, std::numeric_limits<double>::infinity());
+  std::vector<int> prev(total_states, -1);
+
+  struct QItem {
+    double cost{0.0};
+    int node{0};
+    int stops{0};
+  };
+  struct QComp {
+    bool operator()(const QItem& a, const QItem& b) const { return a.cost > b.cost; }
+  };
+  std::priority_queue<QItem, std::vector<QItem>, QComp> pq;
+
+  best[state_index(0, 0)] = 0.0;
+  pq.push(QItem{0.0, 0, 0});
+
+  int best_dest_state = -1;
+  while (!pq.empty()) {
+    const QItem cur = pq.top();
+    pq.pop();
+    const int cur_si = state_index(cur.node, cur.stops);
+    if (cur.cost > best[cur_si] + 1e-9) continue;
+
+    if (cur.node == dest_node) {
+      best_dest_state = cur_si;
+      break;
+    }
+
+    const Node& a = nodes[cur.node];
+    const double avail_fuel = (cur.node == 0 ? fuel : cap) * safety;
+    if (avail_fuel <= 1e-9) continue;
+
+    for (int j = 1; j < N; ++j) {
+      if (j == cur.node) continue;
+      const Node& b = nodes[j];
+      const int next_stops = cur.stops + (b.is_refuel_stop ? 1 : 0);
+      if (next_stops > K) continue;
+
+      const std::optional<Vec2> goal = b.is_refuel_stop ? std::optional<Vec2>(b.pos_mkm) : goal_pos_mkm;
+      const auto plan = plan_jump_route_cached(a.system_id, a.pos_mkm,
+                                              ship->faction_id, ship->speed_km_s,
+                                              b.system_id, restrict_to_discovered, goal);
+      if (!plan) continue;
+
+      const double need = plan->total_distance_mkm * burn;
+      if (need > avail_fuel + 1e-9) continue;
+
+      double edge_cost = plan->total_eta_days;
+      if (b.is_refuel_stop && wait_days > 0) edge_cost += static_cast<double>(wait_days);
+
+      const int nxt_si = state_index(j, next_stops);
+      const double cand = cur.cost + edge_cost;
+      if (cand + 1e-9 < best[nxt_si]) {
+        best[nxt_si] = cand;
+        prev[nxt_si] = cur_si;
+        pq.push(QItem{cand, j, next_stops});
+      }
+    }
+  }
+
+  if (best_dest_state == -1) {
+    // No feasible refuel chain. Fall back to direct travel.
+    const Faction* fac = find_ptr(state_.factions, ship->faction_id);
+    if (fac && fac->control == FactionControl::Player) {
+      EventContext ctx;
+      ctx.faction_id = ship->faction_id;
+      ctx.system_id = nav.system_id;
+      ctx.ship_id = ship_id;
+      push_event(EventLevel::Warn, EventCategory::Movement,
+                 "Smart travel could not find a refuel-stop route; issuing direct travel.", ctx);
+    }
+    return issue_travel_to_system(ship_id, target_system_id, restrict_to_discovered, goal_pos_mkm);
+  }
+
+  // Reconstruct node path.
+  std::vector<int> path;
+  for (int si = best_dest_state; si != -1; si = prev[si]) {
+    const int node = si % N;
+    path.push_back(node);
+  }
+  std::reverse(path.begin(), path.end());
+  if (path.empty() || path.front() != 0 || path.back() != dest_node) {
+    return issue_travel_to_system(ship_id, target_system_id, restrict_to_discovered, goal_pos_mkm);
+  }
+
+  // Issue orders leg-by-leg, keeping an explicit "current" node so goal positions
+  // for subsequent legs are computed from the stop body positions.
+  Id cur_sys = nav.system_id;
+  Vec2 cur_pos = nav.position_mkm;
+
+  auto& q = state_.ship_orders[ship_id].queue;
+
+  for (std::size_t i = 1; i < path.size(); ++i) {
+    const Node& n = nodes[path[i]];
+
+    const std::optional<Vec2> goal = n.is_refuel_stop ? std::optional<Vec2>(n.pos_mkm)
+                                                      : goal_pos_mkm;
+    const auto leg_plan = plan_jump_route_cached(cur_sys, cur_pos, ship->faction_id, ship->speed_km_s,
+                                                n.system_id, restrict_to_discovered, goal);
+    if (!leg_plan) {
+      return issue_travel_to_system(ship_id, target_system_id, restrict_to_discovered, goal_pos_mkm);
+    }
+
+    for (Id jid : leg_plan->jump_ids) q.push_back(TravelViaJump{jid});
+
+    if (n.is_refuel_stop && n.body_id != kInvalidId) {
+      q.push_back(OrbitBody{n.body_id, wait_days});
+      cur_sys = n.system_id;
+      cur_pos = n.pos_mkm;  // OrbitBody snaps to body.
+    } else {
+      cur_sys = n.system_id;
+      cur_pos = leg_plan->arrival_pos_mkm;
+    }
+  }
+
+  return true;
+}
+
 bool Simulation::issue_attack_ship(Id attacker_ship_id, Id target_ship_id, bool restrict_to_discovered) {
   if (attacker_ship_id == target_ship_id) return false;
   auto* attacker = find_ptr(state_.ships, attacker_ship_id);
@@ -1270,13 +1805,22 @@ bool Simulation::issue_attack_ship(Id attacker_ship_id, Id target_ship_id, bool 
 }
 
 bool Simulation::issue_escort_ship(Id escort_ship_id, Id target_ship_id, double follow_distance_mkm,
-                                  bool restrict_to_discovered) {
+                                  bool restrict_to_discovered, bool allow_neutral) {
   if (escort_ship_id == target_ship_id) return false;
   auto* escort = find_ptr(state_.ships, escort_ship_id);
   if (!escort) return false;
   const auto* target = find_ptr(state_.ships, target_ship_id);
   if (!target) return false;
-  if (!are_factions_mutual_friendly(escort->faction_id, target->faction_id)) return false;
+  if (!allow_neutral) {
+    if (!are_factions_mutual_friendly(escort->faction_id, target->faction_id)) return false;
+  } else {
+    // Escorting neutral ships is allowed as long as the factions are not
+    // Hostile toward each other (e.g. civilian convoy escort contracts).
+    if (are_factions_hostile(escort->faction_id, target->faction_id) ||
+        are_factions_hostile(target->faction_id, escort->faction_id)) {
+      return false;
+    }
+  }
   if (!std::isfinite(follow_distance_mkm) || follow_distance_mkm < 0.0) return false;
   if (follow_distance_mkm <= 0.0) follow_distance_mkm = std::max(0.0, cfg_.docking_range_mkm);
 
@@ -1284,6 +1828,7 @@ bool Simulation::issue_escort_ship(Id escort_ship_id, Id target_ship_id, double 
   ord.target_ship_id = target_ship_id;
   ord.follow_distance_mkm = follow_distance_mkm;
   ord.restrict_to_discovered = restrict_to_discovered;
+  ord.allow_neutral = allow_neutral;
 
   auto& orders = state_.ship_orders[escort_ship_id];
   orders.queue.push_back(std::move(ord));
@@ -1640,6 +2185,7 @@ double Simulation::terraforming_points_per_day(const Colony& c) const {
     const auto m = compute_faction_economy_multipliers(content_, *fac);
     total *= std::max(0.0, m.terraforming);
   }
+  total *= colony_condition_multipliers(c).terraforming;
   if (cfg_.enable_blockades) total *= blockade_output_multiplier_for_colony(c.id);
   return std::max(0.0, total);
 }
@@ -1657,6 +2203,7 @@ double Simulation::troop_training_points_per_day(const Colony& c) const {
     const auto m = compute_faction_economy_multipliers(content_, *fac);
     total *= std::max(0.0, m.troop_training);
   }
+  total *= colony_condition_multipliers(c).troop_training;
   if (cfg_.enable_blockades) total *= blockade_output_multiplier_for_colony(c.id);
   return std::max(0.0, total);
 }
@@ -1676,6 +2223,7 @@ double Simulation::crew_training_points_per_day(const Colony& c) const {
     total *= std::max(0.0, m.troop_training);
   }
   total *= std::max(0.0, cfg_.crew_training_points_multiplier);
+  total *= colony_condition_multipliers(c).troop_training;
   if (cfg_.enable_blockades) total *= blockade_output_multiplier_for_colony(c.id);
   return std::max(0.0, total);
 }

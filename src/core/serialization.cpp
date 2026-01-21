@@ -18,7 +18,7 @@ using json::Array;
 using json::Object;
 using json::Value;
 
-constexpr int kCurrentSaveVersion = 53;
+constexpr int kCurrentSaveVersion = 54;
 
 
 std::string contract_kind_to_string(ContractKind k) {
@@ -26,6 +26,7 @@ std::string contract_kind_to_string(ContractKind k) {
     case ContractKind::InvestigateAnomaly: return "investigate_anomaly";
     case ContractKind::SalvageWreck: return "salvage_wreck";
     case ContractKind::SurveyJumpPoint: return "survey_jump_point";
+    case ContractKind::EscortConvoy: return "escort_convoy";
   }
   return "investigate_anomaly";
 }
@@ -34,6 +35,7 @@ ContractKind contract_kind_from_string(const std::string& s) {
   if (s == "investigate_anomaly" || s == "anomaly") return ContractKind::InvestigateAnomaly;
   if (s == "salvage_wreck" || s == "wreck" || s == "salvage") return ContractKind::SalvageWreck;
   if (s == "survey_jump_point" || s == "jump_point" || s == "survey") return ContractKind::SurveyJumpPoint;
+  if (s == "escort_convoy" || s == "convoy" || s == "escort") return ContractKind::EscortConvoy;
   return ContractKind::InvestigateAnomaly;
 }
 
@@ -571,6 +573,7 @@ Value order_to_json(const Order& order) {
           obj["target_ship_id"] = static_cast<double>(o.target_ship_id);
           obj["follow_distance_mkm"] = o.follow_distance_mkm;
           if (o.restrict_to_discovered) obj["restrict_to_discovered"] = true;
+          if (o.allow_neutral) obj["allow_neutral"] = true;
         } else if constexpr (std::is_same_v<T, WaitDays>) {
           obj["type"] = std::string("wait_days");
           obj["days_remaining"] = static_cast<double>(o.days_remaining);
@@ -728,6 +731,9 @@ Order order_from_json(const Value& v) {
     if (!std::isfinite(e.follow_distance_mkm) || e.follow_distance_mkm < 0.0) e.follow_distance_mkm = 1.0;
     if (auto it3 = o.find("restrict_to_discovered"); it3 != o.end()) {
       e.restrict_to_discovered = it3->second.bool_value(false);
+    }
+    if (auto it4 = o.find("allow_neutral"); it4 != o.end()) {
+      e.allow_neutral = it4->second.bool_value(false);
     }
     return e;
   }
@@ -1434,6 +1440,7 @@ json::Value serialize_game_to_json_value(const GameState& s) {
     if (c.assignee_faction_id != kInvalidId) o["assignee_faction_id"] = static_cast<double>(c.assignee_faction_id);
     if (c.system_id != kInvalidId) o["system_id"] = static_cast<double>(c.system_id);
     if (c.target_id != kInvalidId) o["target_id"] = static_cast<double>(c.target_id);
+    if (c.target_id2 != kInvalidId) o["target_id2"] = static_cast<double>(c.target_id2);
     if (c.assigned_ship_id != kInvalidId) o["assigned_ship_id"] = static_cast<double>(c.assigned_ship_id);
     if (c.assigned_fleet_id != kInvalidId) o["assigned_fleet_id"] = static_cast<double>(c.assigned_fleet_id);
     if (c.offered_day != 0) o["offered_day"] = static_cast<double>(c.offered_day);
@@ -1489,6 +1496,22 @@ json::Value serialize_game_to_json_value(const GameState& s) {
     o["faction_id"] = static_cast<double>(c.faction_id);
     o["body_id"] = static_cast<double>(c.body_id);
     o["population_millions"] = c.population_millions;
+
+    if (!c.conditions.empty()) {
+      Array conds;
+      conds.reserve(c.conditions.size());
+      for (const auto& cond : c.conditions) {
+        if (cond.id.empty()) continue;
+        Object co;
+        co["id"] = cond.id;
+        co["remaining_days"] = cond.remaining_days;
+        if (std::abs(cond.severity - 1.0) > 1e-12) co["severity"] = cond.severity;
+        if (cond.started_day != 0) co["started_day"] = static_cast<double>(cond.started_day);
+        conds.push_back(co);
+      }
+      if (!conds.empty()) o["conditions"] = conds;
+    }
+
     o["minerals"] = map_string_double_to_json(c.minerals);
     if (!c.mineral_reserves.empty()) {
       o["mineral_reserves"] = map_string_double_to_json(c.mineral_reserves);
@@ -2409,6 +2432,7 @@ GameState deserialize_game_from_json(const std::string& json_text) {
             const int kv = static_cast<int>(itk->second.int_value(0));
             if (kv == 1) c.kind = ContractKind::SalvageWreck;
             else if (kv == 2) c.kind = ContractKind::SurveyJumpPoint;
+            else if (kv == 3) c.kind = ContractKind::EscortConvoy;
             else c.kind = ContractKind::InvestigateAnomaly;
           }
         }
@@ -2434,6 +2458,9 @@ GameState deserialize_game_from_json(const std::string& json_text) {
         }
         if (auto itt = o.find("target_id"); itt != o.end()) {
           c.target_id = static_cast<Id>(itt->second.int_value(kInvalidId));
+        }
+        if (auto itt2 = o.find("target_id2"); itt2 != o.end()) {
+          c.target_id2 = static_cast<Id>(itt2->second.int_value(kInvalidId));
         }
         if (auto itsh = o.find("assigned_ship_id"); itsh != o.end()) {
           c.assigned_ship_id = static_cast<Id>(itsh->second.int_value(kInvalidId));
@@ -2547,6 +2574,29 @@ GameState deserialize_game_from_json(const std::string& json_text) {
       c.installation_targets = map_string_int_from_json(it->second);
     }
     c.installations = map_string_int_from_json(o.at("installations"));
+
+    if (auto itc = o.find("conditions"); itc != o.end()) {
+      const auto arr = itc->second.array();
+      const std::size_t cap = std::min<std::size_t>(arr.size(), 32);
+      for (std::size_t i = 0; i < cap; ++i) {
+        const auto& co = arr[i].object();
+        ColonyCondition cc;
+        cc.id = co.at("id").string_value();
+        cc.remaining_days = co.at("remaining_days").number_value();
+        if (auto it = co.find("severity"); it != co.end()) cc.severity = it->second.number_value(1.0);
+        if (auto it = co.find("started_day"); it != co.end()) {
+          cc.started_day = static_cast<std::int64_t>(it->second.int_value(0));
+        }
+
+        // Sanitize.
+        if (cc.id.empty()) continue;
+        if (!std::isfinite(cc.remaining_days) || cc.remaining_days <= 0.0) continue;
+        if (!std::isfinite(cc.severity) || cc.severity < 0.0) cc.severity = 1.0;
+        cc.severity = std::clamp(cc.severity, 0.0, 10.0);
+
+        c.conditions.push_back(std::move(cc));
+      }
+    }
 
     if (auto it = o.find("ground_forces"); it != o.end()) c.ground_forces = it->second.number_value(0.0);
     if (auto it = o.find("garrison_target_strength"); it != o.end()) {

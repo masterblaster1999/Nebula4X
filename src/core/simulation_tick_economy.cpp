@@ -72,8 +72,9 @@ void Simulation::tick_colonies(double dt_days, bool emit_daily_events) {
 
   for (Id cid : sorted_keys(state_.colonies)) {
     auto& colony = state_.colonies.at(cid);
+    const ColonyConditionMultipliers cond_mult = colony_condition_multipliers(colony);
 
-    const double mining_mult = std::max(0.0, mult_for(colony.faction_id).mining);
+    const double mining_mult = std::max(0.0, mult_for(colony.faction_id).mining) * cond_mult.mining;
 
     // --- Installation-based production ---
     for (const auto& [inst_id, count] : colony.installations) {
@@ -151,6 +152,7 @@ void Simulation::tick_colonies(double dt_days, bool emit_daily_events) {
             growth_mult = std::max(0.0, cfg_.habitation_supported_growth_multiplier) * std::clamp(hab, 0.0, 1.0);
           }
         }
+        growth_mult *= cond_mult.pop_growth;
         pop *= (1.0 + base_per_day * growth_mult * dt_days);
       }
 
@@ -299,10 +301,12 @@ void Simulation::tick_colonies(double dt_days, bool emit_daily_events) {
   // be consumed by industry in the same day.
   for (Id cid : sorted_keys(state_.colonies)) {
     Colony& colony = state_.colonies.at(cid);
+    const ColonyConditionMultipliers cond_mult = colony_condition_multipliers(colony);
 
     double industry_mult = std::max(0.0, mult_for(colony.faction_id).industry);
     // Trade prosperity bonus (market access / hub activity), reduced by piracy/blockade disruption.
     industry_mult *= trade_prosperity_output_multiplier_for_colony(colony.id);
+    industry_mult *= cond_mult.industry;
 
     // Deterministic processing: installation iteration order of unordered_map is unspecified.
     std::vector<std::string> inst_ids;
@@ -424,7 +428,8 @@ void Simulation::tick_colonies(double dt_days, bool emit_daily_events) {
         depletion_frac = std::clamp(1.0 - (total_remaining / dep_thr), 0.0, 1.0);
       }
 
-      const double mining_mult = std::max(0.0, mult_for(colony.faction_id).mining);
+      const double mining_mult = std::max(0.0, mult_for(colony.faction_id).mining) *
+                                colony_condition_multipliers(colony).mining;
 
       // Probability per installation.
       const double base_p =
@@ -592,6 +597,278 @@ void Simulation::tick_colonies(double dt_days, bool emit_daily_events) {
 }
 
 
+
+void Simulation::tick_colony_conditions(double dt_days, bool day_advanced) {
+  if (!cfg_.enable_colony_conditions) return;
+  if (!(dt_days > 0.0)) return;
+
+  const std::int64_t now_day = state_.date.days_since_epoch();
+
+  // --- Condition duration decay / cleanup ---
+  for (Id cid : sorted_keys(state_.colonies)) {
+    Colony& colony = state_.colonies.at(cid);
+    if (colony.conditions.empty()) continue;
+
+    for (auto& cond : colony.conditions) {
+      if (!std::isfinite(cond.remaining_days)) cond.remaining_days = 0.0;
+      cond.remaining_days -= dt_days;
+    }
+
+    colony.conditions.erase(std::remove_if(colony.conditions.begin(), colony.conditions.end(),
+                                          [](const ColonyCondition& c) {
+                                            if (c.id.empty()) return true;
+                                            if (!std::isfinite(c.remaining_days)) return true;
+                                            return c.remaining_days <= 1e-9;
+                                          }),
+                            colony.conditions.end());
+
+    // Safety cap (should rarely/never trigger).
+    if (cfg_.colony_condition_max_active > 0 &&
+        static_cast<int>(colony.conditions.size()) > cfg_.colony_condition_max_active) {
+      std::stable_sort(colony.conditions.begin(), colony.conditions.end(),
+                       [](const ColonyCondition& a, const ColonyCondition& b) {
+                         if (a.remaining_days != b.remaining_days) return a.remaining_days > b.remaining_days;
+                         return a.started_day > b.started_day;
+                       });
+      colony.conditions.resize(cfg_.colony_condition_max_active);
+    }
+  }
+
+  // --- Event rolls (day boundaries only) ---
+  if (!cfg_.enable_colony_events) return;
+  if (!day_advanced) return;
+
+  const int interval_days = std::max(1, cfg_.colony_event_roll_interval_days);
+  const double base_neg = std::max(0.0, cfg_.colony_event_negative_chance_per_roll);
+  const double base_pos = std::max(0.0, cfg_.colony_event_positive_chance_per_roll);
+  const double cap = std::max(0.0, cfg_.colony_event_max_combined_chance_per_roll);
+  const double fatigue_factor = std::clamp(cfg_.colony_event_existing_condition_chance_factor, 0.0, 1.0);
+
+  for (Id cid : sorted_keys(state_.colonies)) {
+    Colony& colony = state_.colonies.at(cid);
+
+    const auto* fac = find_ptr(state_.factions, colony.faction_id);
+    if (!fac) continue;
+    if (!(colony.population_millions > 0.1)) continue;
+
+    if (cfg_.colony_condition_max_active > 0 &&
+        static_cast<int>(colony.conditions.size()) >= cfg_.colony_condition_max_active) {
+      continue;
+    }
+
+    // Roll cadence (deterministic per colony).
+    if (((now_day + static_cast<std::int64_t>(cid)) % interval_days) != 0) continue;
+
+    std::uint64_t seed = 0xC0110C0110C0FFEEull;
+    seed ^= static_cast<std::uint64_t>(now_day) * 0x9E3779B97F4A7C15ull;
+    seed ^= static_cast<std::uint64_t>(cid) * 0xBF58476D1CE4E5B9ull;
+    seed ^= static_cast<std::uint64_t>(colony.body_id) * 0x94D049BB133111EBull;
+    sim_procgen::HashRng rng(seed);
+
+    const ColonyStabilityStatus stab = colony_stability_status_for_colony(cid);
+    const double stability = std::clamp(stab.stability, 0.0, 1.0);
+
+    const double pop = std::max(0.0, colony.population_millions);
+    const double pop_factor = std::clamp(std::log10(pop + 1.0) / 4.0, 0.10, 1.0);
+    const double fatigue = std::pow(fatigue_factor, static_cast<double>(colony.conditions.size()));
+
+    double p_neg = base_neg * pop_factor * fatigue * (0.25 + 1.5 * (1.0 - stability));
+    double p_pos = base_pos * pop_factor * fatigue * (0.25 + 1.5 * stability);
+
+    p_neg = std::clamp(p_neg, 0.0, 1.0);
+    p_pos = std::clamp(p_pos, 0.0, 1.0);
+
+    double sum = p_neg + p_pos;
+    if (cap > 0.0 && sum > cap) {
+      const double s = cap / sum;
+      p_neg *= s;
+      p_pos *= s;
+      sum = cap;
+    }
+    if (sum <= 1e-9) continue;
+
+    const double roll = rng.next_u01();
+    const bool is_neg = roll < p_neg;
+    const bool is_pos = (!is_neg) && (roll < p_neg + p_pos);
+    if (!is_neg && !is_pos) continue;
+
+    // Colony characteristics for weighting.
+    int industrial_units = 0;
+    double tf_points = 0.0;
+    double shipyard_rate = 0.0;
+    double construction_pts = 0.0;
+    double research_pts = 0.0;
+
+    for (const auto& [inst_id, count] : colony.installations) {
+      if (count <= 0) continue;
+      auto it = content_.installations.find(inst_id);
+      if (it == content_.installations.end()) continue;
+      const InstallationDef& d = it->second;
+
+      // Heuristic: treat any installation that contributes meaningfully to
+      // extraction/production/throughput as "industrial" for the purpose of
+      // weighting colony events.
+      const bool industrial =
+          d.mining || d.mining_tons_per_day > 0.0 ||
+          d.construction_points_per_day > 0.0 || d.build_rate_tons_per_day > 0.0 ||
+          d.research_points_per_day > 0.0 || d.terraforming_points_per_day > 0.0 ||
+          d.troop_training_points_per_day > 0.0 || d.crew_training_points_per_day > 0.0 ||
+          !d.produces_per_day.empty() || !d.consumes_per_day.empty();
+      if (industrial) industrial_units += count;
+
+      tf_points += std::max(0.0, d.terraforming_points_per_day) * static_cast<double>(count);
+      shipyard_rate += std::max(0.0, d.build_rate_tons_per_day) * static_cast<double>(count);
+      construction_pts += std::max(0.0, d.construction_points_per_day) * static_cast<double>(count);
+      research_pts += std::max(0.0, d.research_points_per_day) * static_cast<double>(count);
+    }
+
+    struct Candidate {
+      const char* id{nullptr};
+      double w{0.0};
+      int dur_min{1};
+      int dur_max{1};
+      double sev_min{1.0};
+      double sev_max{1.0};
+    };
+
+    std::vector<Candidate> candidates;
+    candidates.reserve(4);
+
+    if (is_neg) {
+      Candidate accident{"industrial_accident",
+                         0.8 + 0.02 * industrial_units + 0.01 * std::sqrt(std::max(0.0, construction_pts)),
+                         14,
+                         45,
+                         0.90,
+                         1.30};
+      Candidate strike{
+          "labor_strike", 1.0 + pop / 800.0 + 0.01 * industrial_units, 21, 75, 0.80, 1.30};
+      Candidate disease{"disease_outbreak",
+                        1.0 + 2.0 * (1.0 - stab.habitability) + 3.0 * stab.habitation_shortfall_frac,
+                        28,
+                        90,
+                        0.80,
+                        1.40};
+
+      candidates.push_back(accident);
+      candidates.push_back(strike);
+      candidates.push_back(disease);
+    } else {
+      Candidate festival{
+          "cultural_festival", 1.0 + pop / 1200.0 + 0.02 * std::sqrt(std::max(0.0, research_pts)), 7, 21, 0.90, 1.20};
+      Candidate engineering{"engineering_breakthrough",
+                            1.0 + 0.03 * industrial_units + 0.015 * std::sqrt(std::max(0.0, shipyard_rate)),
+                            14,
+                            60,
+                            0.90,
+                            1.30};
+      Candidate terra{"terraforming_breakthrough",
+                      tf_points > 1e-9 ? (1.0 + 0.15 * std::sqrt(tf_points)) : 0.0,
+                      21,
+                      90,
+                      0.90,
+                      1.30};
+
+      candidates.push_back(festival);
+      candidates.push_back(engineering);
+      if (terra.w > 0.0) candidates.push_back(terra);
+    }
+
+    double total_w = 0.0;
+    for (const auto& c : candidates) total_w += std::max(0.0, c.w);
+    if (total_w <= 1e-9) continue;
+
+    double pick = rng.range(0.0, total_w);
+    const Candidate* chosen = nullptr;
+    for (const auto& c : candidates) {
+      pick -= std::max(0.0, c.w);
+      if (pick <= 0.0) {
+        chosen = &c;
+        break;
+      }
+    }
+    if (!chosen) chosen = &candidates.back();
+
+    ColonyCondition cond;
+    cond.id = chosen->id ? chosen->id : "";
+    cond.started_day = now_day;
+    cond.remaining_days = static_cast<double>(rng.range_int(chosen->dur_min, chosen->dur_max));
+
+    double sev = rng.range(chosen->sev_min, chosen->sev_max);
+    if (is_neg) {
+      sev *= std::clamp(0.8 + 0.8 * (1.0 - stability), 0.8, 1.6);
+    } else {
+      sev *= std::clamp(0.9 + 0.3 * stability, 0.9, 1.3);
+    }
+    cond.severity = std::clamp(sev, 0.25, 3.0);
+
+    if (cond.id.empty() || cond.remaining_days <= 0.0) continue;
+
+    // Merge with existing condition of the same id (refresh duration / severity).
+    bool merged = false;
+    for (auto& existing : colony.conditions) {
+      if (existing.id != cond.id) continue;
+      existing.remaining_days = std::max(existing.remaining_days, cond.remaining_days);
+      existing.severity = std::max(existing.severity, cond.severity);
+      existing.started_day = cond.started_day;
+      merged = true;
+      break;
+    }
+    if (!merged) colony.conditions.push_back(cond);
+
+    // Keep within cap (drop shortest-lived conditions first).
+    if (cfg_.colony_condition_max_active > 0 &&
+        static_cast<int>(colony.conditions.size()) > cfg_.colony_condition_max_active) {
+      std::stable_sort(colony.conditions.begin(), colony.conditions.end(),
+                       [](const ColonyCondition& a, const ColonyCondition& b) {
+                         if (a.remaining_days != b.remaining_days) return a.remaining_days > b.remaining_days;
+                         return a.started_day > b.started_day;
+                       });
+      colony.conditions.resize(cfg_.colony_condition_max_active);
+    }
+
+    // Emit event.
+    const std::string name = colony_condition_display_name(cond.id);
+    const auto eff = colony_condition_multipliers_for_condition(cond);
+
+    std::vector<std::string> eff_parts;
+    eff_parts.reserve(6);
+
+    auto add_eff = [&](const char* label, double v) {
+      if (!std::isfinite(v)) return;
+      if (std::abs(v - 1.0) < 0.05) return;
+      std::ostringstream oss;
+      oss << label << " x" << std::fixed << std::setprecision(2) << v;
+      eff_parts.push_back(oss.str());
+    };
+
+    add_eff("Mining", eff.mining);
+    add_eff("Industry", eff.industry);
+    add_eff("Research", eff.research);
+    add_eff("Construction", eff.construction);
+    add_eff("Shipyard", eff.shipyard);
+    add_eff("Terraforming", eff.terraforming);
+    add_eff("Pop", eff.pop_growth);
+
+    std::string eff_str;
+    for (std::size_t i = 0; i < eff_parts.size(); ++i) {
+      if (i > 0) eff_str += ", ";
+      eff_str += eff_parts[i];
+    }
+    if (!eff_str.empty()) eff_str = " Effects: " + eff_str + ".";
+
+    EventContext ctx;
+    ctx.faction_id = colony.faction_id;
+    ctx.colony_id = cid;
+    if (const auto* body = find_ptr(state_.bodies, colony.body_id)) ctx.system_id = body->system_id;
+
+    std::ostringstream msg;
+    msg << "Colony event at " << colony.name << ": " << name << " (" << static_cast<int>(cond.remaining_days) << "d)." << eff_str;
+    push_event(is_neg ? EventLevel::Warn : EventLevel::Info, EventCategory::General, msg.str(), ctx);
+  }
+}
+
+
 void Simulation::tick_research(double dt_days) {
   if (dt_days <= 0.0) return;
   NEBULA4X_TRACE_SCOPE("tick_research", "sim.econ");
@@ -626,6 +903,7 @@ void Simulation::tick_research(double dt_days) {
     rp_per_day *= std::max(0.0, mult_for(col.faction_id).research);
     // Trade prosperity bonus (system market access / hub activity).
     rp_per_day *= trade_prosperity_output_multiplier_for_colony(col.id);
+    rp_per_day *= colony_condition_multipliers(col).research;
     if (rp_per_day <= 0.0) continue;
     auto fit = state_.factions.find(col.faction_id);
     if (fit == state_.factions.end()) continue;
@@ -993,7 +1271,8 @@ void Simulation::tick_shipyards(double dt_days) {
       const auto& colony = state_.colonies.at(cid2);
       const auto it_yard = colony.installations.find("shipyard");
       const int yards = (it_yard != colony.installations.end()) ? it_yard->second : 0;
-      const double shipyard_mult = std::max(0.0, mult_for(fid).shipyard);
+      const double shipyard_mult = std::max(0.0, mult_for(fid).shipyard) *
+                                 colony_condition_multipliers(colony).shipyard;
       const double prosperity = trade_prosperity_output_multiplier_for_colony(cid2);
       const double rate = base_rate * static_cast<double>(yards) * shipyard_mult * prosperity;
       if (rate <= 1e-9) return std::numeric_limits<double>::infinity();
@@ -1085,7 +1364,8 @@ void Simulation::tick_shipyards(double dt_days) {
     if (yards <= 0) continue;
     if (colony.shipyard_queue.empty()) continue;
 
-    const double shipyard_mult = std::max(0.0, mult_for(colony.faction_id).shipyard);
+    const double shipyard_mult = std::max(0.0, mult_for(colony.faction_id).shipyard) *
+                                 colony_condition_multipliers(colony).shipyard;
     const double prosperity = trade_prosperity_output_multiplier_for_colony(colony.id);
     const double per_team_capacity_tons = base_rate * shipyard_mult * prosperity * dt_days;
     if (per_team_capacity_tons <= 1e-9) continue;

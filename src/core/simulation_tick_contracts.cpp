@@ -45,6 +45,15 @@ struct ContractCandidate {
   Id target_id{kInvalidId};
   Id system_id{kInvalidId};
 
+  // Optional secondary target (kind-specific).
+  Id target_id2{kInvalidId};
+
+  // For EscortConvoy: estimated number of jumps in the escorted leg.
+  int leg_hops{0};
+
+  // Estimated route/target risk in [0,1] used for reward/selection heuristics.
+  double risk{0.0};
+
   // Used for reward/selection heuristics.
   double value{0.0};
 };
@@ -54,6 +63,7 @@ static std::string contract_kind_label(ContractKind k) {
     case ContractKind::InvestigateAnomaly: return "Investigate";
     case ContractKind::SalvageWreck: return "Salvage";
     case ContractKind::SurveyJumpPoint: return "Survey";
+    case ContractKind::EscortConvoy: return "Escort";
   }
   return "Contract";
 }
@@ -209,6 +219,12 @@ bool Simulation::assign_contract_to_ship(Id contract_id, Id ship_id, bool clear_
     case ContractKind::SurveyJumpPoint:
       ok = issue_survey_jump_point(ship_id, c.target_id, /*transit_when_done=*/false, restrict_to_discovered);
       break;
+    case ContractKind::EscortConvoy:
+      // Escort neutral convoys is allowed (non-hostile factions) by setting
+      // allow_neutral. The order itself handles cross-system routing.
+      ok = issue_escort_ship(ship_id, c.target_id, /*follow_distance_mkm=*/1.0,
+                             restrict_to_discovered, /*allow_neutral=*/true);
+      break;
   }
 
   if (!ok) {
@@ -283,6 +299,9 @@ bool Simulation::assign_contract_to_fleet(Id contract_id, Id fleet_id, bool clea
       cap = 1.0 + cargo;
     } else if (c.kind == ContractKind::SurveyJumpPoint) {
       cap = 1.0;
+    } else if (c.kind == ContractKind::EscortConvoy) {
+      // Escort is primarily a mobility task; speed dominates.
+      cap = 1.0;
     }
 
     // Speed is a smaller term; capability dominates.
@@ -326,6 +345,10 @@ bool Simulation::assign_contract_to_fleet(Id contract_id, Id fleet_id, bool clea
       break;
     case ContractKind::SurveyJumpPoint:
       ok = issue_survey_jump_point(primary_ship_id, c.target_id, /*transit_when_done=*/false, restrict_to_discovered);
+      break;
+    case ContractKind::EscortConvoy:
+      ok = issue_escort_ship(primary_ship_id, c.target_id, /*follow_distance_mkm=*/1.0,
+                             restrict_to_discovered, /*allow_neutral=*/true);
       break;
   }
 
@@ -461,6 +484,31 @@ void Simulation::tick_contracts() {
         }
         continue;
       }
+    } else if (c.kind == ContractKind::EscortConvoy) {
+      const auto* sh = find_ptr(state_.ships, c.target_id);
+      if (!sh || sh->hp <= 0.0) {
+        if (c.status == ContractStatus::Offered) {
+          mark_expired("target missing");
+        } else if (c.status == ContractStatus::Accepted) {
+          mark_failed("target missing");
+        }
+        continue;
+      }
+      if (c.target_id2 == kInvalidId) {
+        if (c.status == ContractStatus::Offered) {
+          mark_expired("bad destination");
+        } else if (c.status == ContractStatus::Accepted) {
+          mark_failed("bad destination");
+        }
+        continue;
+      }
+
+      // If the convoy already arrived before the player even accepted, the
+      // offer is stale.
+      if (c.status == ContractStatus::Offered && sh->system_id == c.target_id2) {
+        mark_expired("convoy already arrived");
+        continue;
+      }
     }
 
     // Offered contracts can expire.
@@ -492,6 +540,56 @@ void Simulation::tick_contracts() {
         }
         break;
       }
+      case ContractKind::EscortConvoy: {
+        const auto* convoy = find_ptr(state_.ships, c.target_id);
+        if (!convoy || convoy->hp <= 0.0) break;
+        if (c.target_id2 == kInvalidId) break;
+        if (convoy->system_id != c.target_id2) break; // not at destination yet
+
+        if (c.assignee_faction_id == kInvalidId) break;
+
+        // Completion requires at least one assignee ship to be physically near
+        // the convoy at the time it arrives at its destination.
+        constexpr double kEscortCompleteRadiusMkm = 5.0;
+        bool escorted = false;
+        for (const auto& [sid, sh] : state_.ships) {
+          (void)sid;
+          if (sh.hp <= 0.0) continue;
+          if (sh.faction_id != c.assignee_faction_id) continue;
+          if (sh.system_id != convoy->system_id) continue;
+
+          // Require an active escort order targeting this convoy to prevent
+          // "coincidental" proximity at the destination.
+          bool has_order = false;
+          if (auto itso = state_.ship_orders.find(sh.id); itso != state_.ship_orders.end()) {
+            for (const auto& ord : itso->second.queue) {
+              if (std::holds_alternative<EscortShip>(ord)) {
+                const auto& e = std::get<EscortShip>(ord);
+                if (e.target_ship_id == c.target_id) {
+                  has_order = true;
+                  break;
+                }
+              }
+            }
+          }
+          if (!has_order) continue;
+
+          const Vec2 d = sh.position_mkm - convoy->position_mkm;
+          const double dist = std::sqrt(d.x * d.x + d.y * d.y);
+          if (dist <= kEscortCompleteRadiusMkm + 1e-9) {
+            escorted = true;
+            break;
+          }
+        }
+
+        if (escorted) {
+          complete = true;
+        } else {
+          // The convoy reached its destination without an escort present.
+          mark_failed("convoy arrived without escort");
+        }
+        break;
+      }
     }
 
     if (!complete) continue;
@@ -503,6 +601,56 @@ void Simulation::tick_contracts() {
     if (c.assignee_faction_id != kInvalidId) {
       if (auto* f = find_ptr(state_.factions, c.assignee_faction_id)) {
         f->research_points += std::max(0.0, c.reward_research_points);
+      }
+    }
+
+    // Escort contracts provide a small local security benefit: successful
+    // escorts slightly improve pirate suppression along the escorted corridor.
+    if (c.kind == ContractKind::EscortConvoy && cfg_.enable_pirate_suppression) {
+      const double boost = std::clamp(0.02 + 0.05 * clamp01(c.risk_estimate), 0.0, 0.05);
+      if (boost > 1e-12) {
+        std::vector<Id> route_systems;
+        route_systems.reserve(16);
+
+        const Id start_sys = c.system_id;
+        const Id dest_sys = c.target_id2;
+
+        if (start_sys != kInvalidId && dest_sys != kInvalidId && start_sys != dest_sys &&
+            c.assignee_faction_id != kInvalidId) {
+          // Compute a representative route (jump ids) and expand to systems.
+          const auto plan = plan_jump_route_cached(start_sys, Vec2{0.0, 0.0}, c.assignee_faction_id,
+                                                  /*speed*/1.0, dest_sys,
+                                                  /*restrict_to_discovered=*/true);
+          route_systems.push_back(start_sys);
+          Id cur_sys = start_sys;
+          if (plan) {
+            for (Id jid : plan->jump_ids) {
+              const auto* jp = find_ptr(state_.jump_points, jid);
+              if (!jp || jp->system_id != cur_sys || jp->linked_jump_id == kInvalidId) break;
+              const auto* other = find_ptr(state_.jump_points, jp->linked_jump_id);
+              if (!other || other->system_id == kInvalidId) break;
+              cur_sys = other->system_id;
+              route_systems.push_back(cur_sys);
+            }
+          }
+        }
+
+        if (route_systems.empty() && c.target_id2 != kInvalidId) {
+          route_systems.push_back(c.target_id2);
+        }
+
+        std::unordered_set<Id> touched_regions;
+        touched_regions.reserve(route_systems.size() * 2 + 4);
+        for (Id sys_id : route_systems) {
+          const auto* sys = find_ptr(state_.systems, sys_id);
+          if (!sys) continue;
+          const Id rid = sys->region_id;
+          if (rid == kInvalidId) continue;
+          if (!touched_regions.insert(rid).second) continue;
+          if (auto* reg = find_ptr(state_.regions, rid)) {
+            reg->pirate_suppression = std::clamp(reg->pirate_suppression + boost, 0.0, 1.0);
+          }
+        }
       }
     }
 
@@ -545,9 +693,11 @@ void Simulation::tick_contracts() {
     std::unordered_set<Id> used_anoms;
     std::unordered_set<Id> used_wrecks;
     std::unordered_set<Id> used_jumps;
+    std::unordered_set<Id> used_convoys;
     used_anoms.reserve(64);
     used_wrecks.reserve(64);
     used_jumps.reserve(64);
+    used_convoys.reserve(64);
 
     for (Id contract_id : sorted_keys(state_.contracts)) {
       const Contract& c = state_.contracts.at(contract_id);
@@ -559,6 +709,7 @@ void Simulation::tick_contracts() {
           case ContractKind::InvestigateAnomaly: used_anoms.insert(c.target_id); break;
           case ContractKind::SalvageWreck: used_wrecks.insert(c.target_id); break;
           case ContractKind::SurveyJumpPoint: used_jumps.insert(c.target_id); break;
+          case ContractKind::EscortConvoy: used_convoys.insert(c.target_id); break;
         }
       }
     }
@@ -571,9 +722,11 @@ void Simulation::tick_contracts() {
     std::vector<ContractCandidate> anom;
     std::vector<ContractCandidate> wreck;
     std::vector<ContractCandidate> jump;
+    std::vector<ContractCandidate> escort;
     anom.reserve(64);
     wreck.reserve(64);
     jump.reserve(64);
+    escort.reserve(32);
 
     // Normalize discovery lists for deterministic offer generation.
     std::vector<Id> discovered_anoms = fac->discovered_anomalies;
@@ -639,7 +792,104 @@ void Simulation::tick_contracts() {
       }
     }
 
-    if (anom.empty() && wreck.empty() && jump.empty()) continue;
+    // Escort convoys (neutral Merchant Guild ships currently on a jump-route
+    // leg through discovered space).
+    //
+    // This is intentionally conservative: we only offer escorts for convoys
+    // that are currently en-route and where piracy risk along the corridor is
+    // non-trivial.
+    Id merchant_fid = kInvalidId;
+    for (const auto& [mfid, mf] : state_.factions) {
+      if (mf.control == FactionControl::AI_Passive && mf.name == "Merchant Guild") {
+        merchant_fid = mfid;
+        break;
+      }
+    }
+
+    auto corridor_risk_for_system = [&](Id sys_id) -> double {
+      const auto* sys = find_ptr(state_.systems, sys_id);
+      if (!sys) return 0.0;
+      double risk = 0.0;
+      // Combine live piracy presence with a short memory of recent merchant
+      // losses. This makes escort offers more responsive to "raids" that leave
+      // behind wrecks but not necessarily a persistent pirate presence.
+      const double piracy = clamp01(piracy_risk_for_system(sys_id));
+      const double loss = clamp01(civilian_shipping_loss_pressure_for_system(sys_id));
+      const double security = 1.0 - (1.0 - piracy) * (1.0 - loss);
+      risk += clamp01(security) * 0.60;
+      risk += clamp01(sys->nebula_density) * 0.20;
+      risk += clamp01(system_storm_intensity(sys_id)) * 0.20;
+      return clamp01(risk);
+    };
+
+    if (merchant_fid != kInvalidId) {
+      for (const auto& [sid, sh] : state_.ships) {
+        if (sid == kInvalidId) continue;
+        if (sh.hp <= 0.0) continue;
+        if (sh.faction_id != merchant_fid) continue;
+        if (sh.system_id == kInvalidId) continue;
+        if (!sh.name.empty() && sh.name.find("Merchant Convoy") != 0) continue;
+        if (used_convoys.contains(sid)) continue;
+
+        // Only offer escorts when the convoy is in a discovered system.
+        if (!is_system_discovered_by_faction(fid, sh.system_id)) continue;
+
+        // Determine the destination system of the convoy's current jump leg by
+        // expanding the leading sequence of TravelViaJump orders.
+        std::vector<Id> leg_jumps;
+        if (auto itso = state_.ship_orders.find(sid); itso != state_.ship_orders.end()) {
+          for (const auto& ord : itso->second.queue) {
+            if (!std::holds_alternative<TravelViaJump>(ord)) break;
+            const Id jid = std::get<TravelViaJump>(ord).jump_point_id;
+            if (jid == kInvalidId) break;
+            leg_jumps.push_back(jid);
+          }
+        }
+        if (leg_jumps.empty()) continue;
+
+        std::vector<Id> corridor_systems;
+        corridor_systems.reserve(leg_jumps.size() + 1);
+        Id cur_sys = sh.system_id;
+        corridor_systems.push_back(cur_sys);
+
+        bool ok = true;
+        for (Id jid : leg_jumps) {
+          const auto* jp = find_ptr(state_.jump_points, jid);
+          if (!jp || jp->system_id != cur_sys || jp->linked_jump_id == kInvalidId) { ok = false; break; }
+          const auto* other = find_ptr(state_.jump_points, jp->linked_jump_id);
+          if (!other || other->system_id == kInvalidId) { ok = false; break; }
+          cur_sys = other->system_id;
+          corridor_systems.push_back(cur_sys);
+        }
+        if (!ok) continue;
+        const Id dest_sys = cur_sys;
+        if (dest_sys == kInvalidId || dest_sys == sh.system_id) continue;
+
+        // To avoid fog-of-war spoilers, only offer convoys whose destination is
+        // already discovered by the assignee faction.
+        if (!is_system_discovered_by_faction(fid, dest_sys)) continue;
+
+        double corridor_risk = 0.0;
+        for (Id sys_id : corridor_systems) {
+          corridor_risk = std::max(corridor_risk, corridor_risk_for_system(sys_id));
+        }
+
+        // Skip trivial / safe routes; escorts should feel meaningful.
+        if (corridor_risk < 0.15) continue;
+
+        ContractCandidate c;
+        c.kind = ContractKind::EscortConvoy;
+        c.target_id = sid;
+        c.system_id = sh.system_id;
+        c.target_id2 = dest_sys;
+        c.leg_hops = static_cast<int>(leg_jumps.size());
+        c.risk = clamp01(corridor_risk);
+        c.value = 10.0 + 6.0 * c.risk + 0.5 * static_cast<double>(c.leg_hops);
+        escort.push_back(std::move(c));
+      }
+    }
+
+    if (anom.empty() && wreck.empty() && jump.empty() && escort.empty()) continue;
 
     // Determine a home system/position for hop estimation.
     Id home_sys = kInvalidId;
@@ -697,10 +947,11 @@ void Simulation::tick_contracts() {
       // Pick a kind with simple weights.
       struct Bucket { int w; ContractKind kind; };
       std::vector<Bucket> buckets;
-      buckets.reserve(3);
+      buckets.reserve(4);
       if (!anom.empty()) buckets.push_back({3, ContractKind::InvestigateAnomaly});
       if (!jump.empty()) buckets.push_back({2, ContractKind::SurveyJumpPoint});
       if (!wreck.empty()) buckets.push_back({1, ContractKind::SalvageWreck});
+      if (!escort.empty()) buckets.push_back({1, ContractKind::EscortConvoy});
       if (buckets.empty()) break;
 
       int total_w = 0;
@@ -718,7 +969,8 @@ void Simulation::tick_contracts() {
       std::optional<ContractCandidate> cand;
       if (chosen == ContractKind::InvestigateAnomaly) cand = pick_from(anom);
       else if (chosen == ContractKind::SurveyJumpPoint) cand = pick_from(jump);
-      else cand = pick_from(wreck);
+      else if (chosen == ContractKind::SalvageWreck) cand = pick_from(wreck);
+      else cand = pick_from(escort);
       if (!cand) break;
 
       Contract c;
@@ -729,6 +981,7 @@ void Simulation::tick_contracts() {
       c.assignee_faction_id = fid;
       c.system_id = cand->system_id;
       c.target_id = cand->target_id;
+      c.target_id2 = cand->target_id2;
       c.offered_day = now;
       if (cfg_.contract_offer_expiry_days > 0) {
         c.expires_day = now + static_cast<std::int64_t>(cfg_.contract_offer_expiry_days);
@@ -742,6 +995,12 @@ void Simulation::tick_contracts() {
         const auto plan = plan_jump_route_cached(home_sys, home_pos, fid, /*speed*/1.0, c.system_id,
                                                 /*restrict_to_discovered=*/true);
         if (plan) c.hops_estimate = static_cast<int>(plan->jump_ids.size());
+      }
+
+      // Escort contracts include the length of the escorted leg in their hop
+      // estimate so reward scales more plausibly with distance.
+      if (c.kind == ContractKind::EscortConvoy) {
+        c.hops_estimate += std::max(0, cand->leg_hops);
       }
 
       c.risk_estimate = 0.0;
@@ -768,6 +1027,12 @@ void Simulation::tick_contracts() {
         c.risk_estimate = clamp01(risk);
       }
 
+      // Escort risk is computed over the full corridor (not just the start
+      // system), so we override with the candidate's precomputed estimate.
+      if (c.kind == ContractKind::EscortConvoy) {
+        c.risk_estimate = clamp01(cand->risk);
+      }
+
       // Reward heuristic: value + distance + risk.
       c.reward_research_points = std::max(0.0, cand->value) + std::max(0.0, cfg_.contract_reward_base_rp);
       c.reward_research_points += static_cast<double>(std::max(0, c.hops_estimate)) *
@@ -788,6 +1053,17 @@ void Simulation::tick_contracts() {
         if (const auto* jp = find_ptr(state_.jump_points, c.target_id)) {
           target_name = !jp->name.empty() ? jp->name
                                           : ("Jump " + std::to_string(static_cast<std::uint64_t>(jp->id)));
+        }
+      } else if (c.kind == ContractKind::EscortConvoy) {
+        const auto* sh = find_ptr(state_.ships, c.target_id);
+        const auto* dest = (c.target_id2 != kInvalidId) ? find_ptr(state_.systems, c.target_id2) : nullptr;
+        if (sh) {
+          target_name = !sh->name.empty() ? sh->name : ("Convoy " + std::to_string(static_cast<std::uint64_t>(sh->id)));
+          if (dest) {
+            const std::string dest_name = !dest->name.empty() ? dest->name
+                                                             : ("System " + std::to_string(static_cast<std::uint64_t>(dest->id)));
+            target_name += " -> " + dest_name;
+          }
         }
       }
       if (target_name.empty()) target_name = "Target " + std::to_string(static_cast<std::uint64_t>(c.target_id));

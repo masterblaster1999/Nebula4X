@@ -701,6 +701,9 @@ void Simulation::tick_ai() {
         case ContractKind::SurveyJumpPoint:
           reserved_explore_jump_targets[c.assignee_faction_id].insert(c.target_id);
           break;
+        case ContractKind::EscortConvoy:
+          // Escort contracts are handled by combat/civilian escort logic, not auto-explore.
+          break;
       }
     }
   }
@@ -749,6 +752,7 @@ void Simulation::tick_ai() {
           case ContractKind::InvestigateAnomaly: reserved_anoms.insert(c.target_id); break;
           case ContractKind::SalvageWreck: reserved_wrecks.insert(c.target_id); break;
           case ContractKind::SurveyJumpPoint: reserved_jumps.insert(c.target_id); break;
+          case ContractKind::EscortConvoy: break;
         }
       };
 
@@ -779,6 +783,10 @@ void Simulation::tick_ai() {
             if (out_sys) *out_sys = jp->system_id;
             if (out_pos) *out_pos = jp->position_mkm;
             return jp->system_id != kInvalidId;
+          }
+          case ContractKind::EscortConvoy: {
+            // Auto-explore ships should not attempt to fulfill escort contracts.
+            return false;
           }
         }
         return false;
@@ -4515,19 +4523,6 @@ void Simulation::tick_civilian_trade_convoys() {
   const TradeNetwork net = compute_trade_network(*this, opt);
   if (net.lanes.empty()) return;
 
-  double total_vol = 0.0;
-  for (const auto& l : net.lanes) total_vol += std::max(0.0, l.total_volume);
-  if (!(total_vol > 1e-9)) return;
-
-  int target = static_cast<int>(std::llround(std::sqrt(total_vol) * cfg_.civilian_trade_convoy_target_sqrt_mult));
-  target = std::clamp(target, std::max(0, cfg_.civilian_trade_convoy_min_ships), max_ships);
-
-  if (current >= target) return;
-
-  const int max_spawn = std::max(0, cfg_.civilian_trade_convoy_max_spawn_per_day);
-  const int spawn_n = std::min({target - current, max_spawn, max_ships - current});
-  if (spawn_n <= 0) return;
-
   // Precompute a "hub" body position per system for more natural spawns.
   std::unordered_map<Id, Vec2> hub_pos;
   hub_pos.reserve(state_.systems.size() * 2 + 8);
@@ -4576,6 +4571,11 @@ void Simulation::tick_civilian_trade_convoys() {
   // Approximate blockade pressure per system (max over colonies in that system).
   std::unordered_map<Id, double> blockade_pressure_by_system;
   const double blockade_risk_w = std::max(0.0, cfg_.civilian_trade_convoy_blockade_risk_weight);
+  const double loss_risk_w = std::max(0.0, cfg_.civilian_trade_convoy_shipping_loss_risk_weight);
+  if (loss_risk_w > 1e-12) {
+    // Warm the cache once (cheap) to avoid repeated per-lane recompute.
+    ensure_civilian_shipping_loss_cache_current();
+  }
   if (cfg_.enable_blockades && blockade_risk_w > 1e-12) {
     blockade_pressure_by_system.reserve(state_.systems.size() * 2 + 8);
     ensure_blockade_cache_current();
@@ -4599,6 +4599,7 @@ void Simulation::tick_civilian_trade_convoys() {
   struct LanePick { Id from; Id to; double w; std::vector<TradeGoodFlow> flows; };
   std::vector<LanePick> lanes;
   lanes.reserve(net.lanes.size());
+  double weighted_total_vol = 0.0;
   for (const auto& l : net.lanes) {
     if (!(l.total_volume > 1e-9)) continue;
 
@@ -4621,6 +4622,15 @@ void Simulation::tick_civilian_trade_convoys() {
       const double blockade_risk = 0.5 * (ba + bb);
       risk += blockade_risk_w * blockade_risk;
     }
+
+    // Recent merchant losses deter traffic even if pirates are no longer
+    // present (insurance / confidence effect).
+    if (loss_risk_w > 1e-12) {
+      const double la = civilian_shipping_loss_pressure_for_system(l.from_system_id);
+      const double lb = civilian_shipping_loss_pressure_for_system(l.to_system_id);
+      const double loss_risk = 0.5 * (la + lb);
+      risk += loss_risk_w * loss_risk;
+    }
     risk = std::clamp(risk, 0.0, 1.0);
 
     const double av = std::clamp(cfg_.civilian_trade_convoy_risk_aversion, 0.0, 1.0);
@@ -4630,8 +4640,23 @@ void Simulation::tick_civilian_trade_convoys() {
 
     if (!(w > 1e-12)) continue;
     lanes.push_back({l.from_system_id, l.to_system_id, w, l.top_flows});
+    weighted_total_vol += w;
   }
   if (lanes.empty()) return;
+
+  if (!(weighted_total_vol > 1e-9)) return;
+
+  // Determine how many convoys to maintain. We use risk-weighted trade volume
+  // so unsafe corridors naturally reduce civilian traffic.
+  int target =
+      static_cast<int>(std::llround(std::sqrt(weighted_total_vol) * cfg_.civilian_trade_convoy_target_sqrt_mult));
+  target = std::clamp(target, std::max(0, cfg_.civilian_trade_convoy_min_ships), max_ships);
+
+  if (current >= target) return;
+
+  const int max_spawn = std::max(0, cfg_.civilian_trade_convoy_max_spawn_per_day);
+  const int spawn_n = std::min({target - current, max_spawn, max_ships - current});
+  if (spawn_n <= 0) return;
 
   auto remove_ship = [&](Id ship_id) {
     auto it = state_.ships.find(ship_id);

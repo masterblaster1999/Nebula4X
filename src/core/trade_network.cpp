@@ -233,6 +233,12 @@ TradeNetwork compute_trade_network(const Simulation& sim, const TradeNetworkOpti
   std::vector<std::array<double, kTradeGoodKindCount>> colony_demand(n);
   std::vector<double> colony_pop_m(n, 0.0);
 
+  // For diplomacy-weighted trade lanes we need a coarse notion of which faction
+  // "dominates" a system. We use the faction that owns the largest share of
+  // population in the system.
+  std::vector<Id> dominant_faction(n, kInvalidId);
+  std::vector<double> dominant_pop_m(n, 0.0);
+
   if (opt.include_colony_contributions) {
     for (Id cid : util::sorted_keys(s.colonies)) {
       const Colony& c = s.colonies.at(cid);
@@ -244,6 +250,11 @@ TradeNetwork compute_trade_network(const Simulation& sim, const TradeNetworkOpti
 
       const double pop = std::max(0.0, c.population_millions);
       colony_pop_m[si] += pop;
+
+      if (c.faction_id != kInvalidId && pop > dominant_pop_m[si]) {
+        dominant_pop_m[si] = pop;
+        dominant_faction[si] = c.faction_id;
+      }
 
       // Baseline civilian demand signal.
       colony_demand[si][trade_good_index(TradeGoodKind::ProcessedMetals)] += pop / 50000.0;
@@ -426,13 +437,34 @@ TradeNetwork compute_trade_network(const Simulation& sim, const TradeNetworkOpti
       const double decay = 1.0 / std::pow(d + 1.0, expn);
       const double hub_boost = 1.0 + 0.25 * (hub_score[i] + hub_score[j]);
 
+      // Diplomacy weighting (approximate).
+      //
+      // If both endpoints have a "dominant" faction, scale cross-border
+      // trade volume based on their relationship. This makes treaties and
+      // wars feel economically meaningful without modeling detailed tariffs
+      // or embargo logistics.
+      double dip_mult = 1.0;
+      if (sim.cfg().enable_trade_network_diplomacy_multipliers) {
+        const Id fa = dominant_faction[i];
+        const Id fb = dominant_faction[j];
+        if (fa != kInvalidId && fb != kInvalidId && fa != fb) {
+          if (sim.are_factions_trade_partners(fa, fb)) {
+            dip_mult = std::max(0.0, sim.cfg().trade_network_volume_mult_trade_partner);
+          } else if (sim.are_factions_hostile(fa, fb) || sim.are_factions_hostile(fb, fa)) {
+            dip_mult = std::max(0.0, sim.cfg().trade_network_volume_mult_hostile);
+          } else {
+            dip_mult = std::max(0.0, sim.cfg().trade_network_volume_mult_neutral);
+          }
+        }
+      }
+
       bool any = false;
       LaneAgg agg;
       for (int k = 0; k < kTradeGoodKindCount; ++k) {
         const double exp = std::max(0.0, net_balance[i][k]);
         const double imp = std::max(0.0, -net_balance[j][k]);
         if (exp <= 1e-12 || imp <= 1e-12) continue;
-        const double v = exp * imp * decay * hub_boost;
+        const double v = exp * imp * decay * hub_boost * dip_mult;
         if (v <= 1e-12) continue;
         agg.total += v;
         agg.goods[k] += v;
