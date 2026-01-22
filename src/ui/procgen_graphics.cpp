@@ -13,6 +13,12 @@ namespace {
 
 constexpr float kPi = 3.14159265358979323846f;
 
+// Dear ImGui intentionally doesn't provide ImVec2 arithmetic operators unless
+// users opt-in via IMGUI_DEFINE_MATH_OPERATORS. To keep this TU standalone
+// (and avoid global operator pollution), we use tiny local helpers.
+inline ImVec2 v_add(const ImVec2& a, const ImVec2& b) { return ImVec2(a.x + b.x, a.y + b.y); }
+inline ImVec2 v_sub(const ImVec2& a, const ImVec2& b) { return ImVec2(a.x - b.x, a.y - b.y); }
+
 struct StampGridCacheEntry {
   std::uint64_t stamp_hash{0};
   SurfaceStampGrid grid;
@@ -346,8 +352,9 @@ void draw_surface_stamp_pixels(ImDrawList* dl, ImVec2 p0, ImVec2 size, const Sur
   if (draw_border) {
     const ImU32 border = ImGui::GetColorU32(ImGuiCol_Border);
     const ImU32 bg = ImGui::GetColorU32(ImGuiCol_FrameBg);
-    dl->AddRectFilled(o - ImVec2(3, 3), o + total + ImVec2(3, 3), modulate_alpha(bg, 0.75f * alpha), 4.0f);
-    dl->AddRect(o - ImVec2(3, 3), o + total + ImVec2(3, 3), modulate_alpha(border, 0.9f * alpha), 4.0f, 0, 1.0f);
+    const ImVec2 pad(3, 3);
+    dl->AddRectFilled(v_sub(o, pad), v_add(v_add(o, total), pad), modulate_alpha(bg, 0.75f * alpha), 4.0f);
+    dl->AddRect(v_sub(o, pad), v_add(v_add(o, total), pad), modulate_alpha(border, 0.9f * alpha), 4.0f, 0, 1.0f);
   }
 
   for (int y = 0; y < g.h; ++y) {
@@ -681,7 +688,8 @@ void draw_system_badge(ImDrawList* dl, ImVec2 p0, float sz, std::uint32_t seed, 
   }
 
   if (chokepoint) {
-    dl->AddRect(p0 + ImVec2(1, 1), p1 - ImVec2(1, 1), IM_COL32(190, 120, 255, 220), 3.0f, 0, 1.5f);
+    const ImVec2 d(1, 1);
+    dl->AddRect(v_add(p0, d), v_sub(p1, d), IM_COL32(190, 120, 255, 220), 3.0f, 0, 1.5f);
   }
 
   const ImU32 outline = selected ? IM_COL32(255, 255, 255, 200) : IM_COL32(0, 0, 0, 90);

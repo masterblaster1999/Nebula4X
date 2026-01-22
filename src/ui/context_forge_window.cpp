@@ -646,36 +646,69 @@ void draw_context_forge_window(Simulation& sim, UIState& ui, Id selected_ship, I
         ImGui::SetClipboardText(dna.c_str());
       }
       ImGui::SameLine();
+      if (ImGui::Button("Save as preset")) {
+        // Store a reusable template in UI prefs.
+        constexpr std::size_t kMaxPresets = 200;
+        constexpr std::size_t kMaxDnaLen = 64 * 1024;
+
+        auto preset_name_exists = [&](const std::string& name) {
+          for (const auto& p : ui.ui_forge_presets) {
+            if (p.name == name) return true;
+          }
+          return false;
+        };
+        auto make_unique = [&](std::string base) {
+          if (base.empty()) base = "Preset";
+          std::string n = base;
+          int i = 2;
+          while (preset_name_exists(n)) {
+            n = base + " (" + std::to_string(i++) + ")";
+          }
+          return n;
+        };
+
+        std::string name = panel->name.empty() ? "Context Panel" : panel->name;
+        std::string dna = encode_ui_forge_panel_dna(*panel);
+        if (dna.size() > kMaxDnaLen) dna.resize(kMaxDnaLen);
+
+        if (ui.ui_forge_presets.size() >= kMaxPresets) {
+          ui.ui_forge_presets.erase(ui.ui_forge_presets.begin());
+        }
+
+        UiForgePanelPreset pr;
+        pr.name = make_unique(std::move(name));
+        pr.dna = std::move(dna);
+        ui.ui_forge_presets.push_back(std::move(pr));
+
+        ui.context_forge_last_error.clear();
+        ui.context_forge_last_success_time = ImGui::GetTime();
+      }
+      ImGui::SameLine();
       if (ImGui::Button("Paste Panel DNA")) {
         const char* clip = ImGui::GetClipboardText();
         if (clip && clip[0]) {
-          UiForgePanelDNA dna;
           std::string derr;
-          if (decode_ui_forge_panel_dna(std::string(clip), dna, &derr)) {
-            // Replace existing panel widgets.
-            panel->widgets.clear();
-            panel->name = dna.name.empty() ? panel->name : dna.name;
-            panel->root_path = dna.root_path.empty() ? panel->root_path : dna.root_path;
-            for (const auto& w : dna.widgets) {
-              UiForgeWidgetConfig cfg;
-              cfg.id = ui.next_ui_forge_widget_id++;
-              cfg.type = w.type;
-              cfg.label = w.label;
-              cfg.path = w.path;
-              cfg.text = w.text;
-              cfg.is_query = w.is_query;
-              cfg.query_op = w.query_op;
-              cfg.track_history = w.track_history;
-              cfg.show_sparkline = w.show_sparkline;
-              cfg.history_len = w.history_len;
-              cfg.span = w.span;
-              cfg.preview_rows = w.preview_rows;
-              panel->widgets.push_back(std::move(cfg));
+
+          // Decode into a panel config and then apply it onto the existing
+          // Context Forge panel while preserving its stable id/open state.
+          UiForgePanelConfig imported = *panel;
+          if (decode_ui_forge_panel_dna(std::string(clip), &imported, &derr)) {
+            const std::uint64_t keep_id = panel->id;
+            const bool keep_open = panel->open;
+
+            *panel = std::move(imported);
+            panel->id = keep_id;
+            panel->open = keep_open;
+
+            // Assign fresh widget ids (DNA intentionally does not persist ids).
+            for (auto& w : panel->widgets) {
+              w.id = ui.next_ui_forge_widget_id++;
             }
+
             ui.context_forge_last_error.clear();
             ui.context_forge_last_success_time = ImGui::GetTime();
           } else {
-            ui.context_forge_last_error = derr;
+            ui.context_forge_last_error = derr.empty() ? "Clipboard does not contain valid panel DNA." : derr;
           }
         }
       }

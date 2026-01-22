@@ -256,6 +256,15 @@ struct UiForgePanelConfig {
   std::vector<UiForgeWidgetConfig> widgets;
 };
 
+// A lightweight, user-managed library entry for sharing/reusing UI Forge panels.
+//
+// Presets are stored as encoded Panel DNA strings (see ui_forge_dna.h) and are
+// persisted in ui_prefs.json.
+struct UiForgePanelPreset {
+  std::string name;
+  std::string dna;
+};
+
 // Shared UI toggle/state so multiple panels can respect the same fog-of-war settings.
 // This is intentionally not persisted in saves.
 struct UIState {
@@ -555,6 +564,7 @@ struct UIState {
   std::uint64_t next_ui_forge_panel_id{1};
   std::uint64_t next_ui_forge_widget_id{1};
   std::vector<UiForgePanelConfig> ui_forge_panels;
+  std::vector<UiForgePanelPreset> ui_forge_presets;
 
   // --- Procedural UI: OmniSearch (global search over live game JSON) ---
   // These are UI preferences persisted in ui_prefs.json.

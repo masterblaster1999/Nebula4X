@@ -428,9 +428,20 @@ struct ForgeEditorState {
   bool show_preview{true};
 };
 
+// Preset library UI state (not persisted; the presets live in UIState).
+struct ForgePresetState {
+  int selected_idx{-1};
+  char filter[64]{};
+
+  // Rename modal.
+  int rename_idx{-1};
+  char rename_buf[128]{};
+};
+
 static std::unordered_map<std::uint64_t, WidgetRuntime> g_widget_rt;
 static ForgeDoc g_doc;
 static ForgeEditorState g_ed;
+static ForgePresetState g_presets;
 
 bool ensure_doc(const Simulation& sim, ForgeDoc& st, const bool force = false) {
   const double now = ImGui::GetTime();
@@ -516,6 +527,62 @@ void remove_panel(UIState& ui, const std::uint64_t panel_id) {
       std::remove_if(ui.ui_forge_panels.begin(), ui.ui_forge_panels.end(),
                      [&](const UiForgePanelConfig& p) { return p.id == panel_id; }),
       ui.ui_forge_panels.end());
+}
+
+// --- UI Forge Presets (Panel DNA library) ---
+
+bool preset_name_exists(const UIState& ui, const std::string& name) {
+  for (const auto& p : ui.ui_forge_presets) {
+    if (p.name == name) return true;
+  }
+  return false;
+}
+
+std::string make_unique_preset_name(const UIState& ui, std::string base) {
+  if (base.empty()) base = "Preset";
+  std::string name = base;
+  int n = 2;
+  while (preset_name_exists(ui, name)) {
+    name = base + " (" + std::to_string(n++) + ")";
+  }
+  return name;
+}
+
+// Append a preset to UIState with simple safety caps.
+void add_preset(UIState& ui, std::string name, std::string dna) {
+  constexpr std::size_t kMaxPresets = 200;
+  constexpr std::size_t kMaxDnaLen = 64 * 1024;
+
+  if (dna.empty()) return;
+  if (dna.size() > kMaxDnaLen) dna.resize(kMaxDnaLen);
+  if (ui.ui_forge_presets.size() >= kMaxPresets) {
+    // Drop the oldest entry to make room.
+    ui.ui_forge_presets.erase(ui.ui_forge_presets.begin());
+  }
+
+  UiForgePanelPreset p;
+  p.name = make_unique_preset_name(ui, std::move(name));
+  p.dna = std::move(dna);
+  ui.ui_forge_presets.push_back(std::move(p));
+}
+
+bool decode_preset_dna(const std::string& dna, UiForgePanelConfig* out_panel, std::string* err) {
+  if (!out_panel) return false;
+
+  UiForgePanelConfig tmp;
+  tmp.root_path = "/";
+  tmp.desired_columns = 0;
+  tmp.card_width_em = 20.0f;
+
+  if (!decode_ui_forge_panel_dna(dna, &tmp, err)) return false;
+  *out_panel = std::move(tmp);
+  return true;
+}
+
+void assign_fresh_widget_ids(UIState& ui, UiForgePanelConfig& panel) {
+  for (auto& w : panel.widgets) {
+    w.id = ui.next_ui_forge_widget_id++;
+  }
 }
 
 struct WidgetCandidate {
@@ -1816,6 +1883,179 @@ void draw_ui_forge_window(Simulation& sim, UIState& ui, Id selected_ship, Id sel
     try_add_from_entity("New from selected ship", selected_ship, "Ship");
     try_add_from_entity("New from selected colony", selected_colony, "Colony");
     try_add_from_entity("New from selected body", selected_body, "Body");
+
+    ImGui::Separator();
+
+    // --- Preset Library ---
+    ImGui::TextDisabled("Presets (Panel DNA Library)");
+
+    const UiForgePanelConfig* sel_panel = find_panel_const(ui, g_ed.selected_panel_id);
+    if (!sel_panel) ImGui::BeginDisabled();
+    if (ImGui::Button("Save selected panel as preset")) {
+      const std::string dna = encode_ui_forge_panel_dna(*sel_panel);
+      const std::string base = sel_panel->name.empty() ? ("Panel " + std::to_string(sel_panel->id)) : sel_panel->name;
+      add_preset(ui, base, dna);
+      g_ed.dna_status = "Saved selected panel to preset library.";
+      g_ed.dna_status_time = ImGui::GetTime();
+    }
+    if (!sel_panel) ImGui::EndDisabled();
+
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip("Stores the current panel as a reusable preset in ui_prefs.json.");
+    }
+
+    if (ImGui::Button("Import preset from clipboard")) {
+      const char* clip = ImGui::GetClipboardText();
+      if (clip && clip[0]) {
+        UiForgePanelConfig imported;
+        std::string err;
+        if (decode_preset_dna(std::string(clip), &imported, &err)) {
+          const std::string name = imported.name.empty() ? "Imported Preset" : imported.name;
+          // Normalize to canonical encoding so presets remain stable even if pasted JSON was formatted oddly.
+          add_preset(ui, name, encode_ui_forge_panel_dna(imported));
+          g_ed.dna_status = "Imported preset from clipboard.";
+        } else {
+          g_ed.dna_status = err.empty() ? "Clipboard does not contain panel DNA." : ("Panel DNA error: " + err);
+        }
+        g_ed.dna_status_time = ImGui::GetTime();
+      }
+    }
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip("Parses panel DNA from clipboard and stores it as a named preset.");
+    }
+
+    ImGui::InputTextWithHint("##uiforge_preset_filter", "Filter presets...", g_presets.filter,
+                             IM_ARRAYSIZE(g_presets.filter));
+
+    // Preset list.
+    {
+      ImGui::BeginChild("##uiforge_preset_list", ImVec2(0, 150), true);
+
+      const std::string needle = nebula4x::to_lower(std::string(g_presets.filter));
+      int visible_count = 0;
+
+      for (int i = 0; i < (int)ui.ui_forge_presets.size(); ++i) {
+        const auto& pr = ui.ui_forge_presets[(std::size_t)i];
+        const std::string hay = nebula4x::to_lower(pr.name);
+        if (!needle.empty() && hay.find(needle) == std::string::npos) continue;
+
+        const bool sel = (i == g_presets.selected_idx);
+        std::string label = pr.name.empty() ? ("Preset " + std::to_string(i + 1)) : pr.name;
+        label += "##uiforge_preset_" + std::to_string(i);
+
+        if (ImGui::Selectable(label.c_str(), sel)) {
+          g_presets.selected_idx = i;
+        }
+
+        // Context menu.
+        if (ImGui::BeginPopupContextItem()) {
+          if (ImGui::MenuItem("Copy preset DNA to clipboard")) {
+            ImGui::SetClipboardText(pr.dna.c_str());
+            g_ed.dna_status = "Copied preset DNA to clipboard.";
+            g_ed.dna_status_time = ImGui::GetTime();
+          }
+          if (ImGui::MenuItem("Rename...")) {
+            g_presets.rename_idx = i;
+            std::snprintf(g_presets.rename_buf, sizeof(g_presets.rename_buf), "%s", pr.name.c_str());
+            ImGui::OpenPopup("Rename preset##uiforge");
+          }
+          if (ImGui::MenuItem("Delete")) {
+            ui.ui_forge_presets.erase(ui.ui_forge_presets.begin() + i);
+            if (g_presets.selected_idx >= (int)ui.ui_forge_presets.size()) {
+              g_presets.selected_idx = (int)ui.ui_forge_presets.size() - 1;
+            }
+            ImGui::EndPopup();
+            break;
+          }
+          ImGui::EndPopup();
+        }
+
+        ++visible_count;
+      }
+
+      if (visible_count == 0) {
+        ImGui::TextDisabled(ui.ui_forge_presets.empty() ? "No presets yet." : "No matching presets.");
+      }
+
+      ImGui::EndChild();
+    }
+
+    // Rename modal.
+    if (ImGui::BeginPopupModal("Rename preset##uiforge", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+      ImGui::TextUnformatted("Rename preset");
+      ImGui::Spacing();
+      ImGui::InputText("Name", g_presets.rename_buf, IM_ARRAYSIZE(g_presets.rename_buf));
+
+      const bool can_apply = (g_presets.rename_idx >= 0) && (g_presets.rename_idx < (int)ui.ui_forge_presets.size());
+      if (!can_apply) ImGui::BeginDisabled();
+      if (ImGui::Button("Apply")) {
+        UiForgePanelPreset& p = ui.ui_forge_presets[(std::size_t)g_presets.rename_idx];
+        const std::string wanted = std::string(g_presets.rename_buf);
+        p.name = make_unique_preset_name(ui, wanted);
+        g_ed.dna_status = "Renamed preset.";
+        g_ed.dna_status_time = ImGui::GetTime();
+        ImGui::CloseCurrentPopup();
+      }
+      if (!can_apply) ImGui::EndDisabled();
+      ImGui::SameLine();
+      if (ImGui::Button("Cancel")) {
+        ImGui::CloseCurrentPopup();
+      }
+      ImGui::EndPopup();
+    }
+
+    // Selected preset actions.
+    const bool have_sel_preset = (g_presets.selected_idx >= 0) && (g_presets.selected_idx < (int)ui.ui_forge_presets.size());
+    if (!have_sel_preset) {
+      ImGui::TextDisabled("Select a preset to use it.");
+    } else {
+      const UiForgePanelPreset& pr = ui.ui_forge_presets[(std::size_t)g_presets.selected_idx];
+
+      if (ImGui::Button("Create panel from preset")) {
+        UiForgePanelConfig imported;
+        std::string err;
+        if (decode_preset_dna(pr.dna, &imported, &err)) {
+          imported.id = ui.next_ui_forge_panel_id++;
+          if (imported.name.empty()) imported.name = pr.name;
+          imported.open = true;
+          assign_fresh_widget_ids(ui, imported);
+          ui.ui_forge_panels.push_back(std::move(imported));
+          g_ed.selected_panel_id = ui.ui_forge_panels.back().id;
+          g_ed.dna_status = "Created a new panel from preset.";
+        } else {
+          g_ed.dna_status = err.empty() ? "Preset DNA is invalid." : ("Preset DNA error: " + err);
+        }
+        g_ed.dna_status_time = ImGui::GetTime();
+      }
+
+      if (!sel_panel) ImGui::BeginDisabled();
+      if (ImGui::Button("Replace selected panel from preset")) {
+        UiForgePanelConfig* tgt = find_panel(ui, g_ed.selected_panel_id);
+        if (tgt) {
+          UiForgePanelConfig imported = *tgt;
+          std::string err;
+          if (decode_ui_forge_panel_dna(pr.dna, &imported, &err)) {
+            const std::uint64_t keep_id = tgt->id;
+            const bool keep_open = tgt->open;
+            *tgt = std::move(imported);
+            tgt->id = keep_id;
+            tgt->open = keep_open;
+            assign_fresh_widget_ids(ui, *tgt);
+            g_ed.dna_status = "Replaced selected panel from preset.";
+          } else {
+            g_ed.dna_status = err.empty() ? "Preset DNA is invalid." : ("Preset DNA error: " + err);
+          }
+          g_ed.dna_status_time = ImGui::GetTime();
+        }
+      }
+      if (!sel_panel) ImGui::EndDisabled();
+
+      if (ImGui::Button("Copy preset DNA")) {
+        ImGui::SetClipboardText(pr.dna.c_str());
+        g_ed.dna_status = "Copied preset DNA to clipboard.";
+        g_ed.dna_status_time = ImGui::GetTime();
+      }
+    }
   }
   ImGui::EndChild();
 

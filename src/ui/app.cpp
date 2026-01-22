@@ -2318,6 +2318,32 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
         }
       }
 
+      // --- Procedural UI: UI Forge (panel preset library) ---
+      if (auto it = obj->find("ui_forge_presets"); it != obj->end()) {
+        if (it->second.is_array()) {
+          ui_.ui_forge_presets.clear();
+
+          constexpr std::size_t kMaxPresets = 200;
+          constexpr std::size_t kMaxDnaLen = 64 * 1024;
+
+          for (const auto& pv : it->second.array_items()) {
+            if (ui_.ui_forge_presets.size() >= kMaxPresets) break;
+            if (!pv.is_object()) continue;
+            const auto& po = pv.object_items();
+
+            UiForgePanelPreset pr;
+            if (auto jt = po.find("name"); jt != po.end()) pr.name = jt->second.string_value(pr.name);
+            if (auto jt = po.find("dna"); jt != po.end()) pr.dna = jt->second.string_value(pr.dna);
+
+            if (pr.dna.empty()) continue;
+            if (pr.dna.size() > kMaxDnaLen) pr.dna.resize(kMaxDnaLen);
+
+            if (pr.name.empty()) pr.name = "Preset " + std::to_string(ui_.ui_forge_presets.size() + 1);
+            ui_.ui_forge_presets.push_back(std::move(pr));
+          }
+        }
+      }
+
     }
     return true;
   } catch (const std::exception& e) {
@@ -2876,6 +2902,19 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
         pa.push_back(nebula4x::json::object(std::move(po)));
       }
       o["ui_forge_panels"] = nebula4x::json::array(std::move(pa));
+    }
+
+    // --- Procedural UI: UI Forge (panel preset library) ---
+    {
+      nebula4x::json::Array a;
+      a.reserve(ui_.ui_forge_presets.size());
+      for (const auto& p : ui_.ui_forge_presets) {
+        nebula4x::json::Object po;
+        po["name"] = p.name;
+        po["dna"] = p.dna;
+        a.push_back(nebula4x::json::object(std::move(po)));
+      }
+      o["ui_forge_presets"] = nebula4x::json::array(std::move(a));
     }
     const std::string text = nebula4x::json::stringify(nebula4x::json::object(std::move(o)), 2);
     nebula4x::write_text_file(path, text);
