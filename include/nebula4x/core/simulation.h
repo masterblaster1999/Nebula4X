@@ -2583,7 +2583,12 @@ ColonyStabilityStatus colony_stability_status_for_colony(Id colony_id) const;
   bool enqueue_build(Id colony_id, const std::string& design_id);
 
   // Refit an existing ship at a colony shipyard (prototype).
-  // Enqueues a shipyard order that, when complete, updates the ship's design_id.
+  //
+  // This can be queued even if the ship is not currently docked at the colony.
+  // The shipyard will simply skip the order until the ship arrives (and will
+  // continue working on other orders behind it).
+  //
+  // When the shipyard order completes, the ship's design_id is updated.
   bool enqueue_refit(Id colony_id, Id ship_id, const std::string& target_design_id, std::string* error = nullptr);
 
   // Estimate shipyard work (tons) required to refit a ship to a target design.

@@ -2400,8 +2400,11 @@ bool Simulation::enqueue_refit(Id colony_id, Id ship_id, const std::string& targ
   if (!target) return fail("Unknown target design: " + target_design_id);
   if (!is_design_buildable_for_faction(colony->faction_id, target_design_id)) return fail("Target design is not unlocked");
 
-  // Refit requires the ship to be docked at the colony at the time of queuing.
-  if (!is_ship_docked_at_colony(ship_id, colony_id)) return fail("Ship is not docked at the colony");
+  // Scheduled refits are allowed even if the ship is not currently docked.
+  //
+  // The shipyard tick will simply skip stalled refit orders until the target
+  // ship arrives (and will continue working on other orders behind it).
+  const bool docked_now = is_ship_docked_at_colony(ship_id, colony_id);
 
   // Keep the prototype simple: refit ships must be detached from fleets.
   if (fleet_for_ship(ship_id) != kInvalidId) return fail("Ship is assigned to a fleet (detach before refit)");
@@ -2428,6 +2431,7 @@ bool Simulation::enqueue_refit(Id colony_id, Id ship_id, const std::string& targ
     ctx.colony_id = colony->id;
 
     std::string msg = "Shipyard refit queued: " + ship->name + " -> " + target->name + " at " + colony->name;
+    if (!docked_now) msg += " (waiting for docking)";
     push_event(EventLevel::Info, EventCategory::Shipyard, std::move(msg), ctx);
   }
 

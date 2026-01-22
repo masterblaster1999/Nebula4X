@@ -375,8 +375,8 @@ bool simulate_shipyard_day(const Simulation& sim,
   if (shipyard_def.build_rate_tons_per_day <= 1e-12) return false;
   if (colony.shipyard_queue.empty()) return false;
 
-  double capacity_tons = shipyard_def.build_rate_tons_per_day * static_cast<double>(yards) * std::max(0.0, mult.shipyard);
-  if (capacity_tons <= 1e-9) return false;
+  const double per_team_capacity_tons = shipyard_def.build_rate_tons_per_day * std::max(0.0, mult.shipyard);
+  if (per_team_capacity_tons <= 1e-9) return false;
 
   bool progressed = false;
 
@@ -392,31 +392,96 @@ bool simulate_shipyard_day(const Simulation& sim,
     return std::max(0.0, max_tons);
   };
 
-  while (capacity_tons > 1e-9 && !colony.shipyard_queue.empty()) {
-    BuildOrder& bo = colony.shipyard_queue.front();
+  // Pre-clean invalid/complete orders (mirrors Simulation shipyard tick).
+  for (std::size_t i = 0; i < colony.shipyard_queue.size();) {
+    BuildOrder& bo = colony.shipyard_queue[i];
     bo.tons_remaining = std::max(0.0, bo.tons_remaining);
     if (bo.tons_remaining <= 1e-9) {
-      colony.shipyard_queue.erase(colony.shipyard_queue.begin());
+      colony.shipyard_queue.erase(colony.shipyard_queue.begin() + static_cast<long>(i));
       continue;
     }
 
-    // Refit orders require the ship to already be docked (we don't simulate ship movement here).
+    if (bo.design_id.empty() || sim.content().designs.find(bo.design_id) == sim.content().designs.end()) {
+      colony.shipyard_queue.erase(colony.shipyard_queue.begin() + static_cast<long>(i));
+      continue;
+    }
+
     if (bo.is_refit()) {
-      if (!sim.is_ship_docked_at_colony(bo.refit_ship_id, colony.id)) {
-        hard_block = true;
-        hard_block_reason = "Refit is waiting for ship to be docked";
-        return progressed;
+      const Ship* refit_ship = find_ptr(sim.state().ships, bo.refit_ship_id);
+      if (!refit_ship) {
+        colony.shipyard_queue.erase(colony.shipyard_queue.begin() + static_cast<long>(i));
+        continue;
+      }
+      if (refit_ship->faction_id != colony.faction_id) {
+        colony.shipyard_queue.erase(colony.shipyard_queue.begin() + static_cast<long>(i));
+        continue;
       }
     }
 
-    double build_tons = std::min(capacity_tons, bo.tons_remaining);
+    ++i;
+  }
+
+  if (colony.shipyard_queue.empty()) return progressed;
+
+  auto order_workable = [&](const BuildOrder& bo) {
+    if (bo.tons_remaining <= 1e-9) return false;
+    if (!bo.is_refit()) return true;
+    // We do not simulate ship movement here; if the ship isn't docked yet, the
+    // refit stalls but does not block other orders.
+    return sim.is_ship_docked_at_colony(bo.refit_ship_id, colony.id);
+  };
+
+  // --- Shipyard "team" allocation ---
+  // Mirrors Simulation::tick_colonies shipyard behavior:
+  // - each yard contributes one team
+  // - assign 1 team to each workable order in queue order
+  // - pool remaining teams onto the first workable order
+  std::vector<int> teams_for_order(colony.shipyard_queue.size(), 0);
+  int teams_assigned = 0;
+  int first_workable = -1;
+  for (std::size_t i = 0; i < colony.shipyard_queue.size() && teams_assigned < yards; ++i) {
+    if (!order_workable(colony.shipyard_queue[i])) continue;
+    teams_for_order[i] = 1;
+    ++teams_assigned;
+    if (first_workable < 0) first_workable = static_cast<int>(i);
+  }
+  if (first_workable >= 0 && teams_assigned < yards) {
+    teams_for_order[static_cast<std::size_t>(first_workable)] += (yards - teams_assigned);
+  }
+
+  if (first_workable < 0) {
+    // No workable orders. If this is due to stalled refits, surface that as a
+    // hard block (the queue cannot progress without external ship movement).
+    bool has_refit = false;
+    for (const auto& bo : colony.shipyard_queue) {
+      if (bo.is_refit()) {
+        has_refit = true;
+        break;
+      }
+    }
+    if (has_refit) {
+      hard_block = true;
+      hard_block_reason = "Shipyard is waiting for refit ship(s) to be docked";
+    }
+    return progressed;
+  }
+
+  // --- Apply work in queue order ---
+  for (std::size_t i = 0; i < colony.shipyard_queue.size(); ++i) {
+    const int teams_here = teams_for_order[i];
+    if (teams_here <= 0) continue;
+
+    BuildOrder& bo = colony.shipyard_queue[i];
+    if (!order_workable(bo)) continue;
+
+    double build_tons = std::min(per_team_capacity_tons * static_cast<double>(teams_here), bo.tons_remaining);
     if (!shipyard_def.build_costs_per_ton.empty()) {
       build_tons = std::min(build_tons, max_buildable_tons_by_minerals(build_tons));
     }
 
     if (build_tons <= 1e-9) {
-      // Mineral limited.
-      return progressed;
+      // Mineral limited for this order.
+      continue;
     }
 
     // Pay minerals.
@@ -427,15 +492,17 @@ bool simulate_shipyard_day(const Simulation& sim,
     }
 
     bo.tons_remaining -= build_tons;
-    capacity_tons -= build_tons;
     progressed = true;
+  }
 
+  // --- Completion pass ---
+  for (std::size_t i = 0; i < colony.shipyard_queue.size();) {
+    const auto& bo = colony.shipyard_queue[i];
     if (bo.tons_remaining > 1e-9) {
-      // Still building the current order.
-      return progressed;
+      ++i;
+      continue;
     }
 
-    // Completed.
     ColonyScheduleEvent ev;
     ev.kind = ColonyScheduleEventKind::ShipyardComplete;
     ev.day = day;
@@ -448,7 +515,7 @@ bool simulate_shipyard_day(const Simulation& sim,
     }
     events.push_back(std::move(ev));
 
-    colony.shipyard_queue.erase(colony.shipyard_queue.begin());
+    colony.shipyard_queue.erase(colony.shipyard_queue.begin() + static_cast<long>(i));
   }
 
   return progressed;

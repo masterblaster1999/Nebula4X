@@ -20,6 +20,7 @@ const char* contract_kind_label(ContractKind k) {
     case ContractKind::InvestigateAnomaly: return "Investigate Anomaly";
     case ContractKind::SalvageWreck: return "Salvage Wreck";
     case ContractKind::SurveyJumpPoint: return "Survey Jump Point";
+    case ContractKind::EscortConvoy: return "Escort Convoy";
   }
   return "(Unknown)";
 }
@@ -81,6 +82,11 @@ std::string contract_target_label(const GameState& st, const Contract& c) {
       if (!other) return "JumpPoint " + std::to_string((unsigned long long)c.target_id);
       return "Exit to " + system_label(st, other->system_id);
     }
+    case ContractKind::EscortConvoy: {
+      const std::string convoy = ship_label(st, c.target_id);
+      const std::string dest = system_label(st, c.target_id2);
+      return convoy + "  →  " + dest;
+    }
   }
   return "(Unknown)";
 }
@@ -111,6 +117,13 @@ bool contract_target_pos(const GameState& st, const Contract& c, Id* out_sys, Ve
       if (out_sys) *out_sys = jp->system_id;
       if (out_pos) *out_pos = jp->position_mkm;
       return jp->system_id != kInvalidId;
+    }
+    case ContractKind::EscortConvoy: {
+      const auto* sh = find_ptr(st.ships, c.target_id);
+      if (!sh) return false;
+      if (out_sys) *out_sys = sh->system_id;
+      if (out_pos) *out_pos = sh->position_mkm;
+      return sh->system_id != kInvalidId;
     }
   }
   return false;
@@ -162,6 +175,41 @@ void focus_contract_target(const Contract& c, Simulation& sim, UIState& ui) {
   ui.request_system_map_center_system_id = sys_id;
   ui.request_system_map_center_x_mkm = pos.x;
   ui.request_system_map_center_y_mkm = pos.y;
+}
+
+void focus_system_pos(Id sys_id, const Vec2& pos, Simulation& sim, UIState& ui) {
+  if (sys_id == kInvalidId) return;
+  if (!find_ptr(sim.state().systems, sys_id)) return;
+
+  sim.state().selected_system = sys_id;
+  ui.show_map_window = true;
+  ui.request_map_tab = MapTab::System;
+  ui.request_system_map_center = true;
+  ui.request_system_map_center_system_id = sys_id;
+  ui.request_system_map_center_x_mkm = pos.x;
+  ui.request_system_map_center_y_mkm = pos.y;
+}
+
+void focus_contract_destination(const Contract& c, Simulation& sim, UIState& ui) {
+  if (c.kind != ContractKind::EscortConvoy) return;
+  const auto& st = sim.state();
+
+  const Id dest_sys = c.target_id2;
+  if (dest_sys == kInvalidId) return;
+
+  // Best-effort: focus the convoy's *arrival* point (entry jump) in the destination system.
+  Vec2 pos{0.0, 0.0};
+  const auto* convoy = find_ptr(st.ships, c.target_id);
+  if (convoy && convoy->system_id != kInvalidId && convoy->system_id != dest_sys) {
+    const double sp = std::max(1.0, convoy->speed_km_s);
+    const auto plan = sim.plan_jump_route_from_pos(convoy->system_id, convoy->position_mkm, convoy->faction_id,
+                                                   sp, dest_sys, /*restrict_to_discovered=*/false);
+    if (plan && !plan->systems.empty() && plan->systems.back() == dest_sys) {
+      pos = plan->arrival_pos_mkm;
+    }
+  }
+
+  focus_system_pos(dest_sys, pos, sim, ui);
 }
 
 void focus_ship(Id ship_id, Simulation& sim, UIState& ui, Id& selected_ship, Id& selected_colony, Id& selected_body) {
@@ -428,6 +476,47 @@ void draw_contracts_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& 
   ImGui::Text("Reward: %.0f RP", std::max(0.0, c->reward_research_points));
   ImGui::Text("Risk: %.2f   Hops: %d", std::clamp(c->risk_estimate, 0.0, 1.0), std::max(0, c->hops_estimate));
 
+  if (c->kind == ContractKind::EscortConvoy) {
+    ImGui::Separator();
+    ImGui::Text("Escort details");
+
+    const auto* convoy = find_ptr(st.ships, c->target_id);
+    if (!convoy) {
+      ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "Convoy ship is missing.");
+    } else {
+      ImGui::Text("Convoy: %s", ship_label(st, convoy->id).c_str());
+      ImGui::Text("Convoy system: %s", system_label(st, convoy->system_id).c_str());
+      ImGui::Text("Destination: %s", system_label(st, c->target_id2).c_str());
+      ImGui::Text("Convoy speed: %.0f km/s", std::max(0.0, convoy->speed_km_s));
+
+      if (c->target_id2 != kInvalidId && find_ptr(st.systems, c->target_id2) && convoy->system_id != c->target_id2) {
+        const double sp = std::max(1.0, convoy->speed_km_s);
+        const auto plan = sim.plan_jump_route_from_pos(convoy->system_id, convoy->position_mkm, convoy->faction_id,
+                                                       sp, c->target_id2, /*restrict_to_discovered=*/false);
+        if (plan && std::isfinite(plan->total_eta_days)) {
+          const std::string eta = fmt_eta_days(plan->total_eta_days);
+          const std::string arr = fmt_arrival_label(sim, plan->total_eta_days);
+          ImGui::TextDisabled("Remaining route: %d hop(s)   ETA: %s  %s", (int)plan->jump_ids.size(), eta.c_str(), arr.c_str());
+
+          if (ImGui::TreeNode("Route preview")) {
+            for (Id sys_id : plan->systems) {
+              const double piracy = std::clamp(sim.piracy_risk_for_system(sys_id), 0.0, 1.0);
+              const double speed_mult = std::max(0.0, sim.system_movement_speed_multiplier(sys_id));
+              ImGui::BulletText("%s  (piracy %.2f, speed×%.2f)", system_label(st, sys_id).c_str(), piracy, speed_mult);
+            }
+            ImGui::TreePop();
+          }
+        } else {
+          ImGui::TextDisabled("Remaining route: (no route)");
+        }
+
+        if (convoy->system_id != c->system_id && c->system_id != kInvalidId) {
+          ImGui::TextDisabled("Note: convoy has moved since the offer (offer system: %s).", system_label(st, c->system_id).c_str());
+        }
+      }
+    }
+  }
+
   ImGui::TextDisabled("Offered day: %lld", (long long)c->offered_day);
   if (c->status == ContractStatus::Offered && c->expires_day > 0) {
     ImGui::SameLine();
@@ -447,6 +536,12 @@ void draw_contracts_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& 
   // Actions.
   if (ImGui::Button("Focus Target")) {
     focus_contract_target(*c, sim, ui);
+  }
+  if (c->kind == ContractKind::EscortConvoy) {
+    ImGui::SameLine();
+    if (ImGui::Button("Focus Destination")) {
+      focus_contract_destination(*c, sim, ui);
+    }
   }
   ImGui::SameLine();
   if (c->assigned_ship_id != kInvalidId) {
@@ -527,6 +622,45 @@ void draw_contracts_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& 
         ImGui::TextDisabled("ETA: %s  %s", eta.c_str(), arr.c_str());
       } else {
         ImGui::TextDisabled("ETA: (no route)");
+      }
+
+      if (c->kind == ContractKind::EscortConvoy) {
+        const auto* convoy = find_ptr(st.ships, c->target_id);
+        const auto* escort = find_ptr(st.ships, ws.assign_ship);
+        if (!convoy) {
+          ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "Convoy ship is missing.");
+        } else {
+          const double convoy_speed = std::max(0.0, convoy->speed_km_s);
+          if (escort) {
+            const double escort_speed = std::max(0.0, escort->speed_km_s);
+            if (convoy_speed > 1e-9) {
+              ImGui::TextDisabled("Speed: escort %.0f km/s   convoy %.0f km/s", escort_speed, convoy_speed);
+              if (escort_speed + 1e-9 < convoy_speed) {
+                ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f),
+                                   "Warning: this ship is slower than the convoy and may fail to maintain escort range.");
+              }
+            }
+          }
+
+          if (c->target_id2 != kInvalidId && find_ptr(st.systems, c->target_id2) && convoy->system_id != c->target_id2) {
+            const double sp = std::max(1.0, convoy->speed_km_s);
+            const auto convoy_plan = sim.plan_jump_route_from_pos(convoy->system_id, convoy->position_mkm, convoy->faction_id,
+                                                                  sp, c->target_id2, /*restrict_to_discovered=*/false);
+            if (convoy_plan && std::isfinite(convoy_plan->total_eta_days)) {
+              const std::string eta = fmt_eta_days(convoy_plan->total_eta_days);
+              const std::string arr = fmt_arrival_label(sim, convoy_plan->total_eta_days);
+              ImGui::TextDisabled("Convoy ETA to destination: %s  %s", eta.c_str(), arr.c_str());
+
+              if (plan) {
+                const double eta_to_convoy_system = plan->eta_days;
+                if (std::isfinite(eta_to_convoy_system) && eta_to_convoy_system > convoy_plan->total_eta_days + 0.5) {
+                  ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f),
+                                     "Warning: this ship is unlikely to reach the convoy before it arrives.");
+                }
+              }
+            }
+          }
+        }
       }
     }
   }

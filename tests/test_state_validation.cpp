@@ -192,6 +192,113 @@ int test_state_validation() {
     N4X_ASSERT(has_scrap_missing_colony);
   }
 
+  // Sanity: EscortConvoy contracts should validate both the convoy ship + destination system.
+  {
+    auto st = nebula4x::make_sol_scenario();
+    N4X_ASSERT(!st.factions.empty());
+    N4X_ASSERT(!st.systems.empty());
+
+    const auto fid = st.factions.begin()->first;
+    const auto sys_id = st.systems.begin()->first;
+
+    const auto cid = st.next_id;
+    st.next_id = cid + 1;
+
+    nebula4x::Contract c;
+    c.id = cid;
+    c.name = "Bad EscortConvoy (missing convoy ship)";
+    c.kind = nebula4x::ContractKind::EscortConvoy;
+    c.status = nebula4x::ContractStatus::Offered;
+    c.issuer_faction_id = fid;
+    c.assignee_faction_id = fid;
+    c.system_id = sys_id;
+    c.target_id = static_cast<nebula4x::Id>(999999); // missing ship
+    c.target_id2 = sys_id; // valid destination system
+    st.contracts[cid] = c;
+
+    const auto errors = nebula4x::validate_game_state(st, &content);
+    bool has_missing_convoy = false;
+    for (const auto& e : errors) {
+      if (e.find("targets missing convoy ship id") != std::string::npos) {
+        has_missing_convoy = true;
+        break;
+      }
+    }
+    N4X_ASSERT(has_missing_convoy);
+  }
+
+  {
+    auto st = nebula4x::make_sol_scenario();
+    N4X_ASSERT(!st.factions.empty());
+    N4X_ASSERT(!st.systems.empty());
+    N4X_ASSERT(!st.ships.empty());
+
+    const auto fid = st.factions.begin()->first;
+    const auto sys_id = st.systems.begin()->first;
+    const auto ship_id = st.ships.begin()->first;
+
+    const auto cid = st.next_id;
+    st.next_id = cid + 1;
+
+    nebula4x::Contract c;
+    c.id = cid;
+    c.name = "Bad EscortConvoy (missing destination system)";
+    c.kind = nebula4x::ContractKind::EscortConvoy;
+    c.status = nebula4x::ContractStatus::Offered;
+    c.issuer_faction_id = fid;
+    c.assignee_faction_id = fid;
+    c.system_id = sys_id;
+    c.target_id = ship_id; // valid ship
+    c.target_id2 = static_cast<nebula4x::Id>(999999); // missing system
+    st.contracts[cid] = c;
+
+    const auto errors = nebula4x::validate_game_state(st, &content);
+    bool has_missing_dest = false;
+    for (const auto& e : errors) {
+      if (e.find("escort convoy contract targets missing destination system id") != std::string::npos) {
+        has_missing_dest = true;
+        break;
+      }
+    }
+    N4X_ASSERT(has_missing_dest);
+  }
+
+  // Fixer: EscortConvoy contracts with missing targets should be removed.
+  {
+    auto st = nebula4x::make_sol_scenario();
+    N4X_ASSERT(!st.factions.empty());
+    N4X_ASSERT(!st.systems.empty());
+
+    const auto fid = st.factions.begin()->first;
+    const auto sys_id = st.systems.begin()->first;
+
+    const auto cid = st.next_id;
+    st.next_id = cid + 1;
+
+    nebula4x::Contract c;
+    c.id = cid;
+    c.name = "Bad EscortConvoy (fix_me)";
+    c.kind = nebula4x::ContractKind::EscortConvoy;
+    c.status = nebula4x::ContractStatus::Offered;
+    c.issuer_faction_id = fid;
+    c.assignee_faction_id = fid;
+    c.system_id = sys_id;
+    c.target_id = static_cast<nebula4x::Id>(999999); // missing ship
+    c.target_id2 = sys_id;
+    st.contracts[cid] = c;
+
+    const auto report = nebula4x::fix_game_state(st, &content);
+    N4X_ASSERT(report.changes > 0);
+    N4X_ASSERT(st.contracts.find(cid) == st.contracts.end());
+
+    const auto errors = nebula4x::validate_game_state(st, &content);
+    if (!errors.empty()) {
+      std::cerr << "State validation failed after fixing EscortConvoy contract target integrity:\n";
+      for (const auto& e : errors) std::cerr << "  - " << e << "\n";
+      return 1;
+    }
+  }
+
   // Fixer: should be able to repair a variety of common integrity problems and
   // yield a state that validates successfully.
   {

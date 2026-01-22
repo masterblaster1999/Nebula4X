@@ -1133,65 +1133,335 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
 
     // Region boundaries (procedural sector overlays).
     // Draw behind jump links / nodes but above the grid so the map stays readable.
-    if (ui.show_galaxy_region_boundaries) {
-      std::unordered_map<Id, std::vector<Vec2>> reg_pts;
+    const bool want_region_overlay = (ui.show_galaxy_region_boundaries || ui.show_galaxy_region_centers);
+    std::unordered_map<Id, std::vector<Vec2>> reg_pts;
+    if (want_region_overlay) {
       reg_pts.reserve(s.regions.size() * 2);
       for (const auto& v : visible) {
         const Id rid = v.sys ? v.sys->region_id : kInvalidId;
         if (rid == kInvalidId) continue;
         reg_pts[rid].push_back(v.sys->galaxy_pos - world_center);
       }
+    }
 
-      for (auto& kv : reg_pts) {
-        const Id rid = kv.first;
-        std::vector<Vec2> hull = convex_hull(std::move(kv.second));
-        if (hull.empty()) continue;
+    // Region boundaries: convex hull (fast) or clipped Voronoi partition (accurate).
+    if (ui.show_galaxy_region_boundaries && !reg_pts.empty()) {
+      if (ui.galaxy_region_boundary_voronoi) {
+        // Build clipped Voronoi cells based on Region::center (seed points).
+        //
+        // Under fog-of-war, we restrict the *site set* to regions that have at least
+        // one visible system to avoid leaking undiscovered regions. This still
+        // provides intuitive partitions for the explored space.
+        struct VoronoiCache {
+          std::uint64_t key{0};
+          std::unordered_map<Id, std::vector<Vec2>> cells; // region_id -> convex polygon (relative coords)
+        };
+        static VoronoiCache vcache;
+        static std::uint64_t vcache_state_gen = 0;
+        if (vcache_state_gen != sim.state_generation()) {
+          vcache = VoronoiCache{};
+          vcache_state_gen = sim.state_generation();
+        }
 
-        // Colors/alpha (highlight selected region and optionally dim others).
-        float fill_a = 0.05f;
-        float line_a = 0.25f;
-        if (ui.selected_region_id != kInvalidId) {
-          if (rid == ui.selected_region_id) {
-            fill_a = 0.09f;
-            line_a = 0.55f;
-          } else if (ui.galaxy_region_dim_nonselected) {
-            fill_a *= 0.25f;
-            line_a *= 0.35f;
+        auto dot2 = [](const Vec2& a, const Vec2& b) -> double { return a.x * b.x + a.y * b.y; };
+
+        auto clip_halfplane = [&](const std::vector<Vec2>& poly, const Vec2& n, double c) -> std::vector<Vec2> {
+          std::vector<Vec2> out;
+          if (poly.empty()) return out;
+          out.reserve(poly.size() + 4);
+          constexpr double eps = 1.0e-9;
+
+          auto f = [&](const Vec2& p) -> double { return dot2(p, n) - c; };
+
+          Vec2 prev = poly.back();
+          double f_prev = f(prev);
+          bool prev_in = (f_prev <= eps);
+
+          for (const Vec2& curr : poly) {
+            const double f_curr = f(curr);
+            const bool curr_in = (f_curr <= eps);
+
+            if (prev_in && curr_in) {
+              out.push_back(curr);
+            } else if (prev_in && !curr_in) {
+              // Leaving: emit intersection.
+              const double denom = (f_prev - f_curr);
+              double t = 0.0;
+              if (std::abs(denom) > 1.0e-12) t = f_prev / denom;
+              t = std::clamp(t, 0.0, 1.0);
+              out.push_back(prev + (curr - prev) * t);
+            } else if (!prev_in && curr_in) {
+              // Entering: emit intersection then curr.
+              const double denom = (f_prev - f_curr);
+              double t = 0.0;
+              if (std::abs(denom) > 1.0e-12) t = f_prev / denom;
+              t = std::clamp(t, 0.0, 1.0);
+              out.push_back(prev + (curr - prev) * t);
+              out.push_back(curr);
+            }
+
+            prev = curr;
+            f_prev = f_curr;
+            prev_in = curr_in;
           }
+
+          // Deduplicate consecutive points (and collapse closing duplicate).
+          if (out.size() >= 2) {
+            auto near = [](const Vec2& a, const Vec2& b) -> bool {
+              const double dx = a.x - b.x;
+              const double dy = a.y - b.y;
+              return (dx * dx + dy * dy) <= 1.0e-16;
+            };
+            std::vector<Vec2> dedup;
+            dedup.reserve(out.size());
+            for (const Vec2& p : out) {
+              if (dedup.empty() || !near(dedup.back(), p)) dedup.push_back(p);
+            }
+            if (dedup.size() >= 2 && near(dedup.front(), dedup.back())) dedup.pop_back();
+            out.swap(dedup);
+          }
+
+          return out;
+        };
+
+        auto simplify_convex = [&](std::vector<Vec2>& poly) {
+          if (poly.size() < 3) return;
+          // Remove near-collinear vertices (small visual cleanup).
+          constexpr double eps = 1.0e-10;
+          bool changed = true;
+          for (int iter = 0; changed && iter < 3; ++iter) {
+            changed = false;
+            if (poly.size() < 3) break;
+            std::vector<Vec2> out;
+            out.reserve(poly.size());
+            for (std::size_t i = 0; i < poly.size(); ++i) {
+              const Vec2& a = poly[(i + poly.size() - 1) % poly.size()];
+              const Vec2& b = poly[i];
+              const Vec2& cpt = poly[(i + 1) % poly.size()];
+              const Vec2 ab = b - a;
+              const Vec2 bc = cpt - b;
+              const double cr = ab.x * bc.y - ab.y * bc.x;
+              const double lab = std::max(1.0e-12, ab.length());
+              const double lbc = std::max(1.0e-12, bc.length());
+              if (std::abs(cr) <= eps * (lab + lbc)) {
+                changed = true;
+                continue;
+              }
+              out.push_back(b);
+            }
+            poly.swap(out);
+          }
+        };
+
+        auto build_voronoi = [&]() {
+          vcache.cells.clear();
+          if (reg_pts.empty()) return;
+
+          // Determine a clipping rectangle slightly larger than the visible bounds.
+          const Vec2 rel_min{min_x - world_center.x, min_y - world_center.y};
+          const Vec2 rel_max{max_x - world_center.x, max_y - world_center.y};
+          const double margin = std::max(1.0, max_half_span * 0.18);
+          const Vec2 clip_min{rel_min.x - margin, rel_min.y - margin};
+          const Vec2 clip_max{rel_max.x + margin, rel_max.y + margin};
+
+          const std::vector<Vec2> bbox{
+            Vec2{clip_min.x, clip_min.y},
+            Vec2{clip_max.x, clip_min.y},
+            Vec2{clip_max.x, clip_max.y},
+            Vec2{clip_min.x, clip_max.y},
+          };
+
+          struct Site {
+            Id rid{kInvalidId};
+            Vec2 p{0.0, 0.0}; // relative coords
+          };
+          std::vector<Site> sites;
+          sites.reserve(reg_pts.size());
+
+          for (const auto& kv : reg_pts) {
+            const Id rid = kv.first;
+            Vec2 p{0.0, 0.0};
+
+            // Prefer the procedural seed point; fallback to centroid of visible systems.
+            if (const auto* reg = find_ptr(s.regions, rid)) {
+              p = reg->center - world_center;
+            } else {
+              const auto& pts = kv.second;
+              if (!pts.empty()) {
+                Vec2 sum{0.0, 0.0};
+                for (const Vec2& q : pts) sum = sum + q;
+                p = sum * (1.0 / static_cast<double>(pts.size()));
+              }
+            }
+
+            // Deterministic micro-jitter to avoid degenerate equal-site cases.
+            const std::uint64_t h = mix64(static_cast<std::uint64_t>(rid) * 0xA24BAED4963EE407ULL);
+            const double ang = (double)((h & 0xFFFFu) / 65535.0) * 6.283185307179586;
+            const double rad = std::max(1.0e-6, max_half_span * 1.0e-3);
+            p.x += std::cos(ang) * rad;
+            p.y += std::sin(ang) * rad;
+
+            sites.push_back(Site{rid, p});
+          }
+
+          // Build cells by half-plane intersection.
+          for (const Site& si : sites) {
+            std::vector<Vec2> poly = bbox;
+
+            for (const Site& sj : sites) {
+              if (si.rid == sj.rid) continue;
+
+              const Vec2 n = sj.p - si.p;
+              const double nlen2 = n.x * n.x + n.y * n.y;
+              if (nlen2 < 1.0e-18) continue;
+
+              // Keep the half-plane closer to si than sj:
+              //   dot(x, n) <= dot(mid, n), where mid=(si+sj)/2 and n=(sj-si).
+              const Vec2 mid = (si.p + sj.p) * 0.5;
+              const double c = dot2(mid, n);
+
+              poly = clip_halfplane(poly, n, c);
+              if (poly.size() < 3) {
+                poly.clear();
+                break;
+              }
+            }
+
+            if (poly.size() < 3) continue;
+            simplify_convex(poly);
+            if (poly.size() < 3) continue;
+
+            vcache.cells[si.rid] = std::move(poly);
+          }
+        };
+
+        // Cache key: visible region ids + FoW flag + viewer faction.
+        std::uint64_t acc = 0;
+        for (const auto& kv : reg_pts) {
+          acc ^= mix64(static_cast<std::uint64_t>(kv.first) * 0x9E3779B97F4A7C15ULL);
         }
 
-        const ImU32 fill = region_col(rid, fill_a);
-        const ImU32 line = region_col(rid, line_a);
+        std::uint64_t key = 0xD0C0BEEF0DDF00DULL;
+        key ^= mix64(static_cast<std::uint64_t>(ui.fog_of_war) << 1);
+        key ^= mix64(static_cast<std::uint64_t>(viewer_faction_id) << 2);
+        key ^= mix64(acc);
+        key = mix64(key);
 
-        if (hull.size() == 1) {
-          const ImVec2 p = to_screen(hull[0], center_px, scale, zoom, pan);
-          draw->AddCircleFilled(p, 18.0f, fill);
-          draw->AddCircle(p, 18.0f, line, 0, 2.0f);
-          continue;
+        if (key != vcache.key) {
+          vcache.key = key;
+          build_voronoi();
         }
 
-        if (hull.size() == 2) {
-          const ImVec2 p0 = to_screen(hull[0], center_px, scale, zoom, pan);
-          const ImVec2 p1 = to_screen(hull[1], center_px, scale, zoom, pan);
-          draw->AddLine(p0, p1, fill, 12.0f);
-          draw->AddLine(p0, p1, line, 2.0f);
-          draw->AddCircleFilled(p0, 6.0f, fill);
-          draw->AddCircleFilled(p1, 6.0f, fill);
-          draw->AddCircle(p0, 6.0f, line, 0, 2.0f);
-          draw->AddCircle(p1, 6.0f, line, 0, 2.0f);
-          continue;
-        }
+        for (const auto& kv : vcache.cells) {
+          const Id rid = kv.first;
+          const auto& cell = kv.second;
+          if (cell.size() < 3) continue;
 
-        std::vector<ImVec2> poly;
-        poly.reserve(hull.size());
-        for (const Vec2& p : hull) {
-          poly.push_back(to_screen(p, center_px, scale, zoom, pan));
+          // Colors/alpha (highlight selected region and optionally dim others).
+          float fill_a = 0.05f;
+          float line_a = 0.25f;
+          if (ui.selected_region_id != kInvalidId) {
+            if (rid == ui.selected_region_id) {
+              fill_a = 0.09f;
+              line_a = 0.55f;
+            } else if (ui.galaxy_region_dim_nonselected) {
+              fill_a *= 0.25f;
+              line_a *= 0.35f;
+            }
+          }
+
+          const ImU32 fill = region_col(rid, fill_a);
+          const ImU32 line = region_col(rid, line_a);
+
+          std::vector<ImVec2> poly;
+          poly.reserve(cell.size());
+          for (const Vec2& p : cell) poly.push_back(to_screen(p, center_px, scale, zoom, pan));
+          draw->AddConvexPolyFilled(poly.data(), static_cast<int>(poly.size()), fill);
+          draw->AddPolyline(poly.data(), static_cast<int>(poly.size()), line, true, 2.0f);
         }
-        draw->AddConvexPolyFilled(poly.data(), static_cast<int>(poly.size()), fill);
-        draw->AddPolyline(poly.data(), static_cast<int>(poly.size()), line, true, 2.0f);
+      } else {
+        // Hull boundaries mode (original).
+        for (const auto& kv : reg_pts) {
+          const Id rid = kv.first;
+          std::vector<Vec2> hull = convex_hull(kv.second);
+          if (hull.empty()) continue;
+
+          // Colors/alpha (highlight selected region and optionally dim others).
+          float fill_a = 0.05f;
+          float line_a = 0.25f;
+          if (ui.selected_region_id != kInvalidId) {
+            if (rid == ui.selected_region_id) {
+              fill_a = 0.09f;
+              line_a = 0.55f;
+            } else if (ui.galaxy_region_dim_nonselected) {
+              fill_a *= 0.25f;
+              line_a *= 0.35f;
+            }
+          }
+
+          const ImU32 fill = region_col(rid, fill_a);
+          const ImU32 line = region_col(rid, line_a);
+
+          if (hull.size() == 1) {
+            const ImVec2 p = to_screen(hull[0], center_px, scale, zoom, pan);
+            draw->AddCircleFilled(p, 18.0f, fill);
+            draw->AddCircle(p, 18.0f, line, 0, 2.0f);
+            continue;
+          }
+
+          if (hull.size() == 2) {
+            const ImVec2 p0 = to_screen(hull[0], center_px, scale, zoom, pan);
+            const ImVec2 p1 = to_screen(hull[1], center_px, scale, zoom, pan);
+            draw->AddLine(p0, p1, fill, 12.0f);
+            draw->AddLine(p0, p1, line, 2.0f);
+            draw->AddCircleFilled(p0, 6.0f, fill);
+            draw->AddCircleFilled(p1, 6.0f, fill);
+            draw->AddCircle(p0, 6.0f, line, 0, 2.0f);
+            draw->AddCircle(p1, 6.0f, line, 0, 2.0f);
+            continue;
+          }
+
+          std::vector<ImVec2> poly;
+          poly.reserve(hull.size());
+          for (const Vec2& p : hull) poly.push_back(to_screen(p, center_px, scale, zoom, pan));
+          draw->AddConvexPolyFilled(poly.data(), static_cast<int>(poly.size()), fill);
+          draw->AddPolyline(poly.data(), static_cast<int>(poly.size()), line, true, 2.0f);
+        }
       }
     }
 
+    // Optional region seed/center points (debug overlay).
+    if (ui.show_galaxy_region_centers && !reg_pts.empty()) {
+      for (const auto& kv : reg_pts) {
+        const Id rid = kv.first;
+
+        // Use the procedural seed point when present; fallback to centroid of visible systems.
+        Vec2 p{0.0, 0.0};
+        if (const auto* reg = find_ptr(s.regions, rid)) {
+          p = reg->center - world_center;
+        } else if (!kv.second.empty()) {
+          Vec2 sum{0.0, 0.0};
+          for (const Vec2& q : kv.second) sum = sum + q;
+          p = sum * (1.0 / static_cast<double>(kv.second.size()));
+        }
+
+        float a = 0.55f;
+        if (ui.selected_region_id != kInvalidId) {
+          if (rid == ui.selected_region_id) a = 0.85f;
+          else if (ui.galaxy_region_dim_nonselected) a *= 0.35f;
+        }
+
+        const ImVec2 sp = to_screen(p, center_px, scale, zoom, pan);
+        const ImU32 col = region_col(rid, a);
+        const ImU32 sh = modulate_alpha(IM_COL32(0, 0, 0, 220), a);
+
+        const float r = 6.0f;
+        draw->AddLine(ImVec2(sp.x - r, sp.y), ImVec2(sp.x + r, sp.y), sh, 3.0f);
+        draw->AddLine(ImVec2(sp.x, sp.y - r), ImVec2(sp.x, sp.y + r), sh, 3.0f);
+        draw->AddLine(ImVec2(sp.x - r, sp.y), ImVec2(sp.x + r, sp.y), col, 1.5f);
+        draw->AddLine(ImVec2(sp.x, sp.y - r), ImVec2(sp.x, sp.y + r), col, 1.5f);
+      }
+    }
     ScaleBarStyle sb;
     sb.enabled = true;
     sb.desired_px = 120.0f;
@@ -1407,7 +1677,34 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
         const Vec2 b = dest_sys->galaxy_pos - world_center;
         const ImVec2 pa = to_screen(a, center_px, scale, zoom, pan);
         const ImVec2 pb = to_screen(b, center_px, scale, zoom, pan);
-        draw->AddLine(pa, pb, IM_COL32(120, 120, 160, 200), 2.0f);
+        ImU32 col = IM_COL32(120, 120, 160, 200);
+        float thick = 2.0f;
+
+        // Optional: highlight links that cross region borders (debugging / strategic overlay).
+        if (ui.show_galaxy_region_border_links && v.sys) {
+          const Id ra = v.sys->region_id;
+          const Id rb = dest_sys->region_id;
+          if (ra != kInvalidId && rb != kInvalidId && ra != rb) {
+            float a = 0.55f;
+            thick = 3.25f;
+
+            // If a region is selected, emphasize only links on its border.
+            if (ui.selected_region_id != kInvalidId) {
+              if (ra == ui.selected_region_id || rb == ui.selected_region_id) {
+                a = 0.85f;
+                thick = 4.25f;
+              } else if (ui.galaxy_region_dim_nonselected) {
+                a *= 0.30f;
+                thick = 2.0f;
+              }
+            }
+
+            col = modulate_alpha(IM_COL32(255, 210, 120, 255), a);
+            draw->AddLine(pa, pb, modulate_alpha(IM_COL32(0, 0, 0, 220), a), thick + 1.5f);
+          }
+        }
+
+        draw->AddLine(pa, pb, col, thick);
       }
     }
   }
@@ -3846,6 +4143,25 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   ImGui::SameLine();
   ImGui::Checkbox("Dim others", &ui.galaxy_region_dim_nonselected);
   ImGui::EndDisabled();
+
+  const bool any_region_overlay = (ui.show_galaxy_regions || ui.show_galaxy_region_boundaries);
+  ImGui::BeginDisabled(!any_region_overlay);
+  ImGui::Checkbox("Centers##region_centers", &ui.show_galaxy_region_centers);
+  ImGui::SameLine();
+  ImGui::Checkbox("Border links##region_border_links", &ui.show_galaxy_region_border_links);
+  ImGui::EndDisabled();
+
+  ImGui::BeginDisabled(!ui.show_galaxy_region_boundaries);
+  ImGui::Checkbox("Voronoi geometry##region_voronoi_geom", &ui.galaxy_region_boundary_voronoi);
+  ImGui::SameLine();
+  ImGui::TextDisabled("(?)");
+  if (ImGui::IsItemHovered()) {
+    ImGui::BeginTooltip();
+    ImGui::TextUnformatted("Hull: convex hull of visible systems.\nVoronoi: clipped partition from region centers.");
+    ImGui::EndTooltip();
+  }
+  ImGui::EndDisabled();
+
 
   if (ui.selected_region_id != kInvalidId) {
     const auto* reg = find_ptr(s.regions, ui.selected_region_id);

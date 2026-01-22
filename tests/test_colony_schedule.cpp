@@ -180,9 +180,58 @@ int test_colony_schedule() {
     N4X_ASSERT(sched.stalled);
   }
 
+  // --- Case 4: a stalled refit should not block later shipyard orders in the schedule. ---
+  {
+    // A ship that is NOT docked at the colony.
+    Ship sh;
+    sh.id = 150;
+    sh.name = "Remote";
+    sh.faction_id = f.id;
+    sh.design_id = "scout";
+    sh.system_id = sys.id;
+    sh.position_mkm = Vec2{100.0, 0.0};
+    st.ships[sh.id] = sh;
+
+    Colony c;
+    c.id = 103;
+    c.name = "Col4";
+    c.body_id = b.id;
+    c.faction_id = f.id;
+    c.installations["shipyard"] = 1;
+    c.minerals["Duranium"] = 1000.0;
+
+    // Front order: stalled refit (ship not docked).
+    BuildOrder refit;
+    refit.design_id = "scout";
+    refit.refit_ship_id = sh.id;
+    refit.tons_remaining = 50.0;
+    c.shipyard_queue.push_back(refit);
+
+    // Second order: should complete on day 1.
+    BuildOrder build;
+    build.design_id = "scout";
+    build.tons_remaining = 100.0;
+    c.shipyard_queue.push_back(build);
+
+    st.colonies[c.id] = c;
+
+    ColonyScheduleOptions opt;
+    opt.max_days = 1;
+    opt.max_events = 8;
+    opt.include_auto_construction_targets = false;
+    opt.include_shipyard = true;
+    opt.include_construction = false;
+
+    const ColonySchedule sched = estimate_colony_schedule(sim, c.id, opt);
+    N4X_ASSERT(sched.ok);
+    N4X_ASSERT(!sched.stalled);
+    N4X_ASSERT(sched.events.size() == 1);
+    N4X_ASSERT(sched.events[0].kind == ColonyScheduleEventKind::ShipyardComplete);
+    N4X_ASSERT(sched.events[0].day == 1);
+  }
 
 
-  // --- Case 4: Generic mining (mining_tons_per_day) should feed shipyard builds in the schedule. ---
+  // --- Case 5: Generic mining (mining_tons_per_day) should feed shipyard builds in the schedule. ---
   // This validates that the colony schedule simulation matches the modern mining model used in
   // Simulation::tick_colonies (capacity distributed across all deposits by remaining composition).
   {

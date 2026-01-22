@@ -53,6 +53,13 @@ bool contract_target_pos(const GameState& st, const Contract& c, Id* out_sys, Ve
       if (out_pos) *out_pos = jp->position_mkm;
       return jp->system_id != kInvalidId;
     }
+    case ContractKind::EscortConvoy: {
+      const auto* sh = find_ptr(st.ships, c.target_id);
+      if (!sh) return false;
+      if (out_sys) *out_sys = sh->system_id;
+      if (out_pos) *out_pos = sh->position_mkm;
+      return sh->system_id != kInvalidId;
+    }
   }
   return false;
 }
@@ -77,6 +84,10 @@ double role_bonus_for_kind(ShipRole role, ContractKind kind) {
     case ContractKind::SurveyJumpPoint:
       if (role == ShipRole::Surveyor) return 0.25;
       if (role == ShipRole::Combatant) return 0.05;
+      return 0.0;
+    case ContractKind::EscortConvoy:
+      if (role == ShipRole::Combatant) return 0.25;
+      if (role == ShipRole::Surveyor) return 0.05;
       return 0.0;
   }
   return 0.0;
@@ -121,6 +132,19 @@ double estimate_work_days_for_contract(const Simulation& sim, const Contract& c,
       // The scoring primary driver is travel time anyway.
       (void)faction_id;
       return 1.0;
+    }
+    case ContractKind::EscortConvoy: {
+      const auto* tgt = find_ptr(st.ships, c.target_id);
+      if (!tgt) return 0.0;
+      const Id dest_sys = c.target_id2;
+      if (dest_sys == kInvalidId || st.systems.find(dest_sys) == st.systems.end()) return 0.0;
+      if (tgt->system_id == dest_sys) return 0.0;
+      const double sp = std::max(0.0, tgt->speed_km_s);
+      if (sp <= kEps) return 0.0;
+      const auto plan = sim.plan_jump_route_from_pos(tgt->system_id, tgt->position_mkm, tgt->faction_id, sp, dest_sys,
+                                                    /*restrict_to_discovered=*/false);
+      if (!plan) return 0.0;
+      return std::max(0.0, plan->total_eta_days);
     }
   }
   return 0.0;
@@ -198,6 +222,19 @@ ContractPlannerResult compute_contract_plan(const Simulation& sim, Id faction_id
       double total = 0.0;
       for (const auto& [_, t] : w->minerals) total += std::max(0.0, t);
       if (total <= kEps) continue;
+    }
+
+    // Filter out stale/unrunnable escort offers.
+    if (c->kind == ContractKind::EscortConvoy) {
+      const auto* convoy = find_ptr(st.ships, c->target_id);
+      if (!convoy) continue;
+      if (c->target_id2 == kInvalidId || st.systems.find(c->target_id2) == st.systems.end()) continue;
+      if (convoy->system_id == c->target_id2) continue;
+
+      // For escort, "avoid hostiles" should apply to the destination too.
+      if (opt.avoid_hostile_systems && !sim.detected_hostile_ships_in_system(faction_id, c->target_id2).empty()) {
+        continue;
+      }
     }
 
     ContractInfo ci;
@@ -296,8 +333,32 @@ ContractPlannerResult compute_contract_plan(const Simulation& sim, Id faction_id
   const double min_tons = std::max(1e-6, sim.cfg().auto_freight_min_transfer_tons);
   const double risk_penalty = std::max(0.0, opt.risk_penalty);
   const double hop_overhead = std::max(0.0, opt.hop_overhead_days);
+  const double escort_jump_eta_slack_days = 0.5;
+  const double escort_speed_eps = 1e-9;
 
   for (const auto& c : contracts) {
+    const auto* full_c = find_ptr(st.contracts, c.id);
+    if (!full_c) continue;
+
+    // Precompute escort-leg work for EscortConvoy contracts (same for all ships).
+    double escort_leg_days = 0.0;
+    int escort_leg_hops = 0;
+    double escort_convoy_speed_km_s = 0.0;
+    if (c.kind == ContractKind::EscortConvoy) {
+      const auto* convoy = find_ptr(st.ships, full_c->target_id);
+      if (!convoy) continue;
+      const Id dest_sys = full_c->target_id2;
+      if (dest_sys == kInvalidId || st.systems.find(dest_sys) == st.systems.end()) continue;
+      if (convoy->system_id == dest_sys) continue;
+      escort_convoy_speed_km_s = std::max(0.0, convoy->speed_km_s);
+      const auto convoy_plan = sim.plan_jump_route_from_pos(convoy->system_id, convoy->position_mkm, convoy->faction_id,
+                                                           convoy->speed_km_s, dest_sys,
+                                                           /*restrict_to_discovered=*/false);
+      if (!convoy_plan || !std::isfinite(convoy_plan->total_eta_days)) continue;
+      escort_leg_days = std::max(0.0, convoy_plan->total_eta_days);
+      escort_leg_hops = (int)convoy_plan->jump_ids.size();
+    }
+
     for (const auto& sh : ships) {
       // Basic capability filters per contract.
       if (c.kind == ContractKind::SalvageWreck) {
@@ -310,6 +371,11 @@ ContractPlannerResult compute_contract_plan(const Simulation& sim, Id faction_id
         if (sh.sensor_range_mkm <= kEps) continue;
       }
 
+      if (c.kind == ContractKind::EscortConvoy) {
+        // If you're slower than the convoy, you're very unlikely to remain within escort range.
+        if (escort_convoy_speed_km_s > escort_speed_eps && sh.speed_km_s + 1e-9 < escort_convoy_speed_km_s) continue;
+      }
+
       // Travel ETA.
       const auto plan = sim.plan_jump_route_from_pos(sh.system_id, sh.pos, faction_id, sh.speed_km_s, c.system_id,
                                                      opt.restrict_to_discovered, c.pos);
@@ -317,8 +383,26 @@ ContractPlannerResult compute_contract_plan(const Simulation& sim, Id faction_id
       const double eta = plan->total_eta_days;
       if (!std::isfinite(eta)) continue;
 
-      const double work = estimate_work_days_for_contract(sim, *find_ptr(st.contracts, c.id), faction_id, sh.id);
-      const double total = std::max(0.0, eta) + std::max(0.0, work) + hop_overhead * (double)std::max(0, c.hops);
+      // Escort contracts are time-sensitive: if we can't even reach the convoy's
+      // current system before it arrives at its destination, this assignment is
+      // almost certainly doomed.
+      if (c.kind == ContractKind::EscortConvoy) {
+        const double eta_to_system = plan->eta_days;
+        if (!std::isfinite(eta_to_system)) continue;
+        if (eta_to_system > escort_leg_days + escort_jump_eta_slack_days) continue;
+      }
+
+      const double work = (c.kind == ContractKind::EscortConvoy)
+                            ? escort_leg_days
+                            : estimate_work_days_for_contract(sim, *full_c, faction_id, sh.id);
+
+      int hops = std::max(0, c.hops);
+      if (c.kind == ContractKind::EscortConvoy) {
+        // Use a more accurate hop estimate: ship->convoy hops + convoy remaining hops.
+        hops = (int)plan->jump_ids.size() + escort_leg_hops;
+      }
+
+      const double total = std::max(0.0, eta) + std::max(0.0, work) + hop_overhead * (double)hops;
 
       // Heuristic: RP per (day + 1), adjusted for risk and role.
       double score = c.reward_rp / (total + 1.0);

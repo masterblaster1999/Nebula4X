@@ -186,6 +186,18 @@ std::vector<std::string> validate_game_state(const GameState& s, const ContentDB
             push(errors, join("Contract ", id_u64(cid), " targets missing jump point id ", id_u64(c.target_id)));
           }
           break;
+        case ContractKind::EscortConvoy:
+          if (!has_ship(c.target_id)) {
+            push(errors, join("Contract ", id_u64(cid), " targets missing convoy ship id ", id_u64(c.target_id)));
+          }
+          if (c.target_id2 == kInvalidId) {
+            push(errors, join("Contract ", id_u64(cid), " escort convoy contract is missing destination system id"));
+          } else if (!has_system(c.target_id2)) {
+            push(errors,
+                 join("Contract ", id_u64(cid), " escort convoy contract targets missing destination system id ",
+                      id_u64(c.target_id2)));
+          }
+          break;
       }
     }
   }
@@ -1746,11 +1758,16 @@ FixReport fix_game_state(GameState& s, const ContentDB* content) {
 
     // Target integrity: if the target entity is missing, drop the contract entirely.
     bool target_ok = true;
-    if (c.target_id != kInvalidId) {
+    if (c.kind == ContractKind::EscortConvoy) {
+      // EscortConvoy relies on *two* references: convoy ship + destination system.
+      if (c.target_id == kInvalidId || !has_ship(c.target_id)) target_ok = false;
+      if (c.target_id2 == kInvalidId || !has_system(c.target_id2)) target_ok = false;
+    } else if (c.target_id != kInvalidId) {
       switch (c.kind) {
         case ContractKind::InvestigateAnomaly: target_ok = has_anomaly(c.target_id); break;
         case ContractKind::SalvageWreck: target_ok = has_wreck(c.target_id); break;
         case ContractKind::SurveyJumpPoint: target_ok = has_jump(c.target_id); break;
+        case ContractKind::EscortConvoy: break;
       }
     }
     if (!target_ok) {

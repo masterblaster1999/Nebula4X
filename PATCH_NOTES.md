@@ -1,3 +1,43 @@
+## r96: Galaxy region geometry upgrades (clipped Voronoi boundaries + border-link highlighting)
+
+- **Galaxy map region boundaries**: the existing *Boundaries* overlay now supports two geometry modes:
+  - **Hull** (default): convex hull of the region’s **visible systems** (fast, but can be misleading in sparse regions).
+  - **Voronoi**: a clipped Voronoi partition driven by **Region::center** seed points (matches procgen sector assignment more closely).
+- **Region centers**: new *Centers* toggle draws region seed points (debug/procgen visualization).
+- **Border links**: new *Border links* toggle highlights jump links that cross region boundaries (useful for finding “border chokepoints”).
+  - If a region is selected, border links touching that region are emphasized; others can be dimmed with *Dim others*.
+
+Compatibility:
+- **Save schema is unchanged.**
+
+## r95: Scheduled shipyard refits + shipyard schedule preview parity
+
+- **Refit queuing**: `Simulation::enqueue_refit` now allows queuing refits even when the ship is **not currently docked** at the colony.
+  - The shipyard will **skip** the refit order until the ship docks (it does **not block** later shipyard orders).
+  - The player event text indicates when a refit is queued but **waiting for docking**.
+- **Colony schedule**: the shipyard portion of `estimate_colony_schedule()` now mirrors modern shipyard behavior more closely:
+  - Models **multiple shipyards as multiple work teams**.
+  - **Stalled refits** no longer hard-block the entire forecast when other orders are workable.
+
+Compatibility:
+- **Save schema is unchanged.**
+
+
+## r94: EscortConvoy contracts (planner + UI support)
+
+- **Contracts**: the previously AI-only **EscortConvoy** contract type now has full player-facing support:
+  - Contract list + detail view now display the **convoy** and **destination**.
+  - Added **Focus Destination** (centers the destination system at the convoy's estimated entry jump point).
+  - Detail panel shows estimated remaining route ETA, hop count, and a **route preview** with per-system piracy risk + movement speed multipliers.
+  - Assign-to-ship ETA panel now shows convoy ETA-to-destination and warns when the selected escort is **slower than the convoy** or unlikely to rendezvous in time.
+- **Planner**: contract planner now considers EscortConvoy contracts (with feasibility filtering and more accurate hop overhead accounting).
+- **Validation/Repair**: state validation + fixer now check EscortConvoy destination system references and remove broken escort contracts.
+- **Tests**: adds coverage for EscortConvoy validation and fixer behavior.
+
+Compatibility:
+- **Save schema is unchanged.**
+
+
 ## r93: Dynamic procedural points-of-interest (ambient anomalies + hidden caches)
 
 - **Exploration**: star systems now spawn a small stream of **dynamic anomalies** and **mineral cache wrecks** over time.
