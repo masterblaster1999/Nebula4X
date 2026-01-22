@@ -13,6 +13,7 @@
 
 #include "nebula4x/util/json.h"
 #include "nebula4x/util/log.h"
+#include "nebula4x/util/trace_events.h"
 
 #include "nebula4x/core/serialization.h"
 #include "nebula4x/core/trade_network.h"
@@ -53,6 +54,7 @@
 #include "ui/json_explorer_window.h"
 #include "ui/content_validation_window.h"
 #include "ui/state_doctor_window.h"
+#include "ui/trace_viewer_window.h"
 #include "ui/entity_inspector_window.h"
 #include "ui/reference_graph_window.h"
 #include "ui/watchboard_window.h"
@@ -84,6 +86,15 @@ App::App(Simulation sim) : sim_(std::move(sim)) {
 
   // Initialize the ImGui ini file path from the loaded prefs.
   update_imgui_ini_path_from_ui();
+
+
+  // Optional: auto-start performance tracing for NEBULA4X_TRACE_SCOPE.
+  if (ui_.trace_viewer_autostart) {
+    ui_.trace_viewer_max_events = std::clamp(ui_.trace_viewer_max_events, 0, 500000);
+    nebula4x::trace::TraceRecorder::instance().set_max_events(
+        static_cast<std::size_t>(ui_.trace_viewer_max_events));
+    nebula4x::trace::TraceRecorder::instance().start("nebula4x");
+  }
 }
 
 const char* App::imgui_ini_filename() const {
@@ -159,6 +170,7 @@ void App::pre_frame() {
 }
 
 void App::frame() {
+  NEBULA4X_TRACE_SCOPE("ui.frame", "ui");
   auto sync_on_state_generation_change = [&]() {
     const std::uint64_t gen = sim_.state_generation();
     if (gen == last_seen_state_generation_) return;
@@ -445,6 +457,7 @@ void App::frame() {
   if (ui_.show_json_explorer_window) draw_json_explorer_window(sim_, ui_);
   if (ui_.show_content_validation_window) draw_content_validation_window(sim_, ui_);
   if (ui_.show_state_doctor_window) draw_state_doctor_window(sim_, ui_);
+	if (ui_.show_trace_viewer_window) draw_trace_viewer_window(sim_, ui_);
   if (ui_.show_watchboard_window) draw_watchboard_window(sim_, ui_);
   if (ui_.show_data_lenses_window) draw_data_lenses_window(sim_, ui_);
   if (ui_.show_dashboards_window) draw_dashboards_window(sim_, ui_);
@@ -1620,12 +1633,15 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       if (auto it = obj->find("show_json_explorer_window"); it != obj->end()) {
         ui_.show_json_explorer_window = it->second.bool_value(ui_.show_json_explorer_window);
       }
-    if (auto it = obj->find("show_content_validation_window"); it != obj->end()) {
-      ui_.show_content_validation_window = it->second.bool_value(ui_.show_content_validation_window);
-    }
+      if (auto it = obj->find("show_content_validation_window"); it != obj->end()) {
+        ui_.show_content_validation_window = it->second.bool_value(ui_.show_content_validation_window);
+      }
 
       if (auto it = obj->find("show_state_doctor_window"); it != obj->end()) {
         ui_.show_state_doctor_window = it->second.bool_value(ui_.show_state_doctor_window);
+      }
+      if (auto it = obj->find("show_trace_viewer_window"); it != obj->end()) {
+        ui_.show_trace_viewer_window = it->second.bool_value(ui_.show_trace_viewer_window);
       }
       if (auto it = obj->find("show_entity_inspector_window"); it != obj->end()) {
         ui_.show_entity_inspector_window = it->second.bool_value(ui_.show_entity_inspector_window);
@@ -1654,6 +1670,32 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       }
       if (auto it = obj->find("show_status_bar"); it != obj->end()) {
         ui_.show_status_bar = it->second.bool_value(ui_.show_status_bar);
+      }
+
+      // Trace Viewer (performance profiler) preferences.
+      if (auto it = obj->find("trace_viewer_autostart"); it != obj->end()) {
+        ui_.trace_viewer_autostart = it->second.bool_value(ui_.trace_viewer_autostart);
+      }
+      if (auto it = obj->find("trace_viewer_auto_refresh"); it != obj->end()) {
+        ui_.trace_viewer_auto_refresh = it->second.bool_value(ui_.trace_viewer_auto_refresh);
+      }
+      if (auto it = obj->find("trace_viewer_refresh_sec"); it != obj->end()) {
+        ui_.trace_viewer_refresh_sec = static_cast<float>(it->second.number_value(ui_.trace_viewer_refresh_sec));
+        ui_.trace_viewer_refresh_sec = std::clamp(ui_.trace_viewer_refresh_sec, 0.05f, 2.0f);
+      }
+      if (auto it = obj->find("trace_viewer_max_events"); it != obj->end()) {
+        ui_.trace_viewer_max_events = static_cast<int>(it->second.number_value(ui_.trace_viewer_max_events));
+        ui_.trace_viewer_max_events = std::clamp(ui_.trace_viewer_max_events, 0, 500000);
+      }
+      if (auto it = obj->find("trace_viewer_follow_tail"); it != obj->end()) {
+        ui_.trace_viewer_follow_tail = it->second.bool_value(ui_.trace_viewer_follow_tail);
+      }
+      if (auto it = obj->find("trace_viewer_window_ms"); it != obj->end()) {
+        ui_.trace_viewer_window_ms = static_cast<float>(it->second.number_value(ui_.trace_viewer_window_ms));
+        ui_.trace_viewer_window_ms = std::clamp(ui_.trace_viewer_window_ms, 10.0f, 60000.0f);
+      }
+      if (auto it = obj->find("trace_viewer_export_path"); it != obj->end()) {
+        ui_.trace_viewer_export_path = it->second.string_value(ui_.trace_viewer_export_path);
       }
     }
 
@@ -2580,8 +2622,9 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     o["show_time_machine_window"] = ui_.show_time_machine_window;
     o["show_omni_search_window"] = ui_.show_omni_search_window;
     o["show_json_explorer_window"] = ui_.show_json_explorer_window;
-    o["show_content_validation_window"] = ui_.show_content_validation_window;
-    o["show_state_doctor_window"] = ui_.show_state_doctor_window;
+	    o["show_content_validation_window"] = ui_.show_content_validation_window;
+	    o["show_state_doctor_window"] = ui_.show_state_doctor_window;
+	    o["show_trace_viewer_window"] = ui_.show_trace_viewer_window;
     o["show_entity_inspector_window"] = ui_.show_entity_inspector_window;
     o["show_reference_graph_window"] = ui_.show_reference_graph_window;
     o["show_layout_profiles_window"] = ui_.show_layout_profiles_window;
@@ -2591,6 +2634,15 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     o["show_pivot_tables_window"] = ui_.show_pivot_tables_window;
     o["show_ui_forge_window"] = ui_.show_ui_forge_window;
     o["show_status_bar"] = ui_.show_status_bar;
+
+	    // Trace Viewer (performance profiler) preferences.
+	    o["trace_viewer_autostart"] = ui_.trace_viewer_autostart;
+	    o["trace_viewer_auto_refresh"] = ui_.trace_viewer_auto_refresh;
+	    o["trace_viewer_refresh_sec"] = static_cast<double>(ui_.trace_viewer_refresh_sec);
+	    o["trace_viewer_max_events"] = static_cast<double>(ui_.trace_viewer_max_events);
+	    o["trace_viewer_follow_tail"] = ui_.trace_viewer_follow_tail;
+	    o["trace_viewer_window_ms"] = static_cast<double>(ui_.trace_viewer_window_ms);
+	    o["trace_viewer_export_path"] = ui_.trace_viewer_export_path;
 
     // Command Console preferences.
     // Stored as stable command ids in ui_prefs.json.
@@ -2960,6 +3012,7 @@ void App::reset_window_layout_defaults() {
   ui_.show_json_explorer_window = false;
   ui_.show_content_validation_window = false;
   ui_.show_state_doctor_window = false;
+	ui_.show_trace_viewer_window = false;
   ui_.show_entity_inspector_window = false;
   ui_.show_reference_graph_window = false;
   ui_.show_layout_profiles_window = false;

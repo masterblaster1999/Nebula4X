@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstddef>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -36,6 +37,17 @@ class TraceRecorder {
  public:
   static TraceRecorder& instance();
 
+  // Limit the number of recorded data events (ph == 'X') retained in memory.
+  // Metadata events (ph == 'M') are always retained.
+  //
+  // A max_events of 0 disables retention of data events.
+  void set_max_events(std::size_t max_events);
+  std::size_t max_events() const;
+
+  // Counts.
+  std::size_t data_event_count() const;
+  std::size_t total_event_count() const;
+
   // Start a new trace session.
   //
   // This resets any previously recorded events.
@@ -60,6 +72,12 @@ class TraceRecorder {
   // Emit JSON in the Chrome Trace Event format.
   json::Value to_json() const;
   std::string to_json_string(int indent = 2) const;
+
+  // Snapshot events into an output vector.
+  //
+  // If max_data_events is non-zero, the snapshot includes only the most recent
+  // max_data_events data events (plus all metadata).
+  void snapshot(std::vector<TraceEvent>* out, std::size_t max_data_events = 0) const;
 
  private:
   struct Impl;

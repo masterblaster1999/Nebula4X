@@ -1014,11 +1014,12 @@ void draw_automation_center_window(Simulation& sim, UIState& ui, Id& selected_sh
       if (show_mine_cols) {
         ImGui::TableSetColumnIndex(col++);
         if (sh->auto_mine && sh->auto_mine_home_colony_id != kInvalidId) {
-          const auto* c = find_ptr(s.colonies, sh->auto_mine_home_colony_id);
-          if (c)
-            ImGui::TextUnformatted(c->name.c_str());
-          else
+          const auto* home_col = find_ptr(s.colonies, sh->auto_mine_home_colony_id);
+          if (home_col) {
+            ImGui::TextUnformatted(home_col->name.c_str());
+          } else {
             ImGui::TextDisabled("(invalid)");
+          }
         } else {
           ImGui::TextDisabled("-");
         }

@@ -238,6 +238,7 @@ if(NEBULA4X_BUILD_UI)
     src/ui/json_explorer_window.cpp
     src/ui/content_validation_window.cpp
     src/ui/state_doctor_window.cpp
+	    src/ui/trace_viewer_window.cpp
   src/ui/entity_inspector_window.cpp
   src/ui/reference_graph_window.cpp
     src/ui/watchboard_window.cpp

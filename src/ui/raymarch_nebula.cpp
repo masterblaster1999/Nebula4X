@@ -67,9 +67,6 @@ static Vec3 operator-(Vec3 a, Vec3 b) {
 static Vec3 operator*(Vec3 a, float s) {
   return Vec3{a.x * s, a.y * s, a.z * s};
 }
-static Vec3 operator*(float s, Vec3 a) {
-  return a * s;
-}
 
 static float dot(Vec3 a, Vec3 b) {
   return a.x * b.x + a.y * b.y + a.z * b.z;

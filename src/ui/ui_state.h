@@ -469,6 +469,7 @@ struct UIState {
   bool show_json_explorer_window{false};
   bool show_content_validation_window{false};
   bool show_state_doctor_window{false};
+  bool show_trace_viewer_window{false};
   bool show_entity_inspector_window{false};
   bool show_reference_graph_window{false};
   bool show_layout_profiles_window{false};
@@ -481,6 +482,16 @@ struct UIState {
 
   bool show_ui_forge_window{false};
   bool show_context_forge_window{false};
+
+  // --- Trace Viewer (in-process performance profiler) ---
+  // Preferences are stored in ui_prefs.json.
+  bool trace_viewer_autostart{false};
+  bool trace_viewer_auto_refresh{true};
+  float trace_viewer_refresh_sec{0.25f};
+  int trace_viewer_max_events{20000};
+  bool trace_viewer_follow_tail{true};
+  float trace_viewer_window_ms{500.0f};
+  std::string trace_viewer_export_path{"traces/nebula4x_trace.json"};
 
   // --- Procedural UI: Context Forge (auto-generated UI Forge panel) ---
   //

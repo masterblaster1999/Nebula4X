@@ -1,8 +1,10 @@
 #include "nebula4x/util/trace_events.h"
 
 #include <atomic>
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <deque>
 #include <exception>
 #include <mutex>
 #include <thread>
@@ -27,7 +29,12 @@ std::string ph_to_string(char ph) { return std::string(1, ph); }
 
 struct TraceRecorder::Impl {
   std::mutex mu;
-  std::vector<TraceEvent> events;
+  // Metadata events (process/thread naming) are retained indefinitely.
+  std::vector<TraceEvent> meta;
+  // Data events (ph == 'X') are retained up to max_events.
+  std::deque<TraceEvent> events;
+
+  std::size_t max_events{20000};
 
   std::unordered_map<std::thread::id, std::uint32_t> thread_ids;
   std::uint32_t next_tid{0};
@@ -36,6 +43,7 @@ struct TraceRecorder::Impl {
   std::atomic<std::int64_t> start_ns{0};
 
   void reset_unlocked(std::string_view process_name) {
+    meta.clear();
     events.clear();
     thread_ids.clear();
     next_tid = 0;
@@ -52,7 +60,7 @@ struct TraceRecorder::Impl {
     proc.tid = 0;
     proc.ts_us = 0;
     proc.args["name"] = std::string(process_name);
-    events.push_back(std::move(proc));
+    meta.push_back(std::move(proc));
 
     // Main thread name metadata.
     TraceEvent thr;
@@ -62,7 +70,7 @@ struct TraceRecorder::Impl {
     thr.tid = 0;
     thr.ts_us = 0;
     thr.args["name"] = std::string("main");
-    events.push_back(std::move(thr));
+    meta.push_back(std::move(thr));
   }
 
   std::uint32_t thread_id_unlocked() {
@@ -80,7 +88,7 @@ struct TraceRecorder::Impl {
     thr.tid = tid;
     thr.ts_us = 0;
     thr.args["name"] = std::string("thread_") + std::to_string(tid);
-    events.push_back(std::move(thr));
+    meta.push_back(std::move(thr));
 
     return tid;
   }
@@ -94,6 +102,29 @@ TraceRecorder& TraceRecorder::instance() {
 TraceRecorder::TraceRecorder() : impl_(std::make_unique<Impl>()) {}
 
 TraceRecorder::~TraceRecorder() = default;
+
+void TraceRecorder::set_max_events(std::size_t max_events) {
+  std::lock_guard<std::mutex> lock(impl_->mu);
+  impl_->max_events = max_events;
+  while (impl_->events.size() > impl_->max_events) {
+    impl_->events.pop_front();
+  }
+}
+
+std::size_t TraceRecorder::max_events() const {
+  std::lock_guard<std::mutex> lock(impl_->mu);
+  return impl_->max_events;
+}
+
+std::size_t TraceRecorder::data_event_count() const {
+  std::lock_guard<std::mutex> lock(impl_->mu);
+  return impl_->events.size();
+}
+
+std::size_t TraceRecorder::total_event_count() const {
+  std::lock_guard<std::mutex> lock(impl_->mu);
+  return impl_->meta.size() + impl_->events.size();
+}
 
 void TraceRecorder::start(std::string_view process_name) {
   const std::int64_t ns = to_ns(Clock::now());
@@ -111,6 +142,7 @@ void TraceRecorder::stop() {
 
 void TraceRecorder::clear() {
   std::lock_guard<std::mutex> lock(impl_->mu);
+  impl_->meta.clear();
   impl_->events.clear();
   impl_->thread_ids.clear();
   impl_->next_tid = 0;
@@ -145,7 +177,12 @@ void TraceRecorder::record_complete(std::string_view name, std::string_view cat,
   {
     std::lock_guard<std::mutex> lock(impl_->mu);
     ev.tid = impl_->thread_id_unlocked();
-    impl_->events.push_back(std::move(ev));
+    if (impl_->max_events > 0) {
+      impl_->events.push_back(std::move(ev));
+      while (impl_->events.size() > impl_->max_events) {
+        impl_->events.pop_front();
+      }
+    }
   }
 }
 
@@ -153,7 +190,20 @@ json::Value TraceRecorder::to_json() const {
   json::Array arr;
   {
     std::lock_guard<std::mutex> lock(impl_->mu);
-    arr.reserve(impl_->events.size());
+    arr.reserve(impl_->meta.size() + impl_->events.size());
+    for (const auto& e : impl_->meta) {
+      json::Object o;
+      o["name"] = e.name;
+      if (!e.cat.empty()) o["cat"] = e.cat;
+      o["ph"] = ph_to_string(e.ph);
+      o["ts"] = static_cast<double>(e.ts_us);
+      o["pid"] = static_cast<double>(e.pid);
+      o["tid"] = static_cast<double>(e.tid);
+      if (e.ph == 'X') o["dur"] = static_cast<double>(e.dur_us);
+      if (!e.args.empty()) o["args"] = json::object(e.args);
+      arr.push_back(json::object(std::move(o)));
+    }
+
     for (const auto& e : impl_->events) {
       json::Object o;
       o["name"] = e.name;
@@ -172,6 +222,31 @@ json::Value TraceRecorder::to_json() const {
 
 std::string TraceRecorder::to_json_string(int indent) const {
   return json::stringify(to_json(), indent);
+}
+
+void TraceRecorder::snapshot(std::vector<TraceEvent>* out, std::size_t max_data_events) const {
+  if (!out) return;
+  std::lock_guard<std::mutex> lock(impl_->mu);
+  out->clear();
+
+  const std::size_t want_data =
+      (max_data_events == 0) ? impl_->events.size() : std::min<std::size_t>(max_data_events, impl_->events.size());
+  out->reserve(impl_->meta.size() + want_data);
+
+  // Metadata first (process/thread names).
+  for (const auto& e : impl_->meta) out->push_back(e);
+
+  if (want_data == impl_->events.size()) {
+    for (const auto& e : impl_->events) out->push_back(e);
+  } else {
+    // Copy the most recent want_data entries.
+    const std::size_t skip = impl_->events.size() - want_data;
+    std::size_t i = 0;
+    for (const auto& e : impl_->events) {
+      if (i++ < skip) continue;
+      out->push_back(e);
+    }
+  }
 }
 
 Scope::Scope(std::string_view name, std::string_view cat, json::Object args)

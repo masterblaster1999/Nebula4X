@@ -648,6 +648,9 @@ void draw_main_menu(Simulation& sim, UIState& ui, char* save_path, char* load_pa
       if (ImGui::MenuItem("Open State Doctor", "Ctrl+Shift+K")) {
         ui.show_state_doctor_window = true;
       }
+	      if (ImGui::MenuItem("Open Trace Viewer (Performance)")) {
+	        ui.show_trace_viewer_window = true;
+	      }
       if (ImGui::MenuItem("Open Watchboard (JSON Pins)")) {
         ui.show_watchboard_window = true;
       }
@@ -788,7 +791,9 @@ void draw_left_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sele
 
     if (los) {
       double strength = sim.sensor_los_strength();
-      if (ImGui::SliderDouble("LOS strength", &strength, 0.0, 3.0, "%.2f")) {
+      const double los_min = 0.0;
+      const double los_max = 3.0;
+      if (ImGui::SliderScalar("LOS strength", ImGuiDataType_Double, &strength, &los_min, &los_max, "%.2f")) {
         sim.set_sensor_los_strength(strength);
       }
       if (ImGui::IsItemHovered()) {
@@ -806,16 +811,17 @@ void draw_left_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sele
     }
     if (ImGui::IsItemHovered()) {
       ImGui::SetTooltip(
-          "Experimental combat model: beam weapons apply a transmission multiplier based on the
-"
-          "nebula microfield / storm-cell environment *along the line of fire*.
-"
+          "Experimental combat model: beam weapons apply a transmission multiplier based on the\n"
+          "nebula microfield / storm-cell environment *along the line of fire*.\n"
           "Computed via adaptive ray-marching with an SDF-style distance estimate and deterministic jitter.");
     }
 
     if (beam) {
       double strength = sim.beam_los_strength();
-      if (ImGui::SliderDouble("Beam LOS strength", &strength, 0.0, 3.0, "%.2f")) {
+      const double beam_los_min = 0.0;
+      const double beam_los_max = 3.0;
+      if (ImGui::SliderScalar("Beam LOS strength", ImGuiDataType_Double, &strength, &beam_los_min, &beam_los_max,
+                              "%.2f")) {
         sim.set_beam_los_strength(strength);
       }
       if (ImGui::IsItemHovered()) {
@@ -828,14 +834,16 @@ void draw_left_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sele
       }
       if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip(
-            "Converts a fraction of medium-loss (1 - LOS multiplier) into low-intensity splash damage
-"
+            "Converts a fraction of medium-loss (1 - LOS multiplier) into low-intensity splash damage\n"
             "around the beam segment. Makes fighting inside heavy terrain more chaotic.");
       }
 
       if (scatter) {
         double frac = sim.beam_scatter_fraction_of_lost();
-        if (ImGui::SliderDouble("Scatter fraction", &frac, 0.0, 0.75, "%.2f")) {
+        const double scatter_frac_min = 0.0;
+        const double scatter_frac_max = 0.75;
+        if (ImGui::SliderScalar("Scatter fraction", ImGuiDataType_Double, &frac, &scatter_frac_min, &scatter_frac_max,
+                                "%.2f")) {
           sim.set_beam_scatter_fraction_of_lost(frac);
         }
         if (ImGui::IsItemHovered()) {
@@ -843,7 +851,10 @@ void draw_left_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sele
         }
 
         double rad = sim.beam_scatter_radius_mkm();
-        if (ImGui::SliderDouble("Scatter radius (mkm)", &rad, 0.05, 2.0, "%.2f")) {
+        const double scatter_rad_min = 0.05;
+        const double scatter_rad_max = 2.0;
+        if (ImGui::SliderScalar("Scatter radius (mkm)", ImGuiDataType_Double, &rad, &scatter_rad_min, &scatter_rad_max,
+                                "%.2f")) {
           sim.set_beam_scatter_radius_mkm(rad);
         }
 
@@ -872,12 +883,17 @@ void draw_left_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sele
       ImGui::Indent();
 
       double strength = sim.terrain_nav_strength();
-      if (ImGui::SliderDouble("Nav strength", &strength, 0.0, 1.0, "%.2f")) {
+      const double nav_strength_min = 0.0;
+      const double nav_strength_max = 1.0;
+      if (ImGui::SliderScalar("Nav strength", ImGuiDataType_Double, &strength, &nav_strength_min, &nav_strength_max,
+                              "%.2f")) {
         sim.set_terrain_nav_strength(strength);
       }
 
       double look = sim.terrain_nav_lookahead_mkm();
-      if (ImGui::SliderDouble("Lookahead (mkm)", &look, 25.0, 6000.0, "%.0f")) {
+      const double nav_look_min = 25.0;
+      const double nav_look_max = 6000.0;
+      if (ImGui::SliderScalar("Lookahead (mkm)", ImGuiDataType_Double, &look, &nav_look_min, &nav_look_max, "%.0f")) {
         sim.set_terrain_nav_lookahead_mkm(look);
       }
 
@@ -887,12 +903,16 @@ void draw_left_sidebar(Simulation& sim, UIState& ui, Id& selected_ship, Id& sele
       }
 
       double ang = sim.terrain_nav_max_angle_deg();
-      if (ImGui::SliderDouble("Max angle (deg)", &ang, 5.0, 85.0, "%.0f")) {
+      const double nav_ang_min = 5.0;
+      const double nav_ang_max = 85.0;
+      if (ImGui::SliderScalar("Max angle (deg)", ImGuiDataType_Double, &ang, &nav_ang_min, &nav_ang_max, "%.0f")) {
         sim.set_terrain_nav_max_angle_deg(ang);
       }
 
       double tp = sim.terrain_nav_turn_penalty();
-      if (ImGui::SliderDouble("Turn penalty", &tp, 0.0, 2.0, "%.2f")) {
+      const double nav_tp_min = 0.0;
+      const double nav_tp_max = 2.0;
+      if (ImGui::SliderScalar("Turn penalty", ImGuiDataType_Double, &tp, &nav_tp_min, &nav_tp_max, "%.2f")) {
         sim.set_terrain_nav_turn_penalty(tp);
       }
 
@@ -4704,8 +4724,8 @@ const bool can_up = (i > 0);
                   if (c->faction_id == fleet_mut->faction_id) {
                     label += " (own)";
                   } else if (c->faction_id != kInvalidId) {
-                    if (const auto* fac = find_ptr(s.factions, c->faction_id)) {
-                      label += " (" + fac->name + ")";
+                    if (const auto* col_fac = find_ptr(s.factions, c->faction_id)) {
+                      label += " (" + col_fac->name + ")";
                     }
                   }
 
@@ -9496,7 +9516,7 @@ void draw_settings_window(UIState& ui, char* ui_prefs_path, UIPrefActions& actio
         ImGui::SameLine();
         if (ImGui::SmallButton("Paste theme string")) {
           if (const char* clip = ImGui::GetClipboardText()) {
-            std::istringstream iss(std::string(clip));
+	            std::istringstream iss{std::string(clip)};
             std::string tok;
             while (iss >> tok) {
               const auto eq = tok.find('=');
