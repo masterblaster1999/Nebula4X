@@ -305,6 +305,7 @@ struct UIState {
 
   // Galaxy map view toggles.
   bool show_galaxy_labels{true};
+  bool show_galaxy_pins{true};
   bool show_galaxy_jump_lines{true};
   bool show_galaxy_unknown_exits{true};
   bool show_galaxy_intel_alerts{true};

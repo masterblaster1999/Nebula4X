@@ -8,12 +8,13 @@
 #include "ui/raymarch_nebula.h"
 #include "ui/ruler.h"
 
-#include <imgui.h>
+#include "ui/imgui_includes.h"
 
 #include <array>
 #include <cstdint>
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 #include <cctype>
 #include <cmath>
 #include <limits>
@@ -126,6 +127,50 @@ bool ascii_icontains(const std::string& haystack, const std::string& needle) {
         return std::tolower(a) == std::tolower(b);
       });
   return it != haystack.end();
+}
+
+bool ascii_iequals(const std::string& a, const std::string& b) {
+  if (a.size() != b.size()) return false;
+  for (size_t i = 0; i < a.size(); ++i) {
+    const unsigned char ca = static_cast<unsigned char>(a[i]);
+    const unsigned char cb = static_cast<unsigned char>(b[i]);
+    if (std::tolower(ca) != std::tolower(cb)) return false;
+  }
+  return true;
+}
+
+std::string ascii_trim(std::string s) {
+  auto is_ws = [](unsigned char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; };
+  while (!s.empty() && is_ws(static_cast<unsigned char>(s.front()))) s.erase(s.begin());
+  while (!s.empty() && is_ws(static_cast<unsigned char>(s.back()))) s.pop_back();
+  return s;
+}
+
+std::string normalize_tag(std::string t) {
+  t = ascii_trim(std::move(t));
+  if (!t.empty() && t.front() == '#') t.erase(t.begin());
+  // Normalize to lower-case ASCII (good enough for common tags).
+  for (char& ch : t) {
+    const unsigned char c = static_cast<unsigned char>(ch);
+    ch = static_cast<char>(std::tolower(c));
+  }
+  // Replace internal whitespace with '_' to make tags single-token.
+  for (char& ch : t) {
+    if (ch == ' ' || ch == '\t') ch = '_';
+  }
+  // Hard size limit (UI + save friendliness).
+  if (t.size() > 24) t.resize(24);
+  // Strip trailing underscores.
+  while (!t.empty() && t.back() == '_') t.pop_back();
+  return t;
+}
+
+bool note_has_tag(const SystemIntelNote& n, const std::string& tag_norm) {
+  if (tag_norm.empty()) return false;
+  for (const std::string& t : n.tags) {
+    if (ascii_iequals(t, tag_norm)) return true;
+  }
+  return false;
 }
 
 // Effective piracy risk for a system used by trade overlays.
@@ -748,19 +793,18 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
 
   const Ship* viewer_ship = (selected_ship != kInvalidId) ? find_ptr(s.ships, selected_ship) : nullptr;
   const Id viewer_faction_id = viewer_ship ? viewer_ship->faction_id : ui.viewer_faction_id;
+  Faction* viewer_faction = (viewer_faction_id != kInvalidId) ? find_ptr(s.factions, viewer_faction_id) : nullptr;
 
   // Precompute recent contact counts per-system for lightweight "intel alert" rings.
   std::unordered_map<Id, int> recent_contact_count;
-  if (ui.show_galaxy_intel_alerts && viewer_faction_id != kInvalidId) {
-    if (const auto* viewer = find_ptr(s.factions, viewer_faction_id)) {
-  const std::int64_t today = s.date.days_since_epoch();
-      for (const auto& kv : viewer->ship_contacts) {
-        const auto& c = kv.second;
-    const std::int64_t age = today - static_cast<std::int64_t>(c.last_seen_day);
-        if (age < 0) continue;
-        if (age > ui.contact_max_age_days) continue;
-        ++recent_contact_count[c.system_id];
-      }
+  if (ui.show_galaxy_intel_alerts && viewer_faction) {
+    const std::int64_t today = s.date.days_since_epoch();
+    for (const auto& kv : viewer_faction->ship_contacts) {
+      const auto& c = kv.second;
+      const std::int64_t age = today - static_cast<std::int64_t>(c.last_seen_day);
+      if (age < 0) continue;
+      if (age > ui.contact_max_age_days) continue;
+      ++recent_contact_count[c.system_id];
     }
   }
 
@@ -1685,22 +1729,22 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
           const Id ra = v.sys->region_id;
           const Id rb = dest_sys->region_id;
           if (ra != kInvalidId && rb != kInvalidId && ra != rb) {
-            float a = 0.55f;
+            float alpha = 0.55f;
             thick = 3.25f;
 
             // If a region is selected, emphasize only links on its border.
             if (ui.selected_region_id != kInvalidId) {
               if (ra == ui.selected_region_id || rb == ui.selected_region_id) {
-                a = 0.85f;
+                alpha = 0.85f;
                 thick = 4.25f;
               } else if (ui.galaxy_region_dim_nonselected) {
-                a *= 0.30f;
+                alpha *= 0.30f;
                 thick = 2.0f;
               }
             }
 
-            col = modulate_alpha(IM_COL32(255, 210, 120, 255), a);
-            draw->AddLine(pa, pb, modulate_alpha(IM_COL32(0, 0, 0, 220), a), thick + 1.5f);
+            col = modulate_alpha(IM_COL32(255, 210, 120, 255), alpha);
+            draw->AddLine(pa, pb, modulate_alpha(IM_COL32(0, 0, 0, 220), alpha), thick + 1.5f);
           }
         }
 
@@ -2311,6 +2355,21 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   const bool route_ruler_mode = hovered && mouse_in_rect && !over_minimap && !over_legend && !io.WantTextInput &&
                                ImGui::IsKeyDown(ImGuiKey_D) && !io.KeyCtrl && !io.KeyShift && !io.KeyAlt;
 
+  // Quick pin toggle: hover a system and press P.
+  // Stored per-faction and persisted in saves.
+  if (viewer_faction && hovered_system != kInvalidId && hovered && !over_minimap && !over_legend && !io.WantTextInput &&
+      !trade_pick_mode && !route_ruler_mode && !io.KeyCtrl && !io.KeyShift && !io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_P)) {
+    auto itn = viewer_faction->system_notes.find(hovered_system);
+    if (itn == viewer_faction->system_notes.end()) {
+      viewer_faction->system_notes[hovered_system].pinned = true;
+    } else {
+      itn->second.pinned = !itn->second.pinned;
+      if (!itn->second.pinned && itn->second.text.empty() && itn->second.tags.empty()) {
+        viewer_faction->system_notes.erase(itn);
+      }
+    }
+  }
+
   // --- Route preview (hover target) ---
   // Planning routes can be expensive, especially when called every frame while hovering.
   // Cache the preview route until the relevant inputs change.
@@ -2623,6 +2682,16 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
 
     const bool is_hovered = (hovered_system == n.id);
 
+    const SystemIntelNote* sys_note = nullptr;
+    bool is_pinned = false;
+    if (viewer_faction) {
+      const auto itn = viewer_faction->system_notes.find(n.id);
+      if (itn != viewer_faction->system_notes.end()) {
+        sys_note = &itn->second;
+        is_pinned = sys_note->pinned;
+      }
+    }
+
     ImU32 fill = is_selected ? IM_COL32(0, 220, 140, 255) : IM_COL32(240, 240, 240, 255);
     ImU32 lens_col = 0; // full-alpha lens color (for glow/legend).
     if (!is_selected && lens_active && lens_bounds_valid && n.sys) {
@@ -2679,6 +2748,21 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
 
     if (is_hovered) {
       draw->AddCircle(n.p, base_r + 8.0f, IM_COL32(255, 255, 255, 140), 0, 2.0f);
+    }
+
+    // Pinned system marker (player-authored intel note).
+    if (ui.show_galaxy_pins && is_pinned) {
+      const float off = base_r + 8.0f;
+      const float d = 4.25f;
+      const ImVec2 c(n.p.x, n.p.y - off);
+      ImVec2 pts[4] = {ImVec2(c.x, c.y - d), ImVec2(c.x + d, c.y), ImVec2(c.x, c.y + d), ImVec2(c.x - d, c.y)};
+      ImVec2 sh[4] = {ImVec2(pts[0].x + 1.0f, pts[0].y + 1.0f), ImVec2(pts[1].x + 1.0f, pts[1].y + 1.0f),
+                     ImVec2(pts[2].x + 1.0f, pts[2].y + 1.0f), ImVec2(pts[3].x + 1.0f, pts[3].y + 1.0f)};
+      const float a = is_selected ? 0.95f : 0.75f;
+      const ImU32 col = modulate_alpha(IM_COL32(255, 225, 140, 255), a);
+      draw->AddConvexPolyFilled(sh, 4, modulate_alpha(IM_COL32(0, 0, 0, 200), a));
+      draw->AddConvexPolyFilled(pts, 4, col);
+      draw->AddPolyline(pts, 4, modulate_alpha(IM_COL32(0, 0, 0, 220), a), true, 1.0f);
     }
 
     // Highlight the selected fleet's leader system.
@@ -2743,6 +2827,7 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
       if (is_selected) pr += 1000.0f;
       if (is_hovered) pr += 900.0f;
       if (selected_fleet_system != kInvalidId && n.id == selected_fleet_system) pr += 800.0f;
+      if (ui.show_galaxy_pins && is_pinned) pr += 550.0f;
       if (colonized_systems.find(n.id) != colonized_systems.end()) pr += 300.0f;
       if (ui.show_galaxy_chokepoints && !chokepoints.empty() && chokepoints.find(n.id) != chokepoints.end()) pr += 120.0f;
       auto itc = recent_contact_count.find(n.id);
@@ -2755,6 +2840,7 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
         ImU32 col = IM_COL32(220, 220, 220, 255);
         if (is_selected) col = IM_COL32(190, 255, 220, 255);
         else if (is_hovered) col = IM_COL32(255, 255, 255, 255);
+        else if (ui.show_galaxy_pins && is_pinned) col = IM_COL32(255, 245, 210, 255);
         else if (colonized_systems.find(n.id) != colonized_systems.end()) col = IM_COL32(225, 235, 255, 255);
 
         SystemLabelCandidate c;
@@ -2777,7 +2863,7 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
 
     // Label budget scales with viewport area and zoom (prevents visual overload).
     const float area = std::max(1.0f, avail.x * avail.y);
-    const float z = std::clamp(zoom, 0.35f, 2.5f);
+    const float z = std::clamp(static_cast<float>(zoom), 0.35f, 2.5f);
     const int budget = static_cast<int>(std::clamp((area / (160.0f * 40.0f)) * (0.70f + 0.90f * z), 20.0f, 900.0f));
 
     std::stable_sort(label_cands.begin(), label_cands.end(), [](const SystemLabelCandidate& a, const SystemLabelCandidate& b) {
@@ -3527,12 +3613,14 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   ImGui::BulletText("Ctrl+Alt+Right click: edit selected fleet patrol circuit waypoints");
   ImGui::BulletText("Hover: route preview (Shift=queued, Ctrl=fleet, Alt=smart)");
 
-  // --- System finder & favorites ---
+  // --- System finder, pins & notes ---
   // Keeps everything within the *visible* system set to avoid leaking information under FoW.
   {
     ImGui::SeparatorText("Find");
     static char find_query[96] = "";
-    static std::vector<Id> favorites;
+    static bool pinned_only = false;
+    // Fallback when no viewer faction is available.
+    static std::vector<Id> local_favorites;
 
     // Ctrl+F focuses the search bar.
     static bool focus_find = false;
@@ -3545,31 +3633,108 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
       focus_find = false;
     }
 
+    const char* hint = viewer_faction ? "Find: name tokens + #tags (Enter to jump)" : "Find system (name) - Enter to jump";
     ImGui::SetNextItemWidth(-1.0f);
-    const bool enter_pressed = ImGui::InputTextWithHint("##galaxy_find", "Find system (name) - Enter to jump", find_query,
-                                                       sizeof(find_query), ImGuiInputTextFlags_EnterReturnsTrue);
+    const bool enter_pressed = ImGui::InputTextWithHint("##galaxy_find", hint, find_query, sizeof(find_query),
+                                                       ImGuiInputTextFlags_EnterReturnsTrue);
 
     // Escape clears.
     if (ImGui::IsItemActive() && ImGui::IsKeyPressed(ImGuiKey_Escape)) {
       find_query[0] = '\0';
     }
 
+    // Parse query into name terms and tag terms.
+    std::vector<std::string> name_terms;
+    std::vector<std::string> tag_terms;
+    bool wants_pinned = pinned_only;
+
+    std::string q = ascii_trim(std::string(find_query));
+    if (!q.empty()) {
+      size_t pos = 0;
+      while (pos < q.size()) {
+        while (pos < q.size() && std::isspace(static_cast<unsigned char>(q[pos]))) ++pos;
+        const size_t start = pos;
+        while (pos < q.size() && !std::isspace(static_cast<unsigned char>(q[pos]))) ++pos;
+        if (start >= pos) break;
+        std::string tok = q.substr(start, pos - start);
+        if (tok == "pin" || tok == "pinned") {
+          wants_pinned = true;
+          continue;
+        }
+        if (!tok.empty() && tok.front() == '#') {
+          tok = normalize_tag(std::move(tok));
+          if (!tok.empty()) tag_terms.push_back(std::move(tok));
+        } else {
+          name_terms.push_back(std::move(tok));
+        }
+      }
+    }
+
+    if (viewer_faction) {
+      ImGui::Checkbox("Pinned only", &pinned_only);
+      if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Filter results to systems you pinned (P) or pinned via Notes.");
+      }
+    } else {
+      pinned_only = false;
+    }
+
+    auto is_pinned_id = [&](Id id) -> bool {
+      if (!viewer_faction) return false;
+      const auto itn = viewer_faction->system_notes.find(id);
+      return itn != viewer_faction->system_notes.end() && itn->second.pinned;
+    };
+
+    auto note_for_id = [&](Id id) -> const SystemIntelNote* {
+      if (!viewer_faction) return nullptr;
+      const auto itn = viewer_faction->system_notes.find(id);
+      if (itn == viewer_faction->system_notes.end()) return nullptr;
+      return &itn->second;
+    };
+
     // Collect matches.
     std::vector<const SysView*> matches;
     matches.reserve(24);
-    const std::string q(find_query);
-    if (!q.empty()) {
+    const bool have_filter = !name_terms.empty() || !tag_terms.empty() || wants_pinned;
+    if (have_filter) {
       for (const auto& v : visible) {
         if (!v.sys) continue;
-        if (!ascii_icontains(v.sys->name, q)) continue;
+
+        bool ok = true;
+        for (const std::string& term : name_terms) {
+          if (!ascii_icontains(v.sys->name, term)) {
+            ok = false;
+            break;
+          }
+        }
+        if (!ok) continue;
+
+        if (wants_pinned && !is_pinned_id(v.id)) continue;
+
+        if (!tag_terms.empty()) {
+          const SystemIntelNote* n = note_for_id(v.id);
+          if (!n) continue;
+          for (const std::string& tag : tag_terms) {
+            if (!note_has_tag(*n, tag)) {
+              ok = false;
+              break;
+            }
+          }
+          if (!ok) continue;
+        }
+
         matches.push_back(&v);
         if (matches.size() >= 32) break;
       }
 
+      const std::string first_term = name_terms.empty() ? std::string() : name_terms.front();
       std::stable_sort(matches.begin(), matches.end(), [&](const SysView* a, const SysView* b) {
-        const bool ap = ascii_istarts_with(a->sys->name, q);
-        const bool bp = ascii_istarts_with(b->sys->name, q);
-        if (ap != bp) return ap;  // Prefix matches first.
+        const bool ap = !first_term.empty() ? ascii_istarts_with(a->sys->name, first_term) : false;
+        const bool bp = !first_term.empty() ? ascii_istarts_with(b->sys->name, first_term) : false;
+        if (ap != bp) return ap; // Prefix matches first.
+        const bool api = is_pinned_id(a->id);
+        const bool bpi = is_pinned_id(b->id);
+        if (api != bpi) return api; // Pinned next.
         return a->sys->name < b->sys->name;
       });
     }
@@ -3586,7 +3751,7 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
       jump_to_system(matches.front()->id, matches.front()->sys);
     }
 
-    if (!q.empty()) {
+    if (have_filter) {
       if (matches.empty()) {
         ImGui::TextDisabled("No matches");
       } else {
@@ -3595,56 +3760,194 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
         for (int i = 0; i < static_cast<int>(matches.size()) && i < max_show; ++i) {
           const SysView* v = matches[i];
           const bool is_sel = (s.selected_system == v->id);
-          std::string label = v->sys->name;
+
+          std::string label;
+          if (viewer_faction && is_pinned_id(v->id)) {
+            label += "* ";
+          }
+          label += v->sys->name;
           label += "##find_" + std::to_string(static_cast<std::uint64_t>(v->id));
+
           if (ImGui::Selectable(label.c_str(), is_sel)) {
             jump_to_system(v->id, v->sys);
+          }
+          if (ImGui::IsItemHovered() && viewer_faction) {
+            if (const SystemIntelNote* n = note_for_id(v->id); n && (!n->tags.empty() || !n->text.empty())) {
+              ImGui::BeginTooltip();
+              if (!n->tags.empty()) {
+                ImGui::TextDisabled("Tags:");
+                ImGui::SameLine();
+                for (size_t ti = 0; ti < n->tags.size(); ++ti) {
+                  ImGui::TextUnformatted(n->tags[ti].c_str());
+                  if (ti + 1 < n->tags.size()) {
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("|");
+                    ImGui::SameLine();
+                  }
+                }
+              }
+              if (!n->text.empty()) {
+                ImGui::Separator();
+                ImGui::TextWrapped("%s", n->text.c_str());
+              }
+              ImGui::EndTooltip();
+            }
           }
         }
         ImGui::EndChild();
       }
     }
 
-    // Favorites.
-    ImGui::SeparatorText("Favorites");
-    {
-      // Drop any invalid IDs (e.g. after loading another save).
-      favorites.erase(std::remove_if(favorites.begin(), favorites.end(), [&](Id id) {
-                        return find_ptr(s.systems, id) == nullptr;
-                      }),
-                      favorites.end());
+    // Pins (persisted per-faction) or local favorites fallback.
+    if (viewer_faction) {
+      ImGui::SeparatorText("Pins");
 
-      ImGui::BeginDisabled(s.selected_system == kInvalidId);
-      if (ImGui::SmallButton("Add selected")) {
-        const Id id = s.selected_system;
-        if (id != kInvalidId && std::find(favorites.begin(), favorites.end(), id) == favorites.end()) {
-          favorites.push_back(id);
+      // Drop invalid IDs (e.g. after loading another save).
+      {
+        std::vector<Id> to_erase;
+        to_erase.reserve(8);
+        for (const auto& kv : viewer_faction->system_notes) {
+          if (kv.first == kInvalidId || find_ptr(s.systems, kv.first) == nullptr) {
+            to_erase.push_back(kv.first);
+          }
+        }
+        for (Id id : to_erase) {
+          viewer_faction->system_notes.erase(id);
+        }
+      }
+
+      const Id sel = s.selected_system;
+      const bool sel_pinned = (sel != kInvalidId) ? is_pinned_id(sel) : false;
+
+      ImGui::BeginDisabled(sel == kInvalidId);
+      if (ImGui::SmallButton(sel_pinned ? "Unpin selected" : "Pin selected")) {
+        if (sel != kInvalidId) {
+          auto& n = viewer_faction->system_notes[sel];
+          n.pinned = !sel_pinned;
+          if (!n.pinned && n.text.empty() && n.tags.empty()) {
+            viewer_faction->system_notes.erase(sel);
+          }
         }
       }
       ImGui::EndDisabled();
       ImGui::SameLine();
-      if (ImGui::SmallButton("Clear")) {
-        favorites.clear();
+      if (ImGui::SmallButton("Clear pins")) {
+        std::vector<Id> to_erase;
+        to_erase.reserve(viewer_faction->system_notes.size());
+        for (auto& kv : viewer_faction->system_notes) {
+          kv.second.pinned = false;
+          if (kv.second.text.empty() && kv.second.tags.empty()) {
+            to_erase.push_back(kv.first);
+          }
+        }
+        for (Id id : to_erase) {
+          viewer_faction->system_notes.erase(id);
+        }
       }
 
-      if (favorites.empty()) {
+      // Collect pinned systems.
+      std::vector<Id> pins;
+      pins.reserve(16);
+      for (const auto& kv : viewer_faction->system_notes) {
+        if (kv.second.pinned) pins.push_back(kv.first);
+      }
+      std::stable_sort(pins.begin(), pins.end(), [&](Id a, Id b) {
+        const StarSystem* sa = find_ptr(s.systems, a);
+        const StarSystem* sb = find_ptr(s.systems, b);
+        const std::string an = sa ? sa->name : std::string();
+        const std::string bn = sb ? sb->name : std::string();
+        if (an != bn) return an < bn;
+        return a < b;
+      });
+
+      if (pins.empty()) {
         ImGui::TextDisabled("(none)");
       } else {
-        ImGui::BeginChild("##galaxy_favorites", ImVec2(0.0f, 110.0f), true);
+        ImGui::BeginChild("##galaxy_pins", ImVec2(0.0f, 110.0f), true);
         int remove_idx = -1;
-        for (int i = 0; i < static_cast<int>(favorites.size()); ++i) {
-          const Id id = favorites[i];
+        for (int i = 0; i < static_cast<int>(pins.size()); ++i) {
+          const Id id = pins[i];
           const StarSystem* sys = find_ptr(s.systems, id);
           if (!sys) continue;
           const bool can_show = can_show_system(viewer_faction_id, ui.fog_of_war, sim, id);
           const bool is_sel = (s.selected_system == id);
           std::string label = can_show ? sys->name : std::string("(undiscovered)");
-          label += "##fav_" + std::to_string(static_cast<std::uint64_t>(id));
+          label += "##pin_" + std::to_string(static_cast<std::uint64_t>(id));
           ImGui::BeginDisabled(!can_show);
           if (ImGui::Selectable(label.c_str(), is_sel)) {
             jump_to_system(id, sys);
           }
           ImGui::EndDisabled();
+
+          if (ImGui::BeginPopupContextItem()) {
+            if (ImGui::MenuItem("Jump")) {
+              if (can_show) jump_to_system(id, sys);
+              ImGui::CloseCurrentPopup();
+            }
+            if (ImGui::MenuItem("Unpin")) {
+              remove_idx = i;
+              ImGui::CloseCurrentPopup();
+            }
+            if (ImGui::MenuItem("Delete note")) {
+              viewer_faction->system_notes.erase(id);
+              remove_idx = -2; // sentinel: already handled.
+              ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+          }
+        }
+
+        if (remove_idx >= 0 && remove_idx < static_cast<int>(pins.size())) {
+          const Id id = pins[remove_idx];
+          auto itn = viewer_faction->system_notes.find(id);
+          if (itn != viewer_faction->system_notes.end()) {
+            itn->second.pinned = false;
+            if (itn->second.text.empty() && itn->second.tags.empty()) {
+              viewer_faction->system_notes.erase(itn);
+            }
+          }
+        }
+
+        ImGui::EndChild();
+      }
+    } else {
+      // Local-only favorites (non-persisted) when no viewer faction is available.
+      ImGui::SeparatorText("Favorites (local)");
+
+      // Drop any invalid IDs (e.g. after loading another save).
+      local_favorites.erase(std::remove_if(local_favorites.begin(), local_favorites.end(), [&](Id id) {
+                            return find_ptr(s.systems, id) == nullptr;
+                          }),
+                          local_favorites.end());
+
+      ImGui::BeginDisabled(s.selected_system == kInvalidId);
+      if (ImGui::SmallButton("Add selected")) {
+        const Id id = s.selected_system;
+        if (id != kInvalidId && std::find(local_favorites.begin(), local_favorites.end(), id) == local_favorites.end()) {
+          local_favorites.push_back(id);
+        }
+      }
+      ImGui::EndDisabled();
+      ImGui::SameLine();
+      if (ImGui::SmallButton("Clear")) {
+        local_favorites.clear();
+      }
+
+      if (local_favorites.empty()) {
+        ImGui::TextDisabled("(none)");
+      } else {
+        ImGui::BeginChild("##galaxy_favorites", ImVec2(0.0f, 110.0f), true);
+        int remove_idx = -1;
+        for (int i = 0; i < static_cast<int>(local_favorites.size()); ++i) {
+          const Id id = local_favorites[i];
+          const StarSystem* sys = find_ptr(s.systems, id);
+          if (!sys) continue;
+          const bool is_sel = (s.selected_system == id);
+          std::string label = sys->name;
+          label += "##fav_" + std::to_string(static_cast<std::uint64_t>(id));
+          if (ImGui::Selectable(label.c_str(), is_sel)) {
+            jump_to_system(id, sys);
+          }
 
           if (ImGui::BeginPopupContextItem()) {
             if (ImGui::MenuItem("Remove")) {
@@ -3654,10 +3957,132 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
             ImGui::EndPopup();
           }
         }
-        if (remove_idx >= 0 && remove_idx < static_cast<int>(favorites.size())) {
-          favorites.erase(favorites.begin() + remove_idx);
+        if (remove_idx >= 0 && remove_idx < static_cast<int>(local_favorites.size())) {
+          local_favorites.erase(local_favorites.begin() + remove_idx);
         }
         ImGui::EndChild();
+      }
+    }
+
+    // Notes for the selected system (persisted per-faction).
+    ImGui::SeparatorText("Notes");
+    if (!viewer_faction) {
+      ImGui::TextDisabled("Notes require a viewer faction (select a ship or set a viewer faction).");
+    } else if (s.selected_system == kInvalidId) {
+      ImGui::TextDisabled("(select a system)");
+    } else {
+      const Id sys_id = s.selected_system;
+      const StarSystem* sys = find_ptr(s.systems, sys_id);
+      if (!sys) {
+        ImGui::TextDisabled("(selected system missing)");
+      } else {
+        SystemIntelNote* note = nullptr;
+        if (auto itn = viewer_faction->system_notes.find(sys_id); itn != viewer_faction->system_notes.end()) {
+          note = &itn->second;
+        }
+
+        // Pinned toggle.
+        bool pinned = note ? note->pinned : false;
+        if (ImGui::Checkbox("Pinned##sys_pin", &pinned)) {
+          auto& n = viewer_faction->system_notes[sys_id];
+          n.pinned = pinned;
+          note = &n;
+        }
+
+        // Tags.
+        if (note && !note->tags.empty()) {
+          ImGui::TextDisabled("Tags:");
+          ImGui::SameLine();
+          int remove_tag = -1;
+          for (int i = 0; i < static_cast<int>(note->tags.size()); ++i) {
+            const std::string& t = note->tags[i];
+            ImGui::PushID(i);
+            if (ImGui::SmallButton(("#" + t).c_str())) {
+              // Quick jump back into search for this tag.
+              std::string qq = "#" + t;
+              std::strncpy(find_query, qq.c_str(), sizeof(find_query));
+              find_query[sizeof(find_query) - 1] = '\0';
+              pinned_only = false;
+            }
+            if (ImGui::BeginPopupContextItem()) {
+              if (ImGui::MenuItem("Remove tag")) {
+                remove_tag = i;
+                ImGui::CloseCurrentPopup();
+              }
+              ImGui::EndPopup();
+            }
+            ImGui::SameLine();
+            ImGui::PopID();
+          }
+          ImGui::NewLine();
+
+          if (remove_tag >= 0 && remove_tag < static_cast<int>(note->tags.size())) {
+            note->tags.erase(note->tags.begin() + remove_tag);
+          }
+        }
+
+        static char new_tag[32] = "";
+        ImGui::SetNextItemWidth(-1.0f);
+        const bool add_enter = ImGui::InputTextWithHint("##note_tag", "Add tag (e.g. home, ruins)", new_tag, sizeof(new_tag),
+                                                       ImGuiInputTextFlags_EnterReturnsTrue);
+        if (ImGui::IsItemHovered()) {
+          ImGui::SetTooltip("Tags are case-insensitive. Use #tag in Find.");
+        }
+        const bool add_clicked = ImGui::SmallButton("Add tag");
+        if (add_enter || add_clicked) {
+          const std::string tag = normalize_tag(std::string(new_tag));
+          if (!tag.empty()) {
+            auto& n = viewer_faction->system_notes[sys_id];
+            bool exists = false;
+            for (const std::string& t : n.tags) {
+              if (ascii_iequals(t, tag)) {
+                exists = true;
+                break;
+              }
+            }
+            if (!exists) {
+              n.tags.push_back(tag);
+            }
+            note = &n;
+          }
+          new_tag[0] = '\0';
+        }
+
+        // Note text editor (stable buffer per selected system).
+        static Id note_edit_id = kInvalidId;
+        static std::string note_edit_text;
+        if (note_edit_id != sys_id) {
+          note_edit_id = sys_id;
+          note_edit_text = note ? note->text : std::string();
+        }
+
+        ImGui::TextDisabled("Text:");
+        ImGui::SetNextItemWidth(-1.0f);
+        const bool edited = ImGui::InputTextMultiline("##note_text", &note_edit_text, ImVec2(0.0f, 90.0f),
+                                                     ImGuiInputTextFlags_AllowTabInput);
+        if (edited) {
+          auto& n = viewer_faction->system_notes[sys_id];
+          n.text = note_edit_text;
+          note = &n;
+        }
+
+        if (ImGui::SmallButton("Clear text")) {
+          note_edit_text.clear();
+          if (note) note->text.clear();
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Delete note")) {
+          viewer_faction->system_notes.erase(sys_id);
+          note = nullptr;
+          note_edit_text.clear();
+        }
+
+        // Prune empty entries to keep saves tidy.
+        if (auto itn = viewer_faction->system_notes.find(sys_id); itn != viewer_faction->system_notes.end()) {
+          if (!itn->second.pinned && itn->second.text.empty() && itn->second.tags.empty()) {
+            viewer_faction->system_notes.erase(itn);
+          }
+        }
       }
     }
   }
@@ -3679,6 +4104,7 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   }
   ImGui::Checkbox("Fog of war", &ui.fog_of_war);
   ImGui::Checkbox("Labels", &ui.show_galaxy_labels);
+  ImGui::Checkbox("Pins", &ui.show_galaxy_pins);
   ImGui::Checkbox("Jump links", &ui.show_galaxy_jump_lines);
   ImGui::Checkbox("Chokepoints (articulation)", &ui.show_galaxy_chokepoints);
   {
@@ -4056,10 +4482,10 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
       }
 
       const char* unit = procgen_lens_value_unit(ui.galaxy_procgen_lens_mode);
-      const double scale = procgen_lens_display_scale(ui.galaxy_procgen_lens_mode);
+      const double disp_scale = procgen_lens_display_scale(ui.galaxy_procgen_lens_mode);
       const int dec = procgen_lens_display_decimals(ui.galaxy_procgen_lens_mode);
-      const double disp_min = lens_raw_min * scale;
-      const double disp_max = lens_raw_max * scale;
+      const double disp_min = lens_raw_min * disp_scale;
+      const double disp_max = lens_raw_max * disp_scale;
       if (ui.galaxy_procgen_lens_mode == ProcGenLensMode::MineralWealth && ui.galaxy_procgen_lens_log_scale) {
         // Mineral wealth is wide-range; keep a compact integer display.
         ImGui::TextDisabled("Min %.0f %s, Max %.0f %s (log)", disp_min, unit, disp_max, unit);

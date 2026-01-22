@@ -1682,6 +1682,32 @@ json::Value serialize_game_to_json_value(const GameState& s) {
       if (!journal.empty()) o["journal"] = journal;
     }
 
+    // Player-authored system intel notes (optional).
+    if (!f.system_notes.empty()) {
+      Array notes;
+      notes.reserve(f.system_notes.size());
+      for (Id sid : sorted_keys(f.system_notes)) {
+        if (sid == kInvalidId) continue;
+        const auto itn = f.system_notes.find(sid);
+        if (itn == f.system_notes.end()) continue;
+        const SystemIntelNote& n = itn->second;
+
+        const bool meaningful = n.pinned || !n.text.empty() || !n.tags.empty();
+        if (!meaningful) continue;
+
+        Object no;
+        no["system_id"] = static_cast<double>(sid);
+        if (n.pinned) no["pinned"] = true;
+        if (!n.tags.empty()) {
+          // Keep the save stable/tidy: de-duplicate tags.
+          no["tags"] = string_vector_to_json(sorted_unique_copy(n.tags));
+        }
+        if (!n.text.empty()) no["text"] = n.text;
+        notes.push_back(no);
+      }
+      if (!notes.empty()) o["system_notes"] = notes;
+    }
+
 
     Array surveyed_jump_points;
     const auto sjp = sorted_unique_copy(f.surveyed_jump_points);
@@ -2830,6 +2856,49 @@ GameState deserialize_game_from_json(const std::string& json_text) {
 
         if (je.title.empty() && je.text.empty()) continue;
         f.journal.push_back(std::move(je));
+      }
+    }
+
+    // Player-authored system intel notes (optional).
+    if (auto it = o.find("system_notes"); it != o.end()) {
+      // Format: array-of-objects.
+      //   [{"system_id": 1, "pinned": true, "tags": ["home"], "text": "..."}, ...]
+      if (it->second.is_array()) {
+        for (const auto& nv : it->second.array()) {
+          if (!nv.is_object()) continue;
+          const auto& no = nv.object();
+
+          const Id sid = static_cast<Id>(no.find("system_id") != no.end() ? no.at("system_id").int_value(kInvalidId)
+                                                                           : kInvalidId);
+          if (sid == kInvalidId) continue;
+
+          // Ignore notes for missing systems (defensive against corrupted saves).
+          if (s.systems.find(sid) == s.systems.end()) continue;
+
+          SystemIntelNote n;
+          if (auto itp = no.find("pinned"); itp != no.end()) n.pinned = itp->second.bool_value(false);
+          if (auto itt = no.find("text"); itt != no.end()) n.text = itt->second.string_value();
+          if (auto ittags = no.find("tags"); ittags != no.end()) n.tags = string_vector_from_json(ittags->second);
+
+          // Basic sanity limits to keep save files reasonable.
+          if (n.text.size() > 8192) n.text.resize(8192);
+
+          // Clean tags: remove empties, limit length, de-duplicate.
+          if (!n.tags.empty()) {
+            n.tags.erase(std::remove_if(n.tags.begin(), n.tags.end(), [](const std::string& t) { return t.empty(); }),
+                         n.tags.end());
+            for (std::string& t : n.tags) {
+              if (t.size() > 32) t.resize(32);
+            }
+            n.tags = sorted_unique_copy(n.tags);
+            if (n.tags.size() > 32) n.tags.resize(32);
+          }
+
+          const bool meaningful = n.pinned || !n.text.empty() || !n.tags.empty();
+          if (!meaningful) continue;
+
+          f.system_notes[sid] = std::move(n);
+        }
       }
     }
 

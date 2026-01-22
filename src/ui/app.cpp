@@ -1378,6 +1378,9 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       if (auto it = obj->find("show_galaxy_labels"); it != obj->end()) {
         ui_.show_galaxy_labels = it->second.bool_value(ui_.show_galaxy_labels);
       }
+      if (auto it = obj->find("show_galaxy_pins"); it != obj->end()) {
+        ui_.show_galaxy_pins = it->second.bool_value(ui_.show_galaxy_pins);
+      }
       if (auto it = obj->find("show_galaxy_jump_lines"); it != obj->end()) {
         ui_.show_galaxy_jump_lines = it->second.bool_value(ui_.show_galaxy_jump_lines);
       }
@@ -2568,6 +2571,7 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     o["show_minor_bodies"] = ui_.show_minor_bodies;
     o["show_minor_body_labels"] = ui_.show_minor_body_labels;
     o["show_galaxy_labels"] = ui_.show_galaxy_labels;
+    o["show_galaxy_pins"] = ui_.show_galaxy_pins;
     o["show_galaxy_jump_lines"] = ui_.show_galaxy_jump_lines;
     o["show_galaxy_unknown_exits"] = ui_.show_galaxy_unknown_exits;
     o["show_galaxy_intel_alerts"] = ui_.show_galaxy_intel_alerts;

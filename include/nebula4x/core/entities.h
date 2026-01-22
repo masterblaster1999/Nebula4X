@@ -1379,6 +1379,23 @@ struct JournalEntry {
   Id wreck_id{kInvalidId};
 };
 
+// Player/faction-authored intel notes attached to star systems.
+//
+// Design goals:
+// - Stored per-faction so notes don't leak between factions under fog-of-war.
+// - Persisted in saves (small, optional payload).
+// - UI-facing: simulation logic should not rely on this data.
+struct SystemIntelNote {
+  // Free-form note text (player-authored).
+  std::string text;
+
+  // Small set of user-defined tags for searching/filtering (e.g. "home", "ruins").
+  std::vector<std::string> tags;
+
+  // When pinned, the galaxy map can show a small pin marker for quick navigation.
+  bool pinned{false};
+};
+
 struct Faction {
   Id id{kInvalidId};
   std::string name;
@@ -1465,6 +1482,12 @@ struct Faction {
   // This is a curated story layer over the raw simulation event log: discoveries,
   // intel, and major outcomes in a form that's easy to read and search.
   std::vector<JournalEntry> journal;
+
+  // Player-authored system intel notes (UI-facing).
+  //
+  // Stored per-faction so notes don't leak between factions under fog-of-war.
+  // Persisted in saves as an optional compact payload.
+  std::unordered_map<Id, SystemIntelNote> system_notes;
 
   // Jump point surveys (fog-of-war route knowledge).
   // When fog-of-war is enabled, the UI + route planner will only consider
