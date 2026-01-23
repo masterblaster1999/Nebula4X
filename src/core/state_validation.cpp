@@ -474,6 +474,19 @@ std::vector<std::string> validate_game_state(const GameState& s, const ContentDB
                 } else if (ord.target_ship_id == ship_id) {
                   push(errors, prefix() + "AttackShip targets itself");
                 }
+
+                if (ord.search_waypoint_index < 0) {
+                  push(errors,
+                       prefix() + join("AttackShip has negative search_waypoint_index ", ord.search_waypoint_index));
+                }
+                if (ord.has_search_offset) {
+                  if (!std::isfinite(ord.search_offset_mkm.x) || !std::isfinite(ord.search_offset_mkm.y)) {
+                    push(errors, prefix() + "AttackShip has non-finite search_offset_mkm");
+                  }
+                  if (ord.search_waypoint_index <= 0) {
+                    push(errors, prefix() + "AttackShip has search_offset but search_waypoint_index <= 0");
+                  }
+                }
               } else if constexpr (std::is_same_v<T, EscortShip>) {
                 if (ord.target_ship_id == kInvalidId) {
                   push(errors, prefix() + "EscortShip has invalid target_ship_id");
@@ -708,6 +721,19 @@ std::vector<std::string> validate_game_state(const GameState& s, const ContentDB
               } else if (!has_ship(ord.target_ship_id)) {
                 push(errors,
                      prefix() + join("AttackShip references missing target_ship_id ", id_u64(ord.target_ship_id)));
+              }
+
+              if (ord.search_waypoint_index < 0) {
+                push(errors,
+                     prefix() + join("AttackShip has negative search_waypoint_index ", ord.search_waypoint_index));
+              }
+              if (ord.has_search_offset) {
+                if (!std::isfinite(ord.search_offset_mkm.x) || !std::isfinite(ord.search_offset_mkm.y)) {
+                  push(errors, prefix() + "AttackShip has non-finite search_offset_mkm");
+                }
+                if (ord.search_waypoint_index <= 0) {
+                  push(errors, prefix() + "AttackShip has search_offset but search_waypoint_index <= 0");
+                }
               }
             } else if constexpr (std::is_same_v<T, EscortShip>) {
               if (ord.target_ship_id == kInvalidId) {
@@ -1707,7 +1733,8 @@ FixReport fix_game_state(GameState& s, const ContentDB* content) {
     // Normalize enum ranges (defensive vs corrupt saves).
     {
       const int k = static_cast<int>(c.kind);
-      if (k < 0 || k > 2) {
+      const int kMaxKind = static_cast<int>(ContractKind::EscortConvoy);
+      if (k < 0 || k > kMaxKind) {
         note(join("Fix: Contract ", id_u64(cid), " had invalid kind ", k, "; set to investigate_anomaly"));
         c.kind = ContractKind::InvestigateAnomaly;
       }
@@ -2221,6 +2248,26 @@ FixReport fix_game_state(GameState& s, const ContentDB* content) {
                   (self_ship_id != kInvalidId && ord.target_ship_id == self_ship_id)) {
                 keep = false;
                 drop(i, "AttackShip invalid target_ship_id");
+              }
+
+              // Normalize lost-contact search state.
+              if (ord.search_waypoint_index < 0) {
+                note(join("Fix: ", owner, " ", list_name, "[", i, "] AttackShip search_waypoint_index clamped ",
+                          ord.search_waypoint_index, " -> 0"));
+                ord.search_waypoint_index = 0;
+              }
+              if (!std::isfinite(ord.search_offset_mkm.x) || !std::isfinite(ord.search_offset_mkm.y)) {
+                note(join("Fix: ", owner, " ", list_name, "[", i, "] AttackShip search_offset_mkm cleared"));
+                ord.search_offset_mkm = Vec2{0.0, 0.0};
+                ord.has_search_offset = false;
+              }
+              if (ord.has_search_offset && ord.search_waypoint_index <= 0) {
+                note(join("Fix: ", owner, " ", list_name, "[", i,
+                          "] AttackShip search_waypoint_index promoted 0 -> 1 (has_search_offset)"));
+                ord.search_waypoint_index = 1;
+              }
+              if (!ord.has_search_offset) {
+                ord.search_offset_mkm = Vec2{0.0, 0.0};
               }
             } else if constexpr (std::is_same_v<T, EscortShip>) {
               if (ord.target_ship_id == kInvalidId || !has_ship(ord.target_ship_id) ||

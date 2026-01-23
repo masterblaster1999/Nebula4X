@@ -97,6 +97,7 @@ int test_duel_simulator();
 int test_duel_tournament();
 int test_duel_swiss_tournament();
 int test_attack_lead_pursuit();
+int test_lost_contact_search();
 int test_combat_doctrine();
 int test_advisor();
 
@@ -262,6 +263,7 @@ int main(int argc, char** argv) {
       {"duel_tournament", test_duel_tournament},
       {"duel_swiss_tournament", test_duel_swiss_tournament},
       {"attack_lead_pursuit", test_attack_lead_pursuit},
+      {"lost_contact_search", test_lost_contact_search},
       {"combat_doctrine", test_combat_doctrine},
       {"ship_repairs", test_ship_repairs},
       {"crew_experience", test_crew_experience},

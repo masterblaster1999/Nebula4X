@@ -568,6 +568,15 @@ Value order_to_json(const Order& order) {
               obj["pursuit_hops"] = static_cast<double>(o.pursuit_hops);
             }
           }
+
+          // Optional persisted lost-contact search state.
+          if (o.search_waypoint_index > 0) {
+            obj["search_waypoint_index"] = static_cast<double>(o.search_waypoint_index);
+          }
+          if (o.has_search_offset) {
+            obj["has_search_offset"] = true;
+            obj["search_offset_mkm"] = vec2_to_json(o.search_offset_mkm);
+          }
         } else if constexpr (std::is_same_v<T, EscortShip>) {
           obj["type"] = std::string("escort_ship");
           obj["target_ship_id"] = static_cast<double>(o.target_ship_id);
@@ -716,6 +725,31 @@ Order order_from_json(const Value& v) {
     }
     if (auto it = o.find("pursuit_hops"); it != o.end()) {
       a.pursuit_hops = static_cast<int>(it->second.int_value(0));
+    }
+
+    // Optional persisted lost-contact search state.
+    if (auto it = o.find("search_waypoint_index"); it != o.end()) {
+      a.search_waypoint_index = static_cast<int>(it->second.int_value(0));
+    }
+    if (auto it = o.find("search_offset_mkm"); it != o.end()) {
+      a.search_offset_mkm = vec2_from_json(it->second);
+      a.has_search_offset = true;
+    }
+    if (auto it = o.find("has_search_offset"); it != o.end()) {
+      a.has_search_offset = it->second.bool_value(a.has_search_offset);
+    }
+
+    // Defensive normalization: keep the fields internally consistent.
+    if (a.search_waypoint_index < 0) a.search_waypoint_index = 0;
+    if (!std::isfinite(a.search_offset_mkm.x) || !std::isfinite(a.search_offset_mkm.y)) {
+      a.search_offset_mkm = Vec2{0.0, 0.0};
+      a.has_search_offset = false;
+    }
+    if (a.has_search_offset && a.search_waypoint_index <= 0) {
+      a.search_waypoint_index = 1;
+    }
+    if (!a.has_search_offset) {
+      a.search_offset_mkm = Vec2{0.0, 0.0};
     }
     return a;
   }

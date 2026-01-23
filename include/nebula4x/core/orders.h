@@ -95,6 +95,23 @@ struct AttackShip {
   // Safety valve: how many times this order has pursued a hypothesized jump.
   // Prevents infinite bouncing when the target repeatedly slips away.
   int pursuit_hops{0};
+
+  // Lost-contact search state.
+  //
+  // When the target is not currently detected, AttackShip behaves like a
+  // bounded search operation around the predicted track position
+  // (last_known_position_mkm). To avoid "jitter" from retargeting a different
+  // random point every day, the simulation keeps a persistent waypoint offset
+  // and advances it only after reaching the current waypoint.
+  //
+  // - search_waypoint_index: monotonically increases as each waypoint is
+  //   reached. Index 0 corresponds to the track center.
+  // - has_search_offset/search_offset_mkm: current waypoint offset (mkm) from
+  //   the predicted track center. When false, the active waypoint is the track
+  //   center.
+  int search_waypoint_index{0};
+  bool has_search_offset{false};
+  Vec2 search_offset_mkm{0.0, 0.0};
 };
 
 // Escort a friendly ship.

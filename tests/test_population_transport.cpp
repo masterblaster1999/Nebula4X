@@ -4,6 +4,7 @@
 
 #include <cmath>
 #include <iostream>
+#include <variant>
 
 using namespace nebula4x;
 
@@ -39,6 +40,10 @@ int test_population_transport() {
   content.designs[freighter.id] = freighter;
 
   SimConfig cfg;
+  // Slow down population transfers so we can test throughput-limited behavior
+  // under sub-day (hourly) ticks.
+  cfg.colonist_transfer_millions_per_day_per_colony_cap = 0.2; // 50M cap => 10M/day
+  cfg.colonist_transfer_millions_per_day_min = 1.0;
   Simulation sim(content, cfg);
 
   // Custom minimal state (single system, two bodies/colonies, two ships).
@@ -107,33 +112,51 @@ int test_population_transport() {
 
   sim.load_game(st);
 
-  // Load explicit 10M.
+  // Load explicit 10M (throughput-limited: 10M/day => 5M per 12h).
   N4X_ASSERT(sim.issue_load_colonists(sh.id, src.id, 10.0), "issue_load_colonists should succeed");
-  sim.advance_days(1);
+
+  // Half a day: should only load 5M and keep the order queued.
+  sim.advance_hours(12);
   {
     const auto& s = sim.state();
     const auto& ship = s.ships.at(sh.id);
     const auto& csrc = s.colonies.at(src.id);
-    N4X_ASSERT(std::abs(ship.colonists_millions - 10.0) < 1e-6, "ship should have 10M embarked");
-    N4X_ASSERT(std::abs(csrc.population_millions - 90.0) < 1e-6, "source colony should drop to 90M");
+    N4X_ASSERT(std::abs(ship.colonists_millions - 5.0) < 1e-6, "ship should have 5M embarked after 12h");
+    N4X_ASSERT(std::abs(csrc.population_millions - 95.0) < 1e-6, "source colony should drop to 95M after 12h");
+    N4X_ASSERT(!s.ship_orders.at(sh.id).queue.empty(), "load order should still be in progress");
+
+    const auto& ord = s.ship_orders.at(sh.id).queue.front();
+    N4X_ASSERT(std::holds_alternative<LoadColonists>(ord), "front order should still be LoadColonists");
+    const double remaining = std::get<LoadColonists>(ord).millions;
+    N4X_ASSERT(std::abs(remaining - 5.0) < 1e-6, "remaining load should be 5M after 12h");
+  }
+
+  // Another 12 hours: should finish the remaining 5M.
+  sim.advance_hours(12);
+  {
+    const auto& s = sim.state();
+    const auto& ship = s.ships.at(sh.id);
+    const auto& csrc = s.colonies.at(src.id);
+    N4X_ASSERT(std::abs(ship.colonists_millions - 10.0) < 1e-6, "ship should have 10M embarked after 24h");
+    N4X_ASSERT(std::abs(csrc.population_millions - 90.0) < 1e-6, "source colony should drop to 90M after 24h");
     N4X_ASSERT(s.ship_orders.at(sh.id).queue.empty(), "load order should complete");
   }
 
-  // Load max (0) should fill remaining capacity (50M cap => +40M).
+  // Load max (0) should fill remaining capacity (50M cap => +40M). At 10M/day this takes 4 days.
   N4X_ASSERT(sim.issue_load_colonists(sh.id, src.id, 0.0), "issue_load_colonists(max) should succeed");
-  sim.advance_days(1);
+  sim.advance_days(4);
   {
     const auto& s = sim.state();
     const auto& ship = s.ships.at(sh.id);
     const auto& csrc = s.colonies.at(src.id);
     N4X_ASSERT(std::abs(ship.colonists_millions - 50.0) < 1e-6, "ship should fill to 50M capacity");
     N4X_ASSERT(std::abs(csrc.population_millions - 50.0) < 1e-6, "source colony should now have 50M");
-    N4X_ASSERT(s.ship_orders.at(sh.id).queue.empty(), "load order should complete");
+    N4X_ASSERT(s.ship_orders.at(sh.id).queue.empty(), "load(max) order should complete");
   }
 
-  // Unload max (0) to destination colony.
+  // Unload max (0) to destination colony. 50M at 10M/day => 5 days.
   N4X_ASSERT(sim.issue_unload_colonists(sh.id, dst.id, 0.0), "issue_unload_colonists(max) should succeed");
-  sim.advance_days(1);
+  sim.advance_days(5);
   {
     const auto& s = sim.state();
     const auto& ship = s.ships.at(sh.id);

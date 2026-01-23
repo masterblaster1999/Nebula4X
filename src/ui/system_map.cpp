@@ -1368,16 +1368,27 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
                 const auto* jp = find_ptr(s.jump_points, o.jump_point_id);
                 if (!jp || jp->system_id != sys->id) return std::nullopt;
                 return jp->position_mkm;
-              } else if constexpr (std::is_same_v<T, nebula4x::AttackShip> ||
-                                   std::is_same_v<T, nebula4x::EscortShip> ||
+              } else if constexpr (std::is_same_v<T, nebula4x::AttackShip>) {
+                // Fog-of-war safety: only reveal the true target position when
+                // the attacking faction currently detects the ship.
+                if (const auto* tgt = find_ptr(s.ships, o.target_ship_id); tgt && tgt->system_id == sys->id) {
+                  if (sim.is_ship_detected_by_faction(sh->faction_id, o.target_ship_id)) {
+                    return tgt->position_mkm;
+                  }
+                }
+
+                // Otherwise show last-known / search waypoint so the player can
+                // understand what their ship is doing without leaking intel.
+                if (o.has_last_known) {
+                  return o.last_known_position_mkm + (o.has_search_offset ? o.search_offset_mkm : Vec2{0.0, 0.0});
+                }
+                return std::nullopt;
+              } else if constexpr (std::is_same_v<T, nebula4x::EscortShip> ||
                                    std::is_same_v<T, nebula4x::TransferCargoToShip> ||
                                    std::is_same_v<T, nebula4x::TransferFuelToShip> ||
                                    std::is_same_v<T, nebula4x::TransferTroopsToShip>) {
                 if (const auto* tgt = find_ptr(s.ships, o.target_ship_id); tgt && tgt->system_id == sys->id) {
                   return tgt->position_mkm;
-                }
-                if constexpr (std::is_same_v<T, nebula4x::AttackShip>) {
-                  if (o.has_last_known) return o.last_known_position_mkm;
                 }
                 return std::nullopt;
               } else if constexpr (std::is_same_v<T, nebula4x::SalvageWreck>) {

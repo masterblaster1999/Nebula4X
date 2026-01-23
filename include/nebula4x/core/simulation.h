@@ -92,6 +92,18 @@ struct SimConfig {
   double troop_transfer_strength_per_day_per_troop_cap{5.0};
   double troop_transfer_strength_per_day_min{10.0};
 
+  // Colonist/passenger transfers (millions per simulated day).
+  //
+  // These are intentionally fairly fast so that moving population around the
+  // empire isn't tedious on daily ticks, but they are still throughput-limited
+  // to keep sub-day ticks (1h/6h/12h) consistent and to prevent instant moves.
+  //
+  // The transfer rate scales with the ship design's colony_capacity_millions.
+  //
+  // Example: colony_capacity_millions=50 and per_cap=1.0 => 50M/day (~2.08M/hour).
+  double colonist_transfer_millions_per_day_per_colony_cap{1.0};
+  double colonist_transfer_millions_per_day_min{5.0};
+
   double salvage_tons_per_day_per_cargo_ton{0.2};
   double salvage_tons_per_day_min{10.0};
 
@@ -859,6 +871,22 @@ double ship_maintenance_breakdown_subsystem_damage_max{0.20};
   //
   // 0 disables the search offset (pure tail-chasing).
   double contact_search_offset_fraction{0.5};
+
+  // Lost-contact search uses a deterministic low-discrepancy pattern (a
+  // Fibonacci / golden-angle spiral) to pick successive search waypoints
+  // within the uncertainty disk.
+  //
+  // This controls how many waypoint samples it takes to "fill" the disk from
+  // center to edge before subsequent waypoints concentrate near the edge.
+  int contact_search_pattern_points{64};
+
+  // Safety cap: limit the search radius to what the pursuing ship can plausibly
+  // traverse during the remaining contact-prediction budget.
+  //
+  // search_radius <= ship_speed_mkm_per_day * remaining_prediction_days * fraction
+  //
+  // Set to 0 to disable this cap.
+  double contact_search_radius_speed_cap_fraction{1.0};
 
   // --- Intel / sensor fusion ---
   //

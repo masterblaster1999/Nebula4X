@@ -53,6 +53,48 @@ inline Vec2 rotate_vec2(const Vec2& v, double ang_rad) {
 
 inline double deg_to_rad(double deg) { return deg * (3.14159265358979323846 / 180.0); }
 
+inline double tau() { return 6.28318530717958647692; }
+
+// Deterministic lost-contact search: generate a low-discrepancy sequence of
+// offsets in a disk using a Fibonacci / golden-angle spiral.
+//
+// waypoint_index:
+//  - 0 => center (0,0)
+//  - 1.. => spiral samples outward until the radius is filled.
+static double contact_search_seed_angle_rad(Id ship_id, Id target_id) {
+  std::uint64_t seed = 0x9e3779b97f4a7c15ULL;
+  seed ^= static_cast<std::uint64_t>(ship_id) * 0xD6E8FEB86659FD93ULL;
+  seed ^= static_cast<std::uint64_t>(target_id) * 0x94D049BB133111EBULL;
+  seed = splitmix64(seed);
+  const double u = u01_from_u64(seed);
+  return u * tau();
+}
+
+static Vec2 contact_search_spiral_offset_mkm(int waypoint_index,
+                                             int pattern_points,
+                                             double radius_mkm,
+                                             double seed_angle_rad) {
+  if (waypoint_index <= 0) return Vec2{0.0, 0.0};
+  if (!(radius_mkm > 1e-9) || !std::isfinite(radius_mkm)) return Vec2{0.0, 0.0};
+
+  const int n = std::max(1, pattern_points);
+  const int i = waypoint_index - 1;
+
+  // Golden angle in radians: pi * (3 - sqrt(5)).
+  const double golden_angle = 2.39996322972865332223;
+
+  // Fill a disk with roughly uniform area density by using r ~ sqrt(t).
+  double t = (static_cast<double>(i) + 0.5) / static_cast<double>(n);
+  if (t > 1.0) t = 1.0;
+  if (t < 0.0) t = 0.0;
+  const double r = radius_mkm * std::sqrt(t);
+
+  const double ang = seed_angle_rad + golden_angle * static_cast<double>(i);
+  Vec2 off{std::cos(ang) * r, std::sin(ang) * r};
+  if (!std::isfinite(off.x) || !std::isfinite(off.y)) return Vec2{0.0, 0.0};
+  return off;
+}
+
 // --- Procedural exploration leads (anomaly chains) ---------------------------------
 //
 // The base game already supports anomalies with rewards and hazards. This layer
@@ -1500,6 +1542,10 @@ void Simulation::tick_ships(double dt_days) {
         ord.last_known_system_id = ship.system_id;
         ord.last_known_day = now;
         ord.pursuit_hops = 0;
+        // Reset lost-contact search state when we reacquire the target.
+        ord.search_waypoint_index = 0;
+        ord.has_search_offset = false;
+        ord.search_offset_mkm = Vec2{0.0, 0.0};
         const auto* d = find_design(ship.design_id);
         const double beam_range = d ? std::max(0.0, d->weapon_range_mkm) : 0.0;
         const double missile_range = d ? std::max(0.0, d->missile_range_mkm) : 0.0;
@@ -1678,6 +1724,10 @@ void Simulation::tick_ships(double dt_days) {
                   next.last_known_position_mkm = dst->position_mkm;
                   next.last_known_day = now;
                   next.pursuit_hops = ord.pursuit_hops + 1;
+                  // New coordinate frame: restart the search pattern.
+                  next.search_waypoint_index = 0;
+                  next.has_search_offset = false;
+                  next.search_offset_mkm = Vec2{0.0, 0.0};
 
                   q.erase(q.begin());
                   q.insert(q.begin(), TravelViaJump{best_jump_id});
@@ -1706,16 +1756,32 @@ void Simulation::tick_ships(double dt_days) {
           }
         }
 
-        // Add a deterministic "search" offset within an uncertainty radius.
+        // Lost-contact pursuit is a *bounded search* around the predicted track.
         //
-        // - With a valid contact track, use the computed contact uncertainty.
-        // - Otherwise, fall back to a ship-speed-based growth model around the
-        //   last known position (useful after jump-chasing).
+        // Previously, this used a per-day pseudo-random offset which caused
+        // visible "zig-zag" retargeting. We now keep a persistent waypoint
+        // offset and advance it only after reaching each waypoint.
+        const Vec2 search_center = target;
+
+        auto reset_search_state = [&]() {
+          ord.search_waypoint_index = 0;
+          ord.has_search_offset = false;
+          ord.search_offset_mkm = Vec2{0.0, 0.0};
+        };
+
+        if (!std::isfinite(ord.search_offset_mkm.x) || !std::isfinite(ord.search_offset_mkm.y)) {
+          reset_search_state();
+        }
+        if (ord.search_waypoint_index < 0) ord.search_waypoint_index = 0;
+
+        // Compute the uncertainty radius.
+        double unc = 0.0;
         if (cfg_.enable_contact_uncertainty && cfg_.contact_search_offset_fraction > 1e-9) {
-          double unc = 0.0;
           if (track_contact && track_contact->system_id == ship.system_id) {
             unc = contact_uncertainty_radius_mkm(*track_contact, now);
           } else {
+            // Fallback after jump-chasing: grow an uncertainty bubble based on
+            // the pursuer's speed and the time since the last-known update.
             const int age = std::max(0, now - ord.last_known_day);
             const double sp = mkm_per_day_from_speed(ship.speed_km_s, cfg_.seconds_per_day);
             const double gmin = std::max(0.0, cfg_.contact_uncertainty_growth_min_mkm_per_day);
@@ -1724,23 +1790,64 @@ void Simulation::tick_ships(double dt_days) {
             unc = cfg_.contact_uncertainty_min_mkm + static_cast<double>(age) * growth;
             unc = std::clamp(unc, cfg_.contact_uncertainty_min_mkm, cfg_.contact_uncertainty_max_mkm);
           }
+        }
+        if (!std::isfinite(unc) || unc < 0.0) unc = 0.0;
 
-          const double rad = std::max(0.0, unc) * std::max(0.0, cfg_.contact_search_offset_fraction);
-          if (rad > 1e-6) {
-            // Stable pseudo-random point inside a circle (biased toward center).
-            std::uint64_t seed = 0x9e3779b97f4a7c15ULL;
-            seed ^= static_cast<std::uint64_t>(now) + 0x85ebca6b;
-            seed ^= static_cast<std::uint64_t>(ship_id) * 0xc2b2ae3d27d4eb4fULL;
-            seed ^= static_cast<std::uint64_t>(target_id) * 0x165667b19e3779f9ULL;
-            seed = splitmix64(seed);
-            const double ang = u01_from_u64(splitmix64(seed)) * 6.283185307179586;
-            const double u = u01_from_u64(splitmix64(seed ^ 0x27d4eb2f165667c5ULL));
-            const double r = rad * u;
-            const Vec2 off{std::cos(ang) * r, std::sin(ang) * r};
-            if (std::isfinite(off.x) && std::isfinite(off.y)) {
-              target = target + off;
+        double rad = std::max(0.0, unc) * std::max(0.0, cfg_.contact_search_offset_fraction);
+        if (!std::isfinite(rad) || rad < 0.0) rad = 0.0;
+
+        // Optional cap: don't generate waypoints that are physically impossible
+        // to reach before the track goes stale.
+        if (rad > 1e-9 && cfg_.contact_search_radius_speed_cap_fraction > 1e-9 && cfg_.contact_prediction_max_days > 0) {
+          const int age = std::max(0, now - ord.last_known_day);
+          const int remaining = std::max(0, cfg_.contact_prediction_max_days - age);
+          const double sp = mkm_per_day_from_speed(ship.speed_km_s, cfg_.seconds_per_day);
+          const double cap = sp * static_cast<double>(remaining) * cfg_.contact_search_radius_speed_cap_fraction;
+          if (std::isfinite(cap) && cap > 0.0) {
+            rad = std::min(rad, cap);
+          }
+        }
+
+        if (rad <= 1e-6) {
+          // No meaningful uncertainty => just go to the predicted center.
+          reset_search_state();
+          target = search_center;
+        } else {
+          // Keep an existing offset within the current radius (in case the cap
+          // shrinks over time).
+          if (ord.has_search_offset) {
+            const double len = ord.search_offset_mkm.length();
+            if (len > rad && len > 1e-12) {
+              ord.search_offset_mkm = ord.search_offset_mkm * (rad / len);
             }
           }
+
+          auto current_waypoint = [&]() {
+            return search_center + (ord.has_search_offset ? ord.search_offset_mkm : Vec2{0.0, 0.0});
+          };
+
+          const Vec2 wp = current_waypoint();
+          const double wp_dist = (ship.position_mkm - wp).length();
+
+          // Advance to the next waypoint only after reaching the current one.
+          if (wp_dist <= arrive_eps + 1e-9) {
+            ord.search_waypoint_index = std::max(0, ord.search_waypoint_index) + 1;
+            const int pts = std::max(8, cfg_.contact_search_pattern_points);
+            const double seed_ang = contact_search_seed_angle_rad(ship_id, target_id);
+            ord.search_offset_mkm = contact_search_spiral_offset_mkm(ord.search_waypoint_index, pts, rad, seed_ang);
+            ord.has_search_offset = (ord.search_waypoint_index > 0);
+          } else {
+            // Backward compatibility: if an older save had an index but no offset,
+            // rebuild it deterministically.
+            if (ord.search_waypoint_index > 0 && !ord.has_search_offset) {
+              const int pts = std::max(8, cfg_.contact_search_pattern_points);
+              const double seed_ang = contact_search_seed_angle_rad(ship_id, target_id);
+              ord.search_offset_mkm = contact_search_spiral_offset_mkm(ord.search_waypoint_index, pts, rad, seed_ang);
+              ord.has_search_offset = true;
+            }
+          }
+
+          target = current_waypoint();
         }
       }
     } else if (std::holds_alternative<EscortShip>(q.front())) {
@@ -3889,52 +3996,148 @@ void Simulation::tick_ships(double dt_days) {
         continue;
       }
 
+      // Colonist transfers are throughput-limited (especially in sub-day tick modes),
+      // similar to cargo/fuel/troop transfers.
+      double blockade_mult = 1.0;
+      if (cfg_.enable_blockades) {
+        blockade_mult = std::clamp(blockade_output_multiplier_for_colony(col->id), 0.0, 1.0);
+      }
+
+      double throughput_limit = 1e300;
+      if (dt_days > 0.0) {
+        const double per_cap = std::max(0.0, cfg_.colonist_transfer_millions_per_day_per_colony_cap);
+        const double min_rate = std::max(0.0, cfg_.colonist_transfer_millions_per_day_min);
+        const double rate_per_day = std::max(min_rate, cap * per_cap);
+        throughput_limit = rate_per_day * dt_days * blockade_mult;
+      }
+
       auto transfer_amount = [&](double want, double available, double free_cap) -> double {
         double take = (want <= 0.0) ? 1e300 : want;
         take = std::min(take, available);
         take = std::min(take, free_cap);
+        take = std::min(take, throughput_limit);
         if (take < 0.0) take = 0.0;
         return take;
       };
 
+      constexpr double kEps = 1e-9;
+      const bool stalled_by_blockade = (cfg_.enable_blockades && blockade_mult <= kEps);
+
       double moved = 0.0;
+      bool complete = false;
+
       if (colonist_mode == 0) {
         // Load from colony population.
+        double want = load_colonists_ord ? load_colonists_ord->millions : colonist_millions;
+
         const double ship_have = std::max(0.0, ship.colonists_millions);
         const double free_cap = std::max(0.0, cap - ship_have);
-        moved = transfer_amount(load_colonists_ord ? load_colonists_ord->millions : colonist_millions,
-                                std::max(0.0, col->population_millions), free_cap);
-        if (moved > 1e-9) {
+        const double avail = std::max(0.0, col->population_millions);
+
+        moved = transfer_amount(want, avail, free_cap);
+        if (moved > kEps) {
           ship.colonists_millions = ship_have + moved;
           col->population_millions = std::max(0.0, col->population_millions - moved);
         }
+
+        if (want <= 0.0) {
+          // "As much as possible": finish once we are full or the source is empty, or
+          // if we can't move anything this tick.
+          const double ship_after = std::max(0.0, ship.colonists_millions);
+          const double free_after = std::max(0.0, cap - ship_after);
+          const double avail_after = std::max(0.0, col->population_millions);
+
+          complete = (moved <= kEps) || (free_after <= kEps) || (avail_after <= kEps);
+
+          // If we are hard-stalled by a blockade but transfer is otherwise possible,
+          // keep the order queued instead of silently completing.
+          if (complete && moved <= kEps && stalled_by_blockade && free_cap > kEps && avail > kEps) {
+            complete = false;
+          }
+        } else {
+          if (load_colonists_ord) {
+            load_colonists_ord->millions = std::max(0.0, load_colonists_ord->millions - moved);
+            want = load_colonists_ord->millions;
+          }
+
+          complete = (want <= kEps) || (moved <= kEps);
+
+          if (complete && moved <= kEps && stalled_by_blockade && free_cap > kEps && avail > kEps && want > kEps) {
+            complete = false;
+          }
+        }
       } else if (colonist_mode == 1) {
         // Unload into colony population.
+        double want = unload_colonists_ord ? unload_colonists_ord->millions : colonist_millions;
+
         const double ship_have = std::max(0.0, ship.colonists_millions);
-        moved = transfer_amount(unload_colonists_ord ? unload_colonists_ord->millions : colonist_millions,
-                                ship_have, 1e300);
-        if (moved > 1e-9) {
+        moved = transfer_amount(want, ship_have, 1e300);
+        if (moved > kEps) {
           ship.colonists_millions = std::max(0.0, ship_have - moved);
           col->population_millions += moved;
         }
-      }
 
-      if (moved > 1e-9) {
-        std::ostringstream ss;
-        if (colonist_mode == 0) {
-          ss << "Ship " << ship.name << " loaded " << moved << "M colonists at colony " << col->name;
+        if (want <= 0.0) {
+          const double ship_after = std::max(0.0, ship.colonists_millions);
+          complete = (moved <= kEps) || (ship_after <= kEps);
+
+          if (complete && moved <= kEps && stalled_by_blockade && ship_have > kEps) {
+            complete = false;
+          }
         } else {
-          ss << "Ship " << ship.name << " unloaded " << moved << "M colonists at colony " << col->name;
+          if (unload_colonists_ord) {
+            unload_colonists_ord->millions = std::max(0.0, unload_colonists_ord->millions - moved);
+            want = unload_colonists_ord->millions;
+          }
+
+          complete = (want <= kEps) || (moved <= kEps);
+
+          if (complete && moved <= kEps && stalled_by_blockade && ship_have > kEps && want > kEps) {
+            complete = false;
+          }
         }
-        EventContext ctx;
-        ctx.faction_id = ship.faction_id;
-        ctx.system_id = ship.system_id;
-        ctx.ship_id = ship_id;
-        ctx.colony_id = col->id;
-        push_event(EventLevel::Info, EventCategory::Movement, ss.str(), ctx);
+      } else {
+        // Unknown mode.
+        complete = true;
       }
 
-      q.erase(q.begin());
+      // Player-facing events: avoid spamming the log under sub-day ticks by emitting
+      // at most once per day (hour 0) plus a final completion message.
+      if (moved > kEps) {
+        const auto* fac = find_ptr(state_.factions, ship.faction_id);
+        const bool is_player = fac && fac->control == FactionControl::Player;
+        if (is_player && (complete || state_.hour_of_day == 0)) {
+          std::ostringstream ss;
+          ss.setf(std::ios::fixed);
+          ss.precision(2);
+          if (colonist_mode == 0) {
+            ss << "Ship " << ship.name << " loaded " << moved << "M colonists at colony " << col->name;
+          } else {
+            ss << "Ship " << ship.name << " unloaded " << moved << "M colonists at colony " << col->name;
+          }
+          EventContext ctx;
+          ctx.faction_id = ship.faction_id;
+          ctx.system_id = ship.system_id;
+          ctx.ship_id = ship_id;
+          ctx.colony_id = col->id;
+          push_event(EventLevel::Info, EventCategory::Movement, ss.str(), ctx);
+        }
+      } else if (!complete && stalled_by_blockade) {
+        const auto* fac = find_ptr(state_.factions, ship.faction_id);
+        const bool is_player = fac && fac->control == FactionControl::Player;
+        if (is_player && state_.hour_of_day == 0) {
+          std::ostringstream ss;
+          ss << "Colonist transfer stalled at " << col->name << ": blockade pressure prevents shuttle traffic.";
+          EventContext ctx;
+          ctx.faction_id = ship.faction_id;
+          ctx.system_id = ship.system_id;
+          ctx.ship_id = ship_id;
+          ctx.colony_id = col->id;
+          push_event(EventLevel::Warn, EventCategory::Movement, ss.str(), ctx);
+        }
+      }
+
+      if (complete) q.erase(q.begin());
       continue;
     }
 

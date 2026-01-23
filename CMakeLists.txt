@@ -325,6 +325,7 @@ if(NEBULA4X_BUILD_TESTS)
     tests/test_duel_tournament.cpp
     tests/test_duel_swiss_tournament.cpp
     tests/test_attack_lead_pursuit.cpp
+    tests/test_lost_contact_search.cpp
     tests/test_combat_doctrine.cpp
     tests/test_sensor_coverage.cpp
     tests/test_swept_contacts.cpp
