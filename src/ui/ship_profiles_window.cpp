@@ -423,6 +423,8 @@ void draw_ship_profiles_window(Simulation& sim, UIState& ui, Id& selected_ship, 
         }
 
         ImGui::Checkbox("Auto colonize", &p.auto_colonize);
+        ImGui::SameLine();
+        ImGui::Checkbox("Auto colonist transport", &p.auto_colonist_transport);
 
         ImGui::Separator();
         ImGui::TextDisabled("Sustainment automation");
@@ -563,6 +565,37 @@ void draw_ship_profiles_window(Simulation& sim, UIState& ui, Id& selected_ship, 
           ImGui::Separator();
           ImGui::TextDisabled("Combat doctrine");
 
+          {
+            const char* fire_labels[] = {"Weapons free", "Orders only", "Hold fire"};
+            int fire_i = static_cast<int>(p.combat_doctrine.fire_control);
+            if (ImGui::Combo("Fire control##ship_prof_fire_ctrl", &fire_i, fire_labels, IM_ARRAYSIZE(fire_labels))) {
+              fire_i = std::clamp(fire_i, 0, 2);
+              p.combat_doctrine.fire_control = static_cast<FireControlMode>(fire_i);
+            }
+            if (ImGui::IsItemHovered()) {
+              ImGui::SetTooltip(
+                  "Weapons free: auto-engage detected hostiles in range.\n"
+                  "Orders only: only fire when executing explicit combat orders (AttackShip/BombardColony).\n"
+                  "Hold fire: never fire offensive weapons (point defense still works).");
+            }
+
+            const char* prio_labels[] = {"Nearest", "Weakest", "Threat", "Largest"};
+            int prio_i = static_cast<int>(p.combat_doctrine.targeting_priority);
+            if (ImGui::Combo("Target priority##ship_prof_target_prio", &prio_i, prio_labels,
+                             IM_ARRAYSIZE(prio_labels))) {
+              prio_i = std::clamp(prio_i, 0, 3);
+              p.combat_doctrine.targeting_priority = static_cast<TargetingPriority>(prio_i);
+            }
+            if (ImGui::IsItemHovered()) {
+              ImGui::SetTooltip(
+                  "Automatic target selection (Weapons free mode only).\n"
+                  "Nearest: closest detected hostile.\n"
+                  "Weakest: lowest HP (ties by distance).\n"
+                  "Threat: highest combat threat (ties by distance).\n"
+                  "Largest: highest mass (ties by distance).");
+            }
+          }
+
           int mode_i = static_cast<int>(p.combat_doctrine.range_mode);
           const char* mode_labels[] = {"Auto", "Beam", "Missile", "Max", "Min", "Custom"};
           if (ImGui::Combo("Range mode##ship_prof_eng_range_mode", &mode_i, mode_labels,
@@ -593,6 +626,41 @@ void draw_ship_profiles_window(Simulation& sim, UIState& ui, Id& selected_ship, 
             float db = static_cast<float>(p.combat_doctrine.kite_deadband_fraction);
             if (ImGui::SliderFloat("Kite deadband##ship_prof_eng_db", &db, 0.0f, 0.50f, "%.2f")) {
               p.combat_doctrine.kite_deadband_fraction = std::clamp(static_cast<double>(db), 0.0, 0.90);
+            }
+          }
+
+          ImGui::Separator();
+          ImGui::TextDisabled("Disengagement");
+
+          ImGui::Checkbox("Auto-retreat##ship_prof_ret_auto", &p.combat_doctrine.auto_retreat);
+          if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "When enabled, ships using this profile will automatically suspend their current order queue and\n"
+                "execute an emergency retreat plan when damaged (or low on missiles), then resume once safe and\n"
+                "sufficiently repaired.");
+          }
+
+          if (p.combat_doctrine.auto_retreat) {
+            float trig = static_cast<float>(p.combat_doctrine.retreat_hp_trigger_fraction);
+            if (ImGui::SliderFloat("Retreat HP fraction##ship_prof_ret_hp_trig", &trig, 0.05f, 0.95f, "%.2f")) {
+              p.combat_doctrine.retreat_hp_trigger_fraction = std::clamp(static_cast<double>(trig), 0.0, 1.0);
+              p.combat_doctrine.retreat_hp_resume_fraction = std::max(
+                  p.combat_doctrine.retreat_hp_resume_fraction, p.combat_doctrine.retreat_hp_trigger_fraction);
+            }
+            float res = static_cast<float>(p.combat_doctrine.retreat_hp_resume_fraction);
+            if (ImGui::SliderFloat("Resume HP fraction##ship_prof_ret_hp_res", &res, 0.05f, 1.0f, "%.2f")) {
+              p.combat_doctrine.retreat_hp_resume_fraction = std::max(
+                  p.combat_doctrine.retreat_hp_trigger_fraction, std::clamp(static_cast<double>(res), 0.0, 1.0));
+            }
+
+            ImGui::Checkbox("Retreat when low on missiles##ship_prof_ret_mis_en",
+                            &p.combat_doctrine.retreat_when_out_of_missiles);
+            if (p.combat_doctrine.retreat_when_out_of_missiles) {
+              float ammo = static_cast<float>(p.combat_doctrine.retreat_missile_ammo_trigger_fraction);
+              if (ImGui::SliderFloat("Missile ammo fraction##ship_prof_ret_mis_frac", &ammo, 0.0f, 1.0f, "%.2f")) {
+                p.combat_doctrine.retreat_missile_ammo_trigger_fraction =
+                    std::clamp(static_cast<double>(ammo), 0.0, 1.0);
+              }
             }
           }
 

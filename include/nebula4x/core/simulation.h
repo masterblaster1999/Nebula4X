@@ -1404,6 +1404,31 @@ int colony_condition_max_active{4};
   // If true, auto-troop considers ongoing defensive ground battles as urgent troop needs.
   bool auto_troop_consider_active_battles{true};
 
+  // --- Auto-colonist transport (population logistics) ---
+  //
+  // Ships with Ship::auto_colonist_transport enabled will, when idle, automatically
+  // ferry colonists between owned colonies to satisfy population targets.
+  //
+  // A destination colony is eligible when:
+  //   colony.population_target_millions > colony.population_millions
+  //
+  // A source colony can export any population above:
+  //   max(colony.population_reserve_millions, colony.population_target_millions)
+  //
+  // By default this export floor must be non-zero (auto_colonist_require_source_floor = true)
+  // to avoid accidentally draining colonies when only destination targets are configured.
+
+  // Minimum colonists moved in a single auto-colonist task (in millions).
+  double auto_colonist_min_transfer_millions{1.0};
+
+  // When pulling colonists from a source colony, auto-colonist will never take more than
+  // this fraction of that colony's computed surplus in a single task.
+  double auto_colonist_max_take_fraction_of_surplus{0.75};
+
+  // If true, only export from colonies that have a non-zero export floor
+  // (population_target_millions or population_reserve_millions).
+  bool auto_colonist_require_source_floor{true};
+
   // --- Dynamic piracy / raids ---
   //
   // When enabled, AI pirate factions can spawn occasional "raid" groups in
@@ -1492,9 +1517,38 @@ int colony_condition_max_active{4};
   int civilian_trade_convoy_endpoint_wait_days_base{1};
   int civilian_trade_convoy_endpoint_wait_days_jitter{3};
 
-  // How full civilian convoy cargo holds should be (0..1). Cargo is purely
-  // cosmetic / salvageable and does not directly transfer colony minerals.
+  // How full civilian convoy cargo holds should be (0..1).
+  //
+  // - When enable_civilian_trade_convoy_cargo_transfers is false, cargo is purely
+  //   cosmetic / salvageable and does not directly transfer colony minerals.
+  // - When cargo transfers are enabled, this is the target fill fraction for
+  //   each trade run (load/unload is throughput-limited, so runs may be partially
+  //   filled if stockpiles are low or export reserves block transfers).
   double civilian_trade_convoy_cargo_fill_fraction{0.80};
+
+  // If true, civilian trade convoys attempt to load and unload real minerals at
+  // colony hubs (driven by TradeNetwork lanes).
+  //
+  // This creates a lightweight "civilian freight" layer that can smooth local
+  // shortages and makes piracy/escorts matter economically.
+  bool enable_civilian_trade_convoy_cargo_transfers{true};
+
+  // Export safeguards for civilian trade convoys (Merchant Guild) when loading
+  // minerals from colonies:
+  //
+  // Convoys will not export below a computed reserve floor derived from:
+  // - colony mineral_reserves / mineral_targets, and
+  // - the colony owner's current logistics needs (shipyards, industry input
+  //   buffers, fuel/rearm requirements, etc.).
+  //
+  // This multiplier scales that reserve floor (>= 0). Values > 1 leave extra
+  // safety stock behind.
+  double civilian_trade_convoy_export_reserve_multiplier{1.25};
+
+  // Additional hard floors (tons) for critical strategic goods even if the colony
+  // has no explicit reserves/targets.
+  double civilian_trade_convoy_export_min_fuel_reserve_tons{500.0};
+  double civilian_trade_convoy_export_min_munitions_reserve_tons{250.0};
 
 
   // How strongly civilian convoys avoid high-risk endpoints (0..1).

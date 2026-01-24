@@ -26,6 +26,7 @@ bool orders_empty(const GameState& st, Id ship_id) {
   auto it = st.ship_orders.find(ship_id);
   if (it == st.ship_orders.end()) return true;
   const ShipOrders& so = it->second;
+  if (so.suspended) return false;
   if (!so.queue.empty()) return false;
   // A ship with repeat enabled and remaining refills is not considered idle:
   // its queue will be refilled during tick_ships().

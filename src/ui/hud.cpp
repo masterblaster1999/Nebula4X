@@ -19,6 +19,8 @@
 
 #include "ui/screen_reader.h"
 
+#include "ui/navigation.h"
+
 namespace nebula4x::ui {
 namespace {
 
@@ -172,6 +174,7 @@ enum class PaletteAction {
   ToggleEntityInspector,
   ToggleReferenceGraph,
   ToggleTimeMachine,
+  ToggleNavigator,
   ToggleWatchboard,
   ToggleDataLenses,
   ToggleDashboards,
@@ -188,6 +191,9 @@ enum class PaletteAction {
   WorkspaceIntel,
   OpenLogTab,
   OpenHelp,
+  NavBack,
+  NavForward,
+  ToggleBookmarkCurrent,
   FocusSystemMap,
   FocusGalaxyMap,
   NewGameDialog,
@@ -297,6 +303,9 @@ void activate_palette_item(PaletteItem& item, Simulation& sim, UIState& ui, Id& 
           break;
         case PaletteAction::ToggleTimeMachine:
           ui.show_time_machine_window = !ui.show_time_machine_window;
+          break;
+        case PaletteAction::ToggleNavigator:
+          ui.show_navigator_window = !ui.show_navigator_window;
           break;
         case PaletteAction::ToggleWatchboard:
           ui.show_watchboard_window = !ui.show_watchboard_window;
@@ -421,6 +430,15 @@ void activate_palette_item(PaletteItem& item, Simulation& sim, UIState& ui, Id& 
           break;
         case PaletteAction::OpenHelp:
           ui.show_help_window = true;
+          break;
+        case PaletteAction::NavBack:
+          nav_history_back(sim, ui, selected_ship, selected_colony, selected_body, ui.nav_open_windows_on_jump);
+          break;
+        case PaletteAction::NavForward:
+          nav_history_forward(sim, ui, selected_ship, selected_colony, selected_body, ui.nav_open_windows_on_jump);
+          break;
+        case PaletteAction::ToggleBookmarkCurrent:
+          nav_bookmark_toggle_current(sim, ui, selected_ship, selected_colony, selected_body);
           break;
         case PaletteAction::FocusSystemMap:
           ui.show_map_window = true;
@@ -563,6 +581,15 @@ constexpr ActionMeta kActionMetas[] = {
     {PaletteAction::OpenHelp, "Navigation", "Help / Shortcuts", "Open the shortcuts/help overlay.", "F1",
      "help shortcuts", false},
 
+    {PaletteAction::ToggleNavigator, "Navigation", "Navigator window",
+     "Open the Navigator window (selection history + bookmarks).", "Ctrl+Shift+N", "navigator history bookmarks pin", true},
+    {PaletteAction::NavBack, "Navigation", "Back (Selection History)",
+     "Navigate back through selection history.", "Alt+Left", "back history previous selection", false},
+    {PaletteAction::NavForward, "Navigation", "Forward (Selection History)",
+     "Navigate forward through selection history.", "Alt+Right", "forward history next selection", false},
+    {PaletteAction::ToggleBookmarkCurrent, "Navigation", "Pin/Unpin Current Selection",
+     "Toggle a pinned bookmark for your current selection.", nullptr, "pin unpin bookmark favorite", false},
+
     // Windows
     {PaletteAction::ToggleControls, "Windows", "Controls window", "Show/hide the Controls window.", "Ctrl+1",
      "controls", true},
@@ -702,6 +729,7 @@ bool action_toggle_state(const UIState& ui, PaletteAction a) {
     case PaletteAction::ToggleEntityInspector: return ui.show_entity_inspector_window;
     case PaletteAction::ToggleReferenceGraph: return ui.show_reference_graph_window;
     case PaletteAction::ToggleTimeMachine: return ui.show_time_machine_window;
+    case PaletteAction::ToggleNavigator: return ui.show_navigator_window;
     case PaletteAction::ToggleWatchboard: return ui.show_watchboard_window;
     case PaletteAction::ToggleDataLenses: return ui.show_data_lenses_window;
     case PaletteAction::ToggleDashboards: return ui.show_dashboards_window;
@@ -810,6 +838,24 @@ void draw_status_bar(Simulation& sim, UIState& ui, HUDState& /*hud*/, Id& select
   if (ImGui::SmallButton("Sustain")) ui.show_sustainment_window = true;
   if (ImGui::IsItemHovered()) {
     ImGui::SetTooltip("Open the Sustainment Planner (fleet base stockpile targets)");
+  }
+
+  ImGui::SameLine();
+  if (ImGui::SmallButton("Troops")) ui.show_troop_window = true;
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip("Open Troop Logistics (auto-troop preview + apply plan)");
+  }
+
+  ImGui::SameLine();
+  if (ImGui::SmallButton("Pop")) ui.show_colonist_window = true;
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip("Open Population Logistics (auto-colonist preview + apply plan)");
+  }
+
+  ImGui::SameLine();
+  if (ImGui::SmallButton("Terra")) ui.show_terraforming_window = true;
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip("Open Terraforming Planner (empire-wide overview + ETA)");
   }
 
   ImGui::SameLine();
@@ -924,6 +970,12 @@ void draw_status_bar(Simulation& sim, UIState& ui, HUDState& /*hud*/, Id& select
   ImGui::SameLine();
   if (ImGui::SmallButton("Settings")) ui.show_settings_window = true;
 
+  ImGui::SameLine();
+  if (ImGui::SmallButton("Nav")) ui.show_navigator_window = true;
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip("Navigator (Ctrl+Shift+N)\nSelection history + bookmarks (Alt+Left/Alt+Right).");
+  }
+
   VerticalSeparator();
 
   // --- Context / indicators ---
@@ -1010,6 +1062,8 @@ void draw_help_window(UIState& ui) {
   ImGui::BulletText("Space: Advance +1 day (Shift=+5, Ctrl=+30)");
   ImGui::BulletText("Ctrl+Shift+L: Layout Profiles (switch dock layouts)");
   ImGui::BulletText("Ctrl+Shift+U: UI Forge (custom panels)");
+  ImGui::BulletText("Ctrl+Shift+N: Navigator (selection history + bookmarks/pins)");
+  ImGui::BulletText("Alt+Left / Alt+Right: Navigate selection history (back/forward)");
 
   ImGui::SeparatorText("Window toggles");
   ImGui::BulletText("Drag window tabs to dock/undock and rearrange the workspace");

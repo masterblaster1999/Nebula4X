@@ -1133,6 +1133,9 @@ void Simulation::tick_combat(double dt_days) {
     const double weapon_integrity = ship_subsystem_weapon_output_multiplier(attacker);
     if (weapon_integrity <= 1e-9) continue;
 
+    const FireControlMode fire_control = attacker.combat_doctrine.fire_control;
+    const TargetingPriority target_prio = attacker.combat_doctrine.targeting_priority;
+
     // --- Orbital bombardment ---
     // If the current order is BombardColony and the target is in range, use
     // this ship's daily weapon fire to damage the colony.
@@ -1160,6 +1163,25 @@ void Simulation::tick_combat(double dt_days) {
             if (body && body->system_id == attacker.system_id) {
               const double dist = (body->position_mkm - attacker.position_mkm).length();
               if (dist <= ad->weapon_range_mkm + 1e-9) {
+                if (fire_control == FireControlMode::HoldFire) {
+                  // Hold fire: do not apply damage, but still advance bombardment timer if in range.
+                  bo->progress_days = std::max(0.0, bo->progress_days) + dt_days;
+                  while (bo->duration_days > 0 && bo->progress_days >= 1.0 - 1e-12) {
+                    bo->duration_days -= 1;
+                    bo->progress_days -= 1.0;
+                  }
+                  if (bo->duration_days == 0) {
+                    auto itq = state_.ship_orders.find(aid);
+                    if (itq != state_.ship_orders.end() && !itq->second.queue.empty() &&
+                        std::holds_alternative<BombardColony>(itq->second.queue.front())) {
+                      itq->second.queue.erase(itq->second.queue.begin());
+                    }
+                  }
+
+                  // Hold fire also prevents missile/beam fire this tick.
+                  continue;
+                }
+
                 // Apply damage in the order: ground forces -> installations -> population.
                 // Scale by dt_days so sub-day turn ticks don't amplify bombardment.
                 double remaining = std::max(0.0, ad->weapon_damage * maintenance_combat_mult(attacker) *
@@ -1314,10 +1336,61 @@ void Simulation::tick_combat(double dt_days) {
       }
     }
 
+    if (fire_control == FireControlMode::HoldFire) continue;
+
     Id chosen = kInvalidId;
     double chosen_dist = 1e300;
 
     const auto& detected_hostiles = detected_hostiles_for(attacker.faction_id, attacker.system_id);
+    auto make_target_key = [&](const Ship& target, const ShipDesign* td, double dist) {
+      // Lower keys are "better".
+      double primary = dist;
+      double secondary = 0.0;
+
+      switch (target_prio) {
+        case TargetingPriority::Nearest: {
+          primary = dist;
+          secondary = 0.0;
+        } break;
+        case TargetingPriority::Weakest: {
+          primary = target.hp;
+          secondary = dist;
+        } break;
+        case TargetingPriority::Threat: {
+          double threat = 0.0;
+          if (td) {
+            const double hp_frac = std::clamp(target.hp / std::max(1e-9, td->max_hp), 0.0, 1.0);
+            threat = (std::max(0.0, td->weapon_damage) + std::max(0.0, td->missile_damage) +
+                      0.5 * std::max(0.0, td->point_defense_damage)) *
+                     std::max(0.1, hp_frac);
+          }
+          primary = -threat;
+          secondary = dist;
+        } break;
+        case TargetingPriority::Largest: {
+          double mass = td ? std::max(0.0, td->mass_tons) : 0.0;
+          if (td) {
+            const double hp_frac = std::clamp(target.hp / std::max(1e-9, td->max_hp), 0.0, 1.0);
+            mass *= std::max(0.1, hp_frac);
+          }
+          primary = -mass;
+          secondary = dist;
+        } break;
+      }
+
+      return std::pair<double, double>{primary, secondary};
+    };
+
+    auto is_better_target = [&](double primary, double secondary, Id id, double best_primary, double best_secondary,
+                               Id best_id) {
+      if (best_id == kInvalidId) return true;
+      if (primary + 1e-9 < best_primary) return true;
+      if (std::abs(primary - best_primary) <= 1e-9) {
+        if (secondary + 1e-9 < best_secondary) return true;
+        if (std::abs(secondary - best_secondary) <= 1e-9 && id < best_id) return true;
+      }
+      return false;
+    };
 
     // --- Missile launch ---
     //
@@ -1349,10 +1422,16 @@ void Simulation::tick_combat(double dt_days) {
         }
       }
 
-      // Otherwise, pick nearest detected hostile within missile range.
-      if (mtarget == kInvalidId && !detected_hostiles.empty()) {
+      // Otherwise, pick a detected hostile within missile range (WeaponsFree only).
+      if (mtarget == kInvalidId && fire_control == FireControlMode::WeaponsFree && !detected_hostiles.empty()) {
         auto& idx = index_for_system(attacker.system_id);
         const auto nearby = idx.query_radius(attacker.position_mkm, ad->missile_range_mkm, 0.0);
+
+        double best_primary = 1e300;
+        double best_secondary = 1e300;
+        Id best_id = kInvalidId;
+        double best_dist = 1e300;
+
         for (Id bid : nearby) {
           if (bid == aid) continue;
           if (!std::binary_search(detected_hostiles.begin(), detected_hostiles.end(), bid)) continue;
@@ -1364,11 +1443,23 @@ void Simulation::tick_combat(double dt_days) {
 
           const double dist = (tgt->position_mkm - attacker.position_mkm).length();
           if (dist > ad->missile_range_mkm + 1e-9) continue;
-          if (dist + 1e-9 < mtarget_dist ||
-              (std::abs(dist - mtarget_dist) <= 1e-9 && (mtarget == kInvalidId || bid < mtarget))) {
-            mtarget = bid;
-            mtarget_dist = dist;
+
+          // Intent to capture: avoid picking boardable targets for automatic fire.
+          if (is_target_boardable(attacker, *tgt)) continue;
+
+          const auto* td = find_design(tgt->design_id);
+          const auto key = make_target_key(*tgt, td, dist);
+          if (is_better_target(key.first, key.second, bid, best_primary, best_secondary, best_id)) {
+            best_primary = key.first;
+            best_secondary = key.second;
+            best_id = bid;
+            best_dist = dist;
           }
+        }
+
+        if (best_id != kInvalidId) {
+          mtarget = best_id;
+          mtarget_dist = best_dist;
         }
       }
 
@@ -1485,10 +1576,15 @@ void Simulation::tick_combat(double dt_days) {
       }
     }
 
-    if (chosen == kInvalidId) {
+    if (chosen == kInvalidId && fire_control == FireControlMode::WeaponsFree) {
       if (!detected_hostiles.empty()) {
         auto& idx = index_for_system(attacker.system_id);
         const auto nearby = idx.query_radius(attacker.position_mkm, ad->weapon_range_mkm, 0.0);
+
+        double best_primary = 1e300;
+        double best_secondary = 1e300;
+        Id best_id = kInvalidId;
+        double best_dist = 1e300;
 
         for (Id bid : nearby) {
           if (bid == aid) continue;
@@ -1507,11 +1603,23 @@ void Simulation::tick_combat(double dt_days) {
 
           const double dist = (target.position_mkm - attacker.position_mkm).length();
           if (dist > ad->weapon_range_mkm) continue;
-          if (dist + 1e-9 < chosen_dist ||
-              (std::abs(dist - chosen_dist) <= 1e-9 && (chosen == kInvalidId || bid < chosen))) {
-            chosen = bid;
-            chosen_dist = dist;
+
+          // Intent to capture: avoid picking boardable targets for automatic fire.
+          if (is_target_boardable(attacker, target)) continue;
+
+          const auto* td = find_design(target.design_id);
+          const auto key = make_target_key(target, td, dist);
+          if (is_better_target(key.first, key.second, bid, best_primary, best_secondary, best_id)) {
+            best_primary = key.first;
+            best_secondary = key.second;
+            best_id = bid;
+            best_dist = dist;
           }
+        }
+
+        if (best_id != kInvalidId) {
+          chosen = best_id;
+          chosen_dist = best_dist;
         }
       }
     }

@@ -449,6 +449,8 @@ void draw_colony_profiles_window(Simulation& sim, UIState& ui, Id& /*selected_sh
               ImGui::Checkbox("Mineral reserves", &apply_opt.apply_mineral_reserves);
               ImGui::Checkbox("Mineral targets", &apply_opt.apply_mineral_targets);
               ImGui::Checkbox("Garrison target", &apply_opt.apply_garrison_target);
+              ImGui::Checkbox("Population target", &apply_opt.apply_population_target);
+              ImGui::Checkbox("Population reserve", &apply_opt.apply_population_reserve);
             }
 
             // Action buttons.
@@ -491,6 +493,20 @@ void draw_colony_profiles_window(Simulation& sim, UIState& ui, Id& /*selected_sh
             }
 
             ImGui::Separator();
+            // --- Editor: population logistics ---
+            ImGui::TextUnformatted("Population logistics");
+            ImGui::SetNextItemWidth(200.0f);
+            if (ImGui::InputDouble("Target (M)##pop_target_profile", &p.population_target_millions, 10.0, 100.0, "%.0f")) {
+              if (!std::isfinite(p.population_target_millions) || p.population_target_millions < 0.0) p.population_target_millions = 0.0;
+            }
+            ImGui::SetNextItemWidth(200.0f);
+            if (ImGui::InputDouble("Reserve (M)##pop_reserve_profile", &p.population_reserve_millions, 10.0, 100.0, "%.0f")) {
+              if (!std::isfinite(p.population_reserve_millions) || p.population_reserve_millions < 0.0) p.population_reserve_millions = 0.0;
+            }
+            ImGui::TextDisabled("Used by auto-colonist transports (ships with 'Auto-colonist transport when idle').");
+
+            ImGui::Separator();
+
 
             // --- Editor: minerals ---
             if (ImGui::CollapsingHeader("Mineral reserves (export floor)", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -638,6 +654,8 @@ void draw_colony_profiles_window(Simulation& sim, UIState& ui, Id& /*selected_sh
             ImGui::Checkbox("Mineral reserves##founding_opt_reserves", &founding_apply_opt.apply_mineral_reserves);
             ImGui::Checkbox("Mineral targets##founding_opt_targets", &founding_apply_opt.apply_mineral_targets);
             ImGui::Checkbox("Garrison target##founding_opt_garrison", &founding_apply_opt.apply_garrison_target);
+            ImGui::Checkbox("Population target##founding_opt_pop_target", &founding_apply_opt.apply_population_target);
+            ImGui::Checkbox("Population reserve##founding_opt_pop_reserve", &founding_apply_opt.apply_population_reserve);
 
             if (!colony_ok) ImGui::BeginDisabled();
             if (ImGui::Button("Apply to selected colony##founding_apply_selected")) {
@@ -664,6 +682,20 @@ void draw_colony_profiles_window(Simulation& sim, UIState& ui, Id& /*selected_sh
           }
 
           ImGui::Separator();
+          // --- Editor: population logistics ---
+          ImGui::TextUnformatted("Population logistics");
+          ImGui::SetNextItemWidth(200.0f);
+          if (ImGui::InputDouble("Target (M)##founding_pop_target", &fp.population_target_millions, 10.0, 100.0, "%.0f")) {
+            if (!std::isfinite(fp.population_target_millions) || fp.population_target_millions < 0.0) fp.population_target_millions = 0.0;
+          }
+          ImGui::SetNextItemWidth(200.0f);
+          if (ImGui::InputDouble("Reserve (M)##founding_pop_reserve", &fp.population_reserve_millions, 10.0, 100.0, "%.0f")) {
+            if (!std::isfinite(fp.population_reserve_millions) || fp.population_reserve_millions < 0.0) fp.population_reserve_millions = 0.0;
+          }
+          ImGui::TextDisabled("Used by auto-colonist transports (ships with 'Auto-colonist transport when idle').");
+
+          ImGui::Separator();
+
 
           // --- Editor: minerals ---
           if (ImGui::CollapsingHeader("Mineral reserves (export floor)##founding_reserves", ImGuiTreeNodeFlags_DefaultOpen)) {

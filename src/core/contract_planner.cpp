@@ -21,6 +21,7 @@ bool is_ship_idle(const GameState& st, Id ship_id) {
   const auto it = st.ship_orders.find(ship_id);
   if (it == st.ship_orders.end()) return true;
   const ShipOrders& so = it->second;
+  if (so.suspended) return false;
   if (!so.queue.empty()) return false;
   if (so.repeat && !so.repeat_template.empty() && so.repeat_count_remaining != 0) return false;
   return true;

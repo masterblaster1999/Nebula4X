@@ -18,7 +18,7 @@
 namespace nebula4x::ui {
 namespace {
 
-constexpr int kLaneCount = 9;
+constexpr int kLaneCount = 10;
 
 struct LaneInfo {
   EventCategory category{EventCategory::General};
@@ -35,6 +35,7 @@ constexpr std::array<LaneInfo, kLaneCount> kLanes = {{
     {EventCategory::Intel, "Intel"},
     {EventCategory::Exploration, "Exploration"},
     {EventCategory::Diplomacy, "Diplomacy"},
+    {EventCategory::Terraforming, "Terraforming"},
 }};
 
 int lane_index(EventCategory c) {

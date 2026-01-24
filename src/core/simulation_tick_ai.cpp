@@ -22,6 +22,7 @@
 #include "nebula4x/core/ground_battle_forecast.h"
 #include "nebula4x/core/trade_network.h"
 #include "nebula4x/core/troop_planner.h"
+#include "nebula4x/core/colonist_planner.h"
 #include "nebula4x/util/log.h"
 #include "nebula4x/util/trace_events.h"
 #include "nebula4x/util/spatial_index.h"
@@ -82,6 +83,7 @@ void Simulation::tick_ai() {
     auto it = state_.ship_orders.find(ship_id);
     if (it == state_.ship_orders.end()) return true;
     const ShipOrders& so = it->second;
+    if (so.suspended) return false;
     if (!so.queue.empty()) return false;
     // A ship with repeat enabled and remaining refills is not considered idle:
     // its queue will be refilled during tick_ships().
@@ -1106,6 +1108,27 @@ void Simulation::tick_ai() {
       if (!plan.ok || plan.assignments.empty()) continue;
       (void)apply_troop_plan(*this, plan, /*clear_existing_orders=*/false);
     }
+  // --- Ship-level automation: Auto-colonist transport (population logistics) ---
+
+  // Implementation note:
+  // Use the shared Colonist Planner so UI previews and automation remain consistent.
+  {
+    ColonistPlannerOptions opt;
+    opt.require_auto_colonist_transport_flag = true;
+    opt.require_idle = true;
+    opt.restrict_to_discovered = true;
+    opt.exclude_fleet_ships = true;
+
+    // Safety cap (large enough to not break typical automation in bigger saves).
+    opt.max_ships = 4096;
+
+    for (Id fid : faction_ids) {
+      const auto plan = compute_colonist_plan(*this, fid, opt);
+      if (!plan.ok || plan.assignments.empty()) continue;
+      (void)apply_colonist_plan(*this, plan, /*clear_existing_orders=*/false);
+    }
+  }
+
   }
 
   // --- Ship-level automation: Auto-salvage (wreck recovery) ---
@@ -4528,9 +4551,10 @@ void Simulation::tick_civilian_trade_convoys() {
   hub_pos.reserve(state_.systems.size() * 2 + 8);
   std::unordered_map<Id, double> hub_pop;
   hub_pop.reserve(state_.systems.size() * 2 + 8);
+  std::unordered_map<Id, Id> hub_colony;
+  hub_colony.reserve(state_.systems.size() * 2 + 8);
 
   for (const auto& [cid, c] : state_.colonies) {
-    (void)cid;
     const Body* b = find_ptr(state_.bodies, c.body_id);
     if (!b) continue;
     const Id sys = b->system_id;
@@ -4540,6 +4564,7 @@ void Simulation::tick_civilian_trade_convoys() {
     if (it == hub_pop.end() || p > it->second + 1e-9) {
       hub_pop[sys] = p;
       hub_pos[sys] = b->position_mkm;
+      hub_colony[sys] = cid;
     }
   }
 
@@ -4720,22 +4745,28 @@ void Simulation::tick_civilian_trade_convoys() {
     sh.design_id = design_id;
     sh.sensor_mode = SensorMode::Passive;
 
-    // Cosmetic cargo (also provides salvage if the convoy is destroyed).
     const double fill = std::clamp(cfg_.civilian_trade_convoy_cargo_fill_fraction, 0.0, 1.0);
     const double cap = std::max(0.0, sd->cargo_tons);
     const double load = cap * fill;
-    if (load > 1e-6 && !lp.flows.empty()) {
-      const int n = std::min(3, static_cast<int>(lp.flows.size()));
-      double sum_share = 0.0;
-      for (int j = 0; j < n; ++j) sum_share += std::max(0.0, lp.flows[j].volume);
-      if (!(sum_share > 1e-9)) sum_share = 1.0;
 
-      for (int j = 0; j < n; ++j) {
-        const auto res = good_to_resource(lp.flows[j].good);
-        if (res.empty()) continue;
-        const double part = load * (std::max(0.0, lp.flows[j].volume) / sum_share);
-        if (part > 1e-9) sh.cargo[res] += part;
+    if (!cfg_.enable_civilian_trade_convoy_cargo_transfers) {
+      // Cosmetic cargo (also provides salvage if the convoy is destroyed).
+      if (load > 1e-6 && !lp.flows.empty()) {
+        const int n = std::min(3, static_cast<int>(lp.flows.size()));
+        double sum_share = 0.0;
+        for (int j = 0; j < n; ++j) sum_share += std::max(0.0, lp.flows[j].volume);
+        if (!(sum_share > 1e-9)) sum_share = 1.0;
+
+        for (int j = 0; j < n; ++j) {
+          const auto res = good_to_resource(lp.flows[j].good);
+          if (res.empty()) continue;
+          const double part = load * (std::max(0.0, lp.flows[j].volume) / sum_share);
+          if (part > 1e-9) sh.cargo[res] += part;
+        }
       }
+    } else {
+      // Real cargo is loaded/unloaded via orders at colony hubs; start empty.
+      // Any cargo carried by the convoy is therefore "real" and salvageable.
     }
 
     // Insert into state.
@@ -4750,19 +4781,92 @@ void Simulation::tick_civilian_trade_convoys() {
     const int wait_a = wait_base + static_cast<int>(std::floor(u01(rng) * (wait_jit + 1)));
     const int wait_b = wait_base + static_cast<int>(std::floor(u01(rng) * (wait_jit + 1)));
 
-    if (!issue_travel_to_system(sh.id, lp.to, /*restrict_to_discovered=*/false)) {
-      remove_ship(sh.id);
-      continue;
-    }
-    if (wait_a > 0) state_.ship_orders[sh.id].queue.push_back(WaitDays{.days_remaining = wait_a});
+    auto& q = state_.ship_orders[sh.id].queue;
 
-    if (!issue_travel_to_system(sh.id, lp.from, /*restrict_to_discovered=*/false)) {
-      remove_ship(sh.id);
-      continue;
-    }
-    if (wait_b > 0) state_.ship_orders[sh.id].queue.push_back(WaitDays{.days_remaining = wait_b});
+    if (cfg_.enable_civilian_trade_convoy_cargo_transfers) {
+      const Id from_col = [&]() -> Id {
+        auto it = hub_colony.find(lp.from);
+        return (it != hub_colony.end()) ? it->second : kInvalidId;
+      }();
+      const Id to_col = [&]() -> Id {
+        auto it = hub_colony.find(lp.to);
+        return (it != hub_colony.end()) ? it->second : kInvalidId;
+      }();
 
-    enable_order_repeat(sh.id, -1);
+      auto push_load_plan = [&](Id colony_id, const std::vector<TradeGoodFlow>& flows) {
+        if (colony_id == kInvalidId) return;
+        if (!(load > 1e-6)) return;
+        if (flows.empty()) return;
+
+        const int n = std::min(3, static_cast<int>(flows.size()));
+        double sum_share = 0.0;
+        for (int j = 0; j < n; ++j) sum_share += std::max(0.0, flows[j].volume);
+        if (!(sum_share > 1e-9)) sum_share = 1.0;
+
+        std::unordered_map<std::string, double> want;
+        want.reserve(static_cast<size_t>(n) * 2 + 4);
+        for (int j = 0; j < n; ++j) {
+          const std::string res = good_to_resource(flows[j].good);
+          if (res.empty()) continue;
+          const double part = load * (std::max(0.0, flows[j].volume) / sum_share);
+          if (part > 1e-9) want[res] += part;
+        }
+        if (want.empty()) return;
+
+        std::vector<std::string> keys;
+        keys.reserve(want.size());
+        for (const auto& [k, _] : want) keys.push_back(k);
+        std::sort(keys.begin(), keys.end());
+
+        for (const auto& k : keys) {
+          const double tons = want[k];
+          if (tons > 1e-9) q.push_back(LoadMineral{.colony_id = colony_id, .mineral = k, .tons = tons});
+        }
+      };
+
+      // Forward leg: load at origin hub, travel, unload at destination hub.
+      push_load_plan(from_col, lp.flows);
+
+      if (!issue_travel_to_system(sh.id, lp.to, /*restrict_to_discovered=*/false)) {
+        remove_ship(sh.id);
+        continue;
+      }
+      if (to_col != kInvalidId) q.push_back(UnloadMineral{.colony_id = to_col, .mineral = "", .tons = 0.0});
+      if (wait_a > 0) q.push_back(WaitDays{.days_remaining = wait_a});
+
+      // Return leg: try to use the reverse lane's flows if present.
+      std::vector<TradeGoodFlow> flows_back = lp.flows;
+      for (const auto& l : net.lanes) {
+        if (l.from_system_id == lp.to && l.to_system_id == lp.from) {
+          flows_back = l.top_flows;
+          break;
+        }
+      }
+      push_load_plan(to_col, flows_back);
+
+      if (!issue_travel_to_system(sh.id, lp.from, /*restrict_to_discovered=*/false)) {
+        remove_ship(sh.id);
+        continue;
+      }
+      if (from_col != kInvalidId) q.push_back(UnloadMineral{.colony_id = from_col, .mineral = "", .tons = 0.0});
+      if (wait_b > 0) q.push_back(WaitDays{.days_remaining = wait_b});
+
+      enable_order_repeat(sh.id, -1);
+    } else {
+      if (!issue_travel_to_system(sh.id, lp.to, /*restrict_to_discovered=*/false)) {
+        remove_ship(sh.id);
+        continue;
+      }
+      if (wait_a > 0) q.push_back(WaitDays{.days_remaining = wait_a});
+
+      if (!issue_travel_to_system(sh.id, lp.from, /*restrict_to_discovered=*/false)) {
+        remove_ship(sh.id);
+        continue;
+      }
+      if (wait_b > 0) q.push_back(WaitDays{.days_remaining = wait_b});
+
+      enable_order_repeat(sh.id, -1);
+    }
   }
 }
 

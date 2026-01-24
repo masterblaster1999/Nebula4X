@@ -163,7 +163,8 @@ enum class RepairPriority : std::uint8_t {
 // Ship tactical doctrine / engagement settings.
 //
 // This is a deliberately lightweight, deterministic knob-set that influences
-// how ships execute AttackShip orders (movement/positioning, not targeting).
+// how ships execute AttackShip orders (movement/positioning) and, separately,
+// how they automatically engage targets when not given an explicit target.
 //
 // Motivation:
 // - Pure missile ships previously closed to point-blank range when attacking
@@ -192,8 +193,40 @@ enum class EngagementRangeMode : std::uint8_t {
   Custom = 5,
 };
 
+
+// Fire control / rules of engagement for *automatic* weapon fire.
+//
+// This does not affect point defense interception (missile defense), which is
+// always active when equipped.
+enum class FireControlMode : std::uint8_t {
+  // Default behavior: automatically fire at detected hostile ships in range
+  // (preferring the explicit AttackShip target when present).
+  WeaponsFree = 0,
+
+  // Only fire when executing an explicit combat order (e.g. AttackShip or
+  // BombardColony). Ships on unrelated missions will not opportunistically
+  // engage targets.
+  OrdersOnly = 1,
+
+  // Never fire offensive weapons (even with combat orders). Useful for stealth
+  // approaches or to avoid accidental escalation.
+  HoldFire = 2,
+};
+
+// Target selection heuristic for automatic weapon fire (used when
+// FireControlMode::WeaponsFree and no explicit AttackShip target is in range).
+enum class TargetingPriority : std::uint8_t {
+  Nearest = 0,
+  Weakest = 1,
+  Threat = 2,
+  Largest = 3,
+};
+
 struct ShipCombatDoctrine {
   EngagementRangeMode range_mode{EngagementRangeMode::Auto};
+
+  FireControlMode fire_control{FireControlMode::WeaponsFree};
+  TargetingPriority targeting_priority{TargetingPriority::Nearest};
 
   // Fraction (0..1) of the selected base range to maintain as standoff.
   //
@@ -216,6 +249,33 @@ struct ShipCombatDoctrine {
   //
   // Example: 0.10 => start backing off when distance < 90% of desired_range.
   double kite_deadband_fraction{0.10};
+
+  // --- Disengagement (auto-retreat) ---
+  //
+  // When enabled, ships will temporarily suspend their current order queue
+  // and execute an emergency retreat plan when engaged by detected hostiles
+  // and their condition drops below configured thresholds.
+  //
+  // This is intended to prevent "fight to the last" behavior for civilian
+  // ships and to support more realistic tactical doctrines for combatants.
+  bool auto_retreat{false};
+
+  // Trigger emergency retreat when HP fraction (current/max) drops to or below
+  // this value.
+  double retreat_hp_trigger_fraction{0.25};
+
+  // Resume suspended orders when HP fraction rises to or above this value and
+  // the ship is no longer in a system with detected hostiles.
+  //
+  // Should be > retreat_hp_trigger_fraction to avoid oscillation.
+  double retreat_hp_resume_fraction{0.60};
+
+  // Optional: trigger retreat when missile ammo fraction (current/capacity)
+  // drops to or below retreat_missile_ammo_trigger_fraction.
+  //
+  // Only applies to designs with a missile ammo capacity > 0.
+  bool retreat_when_out_of_missiles{false};
+  double retreat_missile_ammo_trigger_fraction{0.0};
 };
 
 
@@ -621,6 +681,7 @@ struct Ship {
   // between owned colonies to satisfy garrison targets and (optionally) reinforce
   // ongoing defensive ground battles.
   bool auto_troop_transport{false};
+  bool auto_colonist_transport{false};
 
 
   // Automation: when enabled, the simulation will generate salvage orders for
@@ -1134,6 +1195,14 @@ struct Colony {
 
   double population_millions{100.0};
 
+  // Population logistics (optional):
+  // - population_target_millions: desired minimum population. Auto-colonist transports will try
+  //   to move colonists here until this target is met.
+  // - population_reserve_millions: export floor. Auto-colonist transports will not export
+  //   population below this value.
+  double population_target_millions{0.0};
+  double population_reserve_millions{0.0};
+
   // Active temporary colony conditions (accidents, strikes, festivals, etc.)
   // See ColonyCondition for semantics.
   std::vector<ColonyCondition> conditions;
@@ -1226,6 +1295,10 @@ struct ColonyAutomationProfile {
 
   // Optional garrison automation target.
   double garrison_target_strength{0.0};
+
+  // Optional population logistics knobs.
+  double population_target_millions{0.0};
+  double population_reserve_millions{0.0};
 };
 
 
@@ -1239,6 +1312,7 @@ struct ShipAutomationProfile {
   bool auto_explore{false};
   bool auto_freight{false};
   bool auto_troop_transport{false};
+  bool auto_colonist_transport{false};
   bool auto_salvage{false};
   bool auto_mine{false};
 
@@ -1347,6 +1421,7 @@ enum class EventCategory {
   Intel,
   Exploration,
   Diplomacy,
+  Terraforming,
 };
 
 // A narrative journal entry for a faction.

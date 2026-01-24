@@ -39,6 +39,7 @@ const char* event_category_label(EventCategory c) {
     case EventCategory::Intel: return "Intel";
     case EventCategory::Exploration: return "Exploration";
     case EventCategory::Diplomacy: return "Diplomacy";
+    case EventCategory::Terraforming: return "Terraforming";
   }
   return "General";
 }
@@ -47,6 +48,7 @@ constexpr EventCategory kAllCategories[] = {
     EventCategory::General,      EventCategory::Research,     EventCategory::Shipyard,
     EventCategory::Construction, EventCategory::Movement,     EventCategory::Combat,
     EventCategory::Intel,        EventCategory::Exploration,  EventCategory::Diplomacy,
+    EventCategory::Terraforming,
 };
 
 constexpr int kStepChoicesHours[] = {1, 6, 12, 24};
@@ -220,6 +222,12 @@ void apply_preset(const char* name, TimeWarpJob& tw) {
     tw.stop_on_error = true;
     tw.filter_category = true;
     tw.category_idx = idx_for_category(EventCategory::Diplomacy);
+  } else if (n == "Terraforming") {
+    tw.stop_on_info = true;
+    tw.stop_on_warn = true;
+    tw.stop_on_error = true;
+    tw.filter_category = true;
+    tw.category_idx = idx_for_category(EventCategory::Terraforming);
   }
 }
 
@@ -462,6 +470,8 @@ if (tw.active) {
   if (ImGui::SmallButton("Shipyard")) apply_preset("Shipyard", tw);
   ImGui::SameLine();
   if (ImGui::SmallButton("Construction")) apply_preset("Construction", tw);
+  ImGui::SameLine();
+  if (ImGui::SmallButton("Terra")) apply_preset("Terraforming", tw);
   ImGui::SameLine();
   if (ImGui::SmallButton("Movement")) apply_preset("Movement", tw);
   ImGui::SameLine();

@@ -33,6 +33,34 @@ enum class MapTab {
   Galaxy,
 };
 
+// UI navigation targets used by the Navigator window (history/bookmarks).
+//
+// These are UI-only structures (not persisted in save-games). IDs are resolved
+// against the currently-loaded GameState; stale entries are treated as missing.
+enum class NavTargetKind : int {
+  System = 0,
+  Ship,
+  Colony,
+  Body,
+};
+
+struct NavTarget {
+  NavTargetKind kind{NavTargetKind::System};
+  Id id{kInvalidId};
+};
+
+inline bool operator==(const NavTarget& a, const NavTarget& b) {
+  return a.kind == b.kind && a.id == b.id;
+}
+inline bool operator!=(const NavTarget& a, const NavTarget& b) { return !(a == b); }
+
+struct NavBookmark {
+  std::uint64_t bookmark_id{0};
+  std::string name;
+  NavTarget target;
+};
+
+
 // Galaxy-map visualization overlays for procedural-generation outcomes.
 //
 // This is a UI-only enum (not saved in game state). Preferences may be stored
@@ -456,6 +484,8 @@ struct UIState {
   // Fleet Manager: global fleet list + route planner + quick mission controls.
   bool show_fleet_manager_window{false};
   bool show_troop_window{false};
+  bool show_colonist_window{false};
+  bool show_terraforming_window{false};
   bool show_advisor_window{false};
   bool show_time_warp_window{false};
   bool show_timeline_window{false};
@@ -631,6 +661,20 @@ struct UIState {
   // Transient helper windows.
   bool show_command_palette{false};
   bool show_help_window{false};
+  bool show_navigator_window{false};
+
+  // --- Navigation (selection history + bookmarks) ---
+  // UI-only; cleared when a new game is loaded/created (state generation changes).
+  bool nav_open_windows_on_jump{true};
+  int nav_history_max{256};
+
+  std::vector<NavTarget> nav_history;
+  int nav_history_cursor{-1};
+  bool nav_history_suppress_push{false};
+
+  std::uint64_t nav_next_bookmark_id{1};
+  std::vector<NavBookmark> nav_bookmarks;
+
 
   // Requested tab focus (consumed by the next frame).
   DetailsTab request_details_tab{DetailsTab::None};

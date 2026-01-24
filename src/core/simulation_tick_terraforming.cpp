@@ -166,7 +166,7 @@ void Simulation::tick_terraforming(double dt_days) {
         }
       }
 
-      push_event(EventLevel::Info, EventCategory::General,
+      push_event(EventLevel::Info, EventCategory::Terraforming,
                  "Terraforming complete on " + body.name,
                  ctx);
     }

@@ -51,11 +51,20 @@ const char* treaty_type_display_name(TreatyType t) {
   }
   return "treaty";
 }
+
+void clear_order_suspension(ShipOrders& so) {
+  so.suspended = false;
+  so.suspended_queue.clear();
+  so.suspended_repeat = false;
+  so.suspended_repeat_count_remaining = 0;
+  so.suspended_repeat_template.clear();
+}
 } // namespace
 
 bool Simulation::clear_orders(Id ship_id) {
   if (!find_ptr(state_.ships, ship_id)) return false;
   auto& so = state_.ship_orders[ship_id];
+  clear_order_suspension(so);
   so.queue.clear();
   so.repeat = false;
   so.repeat_count_remaining = 0;
@@ -66,6 +75,7 @@ bool Simulation::clear_orders(Id ship_id) {
 bool Simulation::enable_order_repeat(Id ship_id, int repeat_count_remaining) {
   if (!find_ptr(state_.ships, ship_id)) return false;
   auto& so = state_.ship_orders[ship_id];
+  clear_order_suspension(so);
   if (so.queue.empty()) return false;
   so.repeat = true;
   if (repeat_count_remaining < -1) repeat_count_remaining = -1;
@@ -77,6 +87,7 @@ bool Simulation::enable_order_repeat(Id ship_id, int repeat_count_remaining) {
 bool Simulation::update_order_repeat_template(Id ship_id) {
   if (!find_ptr(state_.ships, ship_id)) return false;
   auto& so = state_.ship_orders[ship_id];
+  clear_order_suspension(so);
   if (so.queue.empty()) return false;
   if (!so.repeat) {
     so.repeat_count_remaining = -1;
@@ -89,6 +100,7 @@ bool Simulation::update_order_repeat_template(Id ship_id) {
 bool Simulation::disable_order_repeat(Id ship_id) {
   if (!find_ptr(state_.ships, ship_id)) return false;
   auto& so = state_.ship_orders[ship_id];
+  clear_order_suspension(so);
   so.repeat = false;
   so.repeat_count_remaining = 0;
   so.repeat_template.clear();
@@ -98,6 +110,7 @@ bool Simulation::disable_order_repeat(Id ship_id) {
 bool Simulation::stop_order_repeat_keep_template(Id ship_id) {
   if (!find_ptr(state_.ships, ship_id)) return false;
   auto& so = state_.ship_orders[ship_id];
+  clear_order_suspension(so);
   so.repeat = false;
   so.repeat_count_remaining = 0;
   return true;
@@ -106,6 +119,7 @@ bool Simulation::stop_order_repeat_keep_template(Id ship_id) {
 bool Simulation::set_order_repeat_count(Id ship_id, int repeat_count_remaining) {
   if (!find_ptr(state_.ships, ship_id)) return false;
   auto& so = state_.ship_orders[ship_id];
+  clear_order_suspension(so);
   if (repeat_count_remaining < -1) repeat_count_remaining = -1;
   so.repeat_count_remaining = repeat_count_remaining;
   return true;
@@ -114,6 +128,7 @@ bool Simulation::set_order_repeat_count(Id ship_id, int repeat_count_remaining) 
 bool Simulation::enable_order_repeat_from_template(Id ship_id, int repeat_count_remaining) {
   if (!find_ptr(state_.ships, ship_id)) return false;
   auto& so = state_.ship_orders[ship_id];
+  clear_order_suspension(so);
   if (so.repeat_template.empty()) return false;
 
   so.repeat = true;
@@ -131,6 +146,7 @@ bool Simulation::cancel_current_order(Id ship_id) {
   if (!find_ptr(state_.ships, ship_id)) return false;
   auto it = state_.ship_orders.find(ship_id);
   if (it == state_.ship_orders.end() || it->second.queue.empty()) return false;
+  clear_order_suspension(it->second);
   it->second.queue.erase(it->second.queue.begin());
   return true;
 }
@@ -139,6 +155,7 @@ bool Simulation::delete_queued_order(Id ship_id, int index) {
   if (!find_ptr(state_.ships, ship_id)) return false;
   auto it = state_.ship_orders.find(ship_id);
   if (it == state_.ship_orders.end()) return false;
+  clear_order_suspension(it->second);
   auto& q = it->second.queue;
   if (index < 0 || index >= static_cast<int>(q.size())) return false;
   q.erase(q.begin() + index);
@@ -149,6 +166,7 @@ bool Simulation::duplicate_queued_order(Id ship_id, int index) {
   if (!find_ptr(state_.ships, ship_id)) return false;
   auto it = state_.ship_orders.find(ship_id);
   if (it == state_.ship_orders.end()) return false;
+  clear_order_suspension(it->second);
   auto& q = it->second.queue;
   if (index < 0 || index >= static_cast<int>(q.size())) return false;
   const Order copy = q[index];
@@ -160,6 +178,8 @@ bool Simulation::move_queued_order(Id ship_id, int from_index, int to_index) {
   if (!find_ptr(state_.ships, ship_id)) return false;
   auto it = state_.ship_orders.find(ship_id);
   if (it == state_.ship_orders.end()) return false;
+
+  clear_order_suspension(it->second);
 
   auto& q = it->second.queue;
   const int n = static_cast<int>(q.size());

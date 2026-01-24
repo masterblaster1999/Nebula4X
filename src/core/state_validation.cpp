@@ -659,6 +659,17 @@ std::vector<std::string> validate_game_state(const GameState& s, const ContentDB
     validate_order_list(so.queue, "order_queue");
     validate_order_list(so.repeat_template, "repeat_template");
 
+    if (so.suspended) {
+      validate_order_list(so.suspended_queue, "suspended_queue");
+      validate_order_list(so.suspended_repeat_template, "suspended_repeat_template");
+
+      if (so.suspended_repeat_count_remaining < -1) {
+        push(errors,
+             join("ShipOrders for ship ", id_u64(ship_id), " has invalid suspended_repeat_count_remaining ",
+                  so.suspended_repeat_count_remaining));
+      }
+    }
+
     if (so.repeat_count_remaining < -1) {
       push(errors,
            join("ShipOrders for ship ", id_u64(ship_id), " has invalid repeat_count_remaining ",
@@ -2444,6 +2455,29 @@ FixReport fix_game_state(GameState& s, const ContentDB* content) {
     ShipOrders& so = it->second;
     fix_order_list(so.queue, sid, "order_queue", join("Ship ", id_u64(sid)));
     fix_order_list(so.repeat_template, sid, "repeat_template", join("Ship ", id_u64(sid)));
+
+    if (so.suspended) {
+      fix_order_list(so.suspended_queue, sid, "suspended_queue", join("Ship ", id_u64(sid)));
+      fix_order_list(so.suspended_repeat_template, sid, "suspended_repeat_template", join("Ship ", id_u64(sid)));
+
+      if (so.suspended_repeat_count_remaining < -1) {
+        note(join("Fix: Ship ", id_u64(sid), " suspended_repeat_count_remaining clamped ",
+                  so.suspended_repeat_count_remaining, " -> -1"));
+        so.suspended_repeat_count_remaining = -1;
+      }
+
+      if (!so.suspended_repeat && so.suspended_repeat_count_remaining != 0) {
+        note(join("Fix: Ship ", id_u64(sid), " suspended_repeat_count_remaining reset ",
+                  so.suspended_repeat_count_remaining, " -> 0 (suspended_repeat disabled)"));
+        so.suspended_repeat_count_remaining = 0;
+      }
+
+      if (so.suspended_repeat && so.suspended_repeat_template.empty()) {
+        note(join("Fix: Ship ", id_u64(sid), " suspended_repeat disabled (empty suspended_repeat_template)"));
+        so.suspended_repeat = false;
+        so.suspended_repeat_count_remaining = 0;
+      }
+    }
 
     if (so.repeat_count_remaining < -1) {
       note(join("Fix: Ship ", id_u64(sid), " repeat_count_remaining clamped ", so.repeat_count_remaining,

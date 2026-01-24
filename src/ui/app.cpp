@@ -34,6 +34,9 @@
 #include "ui/colony_profiles_window.h"
 #include "ui/ship_profiles_window.h"
 #include "ui/automation_center_window.h"
+#include "ui/troop_window.h"
+#include "ui/colonist_window.h"
+#include "ui/terraforming_window.h"
 #include "ui/shipyard_targets_window.h"
 #include "ui/survey_network_window.h"
 #include "ui/time_warp_window.h"
@@ -50,6 +53,8 @@
 #include "ui/diplomacy_window.h"
 #include "ui/save_tools_window.h"
 #include "ui/time_machine_window.h"
+#include "ui/navigation.h"
+#include "ui/navigator_window.h"
 #include "ui/omni_search_window.h"
 #include "ui/json_explorer_window.h"
 #include "ui/content_validation_window.h"
@@ -188,6 +193,12 @@ void App::frame() {
       }
     }
 
+    // Selection Navigator state is UI-only; reset it so we don't carry stale entity IDs
+    // across a load/new-game.
+    nav_history_reset(ui_);
+    ui_.nav_bookmarks.clear();
+    ui_.nav_next_bookmark_id = 1;
+
     // Reset autosave cadence when the underlying state is replaced.
     autosave_mgr_.reset();
     ui_.last_autosave_game_path.clear();
@@ -226,6 +237,10 @@ void App::frame() {
   sync_screen_reader();
   ScreenReader::instance().begin_frame();
 
+  // Snapshot the current navigation target so we can record selection changes into
+  // the selection-history stack later in the frame.
+  const NavTarget nav_before = current_nav_target(sim_, selected_ship_, selected_colony_, selected_body_);
+
   // --- Global keyboard shortcuts (UI focus) ---
   {
     const ImGuiIO& io = ImGui::GetIO();
@@ -237,6 +252,7 @@ void App::frame() {
       if (io.KeyCtrl && !io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_G)) ui_.show_entity_inspector_window = !ui_.show_entity_inspector_window;
       if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_G)) ui_.show_reference_graph_window = !ui_.show_reference_graph_window;
       if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_D)) ui_.show_time_machine_window = !ui_.show_time_machine_window;
+      if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_N)) ui_.show_navigator_window = !ui_.show_navigator_window;
       if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_A)) ui_.show_advisor_window = !ui_.show_advisor_window;
       if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_B)) ui_.show_colony_profiles_window = !ui_.show_colony_profiles_window;
       if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_M)) ui_.show_ship_profiles_window = !ui_.show_ship_profiles_window;
@@ -247,6 +263,14 @@ void App::frame() {
       if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_V)) ui_.show_content_validation_window = !ui_.show_content_validation_window;
       if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_K)) ui_.show_state_doctor_window = !ui_.show_state_doctor_window;
       if (ImGui::IsKeyPressed(ImGuiKey_F1)) ui_.show_help_window = !ui_.show_help_window;
+
+      // Selection history navigation.
+      if (io.KeyAlt && !io.KeyCtrl && !io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_LeftArrow)) {
+        nav_history_back(sim_, ui_, selected_ship_, selected_colony_, selected_body_, ui_.nav_open_windows_on_jump);
+      }
+      if (io.KeyAlt && !io.KeyCtrl && !io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_RightArrow)) {
+        nav_history_forward(sim_, ui_, selected_ship_, selected_colony_, selected_body_, ui_.nav_open_windows_on_jump);
+      }
 
       // Quick window toggles.
       if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_1)) ui_.show_controls_window = !ui_.show_controls_window;
@@ -418,6 +442,9 @@ void App::frame() {
   if (ui_.show_sustainment_window)
     draw_sustainment_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   if (ui_.show_fleet_manager_window) draw_fleet_manager_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  if (ui_.show_troop_window) draw_troop_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  if (ui_.show_colonist_window) draw_colonist_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  if (ui_.show_terraforming_window) draw_terraforming_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   if (ui_.show_advisor_window) draw_advisor_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   if (ui_.show_colony_profiles_window) draw_colony_profiles_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   if (ui_.show_ship_profiles_window) draw_ship_profiles_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
@@ -452,6 +479,9 @@ void App::frame() {
   if (ui_.show_save_tools_window) draw_save_tools_window(sim_, ui_, save_path_, load_path_);
   if (ui_.show_time_machine_window) {
     draw_time_machine_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  }
+  if (ui_.show_navigator_window) {
+    draw_navigator_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   }
   if (ui_.show_omni_search_window) draw_omni_search_window(sim_, ui_);
   if (ui_.show_json_explorer_window) draw_json_explorer_window(sim_, ui_);
@@ -532,6 +562,14 @@ void App::frame() {
   update_event_toasts(sim_, ui_, hud_);
   update_watchboard_alert_toasts(sim_, ui_, hud_);
   draw_event_toasts(sim_, ui_, hud_, selected_ship_, selected_colony_, selected_body_);
+
+  // Selection Navigator: record selection changes into history.
+  const NavTarget nav_after = current_nav_target(sim_, selected_ship_, selected_colony_, selected_body_);
+  if (ui_.nav_history.empty()) {
+    if (nav_after.id != kInvalidId) nav_history_push(ui_, nav_after);
+  } else if (nav_after != nav_before) {
+    nav_history_push(ui_, nav_after);
+  }
 
   // Narrate selection changes (best-effort).
   if (ui_.screen_reader_enabled && ui_.screen_reader_speak_selection) {
@@ -788,6 +826,15 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
         std::snprintf(ui_.autosave_game_dir, sizeof(ui_.autosave_game_dir), "%s", dir.c_str());
       }
 
+      // Navigator prefs.
+      if (auto it = obj->find("nav_open_windows_on_jump"); it != obj->end()) {
+        ui_.nav_open_windows_on_jump = it->second.bool_value(ui_.nav_open_windows_on_jump);
+      }
+      if (auto it = obj->find("nav_history_max"); it != obj->end()) {
+        ui_.nav_history_max = static_cast<int>(it->second.number_value(ui_.nav_history_max));
+        ui_.nav_history_max = std::clamp(ui_.nav_history_max, 16, 1024);
+      }
+
       // New Game dialog defaults.
       if (auto it = obj->find("new_game_scenario"); it != obj->end()) {
         ui_.new_game_scenario = static_cast<int>(it->second.number_value(ui_.new_game_scenario));
@@ -890,7 +937,7 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
         ui_.ui_scale = std::clamp(ui_.ui_scale, 0.65f, 2.5f);
       }
 
-      // Screen reader / narration (accessibility).
+    // Screen reader / narration (accessibility).
       if (auto it = obj->find("screen_reader_enabled"); it != obj->end()) {
         ui_.screen_reader_enabled = it->second.bool_value(ui_.screen_reader_enabled);
       }
@@ -1593,6 +1640,15 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       }
       if (auto it = obj->find("show_fleet_manager_window"); it != obj->end()) {
         ui_.show_fleet_manager_window = it->second.bool_value(ui_.show_fleet_manager_window);
+      }
+      if (auto it = obj->find("show_troop_window"); it != obj->end()) {
+        ui_.show_troop_window = it->second.bool_value(ui_.show_troop_window);
+      }
+      if (auto it = obj->find("show_colonist_window"); it != obj->end()) {
+        ui_.show_colonist_window = it->second.bool_value(ui_.show_colonist_window);
+      }
+      if (auto it = obj->find("show_terraforming_window"); it != obj->end()) {
+        ui_.show_terraforming_window = it->second.bool_value(ui_.show_terraforming_window);
       }
       if (auto it = obj->find("show_time_warp_window"); it != obj->end()) {
         ui_.show_time_warp_window = it->second.bool_value(ui_.show_time_warp_window);
@@ -2431,6 +2487,10 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     o["show_event_toasts"] = ui_.show_event_toasts;
     o["event_toast_duration_sec"] = static_cast<double>(ui_.event_toast_duration_sec);
 
+    // Navigator defaults.
+    o["nav_open_windows_on_jump"] = ui_.nav_open_windows_on_jump;
+    o["nav_history_max"] = static_cast<double>(ui_.nav_history_max);
+
     // Screen reader / narration (accessibility).
     o["screen_reader_enabled"] = ui_.screen_reader_enabled;
     o["screen_reader_speak_focus"] = ui_.screen_reader_speak_focus;
@@ -2638,6 +2698,9 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     o["show_fuel_window"] = ui_.show_fuel_window;
     o["show_sustainment_window"] = ui_.show_sustainment_window;
     o["show_fleet_manager_window"] = ui_.show_fleet_manager_window;
+    o["show_troop_window"] = ui_.show_troop_window;
+    o["show_colonist_window"] = ui_.show_colonist_window;
+    o["show_terraforming_window"] = ui_.show_terraforming_window;
     o["show_time_warp_window"] = ui_.show_time_warp_window;
     o["show_timeline_window"] = ui_.show_timeline_window;
     o["show_design_studio_window"] = ui_.show_design_studio_window;
@@ -3041,6 +3104,9 @@ void App::reset_window_layout_defaults() {
   ui_.show_fuel_window = false;
   ui_.show_sustainment_window = false;
   ui_.show_fleet_manager_window = false;
+  ui_.show_troop_window = false;
+  ui_.show_colonist_window = false;
+  ui_.show_terraforming_window = false;
   ui_.show_time_warp_window = false;
   ui_.show_timeline_window = false;
   ui_.show_design_studio_window = false;

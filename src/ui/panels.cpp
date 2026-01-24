@@ -25,6 +25,8 @@
 #include "nebula4x/core/order_planner.h"
 #include "nebula4x/core/colony_schedule.h"
 #include "nebula4x/core/ground_battle_forecast.h"
+#include "nebula4x/core/date.h"
+#include "nebula4x/core/terraforming_schedule.h"
 #include "nebula4x/util/autosave.h"
 #include "nebula4x/util/event_export.h"
 #include "nebula4x/util/file_io.h"
@@ -162,6 +164,7 @@ const char* event_category_label(EventCategory c) {
     case EventCategory::Intel: return "Intel";
     case EventCategory::Exploration: return "Exploration";
     case EventCategory::Diplomacy: return "Diplomacy";
+    case EventCategory::Terraforming: return "Terraforming";
   }
   return "General";
 }
@@ -502,6 +505,9 @@ void draw_main_menu(Simulation& sim, UIState& ui, char* save_path, char* load_pa
       ImGui::MenuItem("Salvage Planner (Wreck Salvage Runs)", nullptr, &ui.show_salvage_window);
       ImGui::MenuItem("Contracts (Mission Board)", nullptr, &ui.show_contracts_window);
       ImGui::MenuItem("Sustainment Planner (Fleet Base Targets)", nullptr, &ui.show_sustainment_window);
+      ImGui::MenuItem("Troop Logistics (Auto-troop Preview)", nullptr, &ui.show_troop_window);
+      ImGui::MenuItem("Population Logistics (Auto-colonist Preview)", nullptr, &ui.show_colonist_window);
+      ImGui::MenuItem("Terraforming Planner", nullptr, &ui.show_terraforming_window);
       ImGui::MenuItem("Fleet Manager", "Ctrl+Shift+F", &ui.show_fleet_manager_window);
       ImGui::MenuItem("Advisor (Issues)", "Ctrl+Shift+A", &ui.show_advisor_window);
       ImGui::MenuItem("Colony Profiles (Automation Presets)", "Ctrl+Shift+B", &ui.show_colony_profiles_window);
@@ -520,6 +526,7 @@ void draw_main_menu(Simulation& sim, UIState& ui, char* save_path, char* load_pa
       ImGui::MenuItem("Save Tools (Diff/Patch)", nullptr, &ui.show_save_tools_window);
       ImGui::MenuItem("Time Machine (State History)", "Ctrl+Shift+D", &ui.show_time_machine_window);
       ImGui::MenuItem("OmniSearch (JSON + Commands)", "Ctrl+F", &ui.show_omni_search_window);
+      ImGui::MenuItem("Navigator (History + Bookmarks)", "Ctrl+Shift+N", &ui.show_navigator_window);
       ImGui::MenuItem("Entity Inspector (ID Resolver)", "Ctrl+G", &ui.show_entity_inspector_window);
       ImGui::MenuItem("Reference Graph (Entity IDs)", "Ctrl+Shift+G", &ui.show_reference_graph_window);
       ImGui::MenuItem("Watchboard (JSON Pins)", nullptr, &ui.show_watchboard_window);
@@ -599,6 +606,15 @@ void draw_main_menu(Simulation& sim, UIState& ui, char* save_path, char* load_pa
       }
       if (ImGui::MenuItem("Open Sustainment Planner")) {
         ui.show_sustainment_window = true;
+      }
+      if (ImGui::MenuItem("Open Troop Logistics")) {
+        ui.show_troop_window = true;
+      }
+      if (ImGui::MenuItem("Open Population Logistics")) {
+        ui.show_colonist_window = true;
+      }
+      if (ImGui::MenuItem("Open Terraforming Planner")) {
+        ui.show_terraforming_window = true;
       }
       if (ImGui::MenuItem("Open Colony Profiles")) {
         ui.show_colony_profiles_window = true;
@@ -1849,6 +1865,33 @@ if (sim.cfg().enable_ship_maintenance) {
             ImGui::Spacing();
             ImGui::Separator();
             ImGui::TextDisabled("Combat doctrine");
+            {
+              const char* fire_labels[] = {"Weapons free", "Orders only", "Hold fire"};
+              int fire_i = static_cast<int>(sh->combat_doctrine.fire_control);
+              if (ImGui::Combo("Fire control##fire_control", &fire_i, fire_labels, IM_ARRAYSIZE(fire_labels))) {
+                sh->combat_doctrine.fire_control = static_cast<FireControlMode>(fire_i);
+              }
+              if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip(
+                    "Weapons free: auto-engage detected hostiles in range.\n"
+                    "Orders only: only fire when executing explicit combat orders (AttackShip/BombardColony).\n"
+                    "Hold fire: never fire offensive weapons (point defense still works).");
+              }
+
+              const char* prio_labels[] = {"Nearest", "Weakest", "Threat", "Largest"};
+              int prio_i = static_cast<int>(sh->combat_doctrine.targeting_priority);
+              if (ImGui::Combo("Target priority##target_priority", &prio_i, prio_labels, IM_ARRAYSIZE(prio_labels))) {
+                sh->combat_doctrine.targeting_priority = static_cast<TargetingPriority>(prio_i);
+              }
+              if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip(
+                    "Automatic target selection (Weapons free mode only).\n"
+                    "Nearest: closest detected hostile.\n"
+                    "Weakest: lowest HP (ties by distance).\n"
+                    "Threat: highest combat threat (ties by distance).\n"
+                    "Largest: highest mass (ties by distance).");
+              }
+            }
 
             const double beam_range = std::max(0.0, d->weapon_range_mkm);
             const double missile_range = std::max(0.0, d->missile_range_mkm);
@@ -1914,6 +1957,53 @@ if (sim.cfg().enable_ship_maintenance) {
 
             ImGui::Text("Beam range: %.1f mkm | Missile range: %.1f mkm", beam_range, missile_range);
             ImGui::Text("Desired standoff: %.1f mkm", desired);
+
+            // --- Disengagement / auto-retreat ---
+            {
+              ImGui::Spacing();
+              ImGui::Separator();
+              ImGui::TextDisabled("Disengagement");
+
+              ImGui::Checkbox("Auto-retreat##ret_auto", &sh->combat_doctrine.auto_retreat);
+              if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip(
+                    "When enabled, the ship will automatically suspend its current order queue and execute an\n"
+                    "emergency retreat plan when it is damaged (or runs out of missiles), then resume orders once\n"
+                    "it is safe and sufficiently repaired.");
+              }
+
+              if (sh->combat_doctrine.auto_retreat) {
+                float trig = static_cast<float>(sh->combat_doctrine.retreat_hp_trigger_fraction);
+                if (ImGui::SliderFloat("Retreat HP fraction##ret_hp_trig", &trig, 0.05f, 0.95f, "%.2f")) {
+                  sh->combat_doctrine.retreat_hp_trigger_fraction =
+                      std::clamp(static_cast<double>(trig), 0.0, 1.0);
+                  sh->combat_doctrine.retreat_hp_resume_fraction = std::max(
+                      sh->combat_doctrine.retreat_hp_resume_fraction, sh->combat_doctrine.retreat_hp_trigger_fraction);
+                }
+                float res = static_cast<float>(sh->combat_doctrine.retreat_hp_resume_fraction);
+                if (ImGui::SliderFloat("Resume HP fraction##ret_hp_res", &res, 0.05f, 1.0f, "%.2f")) {
+                  sh->combat_doctrine.retreat_hp_resume_fraction = std::max(
+                      sh->combat_doctrine.retreat_hp_trigger_fraction,
+                      std::clamp(static_cast<double>(res), 0.0, 1.0));
+                }
+
+                ImGui::Checkbox("Retreat when low on missiles##ret_mis_en", &sh->combat_doctrine.retreat_when_out_of_missiles);
+                if (sh->combat_doctrine.retreat_when_out_of_missiles) {
+                  float ammo = static_cast<float>(sh->combat_doctrine.retreat_missile_ammo_trigger_fraction);
+                  if (ImGui::SliderFloat("Missile ammo fraction##ret_mis_frac", &ammo, 0.0f, 1.0f, "%.2f")) {
+                    sh->combat_doctrine.retreat_missile_ammo_trigger_fraction =
+                        std::clamp(static_cast<double>(ammo), 0.0, 1.0);
+                  }
+                }
+
+                // Live status indicator.
+                if (const auto* so_view = find_ptr(s.ship_orders, sh->id)) {
+                  if (so_view->suspended) {
+                    ImGui::TextDisabled("Status: emergency retreat (orders suspended)");
+                  }
+                }
+              }
+            }
 
             if (ImGui::SmallButton("Reset##eng_reset")) {
               sh->combat_doctrine = ShipCombatDoctrine{};
@@ -2022,6 +2112,7 @@ if (sim.cfg().enable_ship_maintenance) {
             sh->auto_colonize = false;
             sh->auto_tanker = false;
             sh->auto_troop_transport = false;
+            sh->auto_colonist_transport = false;
           }
         }
         if (ImGui::IsItemHovered()) {
@@ -2040,6 +2131,7 @@ if (sim.cfg().enable_ship_maintenance) {
             sh->auto_colonize = false;
             sh->auto_tanker = false;
             sh->auto_troop_transport = false;
+            sh->auto_colonist_transport = false;
           }
         }
         if (ImGui::IsItemHovered()) {
@@ -2064,6 +2156,7 @@ if (sim.cfg().enable_ship_maintenance) {
             sh->auto_mine = false;
             sh->auto_colonize = false;
             sh->auto_tanker = false;
+            sh->auto_colonist_transport = false;
           }
         }
         if (ImGui::IsItemHovered()) {
@@ -2082,6 +2175,40 @@ if (sim.cfg().enable_ship_maintenance) {
           ImGui::TextDisabled("(requires troop transport capacity)");
         }
 
+
+        const bool can_auto_colonist_transport = (d && d->colony_capacity_millions > 0.0);
+        if (!can_auto_colonist_transport) ImGui::BeginDisabled();
+        if (ImGui::Checkbox("Auto-colonist transport when idle", &sh->auto_colonist_transport)) {
+          if (sh->auto_colonist_transport) {
+            // Mutually exclusive with mission-style automation (explore/freight/salvage/mine/colonize/tanker/troop).
+            sh->auto_explore = false;
+            sh->auto_freight = false;
+            sh->auto_salvage = false;
+            sh->auto_mine = false;
+            sh->auto_colonize = false;
+            sh->auto_tanker = false;
+            sh->auto_troop_transport = false;
+          }
+        }
+        if (ImGui::IsItemHovered()) {
+          const auto& cfg = sim.cfg();
+          ImGui::SetTooltip(
+              "When enabled, this ship will automatically ferry colonists between your colonies to satisfy\n"
+              "population targets (import) and population reserves (export floors) when idle.\n\n"
+              "Configure this per colony:\n"
+              "- Population target (M)\n"
+              "- Population reserve (M)\n\n"
+              "Min transfer: %.1f M\n"
+              "Max take fraction: %.0f%%",
+              cfg.auto_colonist_min_transfer_millions,
+              cfg.auto_colonist_max_take_fraction_of_surplus * 100.0);
+        }
+        if (!can_auto_colonist_transport) {
+          ImGui::EndDisabled();
+          ImGui::SameLine();
+          ImGui::TextDisabled("(requires colonist capacity)");
+        }
+
         const bool can_auto_salvage = (d && d->cargo_tons > 0.0);
         if (!can_auto_salvage) ImGui::BeginDisabled();
         if (ImGui::Checkbox("Auto-salvage wrecks when idle", &sh->auto_salvage)) {
@@ -2092,6 +2219,7 @@ if (sim.cfg().enable_ship_maintenance) {
             sh->auto_colonize = false;
             sh->auto_tanker = false;
             sh->auto_troop_transport = false;
+            sh->auto_colonist_transport = false;
           }
         }
         if (ImGui::IsItemHovered()) {
@@ -2115,6 +2243,7 @@ if (sim.cfg().enable_ship_maintenance) {
             sh->auto_colonize = false;
             sh->auto_tanker = false;
             sh->auto_troop_transport = false;
+            sh->auto_colonist_transport = false;
           }
         }
         if (ImGui::IsItemHovered()) {
@@ -2217,6 +2346,7 @@ if (sim.cfg().enable_ship_maintenance) {
             sh->auto_mine = false;
             sh->auto_tanker = false;
             sh->auto_troop_transport = false;
+            sh->auto_colonist_transport = false;
           }
         }
         if (ImGui::IsItemHovered()) {
@@ -2308,6 +2438,7 @@ if (sim.cfg().enable_ship_maintenance) {
             sh->auto_mine = false;
             sh->auto_colonize = false;
             sh->auto_troop_transport = false;
+            sh->auto_colonist_transport = false;
             sh->auto_tanker_reserve_fraction =
                 std::clamp(sh->auto_tanker_reserve_fraction, 0.0, 1.0);
           }
@@ -5026,6 +5157,37 @@ const bool can_up = (i > 0);
         ImGui::Separator();
         ImGui::Text("Population: %.0f M", colony->population_millions);
 
+        // Population logistics (optional): targets/reserves for auto-colonist transport.
+        ImGui::Indent();
+        double pop_target = colony->population_target_millions;
+        double pop_reserve = colony->population_reserve_millions;
+
+        if (ImGui::InputDouble("Population target (M)##col_pop_target", &pop_target, 10.0, 100.0, "%.0f")) {
+          colony->population_target_millions = std::max(0.0, pop_target);
+        }
+        if (ImGui::IsItemHovered()) {
+          ImGui::SetTooltip("If current population is below this value, auto-colonist transports may deliver colonists here.");
+        }
+
+        if (ImGui::InputDouble("Population reserve (M)##col_pop_reserve", &pop_reserve, 10.0, 100.0, "%.0f")) {
+          colony->population_reserve_millions = std::max(0.0, pop_reserve);
+        }
+        if (ImGui::IsItemHovered()) {
+          ImGui::SetTooltip("Auto-colonist transports will not export population below this value.");
+        }
+
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Set reserve = current##col_pop_reserve_cur")) {
+          colony->population_reserve_millions = std::max(0.0, colony->population_millions);
+        }
+
+        const double pop_floor = std::max(colony->population_target_millions, colony->population_reserve_millions);
+        const double pop_surplus = (pop_floor > 1e-9) ? std::max(0.0, colony->population_millions - pop_floor) : 0.0;
+        const double pop_deficit = std::max(0.0, colony->population_target_millions - colony->population_millions);
+        ImGui::TextDisabled("Floor: %.0f M | Surplus: %.0f M | Deficit: %.0f M", pop_floor, pop_surplus, pop_deficit);
+        ImGui::Unindent();
+
+
 
         // Blockade status (if enabled).
         if (sim.cfg().enable_blockades) {
@@ -5324,6 +5486,36 @@ const bool can_up = (i > 0);
             ImGui::Text("Target temp: %.1f K", b->terraforming_target_temp_k);
             ImGui::Text("Target atm: %.3f", b->terraforming_target_atm);
             if (b->terraforming_complete) ImGui::TextDisabled("(complete)");
+
+            // Best-effort ETA forecast (based on current points/day and current mineral stockpiles).
+            {
+              TerraformingScheduleOptions opt;
+              opt.max_days = 36500;
+              TerraformingSchedule sched = estimate_terraforming_schedule(sim, b->id, opt);
+              if (sched.ok && sched.has_target) {
+                if (sched.complete && sched.days_to_complete <= 0) {
+                  // Already complete.
+                } else if (sched.stalled) {
+                  if (!sched.stall_reason.empty()) {
+                    ImGui::TextDisabled("ETA: stalled (%s)", sched.stall_reason.c_str());
+                  } else {
+                    ImGui::TextDisabled("ETA: stalled");
+                  }
+                } else if (sched.truncated) {
+                  ImGui::TextDisabled("ETA: >%d days (forecast limit)", opt.max_days);
+                } else if (sched.days_to_complete > 0) {
+                  const Date eta_date = sim.state().date.add_days(sched.days_to_complete);
+                  ImGui::TextDisabled("ETA: %d days (%s)", sched.days_to_complete, eta_date.to_string().c_str());
+                } else {
+                  ImGui::TextDisabled("ETA: unknown");
+                }
+
+                if (!opt.ignore_mineral_costs && (sched.duranium_per_point > 0.0 || sched.neutronium_per_point > 0.0)) {
+                  ImGui::TextDisabled("Forecast consumption (no replenishment): D %.0f, N %.0f", sched.duranium_consumed,
+                                      sched.neutronium_consumed);
+                }
+              }
+            }
           } else {
             ImGui::TextDisabled("No target set.");
           }
@@ -5342,6 +5534,8 @@ const bool can_up = (i > 0);
           if (ImGui::Button("Clear target")) {
             sim.clear_terraforming_target(colony->body_id);
           }
+          ImGui::SameLine();
+          if (ImGui::SmallButton("Planner##tf")) ui.show_terraforming_window = true;
         }
 
         // --- Habitability / Life support ---
@@ -10421,6 +10615,7 @@ void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& 
       if (sh->auto_salvage) auto_s += (auto_s.empty() ? "S" : " S");
       if (sh->auto_mine) auto_s += (auto_s.empty() ? "M" : " M");
       if (sh->auto_colonize) auto_s += (auto_s.empty() ? "C" : " C");
+      if (sh->auto_colonist_transport) auto_s += (auto_s.empty() ? "P" : " P");
       if (sh->auto_tanker) auto_s += (auto_s.empty() ? "T" : " T");
       if (sh->auto_troop_transport) auto_s += (auto_s.empty() ? "G" : " G");
       if (sh->auto_refuel) auto_s += (auto_s.empty() ? "Rf" : " Rf");
@@ -10542,7 +10737,7 @@ void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& 
 
         static int bulk_primary_auto_idx = 0; // 0=None
         const char* autos[] = {"(no change)", "Disable mission automation", "Auto-explore", "Auto-freight", "Auto-salvage",
-                               "Auto-mine", "Auto-colonize", "Auto-tanker", "Auto-troop transport"};
+                               "Auto-mine", "Auto-colonize", "Auto-colonist transport", "Auto-tanker", "Auto-troop transport"};
         ImGui::Combo("Mission automation##ship_bulk_auto", &bulk_primary_auto_idx, autos, IM_ARRAYSIZE(autos));
         ImGui::SameLine();
         static std::string bulk_status;
@@ -10559,6 +10754,7 @@ void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& 
             sh.auto_colonize = false;
             sh.auto_tanker = false;
             sh.auto_troop_transport = false;
+            sh.auto_colonist_transport = false;
           };
 
           for (Id sid : bulk_selected) {
@@ -10604,11 +10800,15 @@ void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& 
                 ok = (d && d->colony_capacity_millions > 0.0);
                 if (ok) sh->auto_colonize = true;
                 break;
-              case 7: // tanker
+              case 7: // colonist transport
+                ok = (d && d->colony_capacity_millions > 0.0);
+                if (ok) sh->auto_colonist_transport = true;
+                break;
+              case 8: // tanker
                 ok = (d && d->fuel_capacity_tons > 0.0);
                 if (ok) sh->auto_tanker = true;
                 break;
-              case 8: // troop transport
+              case 9: // troop transport
                 ok = (d && d->troop_capacity > 0.0);
                 if (ok) sh->auto_troop_transport = true;
                 break;
@@ -10647,7 +10847,7 @@ void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& 
           }
         }
 
-        ImGui::TextDisabled("Auto flags legend: E=Explore F=Freight S=Salvage M=Mine C=Colonize T=Tanker G=Troop  Rf=Refuel Rp=Repair Ra=Rearm");
+        ImGui::TextDisabled("Auto flags legend: E=Explore F=Freight S=Salvage M=Mine C=Colonize P=Colonists T=Tanker G=Troop  Rf=Refuel Rp=Repair Ra=Rearm");
       } else {
         ImGui::TextDisabled("Tip: Use the checkboxes to select multiple ships for bulk actions.");
       }

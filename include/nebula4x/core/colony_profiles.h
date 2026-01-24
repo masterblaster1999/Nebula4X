@@ -12,6 +12,8 @@ struct ColonyProfileApplyOptions {
   bool apply_mineral_reserves{true};
   bool apply_mineral_targets{true};
   bool apply_garrison_target{true};
+  bool apply_population_target{true};
+  bool apply_population_reserve{true};
 };
 
 // Capture a colony's current automation knobs into a reusable profile.

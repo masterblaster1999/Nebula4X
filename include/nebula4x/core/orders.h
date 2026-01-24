@@ -355,6 +355,21 @@ struct ShipOrders {
   int repeat_count_remaining{0};
 
   std::vector<Order> repeat_template;
+
+  // Emergency suspension (used by auto-retreat).
+  //
+  // When suspended is true, queue contains a temporary emergency plan
+  // (or may be empty while the ship waits to recover), and the original
+  // queue/repeat settings are stored in the suspended_* fields.
+  //
+  // This avoids permanently destroying player-issued orders while still
+  // allowing ships to disengage when they are about to be lost.
+  bool suspended{false};
+
+  std::vector<Order> suspended_queue;
+  bool suspended_repeat{false};
+  int suspended_repeat_count_remaining{0};
+  std::vector<Order> suspended_repeat_template;
 };
 
 std::string order_to_string(const Order& order);

@@ -27,6 +27,7 @@ ShipAutomationProfile make_ship_profile_from_ship(const Ship& sh) {
   p.auto_explore = sh.auto_explore;
   p.auto_freight = sh.auto_freight;
   p.auto_troop_transport = sh.auto_troop_transport;
+  p.auto_colonist_transport = sh.auto_colonist_transport;
   p.auto_salvage = sh.auto_salvage;
   p.auto_mine = sh.auto_mine;
   p.auto_mine_home_colony_id = sh.auto_mine_home_colony_id;
@@ -65,6 +66,7 @@ void apply_ship_profile(Ship& sh, const ShipAutomationProfile& p, const ShipProf
     sh.auto_explore = p.auto_explore;
     sh.auto_freight = p.auto_freight;
     sh.auto_troop_transport = p.auto_troop_transport;
+    sh.auto_colonist_transport = p.auto_colonist_transport;
     sh.auto_salvage = p.auto_salvage;
     sh.auto_mine = p.auto_mine;
     sh.auto_mine_home_colony_id = p.auto_mine_home_colony_id;

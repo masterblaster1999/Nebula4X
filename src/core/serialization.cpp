@@ -18,7 +18,7 @@ using json::Array;
 using json::Object;
 using json::Value;
 
-constexpr int kCurrentSaveVersion = 54;
+constexpr int kCurrentSaveVersion = 56;
 
 
 std::string contract_kind_to_string(ContractKind k) {
@@ -411,6 +411,40 @@ EngagementRangeMode engagement_range_mode_from_string(const std::string& s) {
   return EngagementRangeMode::Auto;
 }
 
+
+const char* fire_control_mode_to_string(FireControlMode m) {
+  switch (m) {
+    case FireControlMode::WeaponsFree: return "weapons_free";
+    case FireControlMode::OrdersOnly: return "orders_only";
+    case FireControlMode::HoldFire: return "hold_fire";
+  }
+  return "weapons_free";
+}
+
+FireControlMode fire_control_mode_from_string(const std::string& s) {
+  if (s == "orders_only" || s == "orders" || s == "explicit" || s == "order") return FireControlMode::OrdersOnly;
+  if (s == "hold_fire" || s == "hold" || s == "silent" || s == "cease_fire" || s == "ceasefire") return FireControlMode::HoldFire;
+  // Default
+  return FireControlMode::WeaponsFree;
+}
+
+const char* targeting_priority_to_string(TargetingPriority p) {
+  switch (p) {
+    case TargetingPriority::Nearest: return "nearest";
+    case TargetingPriority::Weakest: return "weakest";
+    case TargetingPriority::Threat: return "threat";
+    case TargetingPriority::Largest: return "largest";
+  }
+  return "nearest";
+}
+
+TargetingPriority targeting_priority_from_string(const std::string& s) {
+  if (s == "weakest" || s == "low_hp" || s == "lowest" || s == "finish") return TargetingPriority::Weakest;
+  if (s == "threat" || s == "strongest" || s == "danger" || s == "dps") return TargetingPriority::Threat;
+  if (s == "largest" || s == "biggest" || s == "mass") return TargetingPriority::Largest;
+  return TargetingPriority::Nearest;
+}
+
 const char* fleet_formation_to_string(FleetFormation f) {
   switch (f) {
     case FleetFormation::None: return "none";
@@ -503,6 +537,7 @@ const char* event_category_to_string(EventCategory c) {
     case EventCategory::Intel: return "intel";
     case EventCategory::Exploration: return "exploration";
     case EventCategory::Diplomacy: return "diplomacy";
+    case EventCategory::Terraforming: return "terraforming";
   }
   return "general";
 }
@@ -516,6 +551,7 @@ EventCategory event_category_from_string(const std::string& s) {
   if (s == "intel") return EventCategory::Intel;
   if (s == "exploration") return EventCategory::Exploration;
   if (s == "diplomacy") return EventCategory::Diplomacy;
+  if (s == "terraforming") return EventCategory::Terraforming;
   return EventCategory::General;
 }
 
@@ -945,6 +981,8 @@ std::vector<std::string> string_vector_from_json(const Value& v) {
 Object colony_automation_profile_to_json(const ColonyAutomationProfile& p) {
   Object o;
   if (p.garrison_target_strength > 0.0) o["garrison_target_strength"] = p.garrison_target_strength;
+  if (p.population_target_millions > 0.0) o["population_target_millions"] = p.population_target_millions;
+  if (p.population_reserve_millions > 0.0) o["population_reserve_millions"] = p.population_reserve_millions;
   if (!p.mineral_reserves.empty()) o["mineral_reserves"] = map_string_double_to_json(p.mineral_reserves);
   if (!p.mineral_targets.empty()) o["mineral_targets"] = map_string_double_to_json(p.mineral_targets);
   if (!p.installation_targets.empty()) o["installation_targets"] = map_string_int_to_json(p.installation_targets);
@@ -959,6 +997,12 @@ ColonyAutomationProfile colony_automation_profile_from_json_value(const Value& v
   if (auto itg = po.find("garrison_target_strength"); itg != po.end()) {
     p.garrison_target_strength = itg->second.number_value(0.0);
   }
+  if (auto itp = po.find("population_target_millions"); itp != po.end()) {
+    p.population_target_millions = itp->second.number_value(0.0);
+  }
+  if (auto itp = po.find("population_reserve_millions"); itp != po.end()) {
+    p.population_reserve_millions = itp->second.number_value(0.0);
+  }
   if (auto it2 = po.find("mineral_reserves"); it2 != po.end() && it2->second.is_object()) {
     p.mineral_reserves = map_string_double_from_json(it2->second);
   }
@@ -972,6 +1016,12 @@ ColonyAutomationProfile colony_automation_profile_from_json_value(const Value& v
   // Sanitize for legacy/modded saves.
   if (!std::isfinite(p.garrison_target_strength) || p.garrison_target_strength < 0.0) {
     p.garrison_target_strength = 0.0;
+  }
+  if (!std::isfinite(p.population_target_millions) || p.population_target_millions < 0.0) {
+    p.population_target_millions = 0.0;
+  }
+  if (!std::isfinite(p.population_reserve_millions) || p.population_reserve_millions < 0.0) {
+    p.population_reserve_millions = 0.0;
   }
   for (auto it2 = p.installation_targets.begin(); it2 != p.installation_targets.end();) {
     if (it2->first.empty() || it2->second <= 0) {
@@ -1006,6 +1056,7 @@ Object ship_automation_profile_to_json(const ShipAutomationProfile& p) {
   if (p.auto_explore) o["auto_explore"] = true;
   if (p.auto_freight) o["auto_freight"] = true;
   if (p.auto_troop_transport) o["auto_troop_transport"] = true;
+  if (p.auto_colonist_transport) o["auto_colonist_transport"] = true;
   if (p.auto_salvage) o["auto_salvage"] = true;
   if (p.auto_mine) o["auto_mine"] = true;
   if (p.auto_mine_home_colony_id != kInvalidId) {
@@ -1079,6 +1130,34 @@ Object ship_automation_profile_to_json(const ShipAutomationProfile& p) {
       dco["kite_deadband_fraction"] = doc.kite_deadband_fraction;
       any = true;
     }
+    if (doc.fire_control != FireControlMode::WeaponsFree) {
+      dco["fire_control"] = fire_control_mode_to_string(doc.fire_control);
+      any = true;
+    }
+    if (doc.targeting_priority != TargetingPriority::Nearest) {
+      dco["targeting_priority"] = targeting_priority_to_string(doc.targeting_priority);
+      any = true;
+    }
+    if (doc.auto_retreat) {
+      dco["auto_retreat"] = true;
+      any = true;
+    }
+    if (std::abs(doc.retreat_hp_trigger_fraction - 0.25) > 1e-9) {
+      dco["retreat_hp_trigger_fraction"] = doc.retreat_hp_trigger_fraction;
+      any = true;
+    }
+    if (std::abs(doc.retreat_hp_resume_fraction - 0.60) > 1e-9) {
+      dco["retreat_hp_resume_fraction"] = doc.retreat_hp_resume_fraction;
+      any = true;
+    }
+    if (doc.retreat_when_out_of_missiles) {
+      dco["retreat_when_out_of_missiles"] = true;
+      any = true;
+    }
+    if (std::abs(doc.retreat_missile_ammo_trigger_fraction - 0.0) > 1e-9) {
+      dco["retreat_missile_ammo_trigger_fraction"] = doc.retreat_missile_ammo_trigger_fraction;
+      any = true;
+    }
     if (any) o["combat_doctrine"] = dco;
   }
 
@@ -1094,6 +1173,7 @@ ShipAutomationProfile ship_automation_profile_from_json_value(const Value& v) {
   if (auto it = o.find("auto_explore"); it != o.end()) p.auto_explore = it->second.bool_value(false);
   if (auto it = o.find("auto_freight"); it != o.end()) p.auto_freight = it->second.bool_value(false);
   if (auto it = o.find("auto_troop_transport"); it != o.end()) p.auto_troop_transport = it->second.bool_value(false);
+  if (auto it = o.find("auto_colonist_transport"); it != o.end()) p.auto_colonist_transport = it->second.bool_value(false);
   if (auto it = o.find("auto_salvage"); it != o.end()) p.auto_salvage = it->second.bool_value(false);
   if (auto it = o.find("auto_mine"); it != o.end()) p.auto_mine = it->second.bool_value(false);
   if (auto it = o.find("auto_mine_home_colony_id"); it != o.end()) {
@@ -1157,6 +1237,36 @@ ShipAutomationProfile ship_automation_profile_from_json_value(const Value& v) {
     }
     if (auto idb = dco.find("kite_deadband_fraction"); idb != dco.end()) {
       p.combat_doctrine.kite_deadband_fraction = std::clamp(idb->second.number_value(p.combat_doctrine.kite_deadband_fraction), 0.0, 0.90);
+    }
+    if (auto ifc = dco.find("fire_control"); ifc != dco.end()) {
+      p.combat_doctrine.fire_control = fire_control_mode_from_string(ifc->second.string_value("weapons_free"));
+    }
+    if (auto itp = dco.find("targeting_priority"); itp != dco.end()) {
+      p.combat_doctrine.targeting_priority = targeting_priority_from_string(itp->second.string_value("nearest"));
+    }
+    if (auto iar = dco.find("auto_retreat"); iar != dco.end()) {
+      p.combat_doctrine.auto_retreat = iar->second.bool_value(p.combat_doctrine.auto_retreat);
+    }
+    if (auto ith = dco.find("retreat_hp_trigger_fraction"); ith != dco.end()) {
+      p.combat_doctrine.retreat_hp_trigger_fraction = std::clamp(
+          ith->second.number_value(p.combat_doctrine.retreat_hp_trigger_fraction), 0.0, 1.0);
+    }
+    if (auto irh = dco.find("retreat_hp_resume_fraction"); irh != dco.end()) {
+      p.combat_doctrine.retreat_hp_resume_fraction = std::clamp(
+          irh->second.number_value(p.combat_doctrine.retreat_hp_resume_fraction), 0.0, 1.0);
+    }
+    if (auto irom = dco.find("retreat_when_out_of_missiles"); irom != dco.end()) {
+      p.combat_doctrine.retreat_when_out_of_missiles =
+          irom->second.bool_value(p.combat_doctrine.retreat_when_out_of_missiles);
+    }
+    if (auto irm = dco.find("retreat_missile_ammo_trigger_fraction"); irm != dco.end()) {
+      p.combat_doctrine.retreat_missile_ammo_trigger_fraction = std::clamp(
+          irm->second.number_value(p.combat_doctrine.retreat_missile_ammo_trigger_fraction), 0.0, 1.0);
+    }
+
+    // Safety: if resume threshold is below trigger, clamp it up.
+    if (p.combat_doctrine.retreat_hp_resume_fraction < p.combat_doctrine.retreat_hp_trigger_fraction) {
+      p.combat_doctrine.retreat_hp_resume_fraction = p.combat_doctrine.retreat_hp_trigger_fraction;
     }
   }
 
@@ -1331,6 +1441,7 @@ json::Value serialize_game_to_json_value(const GameState& s) {
     o["auto_explore"] = sh.auto_explore;
     o["auto_freight"] = sh.auto_freight;
     o["auto_troop_transport"] = sh.auto_troop_transport;
+    o["auto_colonist_transport"] = sh.auto_colonist_transport;
     o["auto_salvage"] = sh.auto_salvage;
     o["auto_mine"] = sh.auto_mine;
     if (sh.auto_mine_home_colony_id != kInvalidId) {
@@ -1385,6 +1496,34 @@ json::Value serialize_game_to_json_value(const GameState& s) {
       }
       if (doc.kite_deadband_fraction != 0.10) {
         dco["kite_deadband_fraction"] = doc.kite_deadband_fraction;
+        any = true;
+      }
+      if (doc.fire_control != FireControlMode::WeaponsFree) {
+        dco["fire_control"] = fire_control_mode_to_string(doc.fire_control);
+        any = true;
+      }
+      if (doc.targeting_priority != TargetingPriority::Nearest) {
+        dco["targeting_priority"] = targeting_priority_to_string(doc.targeting_priority);
+        any = true;
+      }
+      if (doc.auto_retreat) {
+        dco["auto_retreat"] = true;
+        any = true;
+      }
+      if (std::abs(doc.retreat_hp_trigger_fraction - 0.25) > 1e-9) {
+        dco["retreat_hp_trigger_fraction"] = doc.retreat_hp_trigger_fraction;
+        any = true;
+      }
+      if (std::abs(doc.retreat_hp_resume_fraction - 0.60) > 1e-9) {
+        dco["retreat_hp_resume_fraction"] = doc.retreat_hp_resume_fraction;
+        any = true;
+      }
+      if (doc.retreat_when_out_of_missiles) {
+        dco["retreat_when_out_of_missiles"] = true;
+        any = true;
+      }
+      if (std::abs(doc.retreat_missile_ammo_trigger_fraction - 0.0) > 1e-9) {
+        dco["retreat_missile_ammo_trigger_fraction"] = doc.retreat_missile_ammo_trigger_fraction;
         any = true;
       }
       if (any) o["combat_doctrine"] = dco;
@@ -1530,6 +1669,8 @@ json::Value serialize_game_to_json_value(const GameState& s) {
     o["faction_id"] = static_cast<double>(c.faction_id);
     o["body_id"] = static_cast<double>(c.body_id);
     o["population_millions"] = c.population_millions;
+    if (c.population_target_millions > 0.0) o["population_target_millions"] = c.population_target_millions;
+    if (c.population_reserve_millions > 0.0) o["population_reserve_millions"] = c.population_reserve_millions;
 
     if (!c.conditions.empty()) {
       Array conds;
@@ -2043,6 +2184,23 @@ json::Value serialize_game_to_json_value(const GameState& s) {
     for (const auto& ord : orders.repeat_template) tmpl.push_back(order_to_json(ord));
     o["repeat_template"] = tmpl;
 
+    // Emergency order suspension (auto-retreat).
+    if (orders.suspended) {
+      o["suspended"] = true;
+      Array sq;
+      sq.reserve(orders.suspended_queue.size());
+      for (const auto& ord : orders.suspended_queue) sq.push_back(order_to_json(ord));
+      o["suspended_queue"] = sq;
+
+      o["suspended_repeat"] = orders.suspended_repeat;
+      o["suspended_repeat_count_remaining"] = static_cast<double>(orders.suspended_repeat_count_remaining);
+
+      Array stmpl;
+      stmpl.reserve(orders.suspended_repeat_template.size());
+      for (const auto& ord : orders.suspended_repeat_template) stmpl.push_back(order_to_json(ord));
+      o["suspended_repeat_template"] = stmpl;
+    }
+
     ship_orders.push_back(o);
   }
   root["ship_orders"] = ship_orders;
@@ -2302,6 +2460,7 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     if (auto it = o.find("auto_explore"); it != o.end()) sh.auto_explore = it->second.bool_value(false);
     if (auto it = o.find("auto_freight"); it != o.end()) sh.auto_freight = it->second.bool_value(false);
     if (auto it = o.find("auto_troop_transport"); it != o.end()) sh.auto_troop_transport = it->second.bool_value(false);
+    if (auto it = o.find("auto_colonist_transport"); it != o.end()) sh.auto_colonist_transport = it->second.bool_value(false);
     if (auto it = o.find("auto_salvage"); it != o.end()) sh.auto_salvage = it->second.bool_value(false);
     if (auto it = o.find("auto_mine"); it != o.end()) sh.auto_mine = it->second.bool_value(false);
     if (auto it = o.find("auto_mine_home_colony_id"); it != o.end()) {
@@ -2353,6 +2512,36 @@ GameState deserialize_game_from_json(const std::string& json_text) {
       }
       if (auto idb = dco.find("kite_deadband_fraction"); idb != dco.end()) {
         sh.combat_doctrine.kite_deadband_fraction = std::clamp(idb->second.number_value(sh.combat_doctrine.kite_deadband_fraction), 0.0, 0.90);
+      }
+      if (auto ifc = dco.find("fire_control"); ifc != dco.end()) {
+        sh.combat_doctrine.fire_control = fire_control_mode_from_string(ifc->second.string_value("weapons_free"));
+      }
+      if (auto itp = dco.find("targeting_priority"); itp != dco.end()) {
+        sh.combat_doctrine.targeting_priority = targeting_priority_from_string(itp->second.string_value("nearest"));
+      }
+      if (auto iar = dco.find("auto_retreat"); iar != dco.end()) {
+        sh.combat_doctrine.auto_retreat = iar->second.bool_value(sh.combat_doctrine.auto_retreat);
+      }
+      if (auto ith = dco.find("retreat_hp_trigger_fraction"); ith != dco.end()) {
+        sh.combat_doctrine.retreat_hp_trigger_fraction = std::clamp(
+            ith->second.number_value(sh.combat_doctrine.retreat_hp_trigger_fraction), 0.0, 1.0);
+      }
+      if (auto irh = dco.find("retreat_hp_resume_fraction"); irh != dco.end()) {
+        sh.combat_doctrine.retreat_hp_resume_fraction = std::clamp(
+            irh->second.number_value(sh.combat_doctrine.retreat_hp_resume_fraction), 0.0, 1.0);
+      }
+      if (auto irom = dco.find("retreat_when_out_of_missiles"); irom != dco.end()) {
+        sh.combat_doctrine.retreat_when_out_of_missiles =
+            irom->second.bool_value(sh.combat_doctrine.retreat_when_out_of_missiles);
+      }
+      if (auto irm = dco.find("retreat_missile_ammo_trigger_fraction"); irm != dco.end()) {
+        sh.combat_doctrine.retreat_missile_ammo_trigger_fraction = std::clamp(
+            irm->second.number_value(sh.combat_doctrine.retreat_missile_ammo_trigger_fraction), 0.0, 1.0);
+      }
+
+      // Safety: if resume threshold is below trigger, clamp it up.
+      if (sh.combat_doctrine.retreat_hp_resume_fraction < sh.combat_doctrine.retreat_hp_trigger_fraction) {
+        sh.combat_doctrine.retreat_hp_resume_fraction = sh.combat_doctrine.retreat_hp_trigger_fraction;
       }
     }
     sh.speed_km_s = o.at("speed_km_s").number_value(0.0);
@@ -2623,6 +2812,12 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     c.faction_id = static_cast<Id>(o.at("faction_id").int_value());
     c.body_id = static_cast<Id>(o.at("body_id").int_value());
     c.population_millions = o.at("population_millions").number_value();
+    if (auto it = o.find("population_target_millions"); it != o.end()) {
+      c.population_target_millions = it->second.number_value(0.0);
+    }
+    if (auto it = o.find("population_reserve_millions"); it != o.end()) {
+      c.population_reserve_millions = it->second.number_value(0.0);
+    }
     c.minerals = map_string_double_from_json(o.at("minerals"));
     if (auto it = o.find("mineral_reserves"); it != o.end()) {
       c.mineral_reserves = map_string_double_from_json(it->second);
@@ -2714,6 +2909,12 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     // Sanitize new gameplay automation fields for legacy/modded saves.
     if (!std::isfinite(c.garrison_target_strength) || c.garrison_target_strength < 0.0) {
       c.garrison_target_strength = 0.0;
+    }
+    if (!std::isfinite(c.population_target_millions) || c.population_target_millions < 0.0) {
+      c.population_target_millions = 0.0;
+    }
+    if (!std::isfinite(c.population_reserve_millions) || c.population_reserve_millions < 0.0) {
+      c.population_reserve_millions = 0.0;
     }
     if (!std::isfinite(c.troop_training_auto_queued) || c.troop_training_auto_queued < 0.0) {
       c.troop_training_auto_queued = 0.0;
@@ -3611,6 +3812,29 @@ GameState deserialize_game_from_json(const std::string& json_text) {
         }
         if (so.repeat_count_remaining < -1) so.repeat_count_remaining = -1;
         if (!so.repeat) so.repeat_count_remaining = 0;
+
+        // Emergency order suspension (auto-retreat).
+        if (auto itsus = o.find("suspended"); itsus != o.end()) {
+          so.suspended = itsus->second.bool_value(false);
+        }
+        if (so.suspended) {
+          if (auto itsq = o.find("suspended_queue"); itsq != o.end()) {
+            parse_order_list(itsq->second, so.suspended_queue, "suspended_queue");
+          }
+          if (auto itsr = o.find("suspended_repeat"); itsr != o.end()) {
+            so.suspended_repeat = itsr->second.bool_value(false);
+          }
+          if (auto itsrc = o.find("suspended_repeat_count_remaining"); itsrc != o.end()) {
+            so.suspended_repeat_count_remaining = static_cast<int>(itsrc->second.int_value(0));
+          }
+          if (auto itst = o.find("suspended_repeat_template"); itst != o.end()) {
+            parse_order_list(itst->second, so.suspended_repeat_template, "suspended_repeat_template");
+          }
+
+          // Sanitize suspension repeat settings.
+          if (so.suspended_repeat_count_remaining < -1) so.suspended_repeat_count_remaining = -1;
+          if (!so.suspended_repeat) so.suspended_repeat_count_remaining = 0;
+        }
 
         s.ship_orders[ship_id] = std::move(so);
       }

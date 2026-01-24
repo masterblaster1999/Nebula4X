@@ -40,6 +40,7 @@ const char* category_label(EventCategory cat) {
     case EventCategory::Intel: return "Intel";
     case EventCategory::Exploration: return "Exploration";
     case EventCategory::Diplomacy: return "Diplomacy";
+    case EventCategory::Terraforming: return "Terraforming";
   }
   return "";
 }
@@ -248,7 +249,7 @@ void jump_to_planner_event(const PlannerEvent& ev,
 
 bool same_options(const PlannerEventsOptions& a, const PlannerEventsOptions& b) {
   return a.max_days == b.max_days && a.max_items == b.max_items && a.include_research == b.include_research &&
-         a.include_colonies == b.include_colonies && a.include_ground_battles == b.include_ground_battles &&
+         a.include_colonies == b.include_colonies && a.include_terraforming == b.include_terraforming && a.include_ground_battles == b.include_ground_battles &&
          a.include_missile_impacts == b.include_missile_impacts && a.include_ships == b.include_ships &&
          a.include_ship_next_step == b.include_ship_next_step &&
          a.include_ship_queue_complete == b.include_ship_queue_complete && a.max_ships == b.max_ships &&
@@ -353,6 +354,8 @@ void draw_planner_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& se
   ImGui::SameLine();
   ImGui::Checkbox("Include colonies", &opt.include_colonies);
   ImGui::SameLine();
+  ImGui::Checkbox("Include terraforming", &opt.include_terraforming);
+  ImGui::SameLine();
   ImGui::Checkbox("Include ships (expensive)", &opt.include_ships);
 
   ImGui::Checkbox("Include ground battles", &opt.include_ground_battles);
@@ -395,7 +398,7 @@ void draw_planner_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& se
   ImGui::SameLine();
 
   const char* cat_items[] = {
-      "All", "General", "Research", "Shipyard", "Construction", "Movement", "Combat", "Intel", "Exploration", "Diplomacy",
+      "All", "General", "Research", "Shipyard", "Construction", "Movement", "Combat", "Intel", "Exploration", "Diplomacy", "Terraforming",
   };
   ImGui::SetNextItemWidth(160);
   ImGui::Combo("Category", &category_filter, cat_items, IM_ARRAYSIZE(cat_items));

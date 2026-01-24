@@ -25,6 +25,8 @@ ColonyAutomationProfile make_colony_profile_from_colony(const Colony& c) {
   p.mineral_reserves = c.mineral_reserves;
   p.mineral_targets = c.mineral_targets;
   p.garrison_target_strength = clamp_nonneg_finite(c.garrison_target_strength);
+  p.population_target_millions = clamp_nonneg_finite(c.population_target_millions);
+  p.population_reserve_millions = clamp_nonneg_finite(c.population_reserve_millions);
   return p;
 }
 
@@ -62,6 +64,14 @@ void apply_colony_profile(Colony& c, const ColonyAutomationProfile& profile,
 
   if (opt.apply_garrison_target) {
     c.garrison_target_strength = clamp_nonneg_finite(profile.garrison_target_strength);
+  }
+
+  if (opt.apply_population_target) {
+    c.population_target_millions = clamp_nonneg_finite(profile.population_target_millions);
+  }
+
+  if (opt.apply_population_reserve) {
+    c.population_reserve_millions = clamp_nonneg_finite(profile.population_reserve_millions);
   }
 }
 

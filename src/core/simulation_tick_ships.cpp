@@ -673,6 +673,54 @@ void Simulation::tick_ships(double dt_days) {
   const double arrive_eps = std::max(0.0, cfg_.arrival_epsilon_mkm);
   const double dock_range = std::max(arrive_eps, cfg_.docking_range_mkm);
 
+  // Merchant Guild (civilian trade convoys) faction id cache.
+  constexpr const char* kMerchantFactionName = "Merchant Guild";
+  Id merchant_faction_id = kInvalidId;
+  for (const auto& [fid, f] : state_.factions) {
+    if (f.control == FactionControl::AI_Passive && f.name == kMerchantFactionName) {
+      merchant_faction_id = fid;
+      break;
+    }
+  }
+
+  const bool allow_civilian_trade_cargo_ops =
+      cfg_.enable_civilian_trade_convoys && cfg_.enable_civilian_trade_convoy_cargo_transfers &&
+      merchant_faction_id != kInvalidId;
+
+  // Cache: faction -> (colony -> mineral -> desired reserve tons) derived from
+  // logistics_needs_for_faction(). Used to keep civilian exports from starving
+  // shipyards / industry / rearm buffers even when the colony has no explicit
+  // mineral_reserves/mineral_targets set.
+  struct LogisticsReserveCache {
+    bool built{false};
+    std::unordered_map<Id, std::unordered_map<std::string, double>> reserve_by_colony;
+  };
+
+  std::unordered_map<Id, LogisticsReserveCache> logistics_reserve_cache;
+  logistics_reserve_cache.reserve(state_.factions.size() * 2 + 8);
+
+  auto logistics_reserve_tons = [&](Id faction_id, Id colony_id, const std::string& mineral) -> double {
+    if (faction_id == kInvalidId || colony_id == kInvalidId) return 0.0;
+    auto& entry = logistics_reserve_cache[faction_id];
+    if (!entry.built) {
+      entry.built = true;
+      const auto needs = logistics_needs_for_faction(faction_id);
+      for (const auto& n : needs) {
+        if (n.colony_id == kInvalidId) continue;
+        const double desired = std::max(0.0, n.desired_tons);
+        if (desired <= 1e-9) continue;
+        double& r = entry.reserve_by_colony[n.colony_id][n.mineral];
+        r = std::max(r, desired);
+      }
+    }
+
+    auto itc = entry.reserve_by_colony.find(colony_id);
+    if (itc == entry.reserve_by_colony.end()) return 0.0;
+    auto itm = itc->second.find(mineral);
+    if (itm == itc->second.end()) return 0.0;
+    return std::max(0.0, itm->second);
+  };
+
   const double maint_min_speed = std::clamp(cfg_.ship_maintenance_min_speed_multiplier, 0.0, 1.0);
   auto maintenance_speed_mult = [&](const Ship& s) -> double {
     if (!cfg_.enable_ship_maintenance) return 1.0;
@@ -825,6 +873,186 @@ void Simulation::tick_ships(double dt_days) {
 
   auto can_refill_from_repeat = [](const ShipOrders& so) {
     return so.repeat && !so.repeat_template.empty() && so.repeat_count_remaining != 0;
+  };
+
+  auto is_player_faction = [&](Id faction_id) -> bool {
+    const Faction* f = find_ptr(state_.factions, faction_id);
+    return f && f->control == FactionControl::Player;
+  };
+
+  auto ship_hp_fraction = [&](const Ship& sh) -> double {
+    const ShipDesign* d = find_design(sh.design_id);
+    const double max_hp = (d && d->max_hp > 1e-9) ? d->max_hp : sh.hp;
+    if (max_hp <= 1e-9) return 1.0;
+    double f = sh.hp / max_hp;
+    if (!std::isfinite(f)) f = 1.0;
+    return std::clamp(f, 0.0, 1.0);
+  };
+
+  auto missile_ammo_fraction = [&](const Ship& sh) -> double {
+    const ShipDesign* d = find_design(sh.design_id);
+    const double cap = (d && d->missile_ammo_capacity > 0.0) ? d->missile_ammo_capacity : 0.0;
+    if (cap <= 1e-9) return 1.0;
+    double a = std::max(0.0, static_cast<double>(sh.missile_ammo));
+    double f = a / cap;
+    if (!std::isfinite(f)) f = 1.0;
+    return std::clamp(f, 0.0, 1.0);
+  };
+
+  auto any_friendly_colony_in_system = [&](Id ship_faction_id, Id system_id) -> bool {
+    if (ship_faction_id == kInvalidId || system_id == kInvalidId) return false;
+    for (const auto& [cid, col] : state_.colonies) {
+      if (!are_factions_trade_partners(ship_faction_id, col.faction_id)) continue;
+      const Body* b = find_ptr(state_.bodies, col.body_id);
+      if (!b || b->system_id != system_id) continue;
+      return true;
+    }
+    return false;
+  };
+
+  auto build_emergency_retreat_plan = [&](const Ship& sh,
+                                         const std::vector<Id>& detected_hostiles) -> std::vector<Order> {
+    std::vector<Order> out;
+
+    // If we have a friendly colony with a shipyard within a known route, prefer it.
+    struct ColonyCandidate {
+      Id colony_id{kInvalidId};
+      Id body_id{kInvalidId};
+      Id system_id{kInvalidId};
+      bool has_shipyard{false};
+      bool system_hostile{false};
+      JumpRoutePlan plan;
+    };
+
+    std::vector<ColonyCandidate> candidates;
+    candidates.reserve(state_.colonies.size());
+
+    // Use a speed estimate that accounts for damage-related multipliers.
+    double plan_speed_km_s = sh.speed_km_s;
+    plan_speed_km_s *= maintenance_speed_mult(sh);
+    plan_speed_km_s *= ship_heat_speed_multiplier(sh);
+    plan_speed_km_s *= ship_subsystem_engine_multiplier(sh);
+    if (!std::isfinite(plan_speed_km_s) || plan_speed_km_s < 0.0) plan_speed_km_s = 0.0;
+
+    for (const auto& [cid, col] : state_.colonies) {
+      if (sh.faction_id == kInvalidId) continue;
+      if (!are_factions_trade_partners(sh.faction_id, col.faction_id)) continue;
+      const Body* b = find_ptr(state_.bodies, col.body_id);
+      if (!b || b->system_id == kInvalidId) continue;
+
+      // Plan a route to the current position of the colony body.
+      const auto plan_opt = plan_jump_route_cached(sh.system_id, sh.position_mkm, sh.faction_id, plan_speed_km_s,
+                                                   b->system_id, /*restrict_to_discovered=*/true, b->position_mkm);
+      if (!plan_opt) continue;
+
+      ColonyCandidate cand;
+      cand.colony_id = cid;
+      cand.body_id = col.body_id;
+      cand.system_id = b->system_id;
+      cand.plan = *plan_opt;
+      cand.has_shipyard = false;
+      if (auto it = col.installations.find("shipyard"); it != col.installations.end()) {
+        cand.has_shipyard = it->second > 0;
+      }
+      cand.system_hostile =
+          (sh.faction_id != kInvalidId) && (!detected_hostile_ships_in_system(sh.faction_id, cand.system_id).empty());
+      candidates.push_back(std::move(cand));
+    }
+
+    auto pick_best = [&](auto pred) -> std::optional<ColonyCandidate> {
+      std::optional<ColonyCandidate> best;
+      for (const auto& c : candidates) {
+        if (!pred(c)) continue;
+        if (!best || c.plan.total_eta_days < best->plan.total_eta_days) {
+          best = c;
+        }
+      }
+      return best;
+    };
+
+    std::optional<ColonyCandidate> chosen;
+    chosen = pick_best([](const ColonyCandidate& c) { return c.has_shipyard && !c.system_hostile; });
+    if (!chosen) chosen = pick_best([](const ColonyCandidate& c) { return !c.system_hostile; });
+    if (!chosen) chosen = pick_best([](const ColonyCandidate& c) { return c.has_shipyard; });
+    if (!chosen) chosen = pick_best([](const ColonyCandidate& c) { return true; });
+
+    if (chosen && chosen->body_id != kInvalidId) {
+      // Jump legs first...
+      for (Id jid : chosen->plan.jump_ids) {
+        if (jid != kInvalidId) out.push_back(TravelViaJump{jid});
+      }
+      // ...then dock at the colony body.
+      out.push_back(MoveToBody{chosen->body_id});
+      return out;
+    }
+
+    // Otherwise, flee via the best known jump point.
+    const StarSystem* sys = find_ptr(state_.systems, sh.system_id);
+    if (sys) {
+      struct JumpCandidate {
+        Id jump_id{kInvalidId};
+        bool dest_hostile{false};
+        bool dest_has_friendly_colony{false};
+        double dist{0.0};
+      };
+
+      std::vector<JumpCandidate> jc;
+      jc.reserve(sys->jump_points.size());
+
+      for (Id jid : sys->jump_points) {
+        const JumpPoint* jp = find_ptr(state_.jump_points, jid);
+        if (!jp) continue;
+        const JumpPoint* linked = (jp->linked_jump_id != kInvalidId) ? find_ptr(state_.jump_points, jp->linked_jump_id)
+                                                                     : nullptr;
+        const Id dest_sys = linked ? linked->system_id : kInvalidId;
+
+        JumpCandidate c;
+        c.jump_id = jid;
+        c.dist = (sh.position_mkm - jp->position_mkm).length();
+        if (!std::isfinite(c.dist)) c.dist = 1e18;
+
+        c.dest_hostile = (dest_sys != kInvalidId && sh.faction_id != kInvalidId) &&
+                         (!detected_hostile_ships_in_system(sh.faction_id, dest_sys).empty());
+        c.dest_has_friendly_colony = (dest_sys != kInvalidId) && any_friendly_colony_in_system(sh.faction_id, dest_sys);
+        jc.push_back(c);
+      }
+
+      auto better = [&](const JumpCandidate& a, const JumpCandidate& b) {
+        // Prefer non-hostile destinations, then destinations with friendly colonies, then shorter distance.
+        const auto key = [](const JumpCandidate& c) {
+          return std::tuple<int, int, double>(c.dest_hostile ? 1 : 0, c.dest_has_friendly_colony ? 0 : 1, c.dist);
+        };
+        return key(a) < key(b);
+      };
+
+      std::optional<JumpCandidate> best;
+      for (const auto& c : jc) {
+        if (!best || better(c, *best)) best = c;
+      }
+
+      if (best && best->jump_id != kInvalidId) {
+        out.push_back(TravelViaJump{best->jump_id});
+        return out;
+      }
+    }
+
+    // Last resort: move directly away from the centroid of detected hostiles.
+    Vec2 centroid;
+    int n = 0;
+    for (Id hid : detected_hostiles) {
+      const Ship* hs = find_ptr(state_.ships, hid);
+      if (!hs || hs->system_id != sh.system_id) continue;
+      centroid += hs->position_mkm;
+      ++n;
+    }
+    if (n > 0) centroid = centroid * (1.0 / static_cast<double>(n));
+
+    Vec2 dir = sh.position_mkm - centroid;
+    if (dir.length() <= 1e-9) dir = Vec2{1.0, 0.0};
+    dir = dir.normalized();
+    const double flee_dist = 200.0;  // mkm
+    out.push_back(MoveToPoint{sh.position_mkm + dir * flee_dist});
+    return out;
   };
 
   // --- Fleet cohesion prepass ---
@@ -1318,7 +1546,39 @@ void Simulation::tick_ships(double dt_days) {
     if (it == state_.ship_orders.end()) continue;
     auto& so = it->second;
 
-    if (so.queue.empty() && so.repeat && !so.repeat_template.empty()) {
+    // --- Auto-retreat: resume suspended orders ---
+    if (so.suspended && so.queue.empty()) {
+      const double hp_frac = ship_hp_fraction(ship);
+      const double resume_frac = std::clamp(ship.combat_doctrine.retreat_hp_resume_fraction, 0.0, 1.0);
+      bool safe_here = true;
+      if (ship.faction_id != kInvalidId && ship.system_id != kInvalidId) {
+        safe_here = detected_hostile_ships_in_system(ship.faction_id, ship.system_id).empty();
+      }
+
+      if (safe_here && hp_frac + 1e-9 >= resume_frac) {
+        so.queue = std::move(so.suspended_queue);
+        so.repeat = so.suspended_repeat;
+        so.repeat_count_remaining = so.suspended_repeat_count_remaining;
+        so.repeat_template = std::move(so.suspended_repeat_template);
+
+        so.suspended = false;
+        so.suspended_queue.clear();
+        so.suspended_repeat = false;
+        so.suspended_repeat_count_remaining = 0;
+        so.suspended_repeat_template.clear();
+
+        if (is_player_faction(ship.faction_id)) {
+          EventContext ctx;
+          ctx.faction_id = ship.faction_id;
+          ctx.system_id = ship.system_id;
+          ctx.ship_id = ship_id;
+          push_event(EventLevel::Info, EventCategory::Combat,
+                     std::string("Orders resumed after retreat: ") + ship.name, ctx);
+        }
+      }
+    }
+
+    if (!so.suspended && so.queue.empty() && so.repeat && !so.repeat_template.empty()) {
       if (so.repeat_count_remaining == 0) {
         // Finite-repeat cycle complete: stop repeating (but keep the template).
         so.repeat = false;
@@ -1326,6 +1586,72 @@ void Simulation::tick_ships(double dt_days) {
         so.queue = so.repeat_template;
         if (so.repeat_count_remaining > 0) {
           so.repeat_count_remaining -= 1;
+        }
+      }
+    }
+
+    // --- Auto-retreat: trigger emergency plan (may run even when queue is empty) ---
+    if (!so.suspended && ship.combat_doctrine.auto_retreat && ship.faction_id != kInvalidId &&
+        ship.system_id != kInvalidId) {
+      const double hp_frac = ship_hp_fraction(ship);
+      const double trig_hp = std::clamp(ship.combat_doctrine.retreat_hp_trigger_fraction, 0.0, 1.0);
+      bool trigger = hp_frac <= trig_hp + 1e-9;
+
+      if (!trigger && ship.combat_doctrine.retreat_when_out_of_missiles) {
+        const double ammo_frac = missile_ammo_fraction(ship);
+        const double trig_ammo =
+            std::clamp(ship.combat_doctrine.retreat_missile_ammo_trigger_fraction, 0.0, 1.0);
+        trigger = ammo_frac <= trig_ammo + 1e-9;
+      }
+
+      if (trigger) {
+        const auto hostiles = detected_hostile_ships_in_system(ship.faction_id, ship.system_id);
+        if (!hostiles.empty()) {
+          // Suspend current orders & repeat state.
+          so.suspended = true;
+          so.suspended_queue = std::move(so.queue);
+          so.suspended_repeat = so.repeat;
+          so.suspended_repeat_count_remaining = so.repeat_count_remaining;
+          so.suspended_repeat_template = std::move(so.repeat_template);
+
+          // Disable repeat while retreating.
+          so.repeat = false;
+          so.repeat_count_remaining = 0;
+          so.repeat_template.clear();
+
+          // Build emergency retreat plan.
+          so.queue = build_emergency_retreat_plan(ship, hostiles);
+
+          if (so.queue.empty()) {
+            // If planning failed for some reason, restore immediately.
+            so.queue = std::move(so.suspended_queue);
+            so.repeat = so.suspended_repeat;
+            so.repeat_count_remaining = so.suspended_repeat_count_remaining;
+            so.repeat_template = std::move(so.suspended_repeat_template);
+            so.suspended = false;
+            so.suspended_queue.clear();
+            so.suspended_repeat = false;
+            so.suspended_repeat_count_remaining = 0;
+            so.suspended_repeat_template.clear();
+          } else if (is_player_faction(ship.faction_id)) {
+            EventContext ctx;
+            ctx.faction_id = ship.faction_id;
+            ctx.system_id = ship.system_id;
+            ctx.ship_id = ship_id;
+
+            std::string reason;
+            if (hp_frac <= trig_hp + 1e-9) {
+              reason = std::string("HP ") +
+                       std::to_string(static_cast<int>(std::lround(hp_frac * 100.0))) + "%";
+            } else {
+              const double ammo_frac = missile_ammo_fraction(ship);
+              reason = std::string("Missile ammo ") +
+                       std::to_string(static_cast<int>(std::lround(ammo_frac * 100.0))) + "%";
+            }
+
+            push_event(EventLevel::Warn, EventCategory::Combat,
+                       std::string("Emergency retreat: ") + ship.name + " (" + reason + ")", ctx);
+          }
         }
       }
     }
@@ -1912,7 +2238,18 @@ void Simulation::tick_ships(double dt_days) {
       cargo_mineral = ord.mineral;
       cargo_tons = ord.tons;
       const auto* colony = find_ptr(state_.colonies, cargo_colony_id);
-      if (!colony || !are_factions_trade_partners(ship.faction_id, colony->faction_id)) { q.erase(q.begin()); continue; }
+      const bool trade_ok = [&]() {
+        if (!colony) return false;
+        if (are_factions_trade_partners(ship.faction_id, colony->faction_id)) return true;
+
+        // Allow Merchant Guild civilian convoys to trade with non-hostile colonies when enabled.
+        if (allow_civilian_trade_cargo_ops && ship.faction_id == merchant_faction_id) {
+          return !are_factions_hostile(ship.faction_id, colony->faction_id) &&
+                 !are_factions_hostile(colony->faction_id, ship.faction_id);
+        }
+        return false;
+      }();
+      if (!trade_ok) { q.erase(q.begin()); continue; }
       const auto* body = find_ptr(state_.bodies, colony->body_id);
       if (!body || body->system_id != ship.system_id) { q.erase(q.begin()); continue; }
       target = body->position_mkm;
@@ -1925,7 +2262,18 @@ void Simulation::tick_ships(double dt_days) {
       cargo_mineral = ord.mineral;
       cargo_tons = ord.tons;
       const auto* colony = find_ptr(state_.colonies, cargo_colony_id);
-      if (!colony || !are_factions_trade_partners(ship.faction_id, colony->faction_id)) { q.erase(q.begin()); continue; }
+      const bool trade_ok = [&]() {
+        if (!colony) return false;
+        if (are_factions_trade_partners(ship.faction_id, colony->faction_id)) return true;
+
+        // Allow Merchant Guild civilian convoys to trade with non-hostile colonies when enabled.
+        if (allow_civilian_trade_cargo_ops && ship.faction_id == merchant_faction_id) {
+          return !are_factions_hostile(ship.faction_id, colony->faction_id) &&
+                 !are_factions_hostile(colony->faction_id, ship.faction_id);
+        }
+        return false;
+      }();
+      if (!trade_ok) { q.erase(q.begin()); continue; }
       const auto* body = find_ptr(state_.bodies, colony->body_id);
       if (!body || body->system_id != ship.system_id) { q.erase(q.begin()); continue; }
       target = body->position_mkm;
@@ -2351,20 +2699,22 @@ void Simulation::tick_ships(double dt_days) {
       std::unordered_map<std::string, double>* dest_minerals = nullptr;
       double dest_capacity_free = 1e300;
 
+      Colony* cargo_colony = nullptr;
+
       if (cargo_mode == 0) { // Load from colony
-        auto* col = find_ptr(state_.colonies, cargo_colony_id);
-        if (!col) return 0.0;
-        source_minerals = &col->minerals;
+        cargo_colony = find_ptr(state_.colonies, cargo_colony_id);
+        if (!cargo_colony) return 0.0;
+        source_minerals = &cargo_colony->minerals;
         dest_minerals = &ship.cargo;
         
         const auto* d = find_design(ship.design_id);
         const double cap = d ? d->cargo_tons : 0.0;
         dest_capacity_free = std::max(0.0, cap - cargo_used_tons(ship));
       } else if (cargo_mode == 1) { // Unload to colony
-        auto* col = find_ptr(state_.colonies, cargo_colony_id);
-        if (!col) return 0.0;
+        cargo_colony = find_ptr(state_.colonies, cargo_colony_id);
+        if (!cargo_colony) return 0.0;
         source_minerals = &ship.cargo;
-        dest_minerals = &col->minerals;
+        dest_minerals = &cargo_colony->minerals;
         // Colony has infinite capacity
       } else if (cargo_mode == 2) { // Transfer to ship
         auto* tgt = find_ptr(state_.ships, cargo_target_ship_id);
@@ -2409,7 +2759,37 @@ void Simulation::tick_ships(double dt_days) {
       auto transfer_one = [&](const std::string& min_type, double amount_limit) {
         if (amount_limit <= 1e-9) return 0.0;
         auto it_src = source_minerals->find(min_type);
-        const double have = (it_src != source_minerals->end()) ? std::max(0.0, it_src->second) : 0.0;
+        const double have_raw = (it_src != source_minerals->end()) ? std::max(0.0, it_src->second) : 0.0;
+        double have = have_raw;
+
+        // Civilian trade convoy export safeguards (Merchant Guild loading from colonies).
+        if (cargo_mode == 0 && allow_civilian_trade_cargo_ops && ship.faction_id == merchant_faction_id && cargo_colony) {
+          double reserve_floor = 0.0;
+
+          if (auto it = cargo_colony->mineral_reserves.find(min_type); it != cargo_colony->mineral_reserves.end()) {
+            reserve_floor = std::max(reserve_floor, std::max(0.0, it->second));
+          }
+          if (auto it = cargo_colony->mineral_targets.find(min_type); it != cargo_colony->mineral_targets.end()) {
+            reserve_floor = std::max(reserve_floor, std::max(0.0, it->second));
+          }
+
+          reserve_floor = std::max(reserve_floor,
+                                   logistics_reserve_tons(cargo_colony->faction_id, cargo_colony_id, min_type));
+
+          if (min_type == "Fuel") {
+            reserve_floor =
+                std::max(reserve_floor, std::max(0.0, cfg_.civilian_trade_convoy_export_min_fuel_reserve_tons));
+          } else if (min_type == "Munitions") {
+            reserve_floor =
+                std::max(reserve_floor, std::max(0.0, cfg_.civilian_trade_convoy_export_min_munitions_reserve_tons));
+          }
+
+          const double mult = std::max(0.0, cfg_.civilian_trade_convoy_export_reserve_multiplier);
+          reserve_floor *= mult;
+
+          have = std::max(0.0, have_raw - reserve_floor);
+        }
+
         const double take = std::min(have, amount_limit);
         if (take > 1e-9) {
           (*dest_minerals)[min_type] += take;

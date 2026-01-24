@@ -17,6 +17,7 @@
 #include "nebula4x/core/order_planner.h"
 #include "nebula4x/core/ground_battle_forecast.h"
 #include "nebula4x/core/research_schedule.h"
+#include "nebula4x/core/terraforming_schedule.h"
 #include "nebula4x/core/simulation.h"
 
 namespace nebula4x {
@@ -443,6 +444,103 @@ PlannerEventsResult compute_planner_events(const Simulation& sim, Id faction_id,
 
       if (!push_bounded(items, opt, std::move(ev), truncated, trunc_reason)) break;
       if (truncated) break;
+    }
+  }
+
+  // --- Terraforming (body-level) ---
+  if (opt.include_terraforming) {
+    TerraformingScheduleOptions to;
+    to.max_days = std::max(0, opt.max_days);
+
+    // Determine which bodies this faction currently has terraforming targets on.
+    std::vector<Id> body_ids;
+    body_ids.reserve(sim.state().colonies.size());
+    for (const auto& [cid, c] : sim.state().colonies) {
+      if (c.faction_id != faction_id) continue;
+      if (c.body_id == kInvalidId) continue;
+      const auto* b = find_ptr(sim.state().bodies, c.body_id);
+      if (!b) continue;
+      const bool has_target = (b->terraforming_target_temp_k > 0.0 || b->terraforming_target_atm > 0.0);
+      if (!has_target) continue;
+      body_ids.push_back(c.body_id);
+    }
+    std::sort(body_ids.begin(), body_ids.end());
+    body_ids.erase(std::unique(body_ids.begin(), body_ids.end()), body_ids.end());
+
+    for (Id bid : body_ids) {
+      const auto* b = find_ptr(sim.state().bodies, bid);
+      if (!b) continue;
+
+      // Pick a representative colony for navigation (prefer the viewing faction).
+      Id nav_colony = kInvalidId;
+      for (const auto& [cid, c] : sim.state().colonies) {
+        if (c.body_id != bid) continue;
+        if (c.faction_id == faction_id) {
+          nav_colony = cid;
+          break;
+        }
+        if (nav_colony == kInvalidId) nav_colony = cid;
+      }
+
+      const TerraformingSchedule sched = estimate_terraforming_schedule(sim, bid, to);
+      if (!sched.ok || !sched.has_target) continue;
+
+      // Skip already-complete targets (they are in the actual event log).
+      if (sched.complete && sched.days_to_complete <= 0) continue;
+
+      std::string body_name = b->name.empty() ? ("Body " + std::to_string(bid)) : b->name;
+
+      if (sched.stalled) {
+        PlannerEvent ev;
+        ev.eta_days = 0.0;
+        const auto dh = eta_to_day_hour(sim, 0.0);
+        ev.day = dh.day;
+        ev.hour = dh.hour;
+        ev.level = EventLevel::Warn;
+        ev.category = EventCategory::Terraforming;
+        ev.faction_id = faction_id;
+        ev.system_id = b->system_id;
+        ev.colony_id = nav_colony;
+        ev.title = "Terraforming stalled: " + body_name;
+        ev.detail = sched.stall_reason;
+        (void)push_bounded(items, opt, std::move(ev), truncated, trunc_reason);
+        continue;
+      }
+      if (sched.truncated) {
+        PlannerEvent ev;
+        ev.eta_days = 0.0;
+        const auto dh = eta_to_day_hour(sim, 0.0);
+        ev.day = dh.day;
+        ev.hour = dh.hour;
+        ev.level = EventLevel::Warn;
+        ev.category = EventCategory::Terraforming;
+        ev.faction_id = faction_id;
+        ev.system_id = b->system_id;
+        ev.colony_id = nav_colony;
+        ev.title = "Terraforming forecast truncated: " + body_name;
+        ev.detail = sched.truncated_reason;
+        (void)push_bounded(items, opt, std::move(ev), truncated, trunc_reason);
+        continue;
+      }
+
+      if (sched.days_to_complete <= 0) continue;
+
+      PlannerEvent ev;
+      ev.eta_days = static_cast<double>(sched.days_to_complete);
+      const auto dh = eta_to_day_hour(sim, ev.eta_days);
+      ev.day = dh.day;
+      ev.hour = dh.hour;
+      ev.level = EventLevel::Info;
+      ev.category = EventCategory::Terraforming;
+      ev.faction_id = faction_id;
+      ev.system_id = b->system_id;
+      ev.colony_id = nav_colony;
+      ev.title = "Terraforming complete: " + body_name;
+
+      // Include the target in detail for filtering.
+      ev.detail = "target_temp_k=" + std::to_string(sched.target_temp_k) + ", target_atm=" + std::to_string(sched.target_atm);
+
+      if (!push_bounded(items, opt, std::move(ev), truncated, trunc_reason)) break;
     }
   }
 

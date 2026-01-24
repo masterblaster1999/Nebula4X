@@ -48,7 +48,9 @@ target_sources(nebula4x_core
     src/core/salvage_planner.cpp
     src/core/contract_planner.cpp
     src/core/troop_planner.cpp
+    src/core/colonist_planner.cpp
     src/core/research_schedule.cpp
+    src/core/terraforming_schedule.cpp
     src/core/colony_schedule.cpp
     src/core/colony_profiles.cpp
   src/core/ship_profiles.cpp
@@ -207,6 +209,8 @@ if(NEBULA4X_BUILD_UI)
     src/ui/new_game_modal.cpp
     src/ui/hud.cpp
     src/ui/ui_commands.cpp
+    src/ui/navigation.cpp
+    src/ui/navigator_window.cpp
     src/ui/map_render.cpp
     src/ui/raymarch_nebula.cpp
     src/ui/raytrace_sensor_heatmap.cpp
@@ -222,6 +226,8 @@ if(NEBULA4X_BUILD_UI)
     src/ui/sustainment_window.cpp
     src/ui/fleet_manager_window.cpp
     src/ui/troop_window.cpp
+    src/ui/colonist_window.cpp
+    src/ui/terraforming_window.cpp
     src/ui/advisor_window.cpp
     src/ui/colony_profiles_window.cpp
   src/ui/ship_profiles_window.cpp
