@@ -37,6 +37,11 @@
 
 #include "ui/screen_reader.h"
 
+#include "ui/notifications.h"
+#include "ui/window_management.h"
+
+#include "ui/hotkeys_window.h"
+
 #include "ui/procedural_theme.h"
 #include "ui/procedural_layout.h"
 #include "ui/procgen_graphics.h"
@@ -494,6 +499,11 @@ void draw_main_menu(Simulation& sim, UIState& ui, char* save_path, char* load_pa
       ImGui::MenuItem("Controls", nullptr, &ui.show_controls_window);
       ImGui::MenuItem("Map", nullptr, &ui.show_map_window);
       ImGui::MenuItem("Details", nullptr, &ui.show_details_window);
+      ImGui::MenuItem("Window Manager", "Ctrl+Shift+W", &ui.show_window_manager_window);
+      if (ImGui::MenuItem("Focus Mode (Map only)", "F10", focus_mode_enabled(ui))) {
+        toggle_focus_mode(ui);
+      }
+      ImGui::Separator();
       ImGui::MenuItem("Directory (Colonies/Bodies)", nullptr, &ui.show_directory_window);
       ImGui::MenuItem("Production (Shipyard/Construction Planner)", nullptr, &ui.show_production_window);
       ImGui::MenuItem("Economy (Industry/Mining/Tech Tree)", nullptr, &ui.show_economy_window);
@@ -517,14 +527,22 @@ void draw_main_menu(Simulation& sim, UIState& ui, char* save_path, char* load_pa
       ImGui::MenuItem("Survey Network (Jump Survey)", "Ctrl+Shift+J", &ui.show_survey_network_window);
       ImGui::MenuItem("Time Warp (Until Event)", nullptr, &ui.show_time_warp_window);
       ImGui::MenuItem("Timeline (Event Timeline)", nullptr, &ui.show_timeline_window);
+      {
+        const int inbox_unread = notifications_unread_count(ui);
+        std::string label = "Notification Center";
+        if (inbox_unread > 0) label += " (" + std::to_string(inbox_unread) + ")";
+        ImGui::MenuItem(label.c_str(), "F3", &ui.show_notifications_window);
+      }
       ImGui::MenuItem("Design Studio (Blueprints)", nullptr, &ui.show_design_studio_window);
       ImGui::MenuItem("Balance Lab (Duel Tournament)", nullptr, &ui.show_balance_lab_window);
       ImGui::MenuItem("Intel (Contacts/Sensors)", nullptr, &ui.show_intel_window);
+      ImGui::MenuItem("Intel Notebook (Notes + Journal)", "Ctrl+Shift+I", &ui.show_intel_notebook_window);
       ImGui::MenuItem("Diplomacy Graph (Relations)", nullptr, &ui.show_diplomacy_window);
       ImGui::MenuItem("Victory & Score", nullptr, &ui.show_victory_window);
       ImGui::MenuItem("Settings Window", nullptr, &ui.show_settings_window);
       ImGui::MenuItem("Save Tools (Diff/Patch)", nullptr, &ui.show_save_tools_window);
       ImGui::MenuItem("Time Machine (State History)", "Ctrl+Shift+D", &ui.show_time_machine_window);
+      ImGui::MenuItem("Compare / Diff (Entities)", "Ctrl+Shift+X", &ui.show_compare_window);
       ImGui::MenuItem("OmniSearch (JSON + Commands)", "Ctrl+F", &ui.show_omni_search_window);
       ImGui::MenuItem("Navigator (History + Bookmarks)", "Ctrl+Shift+N", &ui.show_navigator_window);
       ImGui::MenuItem("Entity Inspector (ID Resolver)", "Ctrl+G", &ui.show_entity_inspector_window);
@@ -643,6 +661,9 @@ void draw_main_menu(Simulation& sim, UIState& ui, char* save_path, char* load_pa
       if (ImGui::MenuItem("Open Intel")) {
         ui.show_intel_window = true;
       }
+      if (ImGui::MenuItem("Open Intel Notebook", "Ctrl+Shift+I")) {
+        ui.show_intel_notebook_window = true;
+      }
       if (ImGui::MenuItem("Open Diplomacy Graph")) {
         ui.show_diplomacy_window = true;
       }
@@ -654,6 +675,9 @@ void draw_main_menu(Simulation& sim, UIState& ui, char* save_path, char* load_pa
       }
       if (ImGui::MenuItem("Open Time Machine (State History)", "Ctrl+Shift+D")) {
         ui.show_time_machine_window = true;
+      }
+      if (ImGui::MenuItem("Open Compare / Diff (Entities)", "Ctrl+Shift+X")) {
+        ui.show_compare_window = true;
       }
       if (ImGui::MenuItem("Open JSON Explorer")) {
         ui.show_json_explorer_window = true;
@@ -9662,7 +9686,7 @@ void draw_settings_window(UIState& ui, char* ui_prefs_path, UIPrefActions& actio
       ImGui::Checkbox("Sync map backgrounds", &ui.ui_procedural_theme_sync_backgrounds);
       if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip(
-            "When enabled, the procedural theme also drives the SDL clear color and map backgrounds.");
+            "When enabled, the procedural theme also drives the renderer clear color and map backgrounds.");
       }
 
       // Preview + share.
@@ -9756,7 +9780,7 @@ void draw_settings_window(UIState& ui, char* ui_prefs_path, UIPrefActions& actio
 
     const bool procedural_bg_lock = (ui.ui_style_preset == 5 && ui.ui_procedural_theme_sync_backgrounds);
     if (procedural_bg_lock) ImGui::BeginDisabled();
-    ImGui::ColorEdit4("Clear background (SDL)", ui.clear_color);
+    ImGui::ColorEdit4("Clear background", ui.clear_color);
     ImGui::ColorEdit4("System map background", ui.system_map_bg);
     ImGui::ColorEdit4("Galaxy map background", ui.galaxy_map_bg);
     ImGui::Checkbox("Override window background", &ui.override_window_bg);
@@ -9929,6 +9953,34 @@ void draw_settings_window(UIState& ui, char* ui_prefs_path, UIPrefActions& actio
       ui.event_toast_duration_sec = std::clamp(ui.event_toast_duration_sec, 0.5f, 60.0f);
     }
 
+    ImGui::SeparatorText("Notification Center");
+    {
+      ImGui::Checkbox("Capture simulation events", &ui.notifications_capture_sim_events);
+      if (ui.notifications_capture_sim_events) {
+        ImGui::Indent();
+        ImGui::Checkbox("Include info events", &ui.notifications_capture_info_events);
+        ImGui::Unindent();
+      }
+      ImGui::Checkbox("Capture watchboard alerts", &ui.notifications_capture_watchboard_alerts);
+      ImGui::Checkbox("Collapse duplicates", &ui.notifications_collapse_duplicates);
+      ImGui::Checkbox("Auto-open on error", &ui.notifications_auto_open_on_error);
+
+      ImGui::SliderInt("Max stored notifications", &ui.notifications_max_entries, 50, 2000);
+      ui.notifications_max_entries = std::clamp(ui.notifications_max_entries, 25, 10000);
+      ImGui::SliderInt("Retention (days, 0=forever)", &ui.notifications_keep_days, 0, 3650);
+      ui.notifications_keep_days = std::clamp(ui.notifications_keep_days, 0, 36500);
+
+      if (ImGui::Button("Open Notification Center (F3)")) ui.show_notifications_window = true;
+      ImGui::SameLine();
+      if (ImGui::Button("Clear read notifications")) notifications_clear_read(ui);
+    }
+
+    ImGui::SeparatorText("Command Console");
+    {
+      ImGui::SliderInt("Recent commands (0=disabled)", &ui.command_recent_limit, 0, 50);
+      ui.command_recent_limit = std::clamp(ui.command_recent_limit, 0, 100);
+    }
+
     ImGui::SeparatorText("Screen Reader (Narration)");
     {
       ScreenReader& sr = ScreenReader::instance();
@@ -10006,10 +10058,15 @@ void draw_settings_window(UIState& ui, char* ui_prefs_path, UIPrefActions& actio
 
     ImGui::SeparatorText("Shortcuts");
     ImGui::TextDisabled(
-        "Ctrl+P palette, Ctrl+F search, Ctrl+G entity, Ctrl+Shift+G graph, Ctrl+Shift+A advisor, "
-        "Ctrl+Shift+B colony profiles, F1 help, Ctrl+S save, Ctrl+O load, Ctrl+0 diplomacy, Ctrl+7 timeline, "
-        "Ctrl+8 design studio, Ctrl+9 intel, Space +1 day, Ctrl+Alt+R screen reader, Ctrl+Alt+. repeat last.");
+        "Keyboard shortcuts are now fully rebindable. See Settings > Hotkeys for the current bindings.\n"
+        "Tip: the Command Console (Ctrl+P by default) also lists shortcuts next to actions.");
 
+    ImGui::EndTabItem();
+  }
+
+  // --- Hotkeys tab ---
+  if (ImGui::BeginTabItem("Hotkeys")) {
+    draw_hotkeys_settings_tab(ui, actions);
     ImGui::EndTabItem();
   }
 
@@ -10100,6 +10157,7 @@ void draw_settings_window(UIState& ui, char* ui_prefs_path, UIPrefActions& actio
     ImGui::Checkbox("Design Studio", &ui.show_design_studio_window);
     ImGui::Checkbox("Balance Lab", &ui.show_balance_lab_window);
     ImGui::Checkbox("Intel", &ui.show_intel_window);
+    ImGui::Checkbox("Intel Notebook", &ui.show_intel_notebook_window);
     ImGui::Checkbox("Diplomacy Graph", &ui.show_diplomacy_window);
     ImGui::Checkbox("Victory & Score", &ui.show_victory_window);
 
@@ -10116,6 +10174,25 @@ void draw_settings_window(UIState& ui, char* ui_prefs_path, UIPrefActions& actio
     ImGui::Checkbox("Hold Shift to dock", &ui.docking_with_shift);
     ImGui::Checkbox("Always show tab bars", &ui.docking_always_tab_bar);
     ImGui::Checkbox("Transparent docking preview", &ui.docking_transparent_payload);
+
+    ImGui::SeparatorText("Detachable Windows");
+#if NEBULA4X_UI_RENDERER_OPENGL2
+#ifdef IMGUI_HAS_VIEWPORT
+    ImGui::Checkbox("Enable detachable tool windows (multi-viewport)", &ui.viewports_enable);
+    ImGui::BeginDisabled(!ui.viewports_enable);
+    ImGui::Checkbox("No taskbar icons for tool windows", &ui.viewports_no_taskbar_icon);
+    ImGui::Checkbox("Disable viewport auto-merge", &ui.viewports_no_auto_merge);
+    ImGui::Checkbox("No OS window decorations (advanced)", &ui.viewports_no_decoration);
+    ImGui::EndDisabled();
+    ImGui::TextDisabled("Tip: drag a window outside the main app window to detach it.");
+#else
+    ImGui::TextDisabled("This ImGui build does not have multi-viewport support enabled.");
+#endif
+#else
+    ImGui::TextDisabled("Detachable OS windows require the OpenGL2 UI backend.");
+    ImGui::TextDisabled("Reconfigure with -DNEBULA4X_UI_USE_OPENGL2=ON.");
+#endif
+
     {
       const char* ini = ImGui::GetIO().IniFilename;
       ImGui::TextDisabled("Layout file: %s", (ini && ini[0]) ? ini : "(none)");
@@ -10127,6 +10204,20 @@ void draw_settings_window(UIState& ui, char* ui_prefs_path, UIPrefActions& actio
         ui.show_layout_profiles_window = true;
       }
     }
+
+    ImGui::SeparatorText("Popup Windows");
+    ImGui::Checkbox("Popup-first mode (new windows open floating)", &ui.window_popup_first_mode);
+    ImGui::SameLine();
+    ImGui::Checkbox("Auto-focus popups", &ui.window_popup_auto_focus);
+    ImGui::SliderFloat("Popup cascade step (px)", &ui.window_popup_cascade_step_px, 0.0f, 64.0f, "%.0f");
+    if (ImGui::SmallButton("Open Window Manager...")) {
+      ui.show_window_manager_window = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Clear per-window overrides")) {
+      ui.window_launch_overrides.clear();
+    }
+    ImGui::TextDisabled("Tip: The Window Manager has one-click Pop Out buttons to undock any panel.");
 
 
     ImGui::SeparatorText("Procedural Layout Synthesizer");

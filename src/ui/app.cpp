@@ -21,6 +21,7 @@
 #include "ui/panels.h"
 #include "ui/new_game_modal.h"
 #include "ui/screen_reader.h"
+#include "ui/guided_tour.h"
 #include "ui/economy_window.h"
 #include "ui/planner_window.h"
 #include "ui/regions_window.h"
@@ -49,11 +50,14 @@
 #include "ui/procgen_atlas_window.h"
 #include "ui/star_atlas_window.h"
 #include "ui/intel_window.h"
+#include "ui/intel_notebook_window.h"
 #include "ui/victory_window.h"
 #include "ui/diplomacy_window.h"
 #include "ui/save_tools_window.h"
 #include "ui/time_machine_window.h"
+#include "ui/compare_window.h"
 #include "ui/navigation.h"
+#include "ui/hotkeys.h"
 #include "ui/navigator_window.h"
 #include "ui/omni_search_window.h"
 #include "ui/json_explorer_window.h"
@@ -64,6 +68,8 @@
 #include "ui/reference_graph_window.h"
 #include "ui/watchboard_window.h"
 #include "ui/watchboard_alerts.h"
+#include "ui/notifications.h"
+#include "ui/notifications_window.h"
 #include "ui/data_lenses_window.h"
 #include "ui/dashboards_window.h"
 #include "ui/pivot_tables_window.h"
@@ -73,6 +79,8 @@
 #include "ui/layout_profiles_window.h"
 #include "ui/procedural_theme.h"
 #include "ui/procedural_layout.h"
+#include "ui/window_management.h"
+#include "ui/window_manager_window.h"
 
 namespace nebula4x::ui {
 
@@ -135,6 +143,28 @@ void App::pre_frame() {
 
   ImGuiIO& io = ImGui::GetIO();
   io.IniFilename = imgui_ini_filename();
+
+  // Apply persisted docking and viewport behavior before ImGui::NewFrame().
+  io.ConfigDockingWithShift = ui_.docking_with_shift;
+  io.ConfigDockingAlwaysTabBar = ui_.docking_always_tab_bar;
+  io.ConfigDockingTransparentPayload = ui_.docking_transparent_payload;
+
+#ifdef IMGUI_HAS_VIEWPORT
+#if NEBULA4X_UI_RENDERER_OPENGL2
+  // Multi-viewport enables detachable OS windows for floating ImGui windows.
+  if (ui_.viewports_enable) {
+    io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
+  } else {
+    io.ConfigFlags &= ~ImGuiConfigFlags_ViewportsEnable;
+  }
+  io.ConfigViewportsNoTaskBarIcon = ui_.viewports_no_taskbar_icon;
+  io.ConfigViewportsNoAutoMerge = ui_.viewports_no_auto_merge;
+  io.ConfigViewportsNoDecoration = ui_.viewports_no_decoration;
+#else
+  // SDL_Renderer2 backend cannot render platform windows; ensure viewports are off.
+  io.ConfigFlags &= ~ImGuiConfigFlags_ViewportsEnable;
+#endif
+#endif
 
   // Reload request or ini path change: load before NewFrame for best results.
   const bool path_changed = (imgui_ini_path_ != last_imgui_ini_path_applied_);
@@ -199,6 +229,10 @@ void App::frame() {
     ui_.nav_bookmarks.clear();
     ui_.nav_next_bookmark_id = 1;
 
+    // The Notification Center is UI-only and holds pointers/IDs into the prior
+    // simulation snapshot; clear it on load.
+    notifications_reset(ui_);
+
     // Reset autosave cadence when the underlying state is replaced.
     autosave_mgr_.reset();
     ui_.last_autosave_game_path.clear();
@@ -211,11 +245,6 @@ void App::frame() {
     ImGuiIO& io = ImGui::GetIO();
     ui_.ui_scale = std::clamp(ui_.ui_scale, 0.65f, 2.5f);
     io.FontGlobalScale = ui_.ui_scale;
-
-    // Docking behavior (persisted via ui_prefs.json).
-    io.ConfigDockingWithShift = ui_.docking_with_shift;
-    io.ConfigDockingAlwaysTabBar = ui_.docking_always_tab_bar;
-    io.ConfigDockingTransparentPayload = ui_.docking_transparent_payload;
   }
 
   // Apply last-frame style overrides so the menu/settings windows reflect them.
@@ -244,66 +273,92 @@ void App::frame() {
   // --- Global keyboard shortcuts (UI focus) ---
   {
     const ImGuiIO& io = ImGui::GetIO();
-    // Avoid stealing shortcuts when the user is typing in an input field.
-    if (!io.WantTextInput) {
+
+    // If the settings window isn't open, abort any pending hotkey capture.
+    // This prevents global hotkeys from being permanently suppressed if the
+    // user closes Settings mid-capture.
+    if (!ui_.show_settings_window) {
+      ui_.hotkeys_capture_id.clear();
+    }
+    ui_.hotkeys_capture_active = !ui_.hotkeys_capture_id.empty();
+
+    // Avoid stealing shortcuts when the user is typing in an input field, or while
+    // the Hotkeys editor is capturing a new chord.
+    if (ui_.hotkeys_enabled && !ui_.hotkeys_capture_active && !io.WantTextInput) {
+      auto hk = [&](const char* id) { return hotkey_pressed(ui_, id, io); };
+
       // Command palette / help.
-      if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_P)) ui_.show_command_palette = true;
-      if (io.KeyCtrl && !io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_F)) ui_.show_omni_search_window = !ui_.show_omni_search_window;
-      if (io.KeyCtrl && !io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_G)) ui_.show_entity_inspector_window = !ui_.show_entity_inspector_window;
-      if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_G)) ui_.show_reference_graph_window = !ui_.show_reference_graph_window;
-      if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_D)) ui_.show_time_machine_window = !ui_.show_time_machine_window;
-      if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_N)) ui_.show_navigator_window = !ui_.show_navigator_window;
-      if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_A)) ui_.show_advisor_window = !ui_.show_advisor_window;
-      if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_B)) ui_.show_colony_profiles_window = !ui_.show_colony_profiles_window;
-      if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_M)) ui_.show_ship_profiles_window = !ui_.show_ship_profiles_window;
-      if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Y)) ui_.show_shipyard_targets_window = !ui_.show_shipyard_targets_window;
-      if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_J)) ui_.show_survey_network_window = !ui_.show_survey_network_window;
-      if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_R)) ui_.show_regions_window = !ui_.show_regions_window;
-      if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_F)) ui_.show_fleet_manager_window = !ui_.show_fleet_manager_window;
-      if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_V)) ui_.show_content_validation_window = !ui_.show_content_validation_window;
-      if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_K)) ui_.show_state_doctor_window = !ui_.show_state_doctor_window;
-      if (ImGui::IsKeyPressed(ImGuiKey_F1)) ui_.show_help_window = !ui_.show_help_window;
+      if (hk("ui.command_console")) ui_.show_command_palette = true;
+      if (hk("ui.toggle.omnisearch")) ui_.show_omni_search_window = !ui_.show_omni_search_window;
+      if (hk("ui.toggle.entity_inspector")) ui_.show_entity_inspector_window = !ui_.show_entity_inspector_window;
+      if (hk("ui.toggle.reference_graph")) ui_.show_reference_graph_window = !ui_.show_reference_graph_window;
+      if (hk("ui.toggle.time_machine")) ui_.show_time_machine_window = !ui_.show_time_machine_window;
+      if (hk("ui.toggle.compare")) ui_.show_compare_window = !ui_.show_compare_window;
+      if (hk("ui.toggle.navigator")) ui_.show_navigator_window = !ui_.show_navigator_window;
+      if (hk("ui.toggle.advisor")) ui_.show_advisor_window = !ui_.show_advisor_window;
+      if (hk("ui.toggle.colony_profiles")) ui_.show_colony_profiles_window = !ui_.show_colony_profiles_window;
+      if (hk("ui.toggle.ship_profiles")) ui_.show_ship_profiles_window = !ui_.show_ship_profiles_window;
+      if (hk("ui.toggle.shipyard_targets")) ui_.show_shipyard_targets_window = !ui_.show_shipyard_targets_window;
+      if (hk("ui.toggle.survey_network")) ui_.show_survey_network_window = !ui_.show_survey_network_window;
+      if (hk("ui.toggle.regions")) ui_.show_regions_window = !ui_.show_regions_window;
+      if (hk("ui.toggle.fleet_manager")) ui_.show_fleet_manager_window = !ui_.show_fleet_manager_window;
+      if (hk("ui.toggle.content_validation")) ui_.show_content_validation_window = !ui_.show_content_validation_window;
+      if (hk("ui.toggle.state_doctor")) ui_.show_state_doctor_window = !ui_.show_state_doctor_window;
+      if (hk("ui.toggle.help")) ui_.show_help_window = !ui_.show_help_window;
+      if (hk("ui.toggle.tours")) {
+        // Guided tours overlay toggle.
+        ui_.tour_active = !ui_.tour_active;
+        if (ui_.tour_active) {
+          // Start/resume the currently selected tour; hide Help so the spotlight is not obscured.
+          ui_.show_help_window = false;
+          // Clamp indexes defensively.
+          if (ui_.tour_active_index < 0) ui_.tour_active_index = 0;
+          if (ui_.tour_step_index < 0) ui_.tour_step_index = 0;
+        }
+      }
+      if (hk("ui.toggle.notifications")) ui_.show_notifications_window = !ui_.show_notifications_window;
+      if (hk("ui.toggle.settings")) ui_.show_settings_window = !ui_.show_settings_window;
 
       // Selection history navigation.
-      if (io.KeyAlt && !io.KeyCtrl && !io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_LeftArrow)) {
+      if (hk("nav.back")) {
         nav_history_back(sim_, ui_, selected_ship_, selected_colony_, selected_body_, ui_.nav_open_windows_on_jump);
       }
-      if (io.KeyAlt && !io.KeyCtrl && !io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_RightArrow)) {
+      if (hk("nav.forward")) {
         nav_history_forward(sim_, ui_, selected_ship_, selected_colony_, selected_body_, ui_.nav_open_windows_on_jump);
       }
 
       // Quick window toggles.
-      if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_1)) ui_.show_controls_window = !ui_.show_controls_window;
-      if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_2)) ui_.show_map_window = !ui_.show_map_window;
-      if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_3)) ui_.show_details_window = !ui_.show_details_window;
-      if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_4)) ui_.show_directory_window = !ui_.show_directory_window;
-      if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_5)) ui_.show_economy_window = !ui_.show_economy_window;
-      if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_6)) ui_.show_production_window = !ui_.show_production_window;
-      if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_7)) ui_.show_timeline_window = !ui_.show_timeline_window;
-      if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_8)) ui_.show_design_studio_window = !ui_.show_design_studio_window;
-      if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_9)) ui_.show_intel_window = !ui_.show_intel_window;
-      if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_0)) ui_.show_diplomacy_window = !ui_.show_diplomacy_window;
-      if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Comma)) ui_.show_settings_window = !ui_.show_settings_window;
-      if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_L)) {
-        ui_.show_layout_profiles_window = !ui_.show_layout_profiles_window;
-      }
-      if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_U)) ui_.show_ui_forge_window = !ui_.show_ui_forge_window;
-      if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_C)) ui_.show_context_forge_window = !ui_.show_context_forge_window;
+      if (hk("ui.toggle.controls")) ui_.show_controls_window = !ui_.show_controls_window;
+      if (hk("ui.toggle.map")) ui_.show_map_window = !ui_.show_map_window;
+      if (hk("ui.toggle.details")) ui_.show_details_window = !ui_.show_details_window;
+      if (hk("ui.toggle.directory")) ui_.show_directory_window = !ui_.show_directory_window;
+      if (hk("ui.toggle.economy")) ui_.show_economy_window = !ui_.show_economy_window;
+      if (hk("ui.toggle.production")) ui_.show_production_window = !ui_.show_production_window;
+      if (hk("ui.toggle.timeline")) ui_.show_timeline_window = !ui_.show_timeline_window;
+      if (hk("ui.toggle.design_studio")) ui_.show_design_studio_window = !ui_.show_design_studio_window;
+      if (hk("ui.toggle.intel")) ui_.show_intel_window = !ui_.show_intel_window;
+      if (hk("ui.toggle.intel_notebook")) ui_.show_intel_notebook_window = !ui_.show_intel_notebook_window;
+      if (hk("ui.toggle.diplomacy")) ui_.show_diplomacy_window = !ui_.show_diplomacy_window;
+      if (hk("ui.toggle.layout_profiles")) ui_.show_layout_profiles_window = !ui_.show_layout_profiles_window;
+      if (hk("ui.toggle.window_manager")) ui_.show_window_manager_window = !ui_.show_window_manager_window;
+      if (hk("ui.toggle.focus_mode")) toggle_focus_mode(ui_);
+      if (hk("ui.toggle.ui_forge")) ui_.show_ui_forge_window = !ui_.show_ui_forge_window;
+      if (hk("ui.toggle.context_forge")) ui_.show_context_forge_window = !ui_.show_context_forge_window;
 
       // Screen reader / narration.
-      if (io.KeyCtrl && io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_R)) {
+      if (hk("accessibility.toggle_screen_reader")) {
         ui_.screen_reader_enabled = !ui_.screen_reader_enabled;
         sync_screen_reader();
         if (ui_.screen_reader_enabled) {
           ScreenReader::instance().speak("Screen reader enabled", true);
         }
       }
-      if (io.KeyCtrl && io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_Period)) {
+      if (hk("accessibility.repeat_last")) {
         ScreenReader::instance().repeat_last();
       }
 
       // Save/load.
-      if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S)) {
+      if (hk("game.save")) {
         try {
           nebula4x::write_text_file(save_path_, serialize_game_to_json(sim_.state()));
           nebula4x::log::info("Saved game.");
@@ -311,7 +366,7 @@ void App::frame() {
           nebula4x::log::error(std::string("Save failed: ") + e.what());
         }
       }
-      if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_O)) {
+      if (hk("game.load")) {
         try {
           sim_.load_game(deserialize_game_from_json(nebula4x::read_text_file(load_path_)));
           selected_ship_ = kInvalidId;
@@ -324,10 +379,9 @@ void App::frame() {
       }
 
       // Turn advance.
-      if (ImGui::IsKeyPressed(ImGuiKey_Space)) {
-        const int days = io.KeyCtrl ? 30 : (io.KeyShift ? 5 : 1);
-        sim_.advance_days(days);
-      }
+      if (hk("time.advance_1")) sim_.advance_days(1);
+      if (hk("time.advance_5")) sim_.advance_days(5);
+      if (hk("time.advance_30")) sim_.advance_days(30);
     }
   }
 
@@ -342,6 +396,10 @@ void App::frame() {
 
   // New Game (scenario picker) modal.
   draw_new_game_modal(sim_, ui_);
+
+  // Guided tours can open/bring-to-front windows for the current step.
+  // This must happen before we draw the workspace windows.
+  guided_tour_preframe(ui_);
 
   // If the user loaded/created a new game via the menu, immediately clear
   // any stale selections before drawing the rest of the UI.
@@ -379,6 +437,12 @@ void App::frame() {
   // Create a fullscreen dockspace so the user can rearrange panels.
   draw_dockspace();
 
+  // Update the persistent Notification Center (and watchboard alerts) before
+  // drawing windows so badge counts and the inbox update immediately on turn
+  // advancement.
+  notifications_ingest_sim_events(sim_, ui_);
+  update_watchboard_alert_toasts(sim_, ui_, hud_);
+
   // Track selection changes for narration.
   const Id prev_selected_ship = selected_ship_;
   const Id prev_selected_colony = selected_colony_;
@@ -387,6 +451,7 @@ void App::frame() {
   // Primary workspace windows (dockable).
   if (ui_.show_controls_window) {
     ImGui::SetNextWindowSize(ImVec2(320, 720), ImGuiCond_FirstUseEver);
+    prepare_window_for_draw(ui_, "controls");
     if (ImGui::Begin("Controls", &ui_.show_controls_window)) {
       draw_left_sidebar(sim_, ui_, selected_ship_, selected_colony_);
     }
@@ -395,6 +460,7 @@ void App::frame() {
 
   if (ui_.show_map_window) {
     ImGui::SetNextWindowSize(ImVec2(900, 720), ImGuiCond_FirstUseEver);
+    prepare_window_for_draw(ui_, "map");
     if (ImGui::Begin("Map", &ui_.show_map_window)) {
       if (ImGui::BeginTabBar("map_tabs")) {
         const MapTab req = ui_.request_map_tab;
@@ -423,6 +489,7 @@ void App::frame() {
 
   if (ui_.show_details_window) {
     ImGui::SetNextWindowSize(ImVec2(360, 720), ImGuiCond_FirstUseEver);
+    prepare_window_for_draw(ui_, "details");
     if (ImGui::Begin("Details", &ui_.show_details_window)) {
       draw_right_sidebar(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
     }
@@ -430,73 +497,202 @@ void App::frame() {
   }
 
   // Optional secondary windows (also dockable).
-  if (ui_.show_directory_window) draw_directory_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
-  if (ui_.show_production_window) draw_production_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
-  if (ui_.show_economy_window) draw_economy_window(sim_, ui_, selected_colony_, selected_body_);
-  if (ui_.show_planner_window) draw_planner_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
-  if (ui_.show_regions_window) draw_regions_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
-  if (ui_.show_freight_window) draw_freight_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
-  if (ui_.show_fuel_window) draw_fuel_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
-  if (ui_.show_salvage_window) draw_salvage_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
-  if (ui_.show_contracts_window) draw_contracts_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
-  if (ui_.show_sustainment_window)
+  if (ui_.show_directory_window) {
+    prepare_window_for_draw(ui_, "directory");
+    draw_directory_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  }
+  if (ui_.show_production_window) {
+    prepare_window_for_draw(ui_, "production");
+    draw_production_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  }
+  if (ui_.show_economy_window) {
+    prepare_window_for_draw(ui_, "economy");
+    draw_economy_window(sim_, ui_, selected_colony_, selected_body_);
+  }
+  if (ui_.show_planner_window) {
+    prepare_window_for_draw(ui_, "planner");
+    draw_planner_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  }
+  if (ui_.show_regions_window) {
+    prepare_window_for_draw(ui_, "regions");
+    draw_regions_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  }
+  if (ui_.show_freight_window) {
+    prepare_window_for_draw(ui_, "freight");
+    draw_freight_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  }
+  if (ui_.show_fuel_window) {
+    prepare_window_for_draw(ui_, "fuel");
+    draw_fuel_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  }
+  if (ui_.show_salvage_window) {
+    prepare_window_for_draw(ui_, "salvage");
+    draw_salvage_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  }
+  if (ui_.show_contracts_window) {
+    prepare_window_for_draw(ui_, "contracts");
+    draw_contracts_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  }
+  if (ui_.show_sustainment_window) {
+    prepare_window_for_draw(ui_, "sustainment");
     draw_sustainment_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
-  if (ui_.show_fleet_manager_window) draw_fleet_manager_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
-  if (ui_.show_troop_window) draw_troop_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
-  if (ui_.show_colonist_window) draw_colonist_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
-  if (ui_.show_terraforming_window) draw_terraforming_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
-  if (ui_.show_advisor_window) draw_advisor_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
-  if (ui_.show_colony_profiles_window) draw_colony_profiles_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
-  if (ui_.show_ship_profiles_window) draw_ship_profiles_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
-  if (ui_.show_automation_center_window)
+  }
+  if (ui_.show_fleet_manager_window) {
+    prepare_window_for_draw(ui_, "fleet_manager");
+    draw_fleet_manager_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  }
+  if (ui_.show_troop_window) {
+    prepare_window_for_draw(ui_, "troops");
+    draw_troop_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  }
+  if (ui_.show_colonist_window) {
+    prepare_window_for_draw(ui_, "population");
+    draw_colonist_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  }
+  if (ui_.show_terraforming_window) {
+    prepare_window_for_draw(ui_, "terraforming");
+    draw_terraforming_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  }
+  if (ui_.show_advisor_window) {
+    prepare_window_for_draw(ui_, "advisor");
+    draw_advisor_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  }
+  if (ui_.show_colony_profiles_window) {
+    prepare_window_for_draw(ui_, "colony_profiles");
+    draw_colony_profiles_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  }
+  if (ui_.show_ship_profiles_window) {
+    prepare_window_for_draw(ui_, "ship_profiles");
+    draw_ship_profiles_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  }
+  if (ui_.show_automation_center_window) {
+    prepare_window_for_draw(ui_, "automation_center");
     draw_automation_center_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
-  if (ui_.show_shipyard_targets_window) draw_shipyard_targets_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
-  if (ui_.show_survey_network_window) draw_survey_network_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
-  if (ui_.show_time_warp_window) draw_time_warp_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
-  if (ui_.show_timeline_window) draw_timeline_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  }
+  if (ui_.show_shipyard_targets_window) {
+    prepare_window_for_draw(ui_, "shipyard_targets");
+    draw_shipyard_targets_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  }
+  if (ui_.show_survey_network_window) {
+    prepare_window_for_draw(ui_, "survey_network");
+    draw_survey_network_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  }
+  if (ui_.show_time_warp_window) {
+    prepare_window_for_draw(ui_, "time_warp");
+    draw_time_warp_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  }
+  if (ui_.show_timeline_window) {
+    prepare_window_for_draw(ui_, "timeline");
+    draw_timeline_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  }
+  if (ui_.show_notifications_window) {
+    prepare_window_for_draw(ui_, "notifications");
+    draw_notifications_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  }
   if (ui_.show_design_studio_window) {
+    prepare_window_for_draw(ui_, "design_studio");
     draw_design_studio_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   }
   if (ui_.show_balance_lab_window) {
+    prepare_window_for_draw(ui_, "balance_lab");
     draw_balance_lab_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   }
   if (ui_.show_procgen_atlas_window) {
+    prepare_window_for_draw(ui_, "procgen_atlas");
     draw_procgen_atlas_window(sim_, ui_, selected_body_);
   }
   if (ui_.show_star_atlas_window) {
+    prepare_window_for_draw(ui_, "star_atlas");
     draw_star_atlas_window(sim_, ui_);
   }
   if (ui_.show_intel_window) {
+    prepare_window_for_draw(ui_, "intel");
     draw_intel_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   }
+  if (ui_.show_intel_notebook_window) {
+    prepare_window_for_draw(ui_, "intel_notebook");
+    draw_intel_notebook_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  }
   if (ui_.show_diplomacy_window) {
+    prepare_window_for_draw(ui_, "diplomacy");
     draw_diplomacy_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   }
   if (ui_.show_victory_window) {
+    prepare_window_for_draw(ui_, "victory");
     draw_victory_window(sim_, ui_);
   }
 
-  if (ui_.show_save_tools_window) draw_save_tools_window(sim_, ui_, save_path_, load_path_);
+  if (ui_.show_save_tools_window) {
+    prepare_window_for_draw(ui_, "save_tools");
+    draw_save_tools_window(sim_, ui_, save_path_, load_path_);
+  }
   if (ui_.show_time_machine_window) {
+    prepare_window_for_draw(ui_, "time_machine");
     draw_time_machine_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   }
+  if (ui_.show_compare_window) {
+    prepare_window_for_draw(ui_, "compare");
+    draw_compare_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  }
   if (ui_.show_navigator_window) {
+    prepare_window_for_draw(ui_, "navigator");
     draw_navigator_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   }
-  if (ui_.show_omni_search_window) draw_omni_search_window(sim_, ui_);
-  if (ui_.show_json_explorer_window) draw_json_explorer_window(sim_, ui_);
-  if (ui_.show_content_validation_window) draw_content_validation_window(sim_, ui_);
-  if (ui_.show_state_doctor_window) draw_state_doctor_window(sim_, ui_);
-	if (ui_.show_trace_viewer_window) draw_trace_viewer_window(sim_, ui_);
-  if (ui_.show_watchboard_window) draw_watchboard_window(sim_, ui_);
-  if (ui_.show_data_lenses_window) draw_data_lenses_window(sim_, ui_);
-  if (ui_.show_dashboards_window) draw_dashboards_window(sim_, ui_);
-  if (ui_.show_pivot_tables_window) draw_pivot_tables_window(sim_, ui_);
-  if (ui_.show_entity_inspector_window) draw_entity_inspector_window(sim_, ui_);
-  if (ui_.show_reference_graph_window) draw_reference_graph_window(sim_, ui_);
-  if (ui_.show_layout_profiles_window) draw_layout_profiles_window(ui_);
+  if (ui_.show_omni_search_window) {
+    prepare_window_for_draw(ui_, "omni_search");
+    draw_omni_search_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  }
+  if (ui_.show_json_explorer_window) {
+    prepare_window_for_draw(ui_, "json_explorer");
+    draw_json_explorer_window(sim_, ui_);
+  }
+  if (ui_.show_content_validation_window) {
+    prepare_window_for_draw(ui_, "content_validation");
+    draw_content_validation_window(sim_, ui_);
+  }
+  if (ui_.show_state_doctor_window) {
+    prepare_window_for_draw(ui_, "state_doctor");
+    draw_state_doctor_window(sim_, ui_);
+  }
+  if (ui_.show_trace_viewer_window) {
+    prepare_window_for_draw(ui_, "trace_viewer");
+    draw_trace_viewer_window(sim_, ui_);
+  }
+  if (ui_.show_watchboard_window) {
+    prepare_window_for_draw(ui_, "watchboard");
+    draw_watchboard_window(sim_, ui_);
+  }
+  if (ui_.show_data_lenses_window) {
+    prepare_window_for_draw(ui_, "data_lenses");
+    draw_data_lenses_window(sim_, ui_);
+  }
+  if (ui_.show_dashboards_window) {
+    prepare_window_for_draw(ui_, "dashboards");
+    draw_dashboards_window(sim_, ui_);
+  }
+  if (ui_.show_pivot_tables_window) {
+    prepare_window_for_draw(ui_, "pivot_tables");
+    draw_pivot_tables_window(sim_, ui_);
+  }
+  if (ui_.show_entity_inspector_window) {
+    prepare_window_for_draw(ui_, "entity_inspector");
+    draw_entity_inspector_window(sim_, ui_);
+  }
+  if (ui_.show_reference_graph_window) {
+    prepare_window_for_draw(ui_, "reference_graph");
+    draw_reference_graph_window(sim_, ui_);
+  }
+  if (ui_.show_layout_profiles_window) {
+    prepare_window_for_draw(ui_, "layout_profiles");
+    draw_layout_profiles_window(ui_);
+  }
+
+  // Window Manager: centralized launcher, pop-out controls, and declutter tools.
+  prepare_window_for_draw(ui_, "window_manager");
+  draw_window_manager_window(ui_);
 
   if (ui_.show_context_forge_window) {
+    prepare_window_for_draw(ui_, "context_forge");
     draw_context_forge_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   }
 
@@ -506,14 +702,18 @@ void App::frame() {
   // UI Forge: user-defined procedural panels (custom dashboards).
   draw_ui_forge_panel_windows(sim_, ui_);
   if (ui_.show_ui_forge_window) {
+    prepare_window_for_draw(ui_, "ui_forge");
     draw_ui_forge_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   }
 
   // Help overlay/window.
+  prepare_window_for_draw(ui_, "help");
   draw_help_window(ui_);
 
   // HUD chrome (status bar, command palette, event toasts).
-  draw_status_bar(sim_, ui_, hud_, selected_ship_, selected_colony_, selected_body_, save_path_, load_path_);
+  if (ui_.show_status_bar) {
+    draw_status_bar(sim_, ui_, hud_, selected_ship_, selected_colony_, selected_body_, save_path_, load_path_);
+  }
   draw_command_palette(sim_, ui_, hud_, selected_ship_, selected_colony_, selected_body_, save_path_, load_path_);
 
   // Load/new-game can also be triggered via the status bar or command palette.
@@ -558,10 +758,13 @@ void App::frame() {
       }
     }
   }
-
   update_event_toasts(sim_, ui_, hud_);
-  update_watchboard_alert_toasts(sim_, ui_, hud_);
-  draw_event_toasts(sim_, ui_, hud_, selected_ship_, selected_colony_, selected_body_);
+  if (!(ui_.tour_active && ui_.tour_pause_toasts)) {
+    draw_event_toasts(sim_, ui_, hud_, selected_ship_, selected_colony_, selected_body_);
+  }
+
+  // Guided tours overlay renders last so it can spotlight existing panels.
+  draw_guided_tour_overlay(ui_);
 
   // Selection Navigator: record selection changes into history.
   const NavTarget nav_after = current_nav_target(sim_, selected_ship_, selected_colony_, selected_body_);
@@ -597,6 +800,9 @@ void App::frame() {
       }
     }
   }
+
+  // Update popup/launch tracking after all UI interactions for the frame.
+  window_management_end_frame(ui_);
 }
 
 void App::draw_dockspace() {
@@ -937,7 +1143,26 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
         ui_.ui_scale = std::clamp(ui_.ui_scale, 0.65f, 2.5f);
       }
 
-    // Screen reader / narration (accessibility).
+      // Hotkeys (keyboard shortcuts). These are UI-only and are stored in ui_prefs.json.
+      if (auto it = obj->find("hotkeys_enabled"); it != obj->end()) {
+        ui_.hotkeys_enabled = it->second.bool_value(ui_.hotkeys_enabled);
+      }
+      if (auto it = obj->find("hotkeys"); it != obj->end()) {
+        if (const auto* hk_obj = it->second.as_object()) {
+          ui_.hotkey_overrides.clear();
+          for (const auto& d : hotkey_defs()) {
+            const auto hit = hk_obj->find(d.id);
+            if (hit == hk_obj->end()) continue;
+            const std::string s = hit->second.string_value("");
+            HotkeyChord c;
+            std::string perr;
+            if (!parse_hotkey(s, &c, &perr)) continue;
+            (void)hotkey_set(ui_, d.id, c);
+          }
+        }
+      }
+
+      // Screen reader / narration (accessibility).
       if (auto it = obj->find("screen_reader_enabled"); it != obj->end()) {
         ui_.screen_reader_enabled = it->second.bool_value(ui_.screen_reader_enabled);
       }
@@ -1031,6 +1256,31 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       if (auto it = obj->find("event_toast_duration_sec"); it != obj->end()) {
         ui_.event_toast_duration_sec = static_cast<float>(it->second.number_value(ui_.event_toast_duration_sec));
         ui_.event_toast_duration_sec = std::clamp(ui_.event_toast_duration_sec, 0.5f, 60.0f);
+      }
+
+      // Notification Center defaults.
+      if (auto it = obj->find("notifications_capture_sim_events"); it != obj->end()) {
+        ui_.notifications_capture_sim_events = it->second.bool_value(ui_.notifications_capture_sim_events);
+      }
+      if (auto it = obj->find("notifications_capture_info_events"); it != obj->end()) {
+        ui_.notifications_capture_info_events = it->second.bool_value(ui_.notifications_capture_info_events);
+      }
+      if (auto it = obj->find("notifications_capture_watchboard_alerts"); it != obj->end()) {
+        ui_.notifications_capture_watchboard_alerts = it->second.bool_value(ui_.notifications_capture_watchboard_alerts);
+      }
+      if (auto it = obj->find("notifications_collapse_duplicates"); it != obj->end()) {
+        ui_.notifications_collapse_duplicates = it->second.bool_value(ui_.notifications_collapse_duplicates);
+      }
+      if (auto it = obj->find("notifications_auto_open_on_error"); it != obj->end()) {
+        ui_.notifications_auto_open_on_error = it->second.bool_value(ui_.notifications_auto_open_on_error);
+      }
+      if (auto it = obj->find("notifications_max_entries"); it != obj->end()) {
+        ui_.notifications_max_entries = static_cast<int>(it->second.number_value(ui_.notifications_max_entries));
+        ui_.notifications_max_entries = std::clamp(ui_.notifications_max_entries, 50, 5000);
+      }
+      if (auto it = obj->find("notifications_keep_days"); it != obj->end()) {
+        ui_.notifications_keep_days = static_cast<int>(it->second.number_value(ui_.notifications_keep_days));
+        ui_.notifications_keep_days = std::clamp(ui_.notifications_keep_days, 0, 100000);
       }
 
       // Timeline view defaults.
@@ -1146,6 +1396,45 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       }
       if (auto it = obj->find("docking_transparent_payload"); it != obj->end()) {
         ui_.docking_transparent_payload = it->second.bool_value(ui_.docking_transparent_payload);
+      }
+
+      // Multi-Viewport (detachable OS windows).
+      if (auto it = obj->find("viewports_enable"); it != obj->end()) {
+        ui_.viewports_enable = it->second.bool_value(ui_.viewports_enable);
+      }
+      if (auto it = obj->find("viewports_no_taskbar_icon"); it != obj->end()) {
+        ui_.viewports_no_taskbar_icon = it->second.bool_value(ui_.viewports_no_taskbar_icon);
+      }
+      if (auto it = obj->find("viewports_no_auto_merge"); it != obj->end()) {
+        ui_.viewports_no_auto_merge = it->second.bool_value(ui_.viewports_no_auto_merge);
+      }
+      if (auto it = obj->find("viewports_no_decoration"); it != obj->end()) {
+        ui_.viewports_no_decoration = it->second.bool_value(ui_.viewports_no_decoration);
+      }
+
+      // Popup window management.
+      if (auto it = obj->find("window_popup_first_mode"); it != obj->end()) {
+        ui_.window_popup_first_mode = it->second.bool_value(ui_.window_popup_first_mode);
+      }
+      if (auto it = obj->find("window_popup_auto_focus"); it != obj->end()) {
+        ui_.window_popup_auto_focus = it->second.bool_value(ui_.window_popup_auto_focus);
+      }
+      if (auto it = obj->find("window_popup_cascade_step_px"); it != obj->end()) {
+        ui_.window_popup_cascade_step_px = static_cast<float>(it->second.number_value(ui_.window_popup_cascade_step_px));
+        ui_.window_popup_cascade_step_px = std::clamp(ui_.window_popup_cascade_step_px, 0.0f, 128.0f);
+      }
+      if (auto it = obj->find("window_launch_overrides"); it != obj->end()) {
+        if (it->second.is_object()) {
+          ui_.window_launch_overrides.clear();
+          const auto ov_obj = it->second.as_object();
+          for (const auto& kv : ov_obj) {
+            const std::string& id = kv.first;
+            const int mode = static_cast<int>(kv.second.number_value(-1));
+            if (mode == 0 || mode == 1) {
+              ui_.window_launch_overrides[id] = mode;
+            }
+          }
+        }
       }
 
       // Dock layout profiles (ImGui ini files).
@@ -1656,6 +1945,9 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       if (auto it = obj->find("show_timeline_window"); it != obj->end()) {
         ui_.show_timeline_window = it->second.bool_value(ui_.show_timeline_window);
       }
+      if (auto it = obj->find("show_notifications_window"); it != obj->end()) {
+        ui_.show_notifications_window = it->second.bool_value(ui_.show_notifications_window);
+      }
       if (auto it = obj->find("show_design_studio_window"); it != obj->end()) {
         ui_.show_design_studio_window = it->second.bool_value(ui_.show_design_studio_window);
       }
@@ -1671,6 +1963,9 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       if (auto it = obj->find("show_intel_window"); it != obj->end()) {
         ui_.show_intel_window = it->second.bool_value(ui_.show_intel_window);
       }
+      if (auto it = obj->find("show_intel_notebook_window"); it != obj->end()) {
+        ui_.show_intel_notebook_window = it->second.bool_value(ui_.show_intel_notebook_window);
+      }
       if (auto it = obj->find("show_diplomacy_window"); it != obj->end()) {
         ui_.show_diplomacy_window = it->second.bool_value(ui_.show_diplomacy_window);
       }
@@ -1685,6 +1980,9 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       }
       if (auto it = obj->find("show_time_machine_window"); it != obj->end()) {
         ui_.show_time_machine_window = it->second.bool_value(ui_.show_time_machine_window);
+      }
+      if (auto it = obj->find("show_compare_window"); it != obj->end()) {
+        ui_.show_compare_window = it->second.bool_value(ui_.show_compare_window);
       }
       if (auto it = obj->find("show_omni_search_window"); it != obj->end()) {
         ui_.show_omni_search_window = it->second.bool_value(ui_.show_omni_search_window);
@@ -1791,6 +2089,18 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       if (auto it = obj->find("omni_search_match_values"); it != obj->end()) {
         ui_.omni_search_match_values = it->second.bool_value(ui_.omni_search_match_values);
       }
+      if (auto it = obj->find("omni_search_match_entities"); it != obj->end()) {
+        ui_.omni_search_match_entities = it->second.bool_value(ui_.omni_search_match_entities);
+      }
+      if (auto it = obj->find("omni_search_match_docs"); it != obj->end()) {
+        ui_.omni_search_match_docs = it->second.bool_value(ui_.omni_search_match_docs);
+      }
+      if (auto it = obj->find("omni_search_match_windows"); it != obj->end()) {
+        ui_.omni_search_match_windows = it->second.bool_value(ui_.omni_search_match_windows);
+      }
+      if (auto it = obj->find("omni_search_match_layouts"); it != obj->end()) {
+        ui_.omni_search_match_layouts = it->second.bool_value(ui_.omni_search_match_layouts);
+      }
       if (auto it = obj->find("omni_search_case_sensitive"); it != obj->end()) {
         ui_.omni_search_case_sensitive = it->second.bool_value(ui_.omni_search_case_sensitive);
       }
@@ -1885,6 +2195,29 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
         ui_.time_machine_checkpoint_stride = static_cast<int>(it->second.number_value(ui_.time_machine_checkpoint_stride));
       }
 
+      // Compare / Diff preferences.
+      if (auto it = obj->find("compare_refresh_sec"); it != obj->end()) {
+        ui_.compare_refresh_sec = static_cast<float>(it->second.number_value(ui_.compare_refresh_sec));
+      }
+      if (auto it = obj->find("compare_include_container_sizes"); it != obj->end()) {
+        ui_.compare_include_container_sizes = it->second.bool_value(ui_.compare_include_container_sizes);
+      }
+      if (auto it = obj->find("compare_show_unchanged"); it != obj->end()) {
+        ui_.compare_show_unchanged = it->second.bool_value(ui_.compare_show_unchanged);
+      }
+      if (auto it = obj->find("compare_case_sensitive"); it != obj->end()) {
+        ui_.compare_case_sensitive = it->second.bool_value(ui_.compare_case_sensitive);
+      }
+      if (auto it = obj->find("compare_max_depth"); it != obj->end()) {
+        ui_.compare_max_depth = static_cast<int>(it->second.number_value(ui_.compare_max_depth));
+      }
+      if (auto it = obj->find("compare_max_nodes"); it != obj->end()) {
+        ui_.compare_max_nodes = static_cast<int>(it->second.number_value(ui_.compare_max_nodes));
+      }
+      if (auto it = obj->find("compare_max_value_chars"); it != obj->end()) {
+        ui_.compare_max_value_chars = static_cast<int>(it->second.number_value(ui_.compare_max_value_chars));
+      }
+
       // Watchboard query budgets.
       if (auto it = obj->find("watchboard_query_max_matches"); it != obj->end()) {
         ui_.watchboard_query_max_matches = static_cast<int>(it->second.number_value(ui_.watchboard_query_max_matches));
@@ -1914,6 +2247,11 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       ui_.time_machine_max_value_chars = std::clamp(ui_.time_machine_max_value_chars, 16, 2000);
       ui_.time_machine_storage_mode = std::clamp(ui_.time_machine_storage_mode, 0, 1);
       ui_.time_machine_checkpoint_stride = std::clamp(ui_.time_machine_checkpoint_stride, 1, 128);
+
+      ui_.compare_refresh_sec = std::clamp(ui_.compare_refresh_sec, 0.0f, 60.0f);
+      ui_.compare_max_depth = std::clamp(ui_.compare_max_depth, 1, 24);
+      ui_.compare_max_nodes = std::clamp(ui_.compare_max_nodes, 50, 200000);
+      ui_.compare_max_value_chars = std::clamp(ui_.compare_max_value_chars, 0, 5000);
 
       ui_.watchboard_query_max_matches = std::clamp(ui_.watchboard_query_max_matches, 10, 500000);
       ui_.watchboard_query_max_nodes = std::clamp(ui_.watchboard_query_max_nodes, 100, 5000000);
@@ -2419,7 +2757,7 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     }
 
     nebula4x::json::Object o;
-    o["version"] = 34.0;
+    o["version"] = 37.0;
 
     // Theme.
     o["clear_color"] = color_to_json(ui_.clear_color);
@@ -2472,6 +2810,21 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     o["ui_style_preset"] = static_cast<double>(ui_.ui_style_preset);
     o["ui_density"] = static_cast<double>(ui_.ui_density);
 
+    // Hotkeys (keyboard shortcuts).
+    o["hotkeys_enabled"] = ui_.hotkeys_enabled;
+    {
+      nebula4x::json::Object hk;
+      for (const auto& d : hotkey_defs()) {
+        const auto it = ui_.hotkey_overrides.find(d.id);
+        if (it == ui_.hotkey_overrides.end()) continue;
+
+        std::string s = hotkey_to_string(it->second);
+        if (s.empty()) s = "Unbound";
+        hk[d.id] = std::move(s);
+      }
+      if (!hk.empty()) o["hotkeys"] = nebula4x::json::object(std::move(hk));
+    }
+
     // Procedural theme (ui_style_preset = 5).
     o["ui_procedural_theme_seed"] = static_cast<double>(ui_.ui_procedural_theme_seed);
     o["ui_procedural_theme_use_seed_hue"] = ui_.ui_procedural_theme_use_seed_hue;
@@ -2486,6 +2839,15 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     o["ui_procedural_theme_sync_backgrounds"] = ui_.ui_procedural_theme_sync_backgrounds;
     o["show_event_toasts"] = ui_.show_event_toasts;
     o["event_toast_duration_sec"] = static_cast<double>(ui_.event_toast_duration_sec);
+
+    // Notification Center defaults.
+    o["notifications_capture_sim_events"] = ui_.notifications_capture_sim_events;
+    o["notifications_capture_info_events"] = ui_.notifications_capture_info_events;
+    o["notifications_capture_watchboard_alerts"] = ui_.notifications_capture_watchboard_alerts;
+    o["notifications_collapse_duplicates"] = ui_.notifications_collapse_duplicates;
+    o["notifications_auto_open_on_error"] = ui_.notifications_auto_open_on_error;
+    o["notifications_max_entries"] = static_cast<double>(ui_.notifications_max_entries);
+    o["notifications_keep_days"] = static_cast<double>(ui_.notifications_keep_days);
 
     // Navigator defaults.
     o["nav_open_windows_on_jump"] = ui_.nav_open_windows_on_jump;
@@ -2545,6 +2907,25 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     o["docking_with_shift"] = ui_.docking_with_shift;
     o["docking_always_tab_bar"] = ui_.docking_always_tab_bar;
     o["docking_transparent_payload"] = ui_.docking_transparent_payload;
+    o["viewports_enable"] = ui_.viewports_enable;
+    o["viewports_no_taskbar_icon"] = ui_.viewports_no_taskbar_icon;
+    o["viewports_no_auto_merge"] = ui_.viewports_no_auto_merge;
+    o["viewports_no_decoration"] = ui_.viewports_no_decoration;
+
+    // Popup window management.
+    o["window_popup_first_mode"] = ui_.window_popup_first_mode;
+    o["window_popup_auto_focus"] = ui_.window_popup_auto_focus;
+    o["window_popup_cascade_step_px"] = static_cast<double>(ui_.window_popup_cascade_step_px);
+    {
+      nebula4x::json::Object overrides;
+      for (const auto& [id, mode] : ui_.window_launch_overrides) {
+        // Mode: 0=docked, 1=popup.
+        if (mode != 0 && mode != 1) continue;
+        overrides[id] = static_cast<double>(mode);
+      }
+      o["window_launch_overrides"] = nebula4x::json::object(std::move(overrides));
+    }
+
 
     // Dock layout profiles (ImGui ini files).
     o["layout_profiles_dir"] = std::string(ui_.layout_profiles_dir);
@@ -2703,16 +3084,19 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     o["show_terraforming_window"] = ui_.show_terraforming_window;
     o["show_time_warp_window"] = ui_.show_time_warp_window;
     o["show_timeline_window"] = ui_.show_timeline_window;
+    o["show_notifications_window"] = ui_.show_notifications_window;
     o["show_design_studio_window"] = ui_.show_design_studio_window;
     o["show_balance_lab_window"] = ui_.show_balance_lab_window;
     o["show_procgen_atlas_window"] = ui_.show_procgen_atlas_window;
     o["show_star_atlas_window"] = ui_.show_star_atlas_window;
     o["show_intel_window"] = ui_.show_intel_window;
+    o["show_intel_notebook_window"] = ui_.show_intel_notebook_window;
     o["show_diplomacy_window"] = ui_.show_diplomacy_window;
     o["show_victory_window"] = ui_.show_victory_window;
     o["show_settings_window"] = ui_.show_settings_window;
     o["show_save_tools_window"] = ui_.show_save_tools_window;
     o["show_time_machine_window"] = ui_.show_time_machine_window;
+    o["show_compare_window"] = ui_.show_compare_window;
     o["show_omni_search_window"] = ui_.show_omni_search_window;
     o["show_json_explorer_window"] = ui_.show_json_explorer_window;
 	    o["show_content_validation_window"] = ui_.show_content_validation_window;
@@ -2765,6 +3149,10 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     // OmniSearch (game JSON global search) preferences.
     o["omni_search_match_keys"] = ui_.omni_search_match_keys;
     o["omni_search_match_values"] = ui_.omni_search_match_values;
+    o["omni_search_match_entities"] = ui_.omni_search_match_entities;
+    o["omni_search_match_docs"] = ui_.omni_search_match_docs;
+    o["omni_search_match_windows"] = ui_.omni_search_match_windows;
+    o["omni_search_match_layouts"] = ui_.omni_search_match_layouts;
     o["omni_search_case_sensitive"] = ui_.omni_search_case_sensitive;
     o["omni_search_auto_refresh"] = ui_.omni_search_auto_refresh;
     o["omni_search_refresh_sec"] = static_cast<double>(ui_.omni_search_refresh_sec);
@@ -2800,6 +3188,15 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     o["time_machine_max_value_chars"] = static_cast<double>(ui_.time_machine_max_value_chars);
     o["time_machine_storage_mode"] = static_cast<double>(ui_.time_machine_storage_mode);
     o["time_machine_checkpoint_stride"] = static_cast<double>(ui_.time_machine_checkpoint_stride);
+
+    // Compare / Diff preferences.
+    o["compare_refresh_sec"] = static_cast<double>(ui_.compare_refresh_sec);
+    o["compare_include_container_sizes"] = ui_.compare_include_container_sizes;
+    o["compare_show_unchanged"] = ui_.compare_show_unchanged;
+    o["compare_case_sensitive"] = ui_.compare_case_sensitive;
+    o["compare_max_depth"] = static_cast<double>(ui_.compare_max_depth);
+    o["compare_max_nodes"] = static_cast<double>(ui_.compare_max_nodes);
+    o["compare_max_value_chars"] = static_cast<double>(ui_.compare_max_value_chars);
 
     // Watchboard pins (JSON pointers).
     o["watchboard_query_max_matches"] = static_cast<double>(ui_.watchboard_query_max_matches);
@@ -3112,11 +3509,13 @@ void App::reset_window_layout_defaults() {
   ui_.show_design_studio_window = false;
   ui_.show_balance_lab_window = false;
   ui_.show_intel_window = false;
+  ui_.show_intel_notebook_window = false;
   ui_.show_diplomacy_window = false;
   ui_.show_victory_window = false;
   ui_.show_settings_window = false;
   ui_.show_save_tools_window = false;
   ui_.show_time_machine_window = false;
+  ui_.show_compare_window = false;
   ui_.show_omni_search_window = false;
   ui_.show_json_explorer_window = false;
   ui_.show_content_validation_window = false;
@@ -3339,6 +3738,17 @@ void App::apply_imgui_style_overrides() {
     style.Colors[ImGuiCol_ChildBg] = c;
     style.Colors[ImGuiCol_PopupBg] = c;
   }
+
+  // When multi-viewports are enabled, detached OS windows can't be rounded the same way
+  // as the main viewport. Enforcing a compatible style avoids mismatched corners/alpha.
+#ifdef IMGUI_HAS_VIEWPORT
+#if NEBULA4X_UI_RENDERER_OPENGL2
+  if (ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_ViewportsEnable) {
+    style.WindowRounding = 0.0f;
+    style.Colors[ImGuiCol_WindowBg].w = 1.0f;
+  }
+#endif
+#endif
 }
 
 } // namespace nebula4x::ui

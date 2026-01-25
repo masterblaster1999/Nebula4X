@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "nebula4x/core/ids.h"
@@ -33,6 +34,19 @@ enum class MapTab {
   Galaxy,
 };
 
+// Help window tabs (Help / Codex).
+// UI-only; used for programmatic tab selection (e.g., guided tours).
+enum class HelpTab {
+  None,
+  QuickStart,
+  Tours,
+  Shortcuts,
+  Docs,
+  Accessibility,
+  About,
+};
+
+
 // UI navigation targets used by the Navigator window (history/bookmarks).
 //
 // These are UI-only structures (not persisted in save-games). IDs are resolved
@@ -59,6 +73,24 @@ struct NavBookmark {
   std::string name;
   NavTarget target;
 };
+
+
+// --- Hotkeys / keyboard shortcuts ---
+//
+// Hotkeys are UI-only and are stored in ui_prefs.json (not in save-games).
+// The key code is stored as an int corresponding to ImGuiKey.
+struct HotkeyChord {
+  bool ctrl{false};
+  bool shift{false};
+  bool alt{false};
+  bool super{false};
+  int key{0};
+};
+
+inline bool operator==(const HotkeyChord& a, const HotkeyChord& b) {
+  return a.ctrl == b.ctrl && a.shift == b.shift && a.alt == b.alt && a.super == b.super && a.key == b.key;
+}
+inline bool operator!=(const HotkeyChord& a, const HotkeyChord& b) { return !(a == b); }
 
 
 // Galaxy-map visualization overlays for procedural-generation outcomes.
@@ -293,6 +325,67 @@ struct UiForgePanelPreset {
   std::string dna;
 };
 
+// --- Notification Center (UI-only inbox) ---
+//
+// The Notification Center is a persistent triage inbox that aggregates:
+//   - Simulation events (SimEvent) that the UI deems important
+//   - Watchboard alerts (pins with alert_enabled)
+//
+// It is intentionally UI-only and is not persisted in saves.
+// Preferences (capture rules, retention caps) are stored in ui_prefs.json.
+enum class NotificationSource : int {
+  SimEvent = 0,
+  WatchboardAlert = 1,
+};
+
+struct NotificationEntry {
+  // Unique id for this notification.
+  // - For SimEvents, this is the SimEvent::seq.
+  // - For Watchboard alerts, this is derived from the toast sequence base.
+  std::uint64_t id{0};
+  NotificationSource source{NotificationSource::SimEvent};
+
+  // Read/unread triage.
+  bool unread{true};
+  bool pinned{false};
+
+  // Collapse duplicates.
+  int count{1};
+
+  // Simulation time context.
+  // day = GameState::date.days_since_epoch.
+  std::int64_t day{0};
+  int hour{0};
+
+  // Severity/category (stored as integers to keep ui_state.h lightweight).
+  // Matches core enums:
+  //   EventLevel    : 0=Info, 1=Warn, 2=Error
+  //   EventCategory : see nebula4x/core/entities.h
+  int level{0};
+  int category{0};
+
+  // Optional entity context.
+  Id system_id{kInvalidId};
+  Id ship_id{kInvalidId};
+  Id colony_id{kInvalidId};
+  Id faction_id{kInvalidId};
+  Id faction_id2{kInvalidId};
+
+  // Watchboard context.
+  std::uint64_t watch_id{0};
+  std::string watch_label;
+  std::string watch_path;
+  std::string watch_rep_ptr;
+
+  // Human-readable message.
+  std::string message;
+
+  // UI timestamps (ImGui::GetTime()) for "arrived" / "last updated".
+  // Used for stable sorting and duplicate collapse heuristics.
+  double created_time_s{0.0};
+  double updated_time_s{0.0};
+};
+
 // Shared UI toggle/state so multiple panels can respect the same fog-of-war settings.
 // This is intentionally not persisted in saves.
 struct UIState {
@@ -466,6 +559,29 @@ struct UIState {
   // Not persisted in saves.
   std::uint64_t last_seen_event_seq{0};
 
+  // Notification Center (persistent UI inbox).
+  // Stores a rolling history of important events/alerts so they can be
+  // triaged even when HUD toasts are disabled or missed.
+  //
+  // Not persisted in saves.
+  std::vector<NotificationEntry> notifications;
+  // Last SimEvent::seq ingested into the inbox.
+  // Used to avoid scanning the full event list each frame.
+  std::uint64_t notifications_last_ingested_event_seq{0};
+  // One-shot focus request: select+scroll to a specific notification id.
+  std::uint64_t notifications_request_focus_id{0};
+
+  // Capture preferences (stored in ui_prefs.json).
+  bool notifications_capture_sim_events{true};
+  bool notifications_capture_info_events{false};
+  bool notifications_capture_watchboard_alerts{true};
+  bool notifications_collapse_duplicates{true};
+  bool notifications_auto_open_on_error{false};
+  // Retention caps.
+  int notifications_max_entries{600};
+  // Age cap (in sim days). 0 = keep forever.
+  int notifications_keep_days{365};
+
   // --- Window visibility / layout ---
   // These are UI-only preferences (not persisted in saves).
   bool show_controls_window{true};
@@ -489,9 +605,11 @@ struct UIState {
   bool show_advisor_window{false};
   bool show_time_warp_window{false};
   bool show_timeline_window{false};
+  bool show_notifications_window{false};
   bool show_design_studio_window{false};
   bool show_balance_lab_window{false};
   bool show_intel_window{false};
+  bool show_intel_notebook_window{false};
   bool show_diplomacy_window{false};
   bool show_victory_window{false};
   bool show_colony_profiles_window{false};
@@ -505,6 +623,7 @@ struct UIState {
   // Debug/tooling windows.
   bool show_save_tools_window{false};
   bool show_time_machine_window{false};
+  bool show_compare_window{false};
   bool show_omni_search_window{false};
   bool show_json_explorer_window{false};
   bool show_content_validation_window{false};
@@ -513,6 +632,7 @@ struct UIState {
   bool show_entity_inspector_window{false};
   bool show_reference_graph_window{false};
   bool show_layout_profiles_window{false};
+  bool show_window_manager_window{false};
   bool show_procgen_atlas_window{false};
   bool show_star_atlas_window{false};
   bool show_watchboard_window{false};
@@ -601,6 +721,10 @@ struct UIState {
   // These are UI preferences persisted in ui_prefs.json.
   bool omni_search_match_keys{true};
   bool omni_search_match_values{true};
+  bool omni_search_match_entities{true};
+  bool omni_search_match_docs{true};
+  bool omni_search_match_windows{true};
+  bool omni_search_match_layouts{true};
   bool omni_search_case_sensitive{false};
   bool omni_search_auto_refresh{false};
   float omni_search_refresh_sec{1.0f};
@@ -650,6 +774,29 @@ struct UIState {
   int time_machine_max_value_chars{160};
 
 
+  // --- Compare / Diff (entity comparison) ---
+  // Preferences persisted in ui_prefs.json.
+  // Note: the selected ids may not exist across different saves/scenarios.
+  float compare_refresh_sec{0.75f};
+  bool compare_include_container_sizes{true};
+  bool compare_show_unchanged{false};
+  bool compare_case_sensitive{false};
+  int compare_max_depth{6};
+  int compare_max_nodes{6000};
+  int compare_max_value_chars{160};
+
+  // UI-only compare state (not persisted).
+  Id compare_a_id{kInvalidId};
+  Id compare_b_id{kInvalidId};
+  bool compare_a_use_snapshot{false};
+  bool compare_b_use_snapshot{false};
+  std::string compare_a_snapshot_label;
+  std::string compare_b_snapshot_label;
+  std::string compare_a_snapshot_json;
+  std::string compare_b_snapshot_json;
+  std::string compare_filter;
+
+
   // Additional UI chrome.
   bool show_status_bar{true};
 
@@ -662,6 +809,19 @@ struct UIState {
   bool show_command_palette{false};
   bool show_help_window{false};
   bool show_navigator_window{false};
+
+  // --- Guided Tours (onboarding overlay) ---
+  // UI-only; not persisted.
+  bool tour_active{false};
+  int tour_active_index{0};
+  int tour_step_index{0};
+  bool tour_dim_background{true};
+  float tour_dim_alpha{0.70f};
+  // When enabled, the tour blocks interactions outside the spotlight target.
+  // This lets the player click inside the highlighted window while preventing
+  // accidental clicks elsewhere.
+  bool tour_block_outside_spotlight{true};
+  bool tour_pause_toasts{true};
 
   // --- Navigation (selection history + bookmarks) ---
   // UI-only; cleared when a new game is loaded/created (state generation changes).
@@ -679,10 +839,15 @@ struct UIState {
   // Requested tab focus (consumed by the next frame).
   DetailsTab request_details_tab{DetailsTab::None};
   MapTab request_map_tab{MapTab::None};
+  HelpTab request_help_tab{HelpTab::None};
 
   // Optional: request that the JSON Explorer focuses a specific JSON Pointer.
   // Consumed by the JSON Explorer window on the next frame.
   std::string request_json_explorer_goto_path;
+
+  // Optional: request that the Codex opens a specific doc (by path or ref).
+  // Consumed by the Docs Browser panel on the next frame.
+  std::string request_open_doc_ref;
 
   // Optional: request that the Watchboard scrolls/highlights a specific watch id.
   // Consumed by the Watchboard window on the next frame.
@@ -740,6 +905,21 @@ struct UIState {
   // UI scaling (1.0 = default). This affects readability on high-DPI displays.
   float ui_scale{1.0f};
 
+  // --- Hotkeys / keyboard shortcuts ---
+  //
+  // These are global hotkeys processed by the App layer (before windows draw).
+  // They are UI-only and persisted in ui_prefs.json.
+  bool hotkeys_enabled{true};
+  // When true, global hotkey dispatch is suppressed so the user can safely
+  // capture a new key chord in the Hotkeys editor.
+  bool hotkeys_capture_active{false};
+  // If non-empty, the Hotkeys editor is waiting for a new chord for this id.
+  // This is UI-only state (not persisted).
+  std::string hotkeys_capture_id;
+  // Overrides keyed by hotkey id (string). Unknown ids are ignored on load.
+  // If a hotkey id is missing here, the default chord for that action is used.
+  std::unordered_map<std::string, HotkeyChord> hotkey_overrides;
+
   // --- Screen reader / narration (accessibility) ---
   //
   // This is not a native OS accessibility tree; it's an in-game narration layer
@@ -789,6 +969,29 @@ struct UIState {
   bool docking_with_shift{false};
   bool docking_always_tab_bar{false};
   bool docking_transparent_payload{true};
+
+// Multi-Viewport (detachable OS windows).
+// Note: Requires a renderer backend with platform-window support (e.g. SDL2+OpenGL2).
+bool viewports_enable{true};
+bool viewports_no_taskbar_icon{true};
+bool viewports_no_auto_merge{false};
+bool viewports_no_decoration{false};
+
+  // Popup window management.
+  // When enabled, newly opened windows appear as floating popups instead of docking into the workspace.
+  // This reduces clutter and makes it easy to drag windows out into detachable OS windows (multi-viewport).
+  bool window_popup_first_mode{true};
+  bool window_popup_auto_focus{true};
+  float window_popup_cascade_step_px{24.0f};
+  // Optional per-window override: id -> 0 (Docked), 1 (Popup). Missing = use defaults.
+  std::unordered_map<std::string, int> window_launch_overrides;
+
+  // UI-only (not persisted): runtime helpers for popup placement and focus-mode.
+  bool window_focus_mode{false};
+  std::unordered_map<std::string, bool> window_focus_restore;
+  std::unordered_map<std::string, bool> window_open_prev;
+  std::unordered_map<std::string, bool> window_popout_request;
+  int window_popup_cascade_index{0};
 
   // --- Procedural dock layout synthesizer ---
   //

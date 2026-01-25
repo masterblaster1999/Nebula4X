@@ -13,6 +13,7 @@
 
 #include "ui/game_json_cache.h"
 #include "ui/json_watch_eval.h"
+#include "ui/notifications.h"
 #include "ui/screen_reader.h"
 
 namespace nebula4x::ui {
@@ -75,9 +76,16 @@ std::int64_t g_last_tick = -1;
 } // namespace
 
 void update_watchboard_alert_toasts(const Simulation& sim, UIState& ui, HUDState& hud) {
-  // Respect the existing toast toggle. If the user disables toasts, we also disable alert emissions
-  // to avoid building a backlog in the background.
-  if (!ui.show_event_toasts) return;
+  // The watchboard can emit two user-facing signals:
+  //   - transient HUD toasts
+  //   - persistent Notification Center entries
+  //
+  // Historically we suppressed evaluation when toasts were disabled to avoid
+  // building a hidden backlog. With the Notification Center, users may want
+  // alerts *without* pop-up toasts, so we evaluate when either sink is enabled.
+  const bool emit_toasts = ui.show_event_toasts;
+  const bool emit_inbox = ui.notifications_capture_watchboard_alerts;
+  if (!emit_toasts && !emit_inbox) return;
 
   // Reset state when a new game state is loaded.
   if (g_last_state_generation != sim.state_generation()) {
@@ -257,33 +265,44 @@ void update_watchboard_alert_toasts(const Simulation& sim, UIState& ui, HUDState
       msg = label + " changed (was " + prev_display + ", now " + cur.display + ")";
     }
 
-    EventToast t;
-    t.seq = kCustomToastSeqBase | (hud.next_custom_toast_seq++);
-    t.day = st.date.days_since_epoch();
-    t.level = lvl;
-    t.category = EventCategory::General;
-    t.custom = true;
-    t.watch_id = cfg.id;
-    t.watch_label = cfg.label;
-    t.watch_path = cfg.path;
-    t.watch_rep_ptr = cur.rep_ptr;
-    t.message = std::move(msg);
-    t.created_time_s = now_s;
+    const std::uint64_t seq = kCustomToastSeqBase | (hud.next_custom_toast_seq++);
+    const std::int64_t day = st.date.days_since_epoch();
+    const int hour = st.hour_of_day;
 
-    hud.toasts.push_back(std::move(t));
+    if (emit_inbox) {
+      notifications_push_watchboard_alert(ui, seq, day, hour, static_cast<int>(lvl), msg, cfg.id, cfg.label, cfg.path,
+                                         cur.rep_ptr);
+    }
 
-    // Keep toast list bounded (matches update_event_toasts cap).
-    constexpr std::size_t kMaxToastsTotal = 10;
-    if (hud.toasts.size() > kMaxToastsTotal) {
-      hud.toasts.erase(hud.toasts.begin(), hud.toasts.begin() + (hud.toasts.size() - kMaxToastsTotal));
+    if (emit_toasts) {
+      EventToast t;
+      t.seq = seq;
+      t.day = day;
+      t.level = lvl;
+      t.category = EventCategory::General;
+      t.custom = true;
+      t.watch_id = cfg.id;
+      t.watch_label = cfg.label;
+      t.watch_path = cfg.path;
+      t.watch_rep_ptr = cur.rep_ptr;
+      t.message = std::move(msg);
+      t.created_time_s = now_s;
+
+      hud.toasts.push_back(std::move(t));
+
+      // Keep toast list bounded (matches update_event_toasts cap).
+      constexpr std::size_t kMaxToastsTotal = 10;
+      if (hud.toasts.size() > kMaxToastsTotal) {
+        hud.toasts.erase(hud.toasts.begin(), hud.toasts.begin() + (hud.toasts.size() - kMaxToastsTotal));
+      }
+
+      if (ui.screen_reader_enabled && ui.screen_reader_speak_toasts) {
+        ScreenReader::instance().announce_toast("Alert: " + hud.toasts.back().message);
+      }
     }
 
     rt.last_fire_time_s = now_s;
     emitted_this_tick++;
-
-    if (ui.screen_reader_enabled && ui.screen_reader_speak_toasts) {
-      ScreenReader::instance().announce_toast("Alert: " + hud.toasts.back().message);
-    }
   }
 
   if (tick_changed) g_last_tick = tick;

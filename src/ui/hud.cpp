@@ -19,7 +19,16 @@
 
 #include "ui/screen_reader.h"
 
+#include "ui/docs_browser.h"
+
+#include "ui/guided_tour.h"
+
 #include "ui/navigation.h"
+
+#include "ui/notifications.h"
+
+#include "ui/hotkeys.h"
+#include "ui/window_management.h"
 
 namespace nebula4x::ui {
 namespace {
@@ -161,9 +170,11 @@ enum class PaletteAction {
   ToggleShipyardTargets,
   ToggleSurveyNetwork,
   ToggleTimeline,
+  ToggleNotifications,
   ToggleDesignStudio,
   ToggleBalanceLab,
   ToggleIntel,
+  ToggleIntelNotebook,
   ToggleDiplomacyGraph,
   ToggleSettings,
   ToggleSaveTools,
@@ -174,6 +185,7 @@ enum class PaletteAction {
   ToggleEntityInspector,
   ToggleReferenceGraph,
   ToggleTimeMachine,
+  ToggleCompare,
   ToggleNavigator,
   ToggleWatchboard,
   ToggleDataLenses,
@@ -181,9 +193,11 @@ enum class PaletteAction {
   TogglePivotTables,
   ToggleUIForge,
   ToggleLayoutProfiles,
+  ToggleWindowManager,
   ToggleStatusBar,
   ToggleFogOfWar,
   ToggleToasts,
+  ToggleFocusMode,
   WorkspaceDefault,
   WorkspaceMinimal,
   WorkspaceEconomy,
@@ -219,6 +233,7 @@ void activate_palette_item(PaletteItem& item, Simulation& sim, UIState& ui, Id& 
 
   switch (item.kind) {
     case PaletteKind::Action: {
+      remember_action_recent(ui, item.action);
       switch (item.action) {
         case PaletteAction::ToggleControls:
           ui.show_controls_window = !ui.show_controls_window;
@@ -265,6 +280,9 @@ void activate_palette_item(PaletteItem& item, Simulation& sim, UIState& ui, Id& 
         case PaletteAction::ToggleTimeline:
           ui.show_timeline_window = !ui.show_timeline_window;
           break;
+        case PaletteAction::ToggleNotifications:
+          ui.show_notifications_window = !ui.show_notifications_window;
+          break;
         case PaletteAction::ToggleDesignStudio:
           ui.show_design_studio_window = !ui.show_design_studio_window;
           break;
@@ -273,6 +291,9 @@ void activate_palette_item(PaletteItem& item, Simulation& sim, UIState& ui, Id& 
           break;
         case PaletteAction::ToggleIntel:
           ui.show_intel_window = !ui.show_intel_window;
+          break;
+        case PaletteAction::ToggleIntelNotebook:
+          ui.show_intel_notebook_window = !ui.show_intel_notebook_window;
           break;
         case PaletteAction::ToggleDiplomacyGraph:
           ui.show_diplomacy_window = !ui.show_diplomacy_window;
@@ -325,6 +346,9 @@ void activate_palette_item(PaletteItem& item, Simulation& sim, UIState& ui, Id& 
         case PaletteAction::ToggleLayoutProfiles:
           ui.show_layout_profiles_window = !ui.show_layout_profiles_window;
           break;
+        case PaletteAction::ToggleWindowManager:
+          ui.show_window_manager_window = !ui.show_window_manager_window;
+          break;
         case PaletteAction::ToggleStatusBar:
           ui.show_status_bar = !ui.show_status_bar;
           break;
@@ -333,6 +357,9 @@ void activate_palette_item(PaletteItem& item, Simulation& sim, UIState& ui, Id& 
           break;
         case PaletteAction::ToggleToasts:
           ui.show_event_toasts = !ui.show_event_toasts;
+          break;
+        case PaletteAction::ToggleFocusMode:
+          toggle_focus_mode(ui);
           break;
         case PaletteAction::WorkspaceDefault:
           ui.show_controls_window = true;
@@ -604,11 +631,16 @@ constexpr ActionMeta kActionMetas[] = {
      "production", true},
     {PaletteAction::ToggleTimeline, "Windows", "Timeline window", "Show/hide the Timeline window.", "Ctrl+7",
      "timeline", true},
+    {PaletteAction::ToggleNotifications, "Windows", "Notification Center", "Show/hide the Notification Center inbox.", "F3",
+     "notifications inbox alerts", true},
     {PaletteAction::ToggleDesignStudio, "Windows", "Design Studio window", "Show/hide the Design Studio.", "Ctrl+8",
      "design", true},
     {PaletteAction::ToggleBalanceLab, "Windows", "Balance Lab window", "Show/hide the Balance Lab (combat/economy tuning sandbox).", nullptr,
      "balance lab", true},
     {PaletteAction::ToggleIntel, "Windows", "Intel window", "Show/hide the Intel window.", "Ctrl+9", "intel", true},
+    {PaletteAction::ToggleIntelNotebook, "Windows", "Intel Notebook",
+     "Unified knowledge-base: system notes + curated journal (tags, pins, export).", "Ctrl+Shift+I",
+     "notebook notes journal intel", true},
     {PaletteAction::ToggleDiplomacyGraph, "Windows", "Diplomacy Graph window", "Show/hide the Diplomacy Graph.", "Ctrl+0",
      "diplomacy", true},
 
@@ -637,6 +669,9 @@ constexpr ActionMeta kActionMetas[] = {
     {PaletteAction::ToggleSaveTools, "Tools", "Save Tools", "Save inspection/export helpers.", nullptr, "save tools", true},
     {PaletteAction::ToggleTimeMachine, "Tools", "Time Machine", "State history + diffs (debug / analysis).", "Ctrl+Shift+D",
      "time machine", true},
+    {PaletteAction::ToggleCompare, "Tools", "Compare / Diff", 
+     "Compare two entities (or snapshots) with a flattened diff + merge patch export.", "Ctrl+Shift+X",
+     "compare diff merge patch", true},
     {PaletteAction::ToggleOmniSearch, "Tools", "OmniSearch", "Search the live game JSON and run commands.", "Ctrl+F",
      "omnisearch", true},
     {PaletteAction::ToggleJsonExplorer, "Tools", "JSON Explorer", "Browse the live game JSON tree.", nullptr,
@@ -663,12 +698,19 @@ constexpr ActionMeta kActionMetas[] = {
     {PaletteAction::ToggleLayoutProfiles, "Tools", "Layout Profiles", "Save/load dock layouts (including procedural layouts).", "Ctrl+Shift+L",
      "layout profiles", true},
 
+    {PaletteAction::ToggleWindowManager, "Tools", "Window Manager",
+     "Open the Window Manager (visibility, pop-outs, and per-window launch modes).", "Ctrl+Shift+W",
+     "window manager popout popup", true},
+
     // UI
     {PaletteAction::ToggleStatusBar, "UI", "Status Bar", "Show/hide the bottom status bar.", nullptr, "status bar", true},
     {PaletteAction::ToggleFogOfWar, "UI", "Fog of War", "Toggle fog-of-war rendering on maps.", nullptr, "fog of war", true},
     {PaletteAction::ToggleToasts, "UI", "Event Toasts", "Show/hide HUD toast notifications.", nullptr, "toasts", true},
 
     // Workspace
+    {PaletteAction::ToggleFocusMode, "Workspace", "Focus Mode (Map only)",
+     "Toggle a decluttered view by hiding all windows except the Map (toggles back restores your previous set).", "F10",
+     "focus zen unclutter", true},
     {PaletteAction::WorkspaceDefault, "Workspace", "Workspace: Default", "Apply the default workspace window preset.", nullptr,
      "workspace default", false},
     {PaletteAction::WorkspaceMinimal, "Workspace", "Workspace: Minimal", "Apply a minimal workspace window preset.", nullptr,
@@ -699,6 +741,123 @@ const ActionMeta* find_action_meta(PaletteAction a) {
   return nullptr;
 }
 
+// --- Command Console persistence helpers (favorites + recent) ---
+
+std::string slugify(std::string_view s) {
+  std::string out;
+  out.reserve(s.size());
+
+  bool prev_underscore = false;
+  for (char c : s) {
+    unsigned char uc = static_cast<unsigned char>(c);
+    const bool is_alnum = (uc >= '0' && uc <= '9') || (uc >= 'a' && uc <= 'z') || (uc >= 'A' && uc <= 'Z');
+    if (is_alnum) {
+      out.push_back(static_cast<char>(std::tolower(uc)));
+      prev_underscore = false;
+    } else if (c == ' ' || c == '-' || c == '.' || c == '/' || c == '\\') {
+      if (!prev_underscore && !out.empty()) {
+        out.push_back('_');
+        prev_underscore = true;
+      }
+    }
+  }
+
+  // Trim trailing underscores.
+  while (!out.empty() && out.back() == '_') out.pop_back();
+  return out;
+}
+
+std::string make_action_persistent_id(const ActionMeta& m) {
+  // Keep IDs readable and stable across launches.
+  // NOTE: if the user-facing label changes, the ID will change; this is acceptable
+  // for now (beta UI), and we garbage-collect unknown IDs automatically.
+  std::string id;
+  const std::string cat = slugify(m.category);
+  const std::string name = slugify(m.label);
+  id.reserve(cat.size() + name.size() + 1);
+  id += cat;
+  id += ':';
+  id += name;
+  return id;
+}
+
+const std::vector<std::pair<PaletteAction, std::string>>& action_id_table() {
+  static const std::vector<std::pair<PaletteAction, std::string>> kTable = [] {
+    std::vector<std::pair<PaletteAction, std::string>> tbl;
+    tbl.reserve(kActionMetas.size());
+    for (const auto& m : kActionMetas) {
+      tbl.emplace_back(m.action, make_action_persistent_id(m));
+    }
+    return tbl;
+  }();
+  return kTable;
+}
+
+const std::string& action_persistent_id(PaletteAction a) {
+  for (const auto& [act, id] : action_id_table()) {
+    if (act == a) return id;
+  }
+  static const std::string kEmpty;
+  return kEmpty;
+}
+
+PaletteAction action_from_persistent_id(std::string_view id) {
+  for (const auto& [act, known] : action_id_table()) {
+    if (known == id) return act;
+  }
+  return PaletteAction::Count;
+}
+
+bool is_action_favorite(const UIState& ui, PaletteAction a) {
+  const std::string& id = action_persistent_id(a);
+  if (id.empty()) return false;
+  return std::find(ui.command_favorites.begin(), ui.command_favorites.end(), id) != ui.command_favorites.end();
+}
+
+void toggle_action_favorite(UIState& ui, PaletteAction a) {
+  const std::string& id = action_persistent_id(a);
+  if (id.empty()) return;
+
+  auto it = std::find(ui.command_favorites.begin(), ui.command_favorites.end(), id);
+  if (it != ui.command_favorites.end()) {
+    ui.command_favorites.erase(it);
+  } else {
+    ui.command_favorites.push_back(id);
+  }
+}
+
+void remember_action_recent(UIState& ui, PaletteAction a) {
+  const std::string& id = action_persistent_id(a);
+  if (id.empty()) return;
+
+  // De-dup.
+  ui.command_recent.erase(std::remove(ui.command_recent.begin(), ui.command_recent.end(), id), ui.command_recent.end());
+
+  // Most-recent first.
+  ui.command_recent.insert(ui.command_recent.begin(), id);
+
+  // Enforce cap.
+  const int limit = std::clamp(ui.command_recent_limit, 0, 200);
+  ui.command_recent_limit = limit;
+  if (limit == 0) {
+    ui.command_recent.clear();
+  } else if (static_cast<int>(ui.command_recent.size()) > limit) {
+    ui.command_recent.resize(static_cast<std::size_t>(limit));
+  }
+}
+
+void gc_unknown_persistent_actions(UIState& ui) {
+  auto is_known = [](const std::string& id) {
+    return action_from_persistent_id(id) != PaletteAction::Count;
+  };
+  ui.command_favorites.erase(std::remove_if(ui.command_favorites.begin(), ui.command_favorites.end(),
+                                            [&](const std::string& id) { return !is_known(id); }),
+                             ui.command_favorites.end());
+  ui.command_recent.erase(std::remove_if(ui.command_recent.begin(), ui.command_recent.end(),
+                                         [&](const std::string& id) { return !is_known(id); }),
+                          ui.command_recent.end());
+}
+
 bool action_toggle_state(const UIState& ui, PaletteAction a) {
   switch (a) {
     case PaletteAction::ToggleControls: return ui.show_controls_window;
@@ -716,9 +875,11 @@ bool action_toggle_state(const UIState& ui, PaletteAction a) {
     case PaletteAction::ToggleShipyardTargets: return ui.show_shipyard_targets_window;
     case PaletteAction::ToggleSurveyNetwork: return ui.show_survey_network_window;
     case PaletteAction::ToggleTimeline: return ui.show_timeline_window;
+    case PaletteAction::ToggleNotifications: return ui.show_notifications_window;
     case PaletteAction::ToggleDesignStudio: return ui.show_design_studio_window;
     case PaletteAction::ToggleBalanceLab: return ui.show_balance_lab_window;
     case PaletteAction::ToggleIntel: return ui.show_intel_window;
+    case PaletteAction::ToggleIntelNotebook: return ui.show_intel_notebook_window;
     case PaletteAction::ToggleDiplomacyGraph: return ui.show_diplomacy_window;
     case PaletteAction::ToggleSettings: return ui.show_settings_window;
     case PaletteAction::ToggleSaveTools: return ui.show_save_tools_window;
@@ -729,6 +890,7 @@ bool action_toggle_state(const UIState& ui, PaletteAction a) {
     case PaletteAction::ToggleEntityInspector: return ui.show_entity_inspector_window;
     case PaletteAction::ToggleReferenceGraph: return ui.show_reference_graph_window;
     case PaletteAction::ToggleTimeMachine: return ui.show_time_machine_window;
+    case PaletteAction::ToggleCompare: return ui.show_compare_window;
     case PaletteAction::ToggleNavigator: return ui.show_navigator_window;
     case PaletteAction::ToggleWatchboard: return ui.show_watchboard_window;
     case PaletteAction::ToggleDataLenses: return ui.show_data_lenses_window;
@@ -736,14 +898,70 @@ bool action_toggle_state(const UIState& ui, PaletteAction a) {
     case PaletteAction::TogglePivotTables: return ui.show_pivot_tables_window;
     case PaletteAction::ToggleUIForge: return ui.show_ui_forge_window;
     case PaletteAction::ToggleLayoutProfiles: return ui.show_layout_profiles_window;
+    case PaletteAction::ToggleWindowManager: return ui.show_window_manager_window;
     case PaletteAction::ToggleStatusBar: return ui.show_status_bar;
     case PaletteAction::ToggleFogOfWar: return ui.fog_of_war;
     case PaletteAction::ToggleToasts: return ui.show_event_toasts;
+    case PaletteAction::ToggleFocusMode: return ui.window_focus_mode;
     default: return false;
   }
 }
 
-void draw_action_tooltip(const ActionMeta& m) {
+const char* hotkey_id_for_action(PaletteAction a) {
+  // Map palette actions to configurable Hotkeys ids.
+  // Only actions that are processed by the App-level global hotkey dispatcher
+  // are mapped here.
+  switch (a) {
+    case PaletteAction::OpenHelp: return "ui.toggle.help";
+    case PaletteAction::ToggleOmniSearch: return "ui.toggle.omnisearch";
+    case PaletteAction::ToggleEntityInspector: return "ui.toggle.entity_inspector";
+    case PaletteAction::ToggleReferenceGraph: return "ui.toggle.reference_graph";
+    case PaletteAction::ToggleTimeMachine: return "ui.toggle.time_machine";
+    case PaletteAction::ToggleCompare: return "ui.toggle.compare";
+    case PaletteAction::ToggleNavigator: return "ui.toggle.navigator";
+    case PaletteAction::ToggleAdvisor: return "ui.toggle.advisor";
+    case PaletteAction::ToggleColonyProfiles: return "ui.toggle.colony_profiles";
+    case PaletteAction::ToggleShipProfiles: return "ui.toggle.ship_profiles";
+    case PaletteAction::ToggleShipyardTargets: return "ui.toggle.shipyard_targets";
+    case PaletteAction::ToggleSurveyNetwork: return "ui.toggle.survey_network";
+    case PaletteAction::ToggleRegions: return "ui.toggle.regions";
+    case PaletteAction::ToggleFleetManager: return "ui.toggle.fleet_manager";
+    case PaletteAction::ToggleContentValidation: return "ui.toggle.content_validation";
+    case PaletteAction::ToggleStateDoctor: return "ui.toggle.state_doctor";
+    case PaletteAction::ToggleControls: return "ui.toggle.controls";
+    case PaletteAction::ToggleMap: return "ui.toggle.map";
+    case PaletteAction::ToggleDetails: return "ui.toggle.details";
+    case PaletteAction::ToggleDirectory: return "ui.toggle.directory";
+    case PaletteAction::ToggleEconomy: return "ui.toggle.economy";
+    case PaletteAction::ToggleProduction: return "ui.toggle.production";
+    case PaletteAction::ToggleTimeline: return "ui.toggle.timeline";
+    case PaletteAction::ToggleNotifications: return "ui.toggle.notifications";
+    case PaletteAction::ToggleDesignStudio: return "ui.toggle.design_studio";
+    case PaletteAction::ToggleIntel: return "ui.toggle.intel";
+    case PaletteAction::ToggleIntelNotebook: return "ui.toggle.intel_notebook";
+    case PaletteAction::ToggleDiplomacyGraph: return "ui.toggle.diplomacy";
+    case PaletteAction::ToggleSettings: return "ui.toggle.settings";
+    case PaletteAction::ToggleLayoutProfiles: return "ui.toggle.layout_profiles";
+    case PaletteAction::ToggleWindowManager: return "ui.toggle.window_manager";
+    case PaletteAction::ToggleUIForge: return "ui.toggle.ui_forge";
+    case PaletteAction::ToggleFocusMode: return "ui.toggle.focus_mode";
+    case PaletteAction::NavBack: return "nav.back";
+    case PaletteAction::NavForward: return "nav.forward";
+    case PaletteAction::Save: return "game.save";
+    case PaletteAction::Load: return "game.load";
+    default: return nullptr;
+  }
+}
+
+std::string effective_shortcut(const ActionMeta& m, const UIState& ui) {
+  const char* hotkey_id = hotkey_id_for_action(m.action);
+  if (hotkey_id) {
+    return hotkey_to_string(hotkey_get(ui, hotkey_id));
+  }
+  return (m.shortcut && m.shortcut[0] != '\0') ? std::string(m.shortcut) : std::string();
+}
+
+void draw_action_tooltip(const ActionMeta& m, const UIState& ui) {
   if (!ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) return;
 
   ImGui::BeginTooltip();
@@ -755,9 +973,10 @@ void draw_action_tooltip(const ActionMeta& m) {
   ImGui::TextWrapped("%s", tip);
   ImGui::PopTextWrapPos();
 
-  if (m.shortcut && m.shortcut[0] != '\0') {
+  const std::string shortcut = effective_shortcut(m, ui);
+  if (!shortcut.empty()) {
     ImGui::Spacing();
-    ImGui::TextDisabled("Shortcut: %s", m.shortcut);
+    ImGui::TextDisabled("Shortcut: %s", shortcut.c_str());
   }
 
   if (m.keywords && m.keywords[0] != '\0') {
@@ -1027,6 +1246,44 @@ void draw_status_bar(Simulation& sim, UIState& ui, HUDState& /*hud*/, Id& select
     }
   }
 
+  // Notifications inbox indicator.
+  const int inbox_unread = notifications_unread_count(ui);
+  ImGui::SameLine();
+  VerticalSeparator();
+  ImGui::SameLine();
+  if (inbox_unread > 0) {
+    std::string b = "Inbox (" + std::to_string(inbox_unread) + ")";
+    if (ImGui::SmallButton(b.c_str())) ui.show_notifications_window = true;
+  } else {
+    if (ImGui::SmallButton("Inbox")) ui.show_notifications_window = true;
+  }
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip("Open Notification Center\nShortcut: F3");
+  }
+
+  // Intel Notebook quick access (uses pinned system notes as a lightweight indicator).
+  {
+    Id vf = ui.viewer_faction_id;
+    if (selected_ship != kInvalidId) {
+      if (const auto* sh = find_ptr(sim.state().ships, selected_ship)) vf = sh->faction_id;
+    }
+    const Faction* fac = (vf != kInvalidId) ? find_ptr(sim.state().factions, vf) : nullptr;
+    if (fac) {
+      int pinned = 0;
+      for (const auto& kv : fac->system_notes) {
+        if (kv.second.pinned) ++pinned;
+      }
+      ImGui::SameLine();
+      VerticalSeparator();
+      ImGui::SameLine();
+      std::string b = (pinned > 0) ? ("Notebook (★" + std::to_string(pinned) + ")") : "Notebook";
+      if (ImGui::SmallButton(b.c_str())) ui.show_intel_notebook_window = true;
+      if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Open Intel Notebook (system notes + journal)\nShortcut: Ctrl+Shift+I");
+      }
+    }
+  }
+
   ImGui::End();
   ImGui::PopStyleVar(3);
 }
@@ -1034,61 +1291,405 @@ void draw_status_bar(Simulation& sim, UIState& ui, HUDState& /*hud*/, Id& select
 void draw_help_window(UIState& ui) {
   if (!ui.show_help_window) return;
 
-  ImGui::SetNextWindowSize(ImVec2(560, 420), ImGuiCond_FirstUseEver);
-  if (!ImGui::Begin("Help", &ui.show_help_window)) {
+  ImGui::SetNextWindowSize(ImVec2(980, 720), ImGuiCond_FirstUseEver);
+  if (!ImGui::Begin("Help / Codex", &ui.show_help_window)) {
     ImGui::End();
     return;
   }
 
-  ImGui::SeparatorText("Global shortcuts");
-  ImGui::BulletText("Ctrl+P: Command Console (panels + search across actions, systems, ships, colonies, bodies)");
-  ImGui::BulletText("Ctrl+F: OmniSearch (global game JSON search)");
-  ImGui::BulletText("Ctrl+G: Entity Inspector (resolve an entity id + find inbound refs)");
-  ImGui::BulletText("Ctrl+Shift+G: Reference Graph (visualize id relationships)");
-  ImGui::BulletText("Ctrl+Shift+D: Time Machine (state history + diffs)");
-  ImGui::BulletText("Ctrl+Shift+A: Advisor (issues + quick fixes)");
-  ImGui::BulletText("Ctrl+Shift+B: Colony Profiles (automation presets)");
-  ImGui::BulletText("Ctrl+Shift+M: Ship Profiles (automation presets)");
-  ImGui::BulletText("Ctrl+Shift+F: Fleet Manager (fleet list + missions)");
-  ImGui::BulletText("Ctrl+Shift+R: Regions (sectors overview)");
-  ImGui::BulletText("Ctrl+Shift+C: Context Forge (context panels)");
-  ImGui::BulletText("Ctrl+Shift+Y: Shipyard Targets (ship design targets)");
-  ImGui::BulletText("Ctrl+Shift+J: Survey Network (jump point surveys)");
-  ImGui::BulletText("Ctrl+Shift+V: Content Validation (validate content bundle errors/warnings)");
-  ImGui::BulletText("Ctrl+Shift+K: State Doctor (validate/fix save integrity; preview merge patch)");
-  ImGui::BulletText("F1: Toggle this help window");
-  ImGui::BulletText("Ctrl+S: Save (uses current save path)");
-  ImGui::BulletText("Ctrl+O: Load (uses current load path)");
-  ImGui::BulletText("Space: Advance +1 day (Shift=+5, Ctrl=+30)");
-  ImGui::BulletText("Ctrl+Shift+L: Layout Profiles (switch dock layouts)");
-  ImGui::BulletText("Ctrl+Shift+U: UI Forge (custom panels)");
-  ImGui::BulletText("Ctrl+Shift+N: Navigator (selection history + bookmarks/pins)");
-  ImGui::BulletText("Alt+Left / Alt+Right: Navigate selection history (back/forward)");
+  // Helper: actions that are safe to trigger without touching the simulation.
+  auto can_apply_ui_only_action = [&](PaletteAction a) -> bool {
+    switch (a) {
+      case PaletteAction::ToggleControls:
+      case PaletteAction::ToggleMap:
+      case PaletteAction::ToggleDetails:
+      case PaletteAction::ToggleDirectory:
+      case PaletteAction::ToggleProduction:
+      case PaletteAction::ToggleEconomy:
+      case PaletteAction::ToggleFleetManager:
+      case PaletteAction::ToggleRegions:
+      case PaletteAction::ToggleAdvisor:
+      case PaletteAction::ToggleColonyProfiles:
+      case PaletteAction::ToggleShipProfiles:
+      case PaletteAction::ToggleAutomationCenter:
+      case PaletteAction::ToggleShipyardTargets:
+      case PaletteAction::ToggleSurveyNetwork:
+      case PaletteAction::ToggleTimeline:
+      case PaletteAction::ToggleNotifications:
+      case PaletteAction::ToggleDesignStudio:
+      case PaletteAction::ToggleBalanceLab:
+      case PaletteAction::ToggleIntel:
+      case PaletteAction::ToggleIntelNotebook:
+      case PaletteAction::ToggleDiplomacyGraph:
 
-  ImGui::SeparatorText("Window toggles");
-  ImGui::BulletText("Drag window tabs to dock/undock and rearrange the workspace");
-  ImGui::BulletText("Ctrl+1: Controls");
-  ImGui::BulletText("Ctrl+2: Map");
-  ImGui::BulletText("Ctrl+3: Details");
-  ImGui::BulletText("Ctrl+4: Directory");
-  ImGui::BulletText("Ctrl+5: Economy");
-  ImGui::BulletText("Ctrl+6: Production");
-  ImGui::BulletText("Ctrl+7: Timeline");
-  ImGui::BulletText("Ctrl+8: Design Studio");
-  ImGui::BulletText("Ctrl+9: Intel");
-  ImGui::BulletText("Ctrl+0: Diplomacy Graph");
-  ImGui::BulletText("Ctrl+,: Settings");
+      case PaletteAction::ToggleSettings:
+      case PaletteAction::ToggleSaveTools:
+      case PaletteAction::ToggleOmniSearch:
+      case PaletteAction::ToggleJsonExplorer:
+      case PaletteAction::ToggleContentValidation:
+      case PaletteAction::ToggleStateDoctor:
+      case PaletteAction::ToggleEntityInspector:
+      case PaletteAction::ToggleReferenceGraph:
+      case PaletteAction::ToggleTimeMachine:
+      case PaletteAction::ToggleNavigator:
+      case PaletteAction::ToggleWatchboard:
+      case PaletteAction::ToggleDataLenses:
+      case PaletteAction::ToggleDashboards:
+      case PaletteAction::TogglePivotTables:
+      case PaletteAction::ToggleUIForge:
+      case PaletteAction::ToggleLayoutProfiles:
 
-  ImGui::SeparatorText("Map controls");
-  ImGui::BulletText("Mouse wheel: zoom");
-  ImGui::BulletText("Middle mouse drag: pan");
-  ImGui::BulletText("System map: Left click = issue order, Right click = select");
-  ImGui::BulletText("Galaxy map: Left click = select system, Right click = route ship (Shift queues)");
+      case PaletteAction::ToggleStatusBar:
+      case PaletteAction::ToggleFogOfWar:
+      case PaletteAction::ToggleToasts:
 
-  ImGui::SeparatorText("Notes");
-  ImGui::TextWrapped(
-      "The Command Console and event toasts are UI-only helpers. They do not change the simulation; they "
-      "just help you navigate and respond to what is happening.");
+      case PaletteAction::OpenLogTab:
+      case PaletteAction::OpenHelp:
+      case PaletteAction::FocusSystemMap:
+      case PaletteAction::FocusGalaxyMap:
+
+      case PaletteAction::WorkspaceDefault:
+      case PaletteAction::WorkspaceMinimal:
+      case PaletteAction::WorkspaceEconomy:
+      case PaletteAction::WorkspaceDesign:
+      case PaletteAction::WorkspaceIntel:
+        return true;
+
+      default:
+        return false;
+    }
+  };
+
+  auto apply_ui_only_action = [&](PaletteAction a) -> bool {
+    switch (a) {
+      // Windows (toggles)
+      case PaletteAction::ToggleControls: ui.show_controls_window = !ui.show_controls_window; return true;
+      case PaletteAction::ToggleMap: ui.show_map_window = !ui.show_map_window; return true;
+      case PaletteAction::ToggleDetails: ui.show_details_window = !ui.show_details_window; return true;
+      case PaletteAction::ToggleDirectory: ui.show_directory_window = !ui.show_directory_window; return true;
+      case PaletteAction::ToggleProduction: ui.show_production_window = !ui.show_production_window; return true;
+      case PaletteAction::ToggleEconomy: ui.show_economy_window = !ui.show_economy_window; return true;
+      case PaletteAction::ToggleFleetManager: ui.show_fleet_manager_window = !ui.show_fleet_manager_window; return true;
+      case PaletteAction::ToggleRegions: ui.show_regions_window = !ui.show_regions_window; return true;
+      case PaletteAction::ToggleAdvisor: ui.show_advisor_window = !ui.show_advisor_window; return true;
+      case PaletteAction::ToggleColonyProfiles: ui.show_colony_profiles_window = !ui.show_colony_profiles_window; return true;
+      case PaletteAction::ToggleShipProfiles: ui.show_ship_profiles_window = !ui.show_ship_profiles_window; return true;
+      case PaletteAction::ToggleAutomationCenter: ui.show_automation_center_window = !ui.show_automation_center_window; return true;
+      case PaletteAction::ToggleShipyardTargets: ui.show_shipyard_targets_window = !ui.show_shipyard_targets_window; return true;
+      case PaletteAction::ToggleSurveyNetwork: ui.show_survey_network_window = !ui.show_survey_network_window; return true;
+      case PaletteAction::ToggleTimeline: ui.show_timeline_window = !ui.show_timeline_window; return true;
+      case PaletteAction::ToggleNotifications: ui.show_notifications_window = !ui.show_notifications_window; return true;
+      case PaletteAction::ToggleDesignStudio: ui.show_design_studio_window = !ui.show_design_studio_window; return true;
+      case PaletteAction::ToggleBalanceLab: ui.show_balance_lab_window = !ui.show_balance_lab_window; return true;
+      case PaletteAction::ToggleIntel: ui.show_intel_window = !ui.show_intel_window; return true;
+      case PaletteAction::ToggleIntelNotebook: ui.show_intel_notebook_window = !ui.show_intel_notebook_window; return true;
+      case PaletteAction::ToggleDiplomacyGraph: ui.show_diplomacy_window = !ui.show_diplomacy_window; return true;
+
+      case PaletteAction::ToggleSettings: ui.show_settings_window = !ui.show_settings_window; return true;
+      case PaletteAction::ToggleSaveTools: ui.show_save_tools_window = !ui.show_save_tools_window; return true;
+      case PaletteAction::ToggleOmniSearch: ui.show_omni_search_window = !ui.show_omni_search_window; return true;
+      case PaletteAction::ToggleJsonExplorer: ui.show_json_explorer_window = !ui.show_json_explorer_window; return true;
+      case PaletteAction::ToggleContentValidation: ui.show_content_validation_window = !ui.show_content_validation_window; return true;
+      case PaletteAction::ToggleStateDoctor: ui.show_state_doctor_window = !ui.show_state_doctor_window; return true;
+      case PaletteAction::ToggleEntityInspector: ui.show_entity_inspector_window = !ui.show_entity_inspector_window; return true;
+      case PaletteAction::ToggleReferenceGraph: ui.show_reference_graph_window = !ui.show_reference_graph_window; return true;
+      case PaletteAction::ToggleTimeMachine: ui.show_time_machine_window = !ui.show_time_machine_window; return true;
+      case PaletteAction::ToggleCompare: ui.show_compare_window = !ui.show_compare_window; return true;
+      case PaletteAction::ToggleNavigator: ui.show_navigator_window = !ui.show_navigator_window; return true;
+      case PaletteAction::ToggleWatchboard: ui.show_watchboard_window = !ui.show_watchboard_window; return true;
+      case PaletteAction::ToggleDataLenses: ui.show_data_lenses_window = !ui.show_data_lenses_window; return true;
+      case PaletteAction::ToggleDashboards: ui.show_dashboards_window = !ui.show_dashboards_window; return true;
+      case PaletteAction::TogglePivotTables: ui.show_pivot_tables_window = !ui.show_pivot_tables_window; return true;
+      case PaletteAction::ToggleUIForge: ui.show_ui_forge_window = !ui.show_ui_forge_window; return true;
+      case PaletteAction::ToggleLayoutProfiles: ui.show_layout_profiles_window = !ui.show_layout_profiles_window; return true;
+
+      // UI chrome
+      case PaletteAction::ToggleStatusBar: ui.show_status_bar = !ui.show_status_bar; return true;
+      case PaletteAction::ToggleFogOfWar: ui.fog_of_war = !ui.fog_of_war; return true;
+      case PaletteAction::ToggleToasts: ui.show_event_toasts = !ui.show_event_toasts; return true;
+
+      // Focus helpers (UI only)
+      case PaletteAction::OpenLogTab:
+        ui.show_details_window = true;
+        ui.request_details_tab = DetailsTab::Log;
+        return true;
+      case PaletteAction::OpenHelp:
+        ui.show_help_window = true;
+        return true;
+      case PaletteAction::FocusSystemMap:
+        ui.show_map_window = true;
+        ui.request_map_tab = MapTab::System;
+        return true;
+      case PaletteAction::FocusGalaxyMap:
+        ui.show_map_window = true;
+        ui.request_map_tab = MapTab::Galaxy;
+        return true;
+
+      // Workspace presets (UI only)
+      case PaletteAction::WorkspaceDefault:
+        ui.show_controls_window = true;
+        ui.show_map_window = true;
+        ui.show_details_window = true;
+        ui.show_directory_window = true;
+        ui.show_production_window = false;
+        ui.show_economy_window = false;
+        ui.show_planner_window = false;
+        ui.show_freight_window = false;
+        ui.show_fuel_window = false;
+        ui.show_time_warp_window = false;
+        ui.show_timeline_window = false;
+        ui.show_design_studio_window = false;
+        ui.show_balance_lab_window = false;
+        ui.show_intel_window = false;
+        ui.show_diplomacy_window = false;
+        ui.show_status_bar = true;
+        return true;
+      case PaletteAction::WorkspaceMinimal:
+        ui.show_controls_window = false;
+        ui.show_map_window = true;
+        ui.show_details_window = true;
+        ui.show_directory_window = false;
+        ui.show_production_window = false;
+        ui.show_economy_window = false;
+        ui.show_planner_window = false;
+        ui.show_freight_window = false;
+        ui.show_fuel_window = false;
+        ui.show_time_warp_window = false;
+        ui.show_timeline_window = false;
+        ui.show_design_studio_window = false;
+        ui.show_balance_lab_window = false;
+        ui.show_intel_window = false;
+        ui.show_diplomacy_window = false;
+        ui.show_status_bar = true;
+        return true;
+      case PaletteAction::WorkspaceEconomy:
+        ui.show_controls_window = false;
+        ui.show_map_window = true;
+        ui.show_details_window = true;
+        ui.show_directory_window = true;
+        ui.show_production_window = true;
+        ui.show_economy_window = true;
+        ui.show_planner_window = true;
+        ui.show_freight_window = false;
+        ui.show_fuel_window = false;
+        ui.show_time_warp_window = false;
+        ui.show_timeline_window = true;
+        ui.show_design_studio_window = false;
+        ui.show_balance_lab_window = false;
+        ui.show_intel_window = false;
+        ui.show_diplomacy_window = false;
+        ui.show_status_bar = true;
+        return true;
+      case PaletteAction::WorkspaceDesign:
+        ui.show_controls_window = false;
+        ui.show_map_window = true;
+        ui.show_details_window = true;
+        ui.show_directory_window = false;
+        ui.show_production_window = false;
+        ui.show_economy_window = false;
+        ui.show_planner_window = false;
+        ui.show_freight_window = false;
+        ui.show_fuel_window = false;
+        ui.show_time_warp_window = false;
+        ui.show_timeline_window = false;
+        ui.show_design_studio_window = true;
+        ui.show_balance_lab_window = true;
+        ui.show_intel_window = false;
+        ui.show_diplomacy_window = false;
+        ui.show_status_bar = true;
+        return true;
+      case PaletteAction::WorkspaceIntel:
+        ui.show_controls_window = false;
+        ui.show_map_window = true;
+        ui.show_details_window = true;
+        ui.show_directory_window = false;
+        ui.show_production_window = false;
+        ui.show_economy_window = false;
+        ui.show_planner_window = false;
+        ui.show_freight_window = false;
+        ui.show_fuel_window = false;
+        ui.show_time_warp_window = false;
+        ui.show_timeline_window = true;
+        ui.show_design_studio_window = false;
+        ui.show_balance_lab_window = false;
+        ui.show_intel_window = true;
+        ui.show_diplomacy_window = true;
+        ui.show_status_bar = true;
+        return true;
+
+      default:
+        return false;
+    }
+  };
+
+  if (ImGui::BeginTabBar("help_tabs")) {
+    auto flags_for_help = [&](HelpTab t) {
+      return (ui.request_help_tab == t) ? ImGuiTabItemFlags_SetSelected : 0;
+    };
+
+    if (ImGui::BeginTabItem("Quick Start", nullptr, flags_for_help(HelpTab::QuickStart))) {
+      ImGui::SeparatorText("Fast navigation");
+      ImGui::TextWrapped(
+          "Nebula4X is a UI-heavy sandbox: use the Command Console (Ctrl+P) to jump to tools and windows, then use the "
+          "Map/Details panels to issue and review orders.");
+
+      if (ImGui::Button("Open Command Console (Ctrl+P)")) ui.show_command_palette = true;
+      ImGui::SameLine();
+      if (ImGui::Button("Open OmniSearch (Ctrl+F)")) ui.show_omni_search_window = true;
+      ImGui::SameLine();
+      if (ImGui::Button("Open Settings (Ctrl+,)")) ui.show_settings_window = true;
+
+      ImGui::SameLine();
+      if (ImGui::Button("Start Guided Tour (F2)")) {
+        ui.tour_active = true;
+        ui.tour_active_index = 0;
+        ui.tour_step_index = 0;
+        // Hide the help window so the spotlight is not obscured.
+        ui.show_help_window = false;
+      }
+
+      ImGui::Spacing();
+      ImGui::SeparatorText("Map basics");
+      ImGui::BulletText("Mouse wheel: zoom");
+      ImGui::BulletText("Middle mouse drag: pan");
+      ImGui::BulletText("System map: Left click = issue order, Right click = select");
+      ImGui::BulletText("Galaxy map: Left click = select system, Right click = route ship (Shift queues)");
+
+      ImGui::Spacing();
+      ImGui::SeparatorText("Workspace tips");
+      ImGui::BulletText("Drag window tabs to dock/undock and rearrange the workspace");
+      ImGui::BulletText("Use Layout Profiles (Ctrl+Shift+L) to save/load dock layouts");
+
+      ImGui::Spacing();
+      ImGui::SeparatorText("UI-only helpers");
+      ImGui::TextWrapped(
+          "The Command Console, the event toasts, and most procedural inspector tools are UI-only helpers. They do not "
+          "change the simulation by themselves; they help you navigate and respond to what is happening.");
+
+      ImGui::EndTabItem();
+    }
+
+    
+    if (ImGui::BeginTabItem("Tours", nullptr, flags_for_help(HelpTab::Tours))) {
+      draw_help_tours_tab(ui);
+      ImGui::EndTabItem();
+    }
+
+    if (ImGui::BeginTabItem("Shortcuts", nullptr, flags_for_help(HelpTab::Shortcuts))) {
+      static char filter[128] = {0};
+
+      ImGui::TextWrapped(
+          "This list is generated from the Command Console action registry. Use it as a searchable cheat-sheet (and for "
+          "UI-only actions, you can trigger them directly from here). For everything else, open Ctrl+P.");
+
+      ImGui::SetNextItemWidth(-1.0f);
+      ImGui::InputText("Filter (label/category/shortcut)", filter, sizeof(filter));
+      const std::string q = trim_copy(filter);
+
+      const ImGuiTableFlags tf = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_Resizable |
+                                 ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_ScrollY;
+      if (ImGui::BeginTable("##help_actions", 5, tf, ImVec2(0, 0))) {
+        ImGui::TableSetupColumn("Category", ImGuiTableColumnFlags_WidthFixed, 160.0f);
+        ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("Shortcut", ImGuiTableColumnFlags_WidthFixed, 110.0f);
+        ImGui::TableSetupColumn("State", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+        ImGui::TableSetupColumn("Run", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+        ImGui::TableHeadersRow();
+
+        for (const auto& m : kActionMetas) {
+          const std::string shortcut = effective_shortcut(m, ui);
+          const std::string keywords = (m.keywords && m.keywords[0] != '\0') ? std::string(m.keywords) : std::string();
+          const std::string hay = std::string(m.category) + " " + m.label + " " + shortcut + " " + keywords;
+          if (!q.empty() && !contains_ci(hay, q)) continue;
+
+          ImGui::TableNextRow();
+          ImGui::TableSetColumnIndex(0);
+          ImGui::TextUnformatted(m.category);
+
+          ImGui::TableSetColumnIndex(1);
+          ImGui::TextUnformatted(m.label);
+          draw_action_tooltip(m, ui);
+
+          ImGui::TableSetColumnIndex(2);
+          if (!shortcut.empty()) ImGui::TextDisabled("%s", shortcut.c_str());
+          else ImGui::TextDisabled("-");
+
+          ImGui::TableSetColumnIndex(3);
+          if (m.toggles) {
+            const bool on = action_toggle_state(ui, m.action);
+            ImGui::TextDisabled("%s", on ? "On" : "Off");
+          } else {
+            ImGui::TextDisabled("-");
+          }
+
+          ImGui::TableSetColumnIndex(4);
+          ImGui::PushID(static_cast<int>(m.action));
+          const bool can_run = can_apply_ui_only_action(m.action);
+          if (!can_run) ImGui::BeginDisabled();
+          if (ImGui::SmallButton("Do") && can_run) {
+            (void)apply_ui_only_action(m.action);
+          }
+          if (!can_run) ImGui::EndDisabled();
+          if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+            ImGui::SetTooltip("Trigger UI-only actions from here.\nFor simulation actions, use Ctrl+P.");
+          }
+          ImGui::PopID();
+        }
+
+        ImGui::EndTable();
+      }
+
+      ImGui::EndTabItem();
+    }
+
+    if (ImGui::BeginTabItem("Docs", nullptr, flags_for_help(HelpTab::Docs))) {
+      draw_docs_browser_panel(ui);
+      ImGui::EndTabItem();
+    }
+
+    if (ImGui::BeginTabItem("Accessibility", nullptr, flags_for_help(HelpTab::Accessibility))) {
+      ImGui::SeparatorText("Screen reader / narration");
+      ImGui::Checkbox("Enable narration", &ui.screen_reader_enabled);
+      ImGui::Checkbox("Speak focused control", &ui.screen_reader_speak_focus);
+      ImGui::Checkbox("Speak hovered control", &ui.screen_reader_speak_hover);
+      ImGui::Checkbox("Speak window changes", &ui.screen_reader_speak_windows);
+      ImGui::Checkbox("Speak toast notifications", &ui.screen_reader_speak_toasts);
+      ImGui::Checkbox("Speak selection changes", &ui.screen_reader_speak_selection);
+      ImGui::SliderFloat("Rate", &ui.screen_reader_rate, 0.50f, 2.0f, "%.2fx");
+      ImGui::SliderFloat("Volume", &ui.screen_reader_volume, 0.0f, 1.0f, "%.2f");
+      ImGui::SliderFloat("Hover delay (sec)", &ui.screen_reader_hover_delay_sec, 0.10f, 2.00f, "%.2f");
+      ImGui::Spacing();
+      ImGui::TextWrapped(
+          "Narration is an in-game feedback layer (not a full OS accessibility tree). It can speak focus changes, toasts, "
+          "and selection updates to reduce UI load.");
+      ImGui::EndTabItem();
+    }
+
+    if (ImGui::BeginTabItem("About", nullptr, flags_for_help(HelpTab::About))) {
+#ifndef NEBULA4X_VERSION
+#define NEBULA4X_VERSION "unknown"
+#endif
+      ImGui::SeparatorText("Build");
+      ImGui::Text("Nebula4X v%s", NEBULA4X_VERSION);
+      ImGui::Text("ImGui %s", ImGui::GetVersion());
+      ImGui::Spacing();
+      ImGui::SeparatorText("Documentation");
+      ImGui::TextWrapped(
+          "This Codex reads Markdown files from: data/docs/*.md (shipped with the build). When running from the repo, it "
+          "also scans ./docs and top-level README/PATCH_NOTES.");
+      ImGui::Spacing();
+      ImGui::SeparatorText("Links");
+      if (ImGui::SmallButton("Copy repo URL")) {
+        ImGui::SetClipboardText("https://github.com/masterblaster1999/Nebula4X");
+      }
+      ImGui::SameLine();
+      ImGui::TextDisabled("(paste in a browser)");
+      ImGui::EndTabItem();
+    }
+
+    ImGui::EndTabBar();
+    if (ui.request_help_tab != HelpTab::None) ui.request_help_tab = HelpTab::None;
+  }
 
   ImGui::End();
 }
@@ -1299,7 +1900,7 @@ void draw_command_palette(Simulation& sim, UIState& ui, HUDState& hud, Id& selec
               hovered_entity_label = results[i].label;
               if (results[i].kind == PaletteKind::Action) {
                 hovered_action = find_action_meta(results[i].action);
-                if (hovered_action) draw_action_tooltip(*hovered_action);
+                if (hovered_action) draw_action_tooltip(*hovered_action, ui);
               } else {
                 ImGui::BeginTooltip();
                 ImGui::TextUnformatted(results[i].label.c_str());
@@ -1323,6 +1924,85 @@ void draw_command_palette(Simulation& sim, UIState& ui, HUDState& hud, Id& selec
             // Keep the query for rapid repeated use, but reset selection.
             hud.palette_selected_idx = 0;
           }
+        }
+      }
+
+      ImGui::Separator();
+    } else {
+      // No query: show persistence helpers above the contextual + browse panels.
+      gc_unknown_persistent_actions(ui);
+
+      if (!ui.command_favorites.empty()) {
+        ImGui::SetNextItemOpen(true, ImGuiCond_Appearing);
+        if (ImGui::CollapsingHeader("Favorites", ImGuiTreeNodeFlags_DefaultOpen)) {
+          for (const auto& id : ui.command_favorites) {
+            const auto a = action_from_persistent_id(id);
+            const auto* m = find_action_meta(a);
+            if (!m) continue;
+
+            ImGui::PushID(id.c_str());
+            const std::string label = std::string("★ ") + m->name;
+            if (ImGui::Selectable(label.c_str(), false)) {
+              PaletteItem item;
+              item.kind = PaletteKind::Action;
+              item.action = a;
+              activate_palette_item(item, sim, ui, selected_ship, selected_colony, selected_body, save_path, load_path);
+              maybe_close();
+              hud.palette_selected_idx = 0;
+            }
+            if (ImGui::IsItemHovered()) {
+              hovered_action = m;
+              PaletteItem hi;
+              hi.kind = PaletteKind::Action;
+              hi.action = a;
+              hud.palette_hovered_item = hi;
+            }
+            if (ImGui::BeginPopupContextItem("##fav_ctx")) {
+              if (ImGui::MenuItem("Remove from Favorites")) toggle_action_favorite(ui, a);
+              ImGui::EndPopup();
+            }
+            ImGui::PopID();
+          }
+        }
+      }
+
+      if (!ui.command_recent.empty()) {
+        ImGui::SetNextItemOpen(true, ImGuiCond_Appearing);
+        if (ImGui::CollapsingHeader("Recent", ImGuiTreeNodeFlags_DefaultOpen)) {
+          for (const auto& id : ui.command_recent) {
+            const auto a = action_from_persistent_id(id);
+            const auto* m = find_action_meta(a);
+            if (!m) continue;
+
+            ImGui::PushID(id.c_str());
+            const std::string label = std::string("⟲ ") + m->name;
+            if (ImGui::Selectable(label.c_str(), false)) {
+              PaletteItem item;
+              item.kind = PaletteKind::Action;
+              item.action = a;
+              activate_palette_item(item, sim, ui, selected_ship, selected_colony, selected_body, save_path, load_path);
+              maybe_close();
+              hud.palette_selected_idx = 0;
+            }
+            if (ImGui::IsItemHovered()) {
+              hovered_action = m;
+              PaletteItem hi;
+              hi.kind = PaletteKind::Action;
+              hi.action = a;
+              hud.palette_hovered_item = hi;
+            }
+            if (ImGui::BeginPopupContextItem("##recent_ctx")) {
+              if (ImGui::MenuItem("Remove")) {
+                // Remove a single entry.
+                auto it = std::find(ui.command_recent.begin(), ui.command_recent.end(), id);
+                if (it != ui.command_recent.end()) ui.command_recent.erase(it);
+              }
+              ImGui::EndPopup();
+            }
+            ImGui::PopID();
+          }
+
+          if (ImGui::SmallButton("Clear recent")) ui.command_recent.clear();
         }
       }
 
@@ -1479,17 +2159,20 @@ void draw_command_palette(Simulation& sim, UIState& ui, HUDState& hud, Id& selec
 
           ImGui::PushID((int)m.action);
 
+          const std::string shortcut = effective_shortcut(m, ui);
+          const char* shortcut_c = shortcut.empty() ? nullptr : shortcut.c_str();
+
           bool activated = false;
           if (m.toggles) {
             const bool checked = action_toggle_state(ui, m.action);
-            activated = ImGui::MenuItem(m.label, m.shortcut, checked, enabled);
+            activated = ImGui::MenuItem(m.label, shortcut_c, checked, enabled);
           } else {
-            activated = ImGui::MenuItem(m.label, m.shortcut, false, enabled);
+            activated = ImGui::MenuItem(m.label, shortcut_c, false, enabled);
           }
 
           if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
             hovered_action = &m;
-            draw_action_tooltip(m);
+            draw_action_tooltip(m, ui);
 
             // Extra contextual hints for save/load paths.
             if ((m.action == PaletteAction::Save || m.action == PaletteAction::Load) && !enabled) {
@@ -1530,9 +2213,18 @@ void draw_command_palette(Simulation& sim, UIState& ui, HUDState& hud, Id& selec
     // Prefer hovered item details.
     if (hovered_action) {
       ImGui::TextUnformatted(hovered_action->label);
+      {
+        const bool is_fav = action_is_favorited(ui, hovered_action->action);
+        if (ImGui::Button(is_fav ? "★ Unfavorite" : "☆ Favorite")) {
+          toggle_action_favorite(ui, hovered_action->action);
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled(is_fav ? "Pinned" : "Pin this action for quick access");
+      }
       ImGui::TextDisabled("Category: %s", hovered_action->category);
-      if (hovered_action->shortcut && hovered_action->shortcut[0] != '\0') {
-        ImGui::TextDisabled("Shortcut: %s", hovered_action->shortcut);
+      {
+        const std::string shortcut = effective_shortcut(*hovered_action, ui);
+        if (!shortcut.empty()) ImGui::TextDisabled("Shortcut: %s", shortcut.c_str());
       }
       ImGui::Separator();
       const char* tip = (hovered_action->tooltip && hovered_action->tooltip[0] != '\0') ? hovered_action->tooltip
@@ -1548,9 +2240,18 @@ void draw_command_palette(Simulation& sim, UIState& ui, HUDState& hud, Id& selec
 
       if (it.kind == PaletteKind::Action) {
         if (const ActionMeta* m = find_action_meta(it.action)) {
+          {
+            const bool is_fav = action_is_favorited(ui, it.action);
+            if (ImGui::Button(is_fav ? "★ Unfavorite" : "☆ Favorite")) {
+              toggle_action_favorite(ui, it.action);
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled(is_fav ? "Pinned" : "Pin this action for quick access");
+          }
           ImGui::TextDisabled("Category: %s", m->category);
-          if (m->shortcut && m->shortcut[0] != '\0') {
-            ImGui::TextDisabled("Shortcut: %s", m->shortcut);
+          {
+            const std::string shortcut = effective_shortcut(*m, ui);
+            if (!shortcut.empty()) ImGui::TextDisabled("Shortcut: %s", shortcut.c_str());
           }
           ImGui::Spacing();
           const char* tip = (m->tooltip && m->tooltip[0] != '\0') ? m->tooltip : m->label;
@@ -1644,6 +2345,15 @@ void update_event_toasts(const Simulation& sim, UIState& ui, HUDState& hud) {
       hud.toasts.erase(hud.toasts.begin(), hud.toasts.begin() + (hud.toasts.size() - kMaxToasts));
     }
   }
+
+  // Expire old toasts here as well, so toasts do not accumulate if rendering is paused
+  // (e.g. guided tours that temporarily hide toast windows).
+  const double now_prune = ImGui::GetTime();
+  const double ttl_prune = std::max(0.5, (double)ui.event_toast_duration_sec);
+  hud.toasts.erase(std::remove_if(hud.toasts.begin(), hud.toasts.end(), [&](const EventToast& t) {
+                    return (now_prune - t.created_time_s) > ttl_prune;
+                  }),
+                  hud.toasts.end());
 }
 
 void draw_event_toasts(Simulation& sim, UIState& ui, HUDState& hud, Id& selected_ship, Id& selected_colony,

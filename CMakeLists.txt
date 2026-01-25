@@ -3,6 +3,7 @@ cmake_minimum_required(VERSION 3.21)
 project(Nebula4X VERSION 0.1.0 LANGUAGES CXX)
 
 option(NEBULA4X_BUILD_UI "Build the SDL2/ImGui UI" ON)
+option(NEBULA4X_UI_USE_OPENGL2 "Use SDL2 + OpenGL2 renderer backend for ImGui (enables detachable tool windows via multi-viewports)" ON)
 option(NEBULA4X_BUILD_TESTS "Build tests" ON)
 option(NEBULA4X_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
 
@@ -161,7 +162,16 @@ if(NEBULA4X_BUILD_UI)
 
   if(NEBULA4X_UI_ENABLED)
     if(NEBULA4X_FETCH_DEPS)
-      FetchContent_Declare(
+      # Optional: use SDL2+OpenGL2 backend for ImGui (enables Multi-Viewport detachable windows).
+if(NEBULA4X_UI_ENABLED AND NEBULA4X_UI_USE_OPENGL2)
+  find_package(OpenGL QUIET)
+  if(NOT OpenGL_FOUND)
+    message(WARNING "OpenGL not found; falling back to SDL_Renderer2 backend for ImGui. Detachable viewports will be disabled. (Install OpenGL dev libraries or configure -DNEBULA4X_UI_USE_OPENGL2=OFF)")
+    set(NEBULA4X_UI_USE_OPENGL2 OFF)
+  endif()
+endif()
+
+FetchContent_Declare(
         imgui
         GIT_REPOSITORY https://github.com/ocornut/imgui.git
         # Docking and viewport APIs live on the upstream 'docking' branch.
@@ -177,29 +187,40 @@ if(NEBULA4X_BUILD_UI)
 
   if(NEBULA4X_UI_ENABLED)
 
-    add_library(imgui_sdlrenderer2)
-  target_sources(imgui_sdlrenderer2 PRIVATE
+    add_library(imgui_sdl)
+  target_sources(imgui_sdl PRIVATE
     ${imgui_SOURCE_DIR}/imgui.cpp
     ${imgui_SOURCE_DIR}/imgui_draw.cpp
     ${imgui_SOURCE_DIR}/imgui_tables.cpp
     ${imgui_SOURCE_DIR}/imgui_widgets.cpp
     ${imgui_SOURCE_DIR}/misc/cpp/imgui_stdlib.cpp
     ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl2.cpp
-    ${imgui_SOURCE_DIR}/backends/imgui_impl_sdlrenderer2.cpp
   )
-  target_include_directories(imgui_sdlrenderer2 PUBLIC
+  if(NEBULA4X_UI_USE_OPENGL2)
+    target_sources(imgui_sdl PRIVATE
+      ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl2.cpp
+    )
+    target_compile_definitions(imgui_sdl PUBLIC NEBULA4X_UI_RENDERER_OPENGL2=1)
+    target_link_libraries(imgui_sdl PUBLIC OpenGL::GL)
+  else()
+    target_sources(imgui_sdl PRIVATE
+      ${imgui_SOURCE_DIR}/backends/imgui_impl_sdlrenderer2.cpp
+    )
+    target_compile_definitions(imgui_sdl PUBLIC NEBULA4X_UI_RENDERER_OPENGL2=0)
+  endif()
+  target_include_directories(imgui_sdl PUBLIC
     ${imgui_SOURCE_DIR}
     ${imgui_SOURCE_DIR}/backends
   )
   if(SDL2_FOUND)
-    target_link_libraries(imgui_sdlrenderer2 PUBLIC SDL2::SDL2)
+    target_link_libraries(imgui_sdl PUBLIC SDL2::SDL2)
   else()
     # when fetched
-    target_link_libraries(imgui_sdlrenderer2 PUBLIC SDL2::SDL2-static)
+    target_link_libraries(imgui_sdl PUBLIC SDL2::SDL2-static)
   endif()
 
-  nebula4x_set_project_warnings(imgui_sdlrenderer2 ${NEBULA4X_WARNINGS_AS_ERRORS})
-  nebula4x_enable_sanitizers(imgui_sdlrenderer2)
+  nebula4x_set_project_warnings(imgui_sdl ${NEBULA4X_WARNINGS_AS_ERRORS})
+  nebula4x_enable_sanitizers(imgui_sdl)
 
     add_executable(nebula4x
     src/main.cpp
@@ -237,6 +258,7 @@ if(NEBULA4X_BUILD_UI)
     src/ui/time_warp_window.cpp
     src/ui/save_tools_window.cpp
     src/ui/time_machine_window.cpp
+    src/ui/compare_window.cpp
     src/ui/game_json_cache.cpp
   src/ui/game_entity_index.cpp
   src/ui/json_watch_eval.cpp
@@ -251,15 +273,24 @@ if(NEBULA4X_BUILD_UI)
   src/ui/watchboard_alerts.cpp
     src/ui/data_lenses_window.cpp
     src/ui/dashboards_window.cpp
+    src/ui/docs_browser.cpp
+    src/ui/hotkeys.cpp
+    src/ui/hotkeys_window.cpp
+    src/ui/notifications.cpp
+    src/ui/notifications_window.cpp
+    src/ui/guided_tour.cpp
     src/ui/pivot_tables_window.cpp
     src/ui/procgen_atlas_window.cpp
     src/ui/procgen_graphics.cpp
     src/ui/ui_forge_window.cpp
     src/ui/context_forge_window.cpp
+    src/ui/window_management.cpp
+    src/ui/window_manager_window.cpp
     src/ui/ui_forge_dna.cpp
     src/ui/screen_reader.cpp
     src/ui/layout_profiles.cpp
     src/ui/layout_profiles_window.cpp
+    src/ui/workspace_presets.cpp
     src/ui/production_window.cpp
     src/ui/galaxy_map.cpp
     src/ui/galaxy_constellations.cpp
@@ -269,6 +300,7 @@ if(NEBULA4X_BUILD_UI)
     src/ui/design_studio_window.cpp
     src/ui/balance_lab_window.cpp
     src/ui/intel_window.cpp
+    src/ui/intel_notebook_window.cpp
     src/ui/diplomacy_window.cpp
     src/ui/victory_window.cpp
   )
@@ -277,7 +309,7 @@ if(NEBULA4X_BUILD_UI)
     ${imgui_SOURCE_DIR}
     ${imgui_SOURCE_DIR}/backends
   )
-  target_link_libraries(nebula4x PRIVATE nebula4x::core imgui_sdlrenderer2)
+  target_link_libraries(nebula4x PRIVATE nebula4x::core imgui_sdl)
 
   if(WIN32)
     # Screen reader (SAPI COM) uses CoInitializeEx / CLSIDFromProgID.

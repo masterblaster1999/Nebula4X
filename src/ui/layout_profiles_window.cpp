@@ -8,6 +8,7 @@
 #include "nebula4x/util/log.h"
 
 #include "ui/layout_profiles.h"
+#include "ui/workspace_presets.h"
 
 namespace nebula4x::ui {
 namespace {
@@ -19,82 +20,6 @@ void copy_into(char (&dst)[N], const std::string& s) {
   dst[N - 1] = '\0';
 }
 
-// Applies a window-visibility "workspace" preset.
-void apply_workspace_preset(const char* preset, UIState& ui) {
-  const std::string p = preset ? std::string(preset) : std::string();
-
-  auto hide_all_major = [&]() {
-    ui.show_controls_window = false;
-    ui.show_map_window = false;
-    ui.show_details_window = false;
-    ui.show_directory_window = false;
-    ui.show_production_window = false;
-    ui.show_economy_window = false;
-    ui.show_planner_window = false;
-    ui.show_freight_window = false;
-    ui.show_fuel_window = false;
-    ui.show_sustainment_window = false;
-    ui.show_time_warp_window = false;
-    ui.show_timeline_window = false;
-    ui.show_design_studio_window = false;
-    ui.show_balance_lab_window = false;
-    ui.show_intel_window = false;
-    ui.show_diplomacy_window = false;
-    ui.show_save_tools_window = false;
-  };
-
-  if (p == "Default") {
-    hide_all_major();
-    ui.show_controls_window = true;
-    ui.show_map_window = true;
-    ui.show_details_window = true;
-    ui.show_directory_window = true;
-    ui.show_status_bar = true;
-    return;
-  }
-
-  if (p == "Minimal") {
-    hide_all_major();
-    ui.show_map_window = true;
-    ui.show_details_window = true;
-    ui.show_status_bar = true;
-    return;
-  }
-
-  if (p == "Economy") {
-    hide_all_major();
-    ui.show_map_window = true;
-    ui.show_details_window = true;
-    ui.show_directory_window = true;
-    ui.show_production_window = true;
-    ui.show_economy_window = true;
-    ui.show_planner_window = true;
-    ui.show_timeline_window = true;
-    ui.show_status_bar = true;
-    return;
-  }
-
-  if (p == "Design") {
-    hide_all_major();
-    ui.show_map_window = true;
-    ui.show_details_window = true;
-    ui.show_design_studio_window = true;
-    ui.show_balance_lab_window = true;
-    ui.show_status_bar = true;
-    return;
-  }
-
-  if (p == "Intel") {
-    hide_all_major();
-    ui.show_map_window = true;
-    ui.show_details_window = true;
-    ui.show_intel_window = true;
-    ui.show_diplomacy_window = true;
-    ui.show_timeline_window = true;
-    ui.show_status_bar = true;
-    return;
-  }
-}
 
 }  // namespace
 
