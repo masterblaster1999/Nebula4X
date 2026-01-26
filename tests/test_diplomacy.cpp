@@ -138,7 +138,7 @@ int test_diplomacy() {
 
   std::string treaty_err;
   const Id tid = sim.create_treaty(f1.id, f2.id, TreatyType::Ceasefire, /*duration_days=*/3, /*push_event=*/false, &treaty_err);
-  N4X_ASSERT(tid_trade != kInvalidId, std::string("create_treaty succeeds: ") + treaty_err);
+  N4X_ASSERT(tid != kInvalidId, std::string("create_treaty succeeds: ") + treaty_err);
   N4X_ASSERT(sim.diplomatic_status(f1.id, f2.id) == DiplomacyStatus::Neutral, "ceasefire forces at least neutral");
   N4X_ASSERT(!sim.are_factions_hostile(f1.id, f2.id), "ceasefire means not hostile (A->B)");
   N4X_ASSERT(!sim.are_factions_hostile(f2.id, f1.id), "ceasefire means not hostile (B->A)");
@@ -329,8 +329,8 @@ int test_diplomacy() {
     sim3.load_game(st3);
 
     std::string err;
-    const Id t_trade = sim3.create_treaty(a.id, b.id, TreatyType::TradeAgreement, /*duration_days=*/-1, /*push_event=*/false, &err);
-    N4X_ASSERT(t_trade != kInvalidId, std::string("create_treaty(trade) succeeds: ") + err);
+    const Id tid_trade = sim3.create_treaty(a.id, b.id, TreatyType::TradeAgreement, /*duration_days=*/-1, /*push_event=*/false, &err);
+    N4X_ASSERT(tid_trade != kInvalidId, std::string("create_treaty(trade) succeeds: ") + err);
 
     // Trade agreement should share charts, but not contacts.
     {
@@ -436,7 +436,7 @@ int test_diplomacy() {
     hauler.max_hp = 100.0;
     hauler.cargo_tons = 100.0;
     hauler.fuel_capacity_tons = 100.0;
-    hauler.missile_ammo_capacity = 10;
+    hauler.missile_ammo_capacity = 10.0;
     c4.designs[hauler.id] = hauler;
 
     Simulation sim4(c4, SimConfig{});
@@ -454,18 +454,18 @@ int test_diplomacy() {
     b.name = "Beta";
     st4.factions[b.id] = b;
 
-    StarSystem sys4;
-    sys4.id = 1;
-    sys4.name = "Sys";
-    st4.systems[sys4.id] = sys4;
+    StarSystem sys;
+    sys.id = 1;
+    sys.name = "Sys";
+    st4.systems[sys.id] = sys;
 
     Body body;
     body.id = 10;
     body.name = "Body";
-    body.system_id = sys4.id;
+    body.system_id = sys.id;
     body.position_mkm = Vec2{0.0, 0.0};
     st4.bodies[body.id] = body;
-    st4.systems[sys4.id].bodies.push_back(body.id);
+    st4.systems[sys.id].bodies.push_back(body.id);
 
     Colony col;
     col.id = 100;
@@ -482,12 +482,12 @@ int test_diplomacy() {
     sh.name = "Hauler";
     sh.faction_id = a.id;
     sh.design_id = hauler.id;
-    sh.system_id = sys4.id;
+    sh.system_id = sys.id;
     sh.position_mkm = Vec2{0.0, 0.0};
     sh.fuel_tons = 0.0;
-    sh.missile_ammo = 0;
+    sh.missile_ammo = 0.0;
     st4.ships[sh.id] = sh;
-    st4.systems[sys4.id].ships.push_back(sh.id);
+    st4.systems[sys.id].ships.push_back(sh.id);
 
     sim4.load_game(st4);
 
@@ -499,8 +499,8 @@ int test_diplomacy() {
                "load mineral blocked without trade access");
 
     std::string err;
-    const Id tid_trade = sim4.create_treaty(a.id, b.id, TreatyType::TradeAgreement, /*duration_days=*/-1, /*push_event=*/false, &err);
-    N4X_ASSERT(tid_trade != kInvalidId, std::string("create_treaty(trade) succeeds: ") + err);
+    const Id tid = sim4.create_treaty(a.id, b.id, TreatyType::TradeAgreement, /*duration_days=*/-1, /*push_event=*/false, &err);
+    N4X_ASSERT(tid != kInvalidId, std::string("create_treaty(trade) succeeds: ") + err);
 
     N4X_ASSERT(sim4.are_factions_trade_partners(a.id, b.id), "trade agreement grants trade access");
 
@@ -527,7 +527,7 @@ int test_diplomacy() {
 
     // Port logistics occurred (refuel + rearm).
     N4X_ASSERT(sh_after.fuel_tons > 0.0, "trade partner refuels ship");
-    N4X_ASSERT(sh_after.missile_ammo > 0, "trade partner rearms ship");
+    N4X_ASSERT(sh_after.missile_ammo > 0.0, "trade partner rearms ship");
     N4X_ASSERT(col_after.minerals.at("Fuel") < fuel_before, "refuel consumes colony fuel");
     N4X_ASSERT(col_after.minerals.at("Munitions") < mun_before, "rearm consumes colony munitions");
   }
@@ -535,12 +535,12 @@ int test_diplomacy() {
 
   // --- Diplomatic offers ---
   {
-    ContentDB content_offer;
-    SimConfig cfg_offer;
-    Simulation sim_offer(content_offer, cfg_offer);
+    ContentDB content;
+    SimConfig cfg;
+    Simulation sim(content, cfg);
 
-    GameState st_offer;
-    st_offer.save_version = GameState{}.save_version;
+    GameState st;
+    st.save_version = GameState{}.save_version;
 
     Faction a;
     a.id = 1;
@@ -552,47 +552,47 @@ int test_diplomacy() {
     b.name = "Beta";
     b.control = FactionControl::AI_Explorer;
 
-    st_offer.factions[a.id] = a;
-    st_offer.factions[b.id] = b;
+    st.factions[a.id] = a;
+    st.factions[b.id] = b;
 
-    sim_offer.load_game(st_offer);
+    sim.load_game(st);
 
     std::string err;
 
-    const Id oid = sim_offer.create_diplomatic_offer(a.id, b.id, TreatyType::NonAggressionPact,
+    const Id oid = sim.create_diplomatic_offer(a.id, b.id, TreatyType::NonAggressionPact,
                                                /*treaty_duration_days=*/180,
                                                /*offer_expires_in_days=*/30,
                                                /*push_event=*/false, &err);
     N4X_ASSERT(oid != kInvalidId, std::string("Failed to create diplomatic offer: ") + err);
-    N4X_ASSERT(sim_offer.state().diplomatic_offers.size() == 1u, "Offer not stored in state");
+    N4X_ASSERT(sim.state().diplomatic_offers.size() == 1u, "Offer not stored in state");
 
     // Save/load roundtrip should preserve offers.
-    const std::string json_offer = serialize_game_to_json(sim_offer.state());
-    GameState loaded_offer = deserialize_game_from_json(json_offer);
-    N4X_ASSERT(loaded_offer.diplomatic_offers.size() == 1u, "Offer not serialized/deserialized");
-    const auto it = loaded_offer.diplomatic_offers.find(oid);
-    N4X_ASSERT(it != loaded_offer.diplomatic_offers.end(), "Offer id not preserved");
+    const std::string json = serialize_game_to_json(sim.state());
+    GameState loaded = deserialize_game_from_json(json);
+    N4X_ASSERT(loaded.diplomatic_offers.size() == 1u, "Offer not serialized/deserialized");
+    const auto it = loaded.diplomatic_offers.find(oid);
+    N4X_ASSERT(it != loaded.diplomatic_offers.end(), "Offer id not preserved");
     N4X_ASSERT(it->second.from_faction_id == a.id, "Offer from_faction_id mismatch");
     N4X_ASSERT(it->second.to_faction_id == b.id, "Offer to_faction_id mismatch");
     N4X_ASSERT(it->second.treaty_type == TreatyType::NonAggressionPact, "Offer treaty_type mismatch");
 
     // Accept should create a treaty and remove the offer.
-    const bool ok = sim_offer.accept_diplomatic_offer(oid, /*push_event=*/false, &err);
+    const bool ok = sim.accept_diplomatic_offer(oid, /*push_event=*/false, &err);
     N4X_ASSERT(ok, std::string("Failed to accept offer: ") + err);
-    N4X_ASSERT(sim_offer.state().diplomatic_offers.empty(), "Offer not removed after accept");
+    N4X_ASSERT(sim.state().diplomatic_offers.empty(), "Offer not removed after accept");
 
-    auto treaties = sim_offer.treaties_between(a.id, b.id);
+    auto treaties = sim.treaties_between(a.id, b.id);
     N4X_ASSERT(!treaties.empty(), "Accepting offer did not create treaty");
     N4X_ASSERT(treaties[0].type == TreatyType::NonAggressionPact, "Created wrong treaty type");
 
     // Expiry tick: create an offer that expires quickly and ensure it is removed by ticking.
-    const Id oid2 = sim_offer.create_diplomatic_offer(a.id, b.id, TreatyType::TradeAgreement,
+    const Id oid2 = sim.create_diplomatic_offer(a.id, b.id, TreatyType::TradeAgreement,
                                                 /*treaty_duration_days=*/-1,
                                                 /*offer_expires_in_days=*/1,
                                                 /*push_event=*/false, &err);
     N4X_ASSERT(oid2 != kInvalidId, std::string("Failed to create second offer: ") + err);
-    sim_offer.advance_days(2);
-    N4X_ASSERT(sim_offer.state().diplomatic_offers.find(oid2) == sim_offer.state().diplomatic_offers.end(),
+    sim.advance_days(2);
+    N4X_ASSERT(sim.state().diplomatic_offers.find(oid2) == sim.state().diplomatic_offers.end(),
                "Offer did not expire as expected");
   }
 
