@@ -98,7 +98,7 @@ int test_state_export() {
     nebula4x::InstallationBuildOrder io;
     io.installation_id = "mine";
     io.quantity_remaining = 3;
-    io.minerals_paid = 10.0;
+    io.minerals_paid = true;
     io.cp_remaining = 5.0;
     c.construction_queue.push_back(io);
 

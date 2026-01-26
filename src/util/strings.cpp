@@ -39,4 +39,13 @@ std::string csv_escape(const std::string& s) {
   return out;
 }
 
+
+
+bool contains_ci(std::string_view haystack, std::string_view needle) {
+  if (needle.empty()) return true;
+  const std::string h = to_lower(std::string(haystack));
+  const std::string n = to_lower(std::string(needle));
+  return h.find(n) != std::string::npos;
+}
+
 } // namespace nebula4x

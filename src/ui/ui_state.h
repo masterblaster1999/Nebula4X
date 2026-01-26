@@ -804,6 +804,7 @@ struct UIState {
   // Stored as command ids (stable strings) in ui_prefs.json.
   std::vector<std::string> command_favorites;
   std::vector<std::string> command_recent;
+  int command_recent_limit{25};
 
   // Transient helper windows.
   bool show_command_palette{false};

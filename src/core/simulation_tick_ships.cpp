@@ -974,7 +974,7 @@ void Simulation::tick_ships(double dt_days) {
     chosen = pick_best([](const ColonyCandidate& c) { return c.has_shipyard && !c.system_hostile; });
     if (!chosen) chosen = pick_best([](const ColonyCandidate& c) { return !c.system_hostile; });
     if (!chosen) chosen = pick_best([](const ColonyCandidate& c) { return c.has_shipyard; });
-    if (!chosen) chosen = pick_best([](const ColonyCandidate& c) { return true; });
+    if (!chosen) chosen = pick_best([](const ColonyCandidate&) { return true; });
 
     if (chosen && chosen->body_id != kInvalidId) {
       // Jump legs first...

@@ -28,6 +28,10 @@ struct ContactPrediction {
 
   // Predicted position at now_day, using extrapolated_days.
   Vec2 predicted_position_mkm{0.0, 0.0};
+
+  // Simple uncertainty estimate (1-sigma) in million km.
+  // This grows with extrapolated_days and (when available) inferred speed.
+  double sigma_mkm{0.0};
 };
 
 // Predict a contact position at 'now_day' using a constant-velocity estimate.
@@ -57,6 +61,16 @@ inline ContactPrediction predict_contact_position(const Contact& c, int now_day,
       }
     }
   }
+
+  // Heuristic uncertainty growth model.
+  //
+  // The simulation does not currently track sensor quality, so we approximate
+  // a widening search radius that grows with time since last contact.
+  const double speed_mkm_per_day = out.has_velocity ? out.velocity_mkm_per_day.length() : 0.0;
+  const double base_sigma_mkm = 0.25;  // baseline sensor/track noise
+  const double growth_per_day_mkm = 0.25 + 0.15 * speed_mkm_per_day;
+  out.sigma_mkm = base_sigma_mkm + growth_per_day_mkm * static_cast<double>(out.extrapolated_days);
+  if (!std::isfinite(out.sigma_mkm) || out.sigma_mkm < 0.0) out.sigma_mkm = 0.0;
 
   return out;
 }

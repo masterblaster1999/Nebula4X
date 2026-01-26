@@ -1424,10 +1424,9 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
         ui_.window_popup_cascade_step_px = std::clamp(ui_.window_popup_cascade_step_px, 0.0f, 128.0f);
       }
       if (auto it = obj->find("window_launch_overrides"); it != obj->end()) {
-        if (it->second.is_object()) {
+        if (const auto* ov_obj = it->second.as_object()) {
           ui_.window_launch_overrides.clear();
-          const auto ov_obj = it->second.as_object();
-          for (const auto& kv : ov_obj) {
+          for (const auto& kv : *ov_obj) {
             const std::string& id = kv.first;
             const int mode = static_cast<int>(kv.second.number_value(-1));
             if (mode == 0 || mode == 1) {
@@ -2079,6 +2078,10 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       // Optional; introduced in ui_prefs v34.
       load_string_array("command_favorites", &ui_.command_favorites, 64);
       load_string_array("command_recent", &ui_.command_recent, 32);
+      if (auto it = obj->find("command_recent_limit"); it != obj->end()) {
+        ui_.command_recent_limit = static_cast<int>(it->second.number_value(ui_.command_recent_limit));
+        ui_.command_recent_limit = std::clamp(ui_.command_recent_limit, 0, 200);
+      }
     }
 
     // OmniSearch (game JSON global search) preferences.
@@ -3145,6 +3148,8 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
       }
       o["command_recent"] = nebula4x::json::array(std::move(a));
     }
+
+    o["command_recent_limit"] = static_cast<double>(ui_.command_recent_limit);
 
     // OmniSearch (game JSON global search) preferences.
     o["omni_search_match_keys"] = ui_.omni_search_match_keys;

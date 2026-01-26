@@ -223,6 +223,14 @@ void notifications_mark_all_read(UIState& ui) {
   }
 }
 
+void notifications_clear_read(UIState& ui) {
+  ui.notifications.erase(
+      std::remove_if(ui.notifications.begin(), ui.notifications.end(), [](const NotificationEntry& e) {
+        return !e.unread && !e.pinned;
+      }),
+      ui.notifications.end());
+}
+
 void notifications_clear(UIState& ui, bool keep_pinned) {
   if (!keep_pinned) {
     ui.notifications.clear();

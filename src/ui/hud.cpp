@@ -16,6 +16,7 @@
 #include "nebula4x/util/file_io.h"
 #include "nebula4x/util/log.h"
 #include "nebula4x/util/time.h"
+#include "nebula4x/util/strings.h"
 
 #include "ui/screen_reader.h"
 
@@ -216,6 +217,9 @@ enum class PaletteAction {
   ReloadContent,
   Save,
   Load,
+
+  // Sentinel (not a real action).
+  Count,
 };
 
 struct PaletteItem {
@@ -226,6 +230,8 @@ struct PaletteItem {
   PaletteAction action{PaletteAction::ToggleControls};
   Id id{kInvalidId};
 };
+
+void remember_action_recent(UIState& ui, PaletteAction a);
 
 void activate_palette_item(PaletteItem& item, Simulation& sim, UIState& ui, Id& selected_ship, Id& selected_colony,
                            Id& selected_body, char* save_path, char* load_path) {
@@ -808,7 +814,7 @@ PaletteAction action_from_persistent_id(std::string_view id) {
   return PaletteAction::Count;
 }
 
-bool is_action_favorite(const UIState& ui, PaletteAction a) {
+bool action_is_favorited(const UIState& ui, PaletteAction a) {
   const std::string& id = action_persistent_id(a);
   if (id.empty()) return false;
   return std::find(ui.command_favorites.begin(), ui.command_favorites.end(), id) != ui.command_favorites.end();
@@ -1941,7 +1947,7 @@ void draw_command_palette(Simulation& sim, UIState& ui, HUDState& hud, Id& selec
             if (!m) continue;
 
             ImGui::PushID(id.c_str());
-            const std::string label = std::string("★ ") + m->name;
+            const std::string label = std::string("★ ") + m->label;
             if (ImGui::Selectable(label.c_str(), false)) {
               PaletteItem item;
               item.kind = PaletteKind::Action;
@@ -1952,10 +1958,6 @@ void draw_command_palette(Simulation& sim, UIState& ui, HUDState& hud, Id& selec
             }
             if (ImGui::IsItemHovered()) {
               hovered_action = m;
-              PaletteItem hi;
-              hi.kind = PaletteKind::Action;
-              hi.action = a;
-              hud.palette_hovered_item = hi;
             }
             if (ImGui::BeginPopupContextItem("##fav_ctx")) {
               if (ImGui::MenuItem("Remove from Favorites")) toggle_action_favorite(ui, a);
@@ -1975,7 +1977,7 @@ void draw_command_palette(Simulation& sim, UIState& ui, HUDState& hud, Id& selec
             if (!m) continue;
 
             ImGui::PushID(id.c_str());
-            const std::string label = std::string("⟲ ") + m->name;
+            const std::string label = std::string("⟲ ") + m->label;
             if (ImGui::Selectable(label.c_str(), false)) {
               PaletteItem item;
               item.kind = PaletteKind::Action;
@@ -1986,10 +1988,6 @@ void draw_command_palette(Simulation& sim, UIState& ui, HUDState& hud, Id& selec
             }
             if (ImGui::IsItemHovered()) {
               hovered_action = m;
-              PaletteItem hi;
-              hi.kind = PaletteKind::Action;
-              hi.action = a;
-              hud.palette_hovered_item = hi;
             }
             if (ImGui::BeginPopupContextItem("##recent_ctx")) {
               if (ImGui::MenuItem("Remove")) {

@@ -65,7 +65,7 @@ int test_turn_ticks() {
   nebula4x::Simulation sim(std::move(content), cfg);
 
   auto& st = sim.state();
-  const int d0 = st.date.days_since_epoch();
+  const auto d0 = st.date.days_since_epoch();
   N4X_ASSERT(st.hour_of_day == 0);
 
   // --- timekeeping ---
@@ -80,7 +80,7 @@ int test_turn_ticks() {
   // Mid-day +1d should preserve hour-of-day and advance the calendar by one day.
   sim.advance_hours(12);
   N4X_ASSERT(st.hour_of_day == 12);
-  const int d1 = st.date.days_since_epoch();
+  const auto d1 = st.date.days_since_epoch();
   sim.advance_days(1);
   N4X_ASSERT(st.date.days_since_epoch() == d1 + 1);
   N4X_ASSERT(st.hour_of_day == 12);

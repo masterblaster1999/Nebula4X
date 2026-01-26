@@ -441,7 +441,7 @@ void draw_design_studio_window(Simulation& sim, UIState& ui, Id& selected_ship, 
   static float forge_min_cargo_tons = 0.0f;
   static float forge_min_sensor_range_mkm = 0.0f;
   static float forge_max_signature_multiplier = 0.0f;
-  static float forge_min_weapon_damage = 0.0f;
+  static float forge_min_beam_damage = 0.0f;
   static float forge_min_missile_damage = 0.0f;
   static float forge_min_point_defense_damage = 0.0f;
   static float forge_min_shields = 0.0f;
@@ -684,7 +684,7 @@ void draw_design_studio_window(Simulation& sim, UIState& ui, Id& selected_ship, 
             row_float("Min troop cap", "##forge_min_troop", &forge_min_troop_capacity);
             row_float("Min sensor range (mkm)", "##forge_min_sensor", &forge_min_sensor_range_mkm);
             row_float("Max signature mult", "##forge_max_sig", &forge_max_signature_multiplier);
-            row_float("Min beam damage", "##forge_min_beam", &forge_min_weapon_damage);
+            row_float("Min beam damage", "##forge_min_beam", &forge_min_beam_damage);
             row_float("Min missile damage", "##forge_min_missile", &forge_min_missile_damage);
             row_float("Min point defense dmg", "##forge_min_pd", &forge_min_point_defense_damage);
             row_float("Min shields", "##forge_min_shields", &forge_min_shields);
@@ -738,7 +738,7 @@ void draw_design_studio_window(Simulation& sim, UIState& ui, Id& selected_ship, 
             opt.constraints.min_troop_capacity = forge_min_troop_capacity;
             opt.constraints.min_sensor_range_mkm = forge_min_sensor_range_mkm;
             opt.constraints.max_signature_multiplier = forge_max_signature_multiplier;
-            opt.constraints.min_weapon_damage = forge_min_weapon_damage;
+            opt.constraints.min_beam_damage = forge_min_beam_damage;
             opt.constraints.min_missile_damage = forge_min_missile_damage;
             opt.constraints.min_point_defense_damage = forge_min_point_defense_damage;
             opt.constraints.min_shields = forge_min_shields;

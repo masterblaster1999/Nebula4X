@@ -8954,7 +8954,7 @@ if (colony->shipyard_queue.empty()) {
               row_float("Min troop cap", &edit_forge_min_troop_capacity);
               row_float("Min sensor range (mkm)", &edit_forge_min_sensor_range_mkm);
               row_float("Max signature mult (0=off)", &edit_forge_max_signature_multiplier);
-              row_float("Min beam dmg", &edit_forge_min_weapon_damage);
+              row_float("Min beam dmg", &edit_forge_min_beam_damage);
               row_float("Min missile dmg", &edit_forge_min_missile_damage);
               row_float("Min point-defense dmg", &edit_forge_min_point_defense_damage);
               row_float("Min shields", &edit_forge_min_shields);
@@ -9007,7 +9007,7 @@ if (colony->shipyard_queue.empty()) {
                 opt.constraints.min_troop_capacity = edit_forge_min_troop_capacity;
                 opt.constraints.min_sensor_range_mkm = edit_forge_min_sensor_range_mkm;
                 opt.constraints.max_signature_multiplier = edit_forge_max_signature_multiplier;
-                opt.constraints.min_weapon_damage = edit_forge_min_weapon_damage;
+                opt.constraints.min_beam_damage = edit_forge_min_beam_damage;
                 opt.constraints.min_missile_damage = edit_forge_min_missile_damage;
                 opt.constraints.min_point_defense_damage = edit_forge_min_point_defense_damage;
                 opt.constraints.min_shields = edit_forge_min_shields;

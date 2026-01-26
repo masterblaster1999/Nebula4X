@@ -586,6 +586,7 @@ void tune_to_constraints(const ContentDB& content,
                          std::vector<std::string>& comps,
                          ShipRole role,
                          const DesignForgeOptions& opt) {
+  (void)rng;
   const auto& c = opt.constraints;
   if (!constraints_enabled(c)) return;
 

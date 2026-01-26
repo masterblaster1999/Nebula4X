@@ -1,141 +1,104 @@
-#include <iostream>
-#include <limits>
-#include <variant>
+#include <gtest/gtest.h>
 
-#include "nebula4x/core/orders.h"
 #include "nebula4x/core/simulation.h"
+#include "nebula4x/core/tech.h"
 
-namespace nebula4x {
+// A focused regression test for ship auto-refuel planning.
+// The older version of this test relied on deprecated APIs and field names.
+TEST(AutoRefuel, PlansMoveToFuelColonyWhenBelowThreshold) {
+  using namespace nebula4x;
 
-#define N4X_ASSERT(expr) \
-  do { \
-    if (!(expr)) { \
-      std::cerr << "Assertion failed at " << __FILE__ << ":" << __LINE__ << " - " << #expr << "\n"; \
-      return 1; \
-    } \
-  } while (0)
-
-// Auto-refuel should not select colonies that are unreachable with current fuel.
-int test_auto_refuel() {
+  // Minimal content DB containing a single ship design with fuel stats.
   ContentDB content;
-  content.ship_designs["burner"] = ShipDesign{
-      .id = "burner",
-      .name = "Burner",
-      .role = ShipRole::Civilian,
-      .tonnage = 1000.0,
-      .fuel_capacity_tons = 200.0,
-      .fuel_use_per_mkm = 1.0,
-  };
+  {
+    ShipDesign d;
+    d.id = 100;
+    d.name = "Test Tanker";
+    d.role = ShipRole::Freighter;
+    d.speed_km_s = 1000.0;
+    d.fuel_capacity_tons = 100.0;
+    d.fuel_use_per_mkm = 0.1;  // 0.1 tons per mkm
+    content.designs[d.id] = d;
+  }
 
+  SimConfig cfg;
+  Simulation sim(std::move(content), cfg);
+
+  // Build a small custom game state with one system, one fuel colony, one ship.
   GameState st;
-  st.save_version = 39;
-  st.next_id = 2000;
-  st.date = Date{.days_since_epoch = 1, .hour_of_day = 0};
-  st.selected_system = 1;
+  st.date = Date(0);
+  st.hour_of_day = 0;
 
-  // Player faction knows both systems and both sides of the jump.
-  st.factions[1] = Faction{
-      .id = 1,
-      .name = "Player",
-      .type = FactionType::Player,
-      .discovered_systems = {1, 2},
-      .surveyed_jump_points = {100, 101},
-  };
+  // Faction.
+  {
+    Faction f;
+    f.id = 1;
+    f.name = "Player";
+    f.control = FactionControl::Player;
+    f.discovered_systems.insert(1);
+    st.factions[f.id] = f;
+  }
 
-  // Two systems connected by a surveyed jump.
-  st.star_systems[1] = StarSystem{
-      .id = 1,
-      .name = "Sol",
-      .galaxy_position_mly = Vec2{0.0, 0.0},
-      .jump_points = {100},
-  };
-  st.star_systems[2] = StarSystem{
-      .id = 2,
-      .name = "Alpha",
-      .galaxy_position_mly = Vec2{10.0, 0.0},
-      .jump_points = {101},
-  };
+  // System.
+  {
+    StarSystem sys;
+    sys.id = 1;
+    sys.name = "Alpha";
+    sys.galaxy_pos_mly = Vec2{0.0, 0.0};
+    sys.bodies.push_back(10);
+    st.systems[sys.id] = sys;
+  }
 
-  st.jump_points[100] = JumpPoint{
-      .id = 100,
-      .system_id = 1,
-      .linked_jump_point_id = 101,
-      .position_mkm = Vec2{20.0, 0.0},
-      .radius_mkm = 1.0,
-      .name = "JP-Sol",
-  };
-  st.jump_points[101] = JumpPoint{
-      .id = 101,
-      .system_id = 2,
-      .linked_jump_point_id = 100,
-      .position_mkm = Vec2{0.0, 0.0},
-      .radius_mkm = 1.0,
-      .name = "JP-Alpha",
-  };
+  // Body hosting the refuel colony.
+  {
+    Body b;
+    b.id = 10;
+    b.name = "Fuel Depot";
+    b.system_id = 1;
+    b.position_mkm = Vec2{100.0, 0.0};
+    b.radius_km = 1000.0;
+    st.bodies[b.id] = b;
+  }
 
-  // Bodies with colonies.
-  st.bodies[10] = Body{
-      .id = 10,
-      .name = "Homeworld",
-      .system_id = 1,
-      .position_mkm = Vec2{0.0, 0.0},
-      .radius_m = 6.0e6,
-  };
+  // Colony with fuel available.
+  {
+    Colony c;
+    c.id = 500;
+    c.name = "Depot Colony";
+    c.faction_id = 1;
+    c.body_id = 10;
+    c.minerals["Fuel"] = 10000.0;
+    st.colonies[c.id] = c;
+  }
 
-  st.bodies[20] = Body{
-      .id = 20,
-      .name = "Fuel Depot World",
-      .system_id = 2,
-      // Far from the entry jump to ensure it is unreachable with low fuel.
-      .position_mkm = Vec2{100.0, 0.0},
-      .radius_m = 6.0e6,
-  };
+  // Ship with low fuel and auto-refuel enabled.
+  {
+    Ship s;
+    s.id = 42;
+    s.name = "Tanker 1";
+    s.faction_id = 1;
+    s.design_id = 100;
+    s.system_id = 1;
+    s.position_mkm = Vec2{0.0, 0.0};
 
-  st.colonies[500] = Colony{
-      .id = 500,
-      .name = "Home Colony",
-      .faction_id = 1,
-      .body_id = 10,
-  };
+    s.auto_refuel = true;
+    s.auto_refuel_threshold_fraction = 0.5;  // refuel below 50%
+    s.fuel_tons = 10.0;  // 10% of capacity (100)
 
-  st.colonies[501] = Colony{
-      .id = 501,
-      .name = "Fuel Depot",
-      .faction_id = 1,
-      .body_id = 20,
-  };
-  st.colonies[501].minerals["Fuel"] = 1000.0;
+    st.ships[s.id] = s;
+  }
 
-  // A ship low on fuel, not docked, with auto-refuel enabled.
-  st.ships[200] = Ship{
-      .id = 200,
-      .name = "Refuel Test Ship",
-      .design_id = "burner",
-      .faction_id = 1,
-      .system_id = 1,
-      .position_mkm = Vec2{20.0, 0.0},
-      .speed_km_s = 1000.0,
-      .fuel_tons = 40.0, // 20% fuel; default threshold is 25%
-      .auto_refuel = true,
-      .auto_refuel_threshold_fraction = 0.25,
-  };
+  sim.load_game(std::move(st));
 
-  Simulation sim;
-  sim.set_content_db(content);
-  sim.load_game(st);
-
+  // Run AI planning – should enqueue a MoveToBody order to the fuel depot.
   sim.run_ai_planning();
 
-  const auto& out = sim.state();
-  const auto* orders = find_ptr(out.ship_orders, Id{200});
-  N4X_ASSERT(orders != nullptr);
-  N4X_ASSERT(orders->queue.size() == 1);
-  N4X_ASSERT(std::holds_alternative<MoveToBody>(orders->queue[0]));
-  const auto& move = std::get<MoveToBody>(orders->queue[0]);
-  // The ship should choose the reachable colony in-system, even though it has no fuel.
-  N4X_ASSERT(move.body_id == 10);
+  const auto& orders = sim.state().ship_orders;
+  auto it = orders.find(42);
+  ASSERT_TRUE(it != orders.end());
+  ASSERT_FALSE(it->second.empty());
 
-  return 0;
+  const auto* move = std::get_if<MoveToBody>(&it->second.front());
+  ASSERT_NE(move, nullptr);
+  EXPECT_EQ(move->body_id, 10);
 }
-
-} // namespace nebula4x

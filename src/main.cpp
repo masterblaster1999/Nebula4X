@@ -19,9 +19,32 @@
 #endif
 
 #include <cstdio>
+#include <exception>
+#include <filesystem>
+#include <vector>
+#include <string>
 
 #include "nebula4x/core/simulation.h"
+#include "nebula4x/core/tech.h"
 #include "ui/app.h"
+
+namespace {
+std::string find_data_file(const std::string& rel_path) {
+  namespace fs = std::filesystem;
+  // Try common working directories (repo root, build dirs).
+  const std::vector<std::string> prefixes = {
+      "", "../", "../../", "../../../", "../../../../",
+  };
+  for (const auto& p : prefixes) {
+    fs::path candidate = fs::path(p) / rel_path;
+    std::error_code ec;
+    if (fs::exists(candidate, ec) && !ec) {
+      return candidate.lexically_normal().string();
+    }
+  }
+  return rel_path;
+}
+} // namespace
 
 int main(int /*argc*/, char** /*argv*/) {
   if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER | SDL_INIT_GAMECONTROLLER) != 0) {
@@ -107,7 +130,29 @@ int main(int /*argc*/, char** /*argv*/) {
 #endif
 
   // Simulation + UI application
-  nebula4x::Simulation sim(nebula4x::State::sample());
+  // Load content/tech from the bundled JSON files.
+  nebula4x::ContentDB content;
+  {
+    const std::string resources = find_data_file("data/blueprints/resources.json");
+    const std::string blueprints = find_data_file("data/blueprints/starting_blueprints.json");
+    try {
+      content = nebula4x::load_content_db_from_files({resources, blueprints});
+    } catch (const std::exception& e) {
+      std::fprintf(stderr, "Warning: failed to load content DB (%s): %s\n", blueprints.c_str(), e.what());
+      content = nebula4x::ContentDB{};
+    }
+
+    const std::string tech_path = find_data_file("data/tech/tech_tree.json");
+    try {
+      content.techs = nebula4x::load_tech_db_from_file(tech_path);
+      content.tech_source_paths = {tech_path};
+    } catch (const std::exception& e) {
+      std::fprintf(stderr, "Warning: failed to load tech DB (%s): %s\n", tech_path.c_str(), e.what());
+    }
+  }
+
+  nebula4x::SimConfig cfg;
+  nebula4x::Simulation sim(std::move(content), cfg);
   nebula4x::ui::App app(std::move(sim));
 
   // Load UI preferences (theme/layout + window visibility).

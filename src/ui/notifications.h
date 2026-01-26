@@ -35,6 +35,7 @@ int notifications_unread_count(const UIState& ui);
 
 // Bulk operations.
 void notifications_mark_all_read(UIState& ui);
+void notifications_clear_read(UIState& ui);
 void notifications_clear(UIState& ui, bool keep_pinned);
 
 } // namespace nebula4x::ui

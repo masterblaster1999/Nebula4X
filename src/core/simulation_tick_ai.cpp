@@ -1155,6 +1155,8 @@ void Simulation::tick_ai() {
       if (!plan.ok || plan.assignments.empty()) continue;
       (void)apply_troop_plan(*this, plan, /*clear_existing_orders=*/false);
     }
+  }
+
   // --- Ship-level automation: Auto-colonist transport (population logistics) ---
 
   // Implementation note:
@@ -1174,8 +1176,6 @@ void Simulation::tick_ai() {
       if (!plan.ok || plan.assignments.empty()) continue;
       (void)apply_colonist_plan(*this, plan, /*clear_existing_orders=*/false);
     }
-  }
-
   }
 
   // --- Ship-level automation: Auto-salvage (wreck recovery) ---
