@@ -63,6 +63,7 @@ static std::string contract_kind_label(ContractKind k) {
     case ContractKind::InvestigateAnomaly: return "Investigate";
     case ContractKind::SalvageWreck: return "Salvage";
     case ContractKind::SurveyJumpPoint: return "Survey";
+    case ContractKind::BountyPirate: return "Bounty";
     case ContractKind::EscortConvoy: return "Escort";
   }
   return "Contract";
@@ -116,6 +117,13 @@ bool Simulation::accept_contract(Id contract_id, bool push_event, std::string* e
 
   const std::int64_t now = state_.date.days_since_epoch();
   if (c.expires_day > 0 && now >= c.expires_day) return fail("Contract offer has expired");
+
+  // Kind-specific staleness validation.
+  if (c.kind == ContractKind::BountyPirate) {
+    if (c.target_destroyed_day != 0) return fail("Bounty target already destroyed");
+    const auto* sh = find_ptr(state_.ships, c.target_id);
+    if (!sh || sh->hp <= 0.0) return fail("Bounty target missing");
+  }
   c.status = ContractStatus::Accepted;
   c.accepted_day = now;
 
@@ -219,6 +227,10 @@ bool Simulation::assign_contract_to_ship(Id contract_id, Id ship_id, bool clear_
     case ContractKind::SurveyJumpPoint:
       ok = issue_survey_jump_point(ship_id, c.target_id, /*transit_when_done=*/false, restrict_to_discovered);
       break;
+    case ContractKind::BountyPirate:
+      // Attack orders use fog-of-war contact prediction to pursue the target.
+      ok = issue_attack_ship(ship_id, c.target_id, restrict_to_discovered);
+      break;
     case ContractKind::EscortConvoy:
       // Escort neutral convoys is allowed (non-hostile factions) by setting
       // allow_neutral. The order itself handles cross-system routing.
@@ -280,7 +292,12 @@ bool Simulation::assign_contract_to_fleet(Id contract_id, Id fleet_id, bool clea
       const double sensor = d ? std::max(0.0, d->sensor_range_mkm) : 0.0;
       return sensor > 1e-9;
     }
-    // Salvage + Survey have no hard capability gates (cargo helps salvage throughput).
+    if (c.kind == ContractKind::BountyPirate) {
+      const auto* d = find_design(sh->design_id);
+      const double weapons = d ? (std::max(0.0, d->weapon_damage) + std::max(0.0, d->missile_damage)) : 0.0;
+      return weapons > 1e-9;
+    }
+    // Salvage + Survey + Escort have no hard capability gates (cargo helps salvage throughput).
     return true;
   };
 
@@ -299,6 +316,11 @@ bool Simulation::assign_contract_to_fleet(Id contract_id, Id fleet_id, bool clea
       cap = 1.0 + cargo;
     } else if (c.kind == ContractKind::SurveyJumpPoint) {
       cap = 1.0;
+    } else if (c.kind == ContractKind::BountyPirate) {
+      // Bounties reward combat power; speed still matters for pursuit.
+      const double weap = d ? (std::max(0.0, d->weapon_damage) + std::max(0.0, d->missile_damage)) : 0.0;
+      const double rng = d ? (std::max(0.0, d->weapon_range_mkm) + std::max(0.0, d->missile_range_mkm)) : 0.0;
+      cap = 1.0 + 50.0 * weap + 0.5 * rng;
     } else if (c.kind == ContractKind::EscortConvoy) {
       // Escort is primarily a mobility task; speed dominates.
       cap = 1.0;
@@ -345,6 +367,9 @@ bool Simulation::assign_contract_to_fleet(Id contract_id, Id fleet_id, bool clea
       break;
     case ContractKind::SurveyJumpPoint:
       ok = issue_survey_jump_point(primary_ship_id, c.target_id, /*transit_when_done=*/false, restrict_to_discovered);
+      break;
+    case ContractKind::BountyPirate:
+      ok = issue_attack_ship(primary_ship_id, c.target_id, restrict_to_discovered);
       break;
     case ContractKind::EscortConvoy:
       ok = issue_escort_ship(primary_ship_id, c.target_id, /*follow_distance_mkm=*/1.0,
@@ -484,6 +509,27 @@ void Simulation::tick_contracts() {
         }
         continue;
       }
+    } else if (c.kind == ContractKind::BountyPirate) {
+      // Bounties target ships; the target may be missing from the world once it
+      // is destroyed, so we treat target_destroyed_day as the authoritative flag
+      // for whether the contract can still be resolved.
+      if (c.target_destroyed_day != 0) {
+        if (c.status == ContractStatus::Offered) {
+          mark_expired("target already destroyed");
+          continue;
+        }
+        // Accepted contracts resolve in the completion logic below.
+      } else {
+        const auto* sh = find_ptr(state_.ships, c.target_id);
+        if (!sh || sh->hp <= 0.0) {
+          if (c.status == ContractStatus::Offered) {
+            mark_expired("target missing");
+          } else if (c.status == ContractStatus::Accepted) {
+            mark_failed("target missing");
+          }
+          continue;
+        }
+      }
     } else if (c.kind == ContractKind::EscortConvoy) {
       const auto* sh = find_ptr(state_.ships, c.target_id);
       if (!sh || sh->hp <= 0.0) {
@@ -537,6 +583,30 @@ void Simulation::tick_contracts() {
       case ContractKind::SurveyJumpPoint: {
         if (c.assignee_faction_id != kInvalidId) {
           complete = is_jump_point_surveyed_by_faction(c.assignee_faction_id, c.target_id);
+        }
+        break;
+      }
+      case ContractKind::BountyPirate: {
+        if (c.assignee_faction_id == kInvalidId) break;
+        if (c.target_destroyed_day == 0) break;
+
+        // Prevent accepting a bounty after it was already destroyed (stale UI
+        // races); the offer should have expired.
+        if (c.accepted_day > 0 && c.accepted_day > c.target_destroyed_day) {
+          mark_failed("target destroyed before acceptance");
+          break;
+        }
+
+        if (c.target_destroyed_by_faction_id == c.assignee_faction_id) {
+          complete = true;
+        } else {
+          std::string reason = "target destroyed by another faction";
+          if (c.target_destroyed_by_faction_id == kInvalidId) {
+            reason = "target destroyed (unknown attacker)";
+          } else if (const auto* f = find_ptr(state_.factions, c.target_destroyed_by_faction_id)) {
+            reason = "target destroyed by " + f->name;
+          }
+          mark_failed(std::move(reason));
         }
         break;
       }
@@ -601,6 +671,21 @@ void Simulation::tick_contracts() {
     if (c.assignee_faction_id != kInvalidId) {
       if (auto* f = find_ptr(state_.factions, c.assignee_faction_id)) {
         f->research_points += std::max(0.0, c.reward_research_points);
+      }
+    }
+
+    // Bounty contracts also provide a small security benefit: destroying pirate
+    // assets reduces local pirate effectiveness.
+    if (c.kind == ContractKind::BountyPirate && cfg_.enable_pirate_suppression) {
+      // Prefer the recorded kill system (target_id2) if available.
+      const Id sys_id = (c.target_id2 != kInvalidId) ? c.target_id2 : c.system_id;
+      const auto* sys = find_ptr(state_.systems, sys_id);
+      const Id rid = sys ? sys->region_id : kInvalidId;
+      if (rid != kInvalidId) {
+        if (auto* reg = find_ptr(state_.regions, rid)) {
+          const double boost = std::clamp(0.02 + 0.06 * clamp01(c.risk_estimate), 0.0, 0.08);
+          reg->pirate_suppression = std::clamp(reg->pirate_suppression + boost, 0.0, 1.0);
+        }
       }
     }
 
@@ -693,10 +778,12 @@ void Simulation::tick_contracts() {
     std::unordered_set<Id> used_anoms;
     std::unordered_set<Id> used_wrecks;
     std::unordered_set<Id> used_jumps;
+    std::unordered_set<Id> used_bounties;
     std::unordered_set<Id> used_convoys;
     used_anoms.reserve(64);
     used_wrecks.reserve(64);
     used_jumps.reserve(64);
+    used_bounties.reserve(64);
     used_convoys.reserve(64);
 
     for (Id contract_id : sorted_keys(state_.contracts)) {
@@ -709,6 +796,7 @@ void Simulation::tick_contracts() {
           case ContractKind::InvestigateAnomaly: used_anoms.insert(c.target_id); break;
           case ContractKind::SalvageWreck: used_wrecks.insert(c.target_id); break;
           case ContractKind::SurveyJumpPoint: used_jumps.insert(c.target_id); break;
+          case ContractKind::BountyPirate: used_bounties.insert(c.target_id); break;
           case ContractKind::EscortConvoy: used_convoys.insert(c.target_id); break;
         }
       }
@@ -722,10 +810,12 @@ void Simulation::tick_contracts() {
     std::vector<ContractCandidate> anom;
     std::vector<ContractCandidate> wreck;
     std::vector<ContractCandidate> jump;
+    std::vector<ContractCandidate> bounty;
     std::vector<ContractCandidate> escort;
     anom.reserve(64);
     wreck.reserve(64);
     jump.reserve(64);
+    bounty.reserve(32);
     escort.reserve(32);
 
     // Normalize discovery lists for deterministic offer generation.
@@ -792,6 +882,89 @@ void Simulation::tick_contracts() {
       }
     }
 
+    // Bounties (known pirate ships, based on faction intel contacts).
+    //
+    // We offer bounties only for relatively fresh contacts in discovered space
+    // to avoid frustrating "needle in a haystack" missions.
+    auto corridor_risk_for_system = [&](Id sys_id) -> double {
+      const auto* sys = find_ptr(state_.systems, sys_id);
+      if (!sys) return 0.0;
+      double risk = 0.0;
+      // Combine live piracy presence with a short memory of recent merchant
+      // losses. This makes bounty/escort offers more responsive to "raids" that
+      // leave behind wrecks but not necessarily a persistent pirate presence.
+      const double piracy = clamp01(piracy_risk_for_system(sys_id));
+      const double loss = clamp01(civilian_shipping_loss_pressure_for_system(sys_id));
+      const double security = 1.0 - (1.0 - piracy) * (1.0 - loss);
+      risk += clamp01(security) * 0.60;
+      risk += clamp01(sys->nebula_density) * 0.20;
+      risk += clamp01(system_storm_intensity(sys_id)) * 0.20;
+      return clamp01(risk);
+    };
+
+    const std::int64_t max_bounty_contact_age_days =
+        std::max<std::int64_t>(30, static_cast<std::int64_t>(cfg_.contract_offer_expiry_days));
+
+    for (Id sid : sorted_keys(fac->ship_contacts)) {
+      if (sid == kInvalidId) continue;
+      if (used_bounties.contains(sid)) continue;
+
+      const auto itc = fac->ship_contacts.find(sid);
+      if (itc == fac->ship_contacts.end()) continue;
+      const Contact& contact = itc->second;
+
+      if (contact.last_seen_faction_id == kInvalidId) continue;
+      const auto* tf = find_ptr(state_.factions, contact.last_seen_faction_id);
+      if (!tf || tf->control != FactionControl::AI_Pirate) continue;
+
+      // Only target ships that are (still) hostile to the assignee.
+      if (!are_factions_hostile(fid, contact.last_seen_faction_id) &&
+          !are_factions_hostile(contact.last_seen_faction_id, fid)) {
+        continue;
+      }
+
+      if (contact.system_id == kInvalidId) continue;
+      if (!is_system_discovered_by_faction(fid, contact.system_id)) continue;
+      if (!find_ptr(state_.systems, contact.system_id)) continue;
+
+      // Avoid offering bounties on already-destroyed ships (contacts are pruned,
+      // but in edge cases a ship could disappear between ticks).
+      if (const auto* sh = find_ptr(state_.ships, sid); !sh || sh->hp <= 0.0) continue;
+
+      const std::int64_t age = std::max<std::int64_t>(0, now - contact.last_seen_day);
+      if (max_bounty_contact_age_days > 0 && age > max_bounty_contact_age_days) continue;
+
+      const auto* d = find_design(contact.last_seen_design_id);
+      const double weap = d ? (std::max(0.0, d->weapon_damage) + std::max(0.0, d->missile_damage)) : 0.0;
+      const double rng = d ? (std::max(0.0, d->weapon_range_mkm) + std::max(0.0, d->missile_range_mkm)) : 0.0;
+      const double hp = d ? std::max(0.0, d->max_hp) : 0.0;
+      const double shields = d ? std::max(0.0, d->max_shields) : 0.0;
+      const double speed = d ? std::max(0.0, d->speed_km_s) : 0.0;
+
+      // A light-weight combat "threat" heuristic.
+      const double threat = 10.0 * weap + 0.05 * rng + 0.02 * (hp + shields) + 0.0005 * speed;
+      const double freshness = (max_bounty_contact_age_days > 0)
+                                 ? (1.0 - std::min(1.0, static_cast<double>(age) /
+                                                         static_cast<double>(max_bounty_contact_age_days)))
+                                 : 1.0;
+
+      ContractCandidate c;
+      c.kind = ContractKind::BountyPirate;
+      c.target_id = sid;
+      c.system_id = contact.system_id;
+
+      // Candidate value scales with threat but is reduced for stale intel.
+      c.value = std::max(0.0, (12.0 + threat) * (0.6 + 0.4 * std::clamp(freshness, 0.0, 1.0)));
+
+      // Candidate risk scales with local environment and target threat.
+      const double env_risk = corridor_risk_for_system(contact.system_id);
+      const double tgt_risk = clamp01(0.12 * weap + 0.002 * (hp + shields) + 0.0002 * speed);
+      const double stale_risk = clamp01(static_cast<double>(age) / 90.0) * 0.20;
+      c.risk = clamp01(std::max(env_risk, tgt_risk) + stale_risk);
+
+      bounty.push_back(std::move(c));
+    }
+
     // Escort convoys (neutral Merchant Guild ships currently on a jump-route
     // leg through discovered space).
     //
@@ -806,21 +979,7 @@ void Simulation::tick_contracts() {
       }
     }
 
-    auto corridor_risk_for_system = [&](Id sys_id) -> double {
-      const auto* sys = find_ptr(state_.systems, sys_id);
-      if (!sys) return 0.0;
-      double risk = 0.0;
-      // Combine live piracy presence with a short memory of recent merchant
-      // losses. This makes escort offers more responsive to "raids" that leave
-      // behind wrecks but not necessarily a persistent pirate presence.
-      const double piracy = clamp01(piracy_risk_for_system(sys_id));
-      const double loss = clamp01(civilian_shipping_loss_pressure_for_system(sys_id));
-      const double security = 1.0 - (1.0 - piracy) * (1.0 - loss);
-      risk += clamp01(security) * 0.60;
-      risk += clamp01(sys->nebula_density) * 0.20;
-      risk += clamp01(system_storm_intensity(sys_id)) * 0.20;
-      return clamp01(risk);
-    };
+
 
     if (merchant_fid != kInvalidId) {
       for (const auto& [sid, sh] : state_.ships) {
@@ -889,7 +1048,7 @@ void Simulation::tick_contracts() {
       }
     }
 
-    if (anom.empty() && wreck.empty() && jump.empty() && escort.empty()) continue;
+    if (anom.empty() && wreck.empty() && jump.empty() && bounty.empty() && escort.empty()) continue;
 
     // Determine a home system/position for hop estimation.
     Id home_sys = kInvalidId;
@@ -947,9 +1106,10 @@ void Simulation::tick_contracts() {
       // Pick a kind with simple weights.
       struct Bucket { int w; ContractKind kind; };
       std::vector<Bucket> buckets;
-      buckets.reserve(4);
+      buckets.reserve(5);
       if (!anom.empty()) buckets.push_back({3, ContractKind::InvestigateAnomaly});
       if (!jump.empty()) buckets.push_back({2, ContractKind::SurveyJumpPoint});
+      if (!bounty.empty()) buckets.push_back({2, ContractKind::BountyPirate});
       if (!wreck.empty()) buckets.push_back({1, ContractKind::SalvageWreck});
       if (!escort.empty()) buckets.push_back({1, ContractKind::EscortConvoy});
       if (buckets.empty()) break;
@@ -969,6 +1129,7 @@ void Simulation::tick_contracts() {
       std::optional<ContractCandidate> cand;
       if (chosen == ContractKind::InvestigateAnomaly) cand = pick_from(anom);
       else if (chosen == ContractKind::SurveyJumpPoint) cand = pick_from(jump);
+      else if (chosen == ContractKind::BountyPirate) cand = pick_from(bounty);
       else if (chosen == ContractKind::SalvageWreck) cand = pick_from(wreck);
       else cand = pick_from(escort);
       if (!cand) break;
@@ -1028,9 +1189,10 @@ void Simulation::tick_contracts() {
       }
 
       // Escort risk is computed over the full corridor (not just the start
-      // system), so we override with the candidate's precomputed estimate.
-      if (c.kind == ContractKind::EscortConvoy) {
-        c.risk_estimate = clamp01(cand->risk);
+      // system). Bounties also incorporate target threat and intel staleness.
+      // In both cases we prefer the candidate's precomputed estimate.
+      if (c.kind == ContractKind::EscortConvoy || c.kind == ContractKind::BountyPirate) {
+        c.risk_estimate = clamp01(std::max(c.risk_estimate, cand->risk));
       }
 
       // Reward heuristic: value + distance + risk.
@@ -1053,6 +1215,32 @@ void Simulation::tick_contracts() {
         if (const auto* jp = find_ptr(state_.jump_points, c.target_id)) {
           target_name = !jp->name.empty() ? jp->name
                                           : ("Jump " + std::to_string(static_cast<std::uint64_t>(jp->id)));
+        }
+      } else if (c.kind == ContractKind::BountyPirate) {
+        // Use intel contacts for naming (avoid omniscience).
+        std::string ship_name;
+        std::int64_t age_days = 0;
+        if (auto itc = fac->ship_contacts.find(c.target_id); itc != fac->ship_contacts.end()) {
+          const Contact& ct = itc->second;
+          ship_name = !ct.last_seen_name.empty() ? ct.last_seen_name
+                                                 : ("Pirate " + std::to_string(static_cast<std::uint64_t>(ct.ship_id)));
+          age_days = std::max<std::int64_t>(0, now - ct.last_seen_day);
+          // Keep the contract's system_id aligned to the last seen system.
+          if (ct.system_id != kInvalidId) c.system_id = ct.system_id;
+        } else if (const auto* sh = find_ptr(state_.ships, c.target_id)) {
+          ship_name = !sh->name.empty() ? sh->name : ("Ship " + std::to_string(static_cast<std::uint64_t>(sh->id)));
+        }
+
+        if (ship_name.empty()) ship_name = "Pirate " + std::to_string(static_cast<std::uint64_t>(c.target_id));
+
+        target_name = ship_name;
+        if (const auto* sys = find_ptr(state_.systems, c.system_id)) {
+          const std::string sys_name =
+              !sys->name.empty() ? sys->name : ("System " + std::to_string(static_cast<std::uint64_t>(sys->id)));
+          target_name += " @ " + sys_name;
+        }
+        if (age_days > 0) {
+          target_name += " (" + std::to_string(static_cast<long long>(age_days)) + "d old)";
         }
       } else if (c.kind == ContractKind::EscortConvoy) {
         const auto* sh = find_ptr(state_.ships, c.target_id);

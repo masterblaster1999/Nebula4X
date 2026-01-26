@@ -105,8 +105,9 @@ inline double stable_sum_nonneg_sorted(const Map& m) {
 // gameplay actions (e.g. issuing hostile orders) on active diplomatic treaties.
 inline int treaty_strength(TreatyType t) {
   switch (t) {
-    case TreatyType::Alliance: return 4;
-    case TreatyType::TradeAgreement: return 3;
+    case TreatyType::Alliance: return 5;
+    case TreatyType::TradeAgreement: return 4;
+    case TreatyType::ResearchAgreement: return 3;
     case TreatyType::NonAggressionPact: return 2;
     case TreatyType::Ceasefire: return 1;
   }
@@ -125,7 +126,7 @@ inline bool treaty_is_active(const Treaty& t, std::int64_t now_day) {
 
 // Returns true if there is any active treaty between the two factions.
 // If out_strongest_type is non-null, it is set to the "strongest" active treaty type.
-// Strength order (high -> low): Alliance, TradeAgreement, NonAggressionPact, Ceasefire.
+// Strength order (high -> low): Alliance, TradeAgreement, ResearchAgreement, NonAggressionPact, Ceasefire.
 inline bool strongest_active_treaty_between(const GameState& s, Id faction_a, Id faction_b,
                                            TreatyType* out_strongest_type = nullptr) {
   if (faction_a == kInvalidId || faction_b == kInvalidId) return false;

@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "nebula4x/core/simulation.h"
+#include "nebula4x/core/contact_prediction.h"
 
 namespace nebula4x {
 
@@ -27,10 +28,12 @@ bool is_ship_idle(const GameState& st, Id ship_id) {
   return true;
 }
 
-bool contract_target_pos(const GameState& st, const Contract& c, Id* out_sys, Vec2* out_pos) {
+bool contract_target_pos(const Simulation& sim, Id viewer_faction_id, const Contract& c, Id* out_sys, Vec2* out_pos) {
   if (out_sys) *out_sys = kInvalidId;
   if (out_pos) *out_pos = Vec2{0.0, 0.0};
   if (c.target_id == kInvalidId) return false;
+
+  const GameState& st = sim.state();
 
   switch (c.kind) {
     case ContractKind::InvestigateAnomaly: {
@@ -53,6 +56,33 @@ bool contract_target_pos(const GameState& st, const Contract& c, Id* out_sys, Ve
       if (out_sys) *out_sys = jp->system_id;
       if (out_pos) *out_pos = jp->position_mkm;
       return jp->system_id != kInvalidId;
+    }
+    case ContractKind::BountyPirate: {
+      // Bounties must respect fog-of-war: use detections/contacts rather than
+      // omniscient access to the target ship.
+      if (c.target_destroyed_day != 0) return false;
+
+      if (sim.is_ship_detected_by_faction(viewer_faction_id, c.target_id)) {
+        const auto* sh = find_ptr(st.ships, c.target_id);
+        if (!sh) return false;
+        if (out_sys) *out_sys = sh->system_id;
+        if (out_pos) *out_pos = sh->position_mkm;
+        return sh->system_id != kInvalidId;
+      }
+
+      const auto* fac = find_ptr(st.factions, viewer_faction_id);
+      if (!fac) return false;
+      const auto itc = fac->ship_contacts.find(c.target_id);
+      if (itc == fac->ship_contacts.end()) return false;
+      const Contact& ct = itc->second;
+
+      if (out_sys) *out_sys = ct.system_id;
+      if (out_pos) {
+        const int now_day = static_cast<int>(st.date.days_since_epoch());
+        const auto pred = predict_contact_position(ct, now_day, sim.cfg().contact_prediction_max_days);
+        *out_pos = pred.predicted_position_mkm;
+      }
+      return ct.system_id != kInvalidId;
     }
     case ContractKind::EscortConvoy: {
       const auto* sh = find_ptr(st.ships, c.target_id);
@@ -85,6 +115,10 @@ double role_bonus_for_kind(ShipRole role, ContractKind kind) {
     case ContractKind::SurveyJumpPoint:
       if (role == ShipRole::Surveyor) return 0.25;
       if (role == ShipRole::Combatant) return 0.05;
+      return 0.0;
+    case ContractKind::BountyPirate:
+      if (role == ShipRole::Combatant) return 0.35;
+      if (role == ShipRole::Surveyor) return 0.05;
       return 0.0;
     case ContractKind::EscortConvoy:
       if (role == ShipRole::Combatant) return 0.25;
@@ -133,6 +167,13 @@ double estimate_work_days_for_contract(const Simulation& sim, const Contract& c,
       // The scoring primary driver is travel time anyway.
       (void)faction_id;
       return 1.0;
+    }
+    case ContractKind::BountyPirate: {
+      // Combat duration is highly situational; the planner mostly cares about
+      // travel time and ship suitability.
+      (void)faction_id;
+      (void)ship_id;
+      return 0.0;
     }
     case ContractKind::EscortConvoy: {
       const auto* tgt = find_ptr(st.ships, c.target_id);
@@ -200,10 +241,11 @@ ContractPlannerResult compute_contract_plan(const Simulation& sim, Id faction_id
 
     Id sys = kInvalidId;
     Vec2 pos{0.0, 0.0};
-    if (!contract_target_pos(st, *c, &sys, &pos)) continue;
+    if (!contract_target_pos(sim, faction_id, *c, &sys, &pos)) continue;
     if (sys == kInvalidId) continue;
     if (opt.restrict_to_discovered && !sim.is_system_discovered_by_faction(faction_id, sys)) continue;
-    if (opt.avoid_hostile_systems && !sim.detected_hostile_ships_in_system(faction_id, sys).empty()) continue;
+    if (opt.avoid_hostile_systems && c->kind != ContractKind::BountyPirate &&
+        !sim.detected_hostile_ships_in_system(faction_id, sys).empty()) continue;
 
     // Filter out already-resolved anomaly offers (stale contracts can exist briefly between ticks).
     if (c->kind == ContractKind::InvestigateAnomaly) {
@@ -271,6 +313,7 @@ ContractPlannerResult compute_contract_plan(const Simulation& sim, Id faction_id
     double cargo_cap_tons{0.0};
     double cargo_used_tons{0.0};
     double sensor_range_mkm{0.0};
+    double weapons{0.0};
   };
 
   std::vector<Id> ship_ids;
@@ -305,6 +348,7 @@ ContractPlannerResult compute_contract_plan(const Simulation& sim, Id faction_id
     si.cargo_cap_tons = std::max(0.0, d->cargo_tons);
     si.cargo_used_tons = cargo_used;
     si.sensor_range_mkm = std::max(0.0, d->sensor_range_mkm);
+    si.weapons = std::max(0.0, d->weapon_damage) + std::max(0.0, d->missile_damage);
     ships.push_back(si);
 
     if ((int)ships.size() >= max_ships) {
@@ -370,6 +414,11 @@ ContractPlannerResult compute_contract_plan(const Simulation& sim, Id faction_id
       if (c.kind == ContractKind::SurveyJumpPoint) {
         // Surveying requires online sensors; ships with no sensors can't progress.
         if (sh.sensor_range_mkm <= kEps) continue;
+      }
+
+      if (c.kind == ContractKind::BountyPirate) {
+        // Bounties require at least minimal offensive capability.
+        if (sh.weapons <= kEps) continue;
       }
 
       if (c.kind == ContractKind::EscortConvoy) {

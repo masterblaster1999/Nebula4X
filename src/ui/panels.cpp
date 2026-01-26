@@ -20,6 +20,7 @@
 #include "nebula4x/core/serialization.h"
 #include "nebula4x/core/procgen_obscure.h"
 #include "nebula4x/core/procgen_surface.h"
+#include "nebula4x/core/procgen_design_forge.h"
 #include "nebula4x/core/research_planner.h"
 #include "nebula4x/core/research_schedule.h"
 #include "nebula4x/core/order_planner.h"
@@ -189,6 +190,7 @@ const char* treaty_type_label(TreatyType t) {
     case TreatyType::NonAggressionPact: return "Non-Aggression Pact";
     case TreatyType::Alliance: return "Alliance";
     case TreatyType::TradeAgreement: return "Trade Agreement";
+    case TreatyType::ResearchAgreement: return "Research Agreement";
   }
   return "Treaty";
 }
@@ -8110,7 +8112,8 @@ if (colony->shipyard_queue.empty()) {
             "to Hostile once contact is confirmed.\n\n"
             "Mutual Friendly stances enable full cooperation: allied sensor coverage + discovered systems are shared, "
             "and ships may refuel/repair/transfer minerals at allied colonies.\n\n"
-            "Trade Agreements (treaties) grant port access for refuel/rearm/transfer minerals without a full alliance.");
+            "Trade Agreements (treaties) grant port access for refuel/rearm/transfer minerals without a full alliance.\n\n"
+            "Research Agreements exchange star charts and improve research output/collaboration without granting port access.");
 
         static bool reciprocal = true;
         ImGui::Checkbox("Reciprocal edits (set both directions)", &reciprocal);
@@ -8320,8 +8323,8 @@ if (colony->shipyard_queue.empty()) {
             for (const auto& p : others) labels.push_back(p.second.c_str());
             ImGui::Combo("To", &offer_target_idx, labels.data(), (int)labels.size());
 
-            const TreatyType offer_types[] = {TreatyType::Ceasefire, TreatyType::NonAggressionPact, TreatyType::TradeAgreement, TreatyType::Alliance};
-            const char* offer_type_labels[] = {"Ceasefire", "Non-Aggression Pact", "Trade Agreement", "Alliance"};
+            const TreatyType offer_types[] = {TreatyType::Ceasefire, TreatyType::NonAggressionPact, TreatyType::TradeAgreement, TreatyType::ResearchAgreement, TreatyType::Alliance};
+            const char* offer_type_labels[] = {"Ceasefire", "Non-Aggression Pact", "Trade Agreement", "Research Agreement", "Alliance"};
             offer_type_idx = std::clamp(offer_type_idx, 0, (int)IM_ARRAYSIZE(offer_types) - 1);
             ImGui::Combo("Treaty type", &offer_type_idx, offer_type_labels, IM_ARRAYSIZE(offer_type_labels));
 
@@ -8627,6 +8630,37 @@ if (colony->shipyard_queue.empty()) {
         static std::vector<std::string> comp_list;
         static std::string status;
 
+        // --- Auto-forge helper state (local to the design editor) ---
+        static bool edit_forge_use_constraints = false;
+        static bool edit_forge_only_meeting_constraints = true;
+        static bool edit_forge_require_power_balance = false;
+        static int edit_forge_seed = 0;
+        static int edit_forge_quality = 16;
+        static int edit_forge_mutations = 5;
+        static int edit_forge_max_components = 14;
+        static bool edit_forge_prefer_missiles = false;
+        static bool edit_forge_prefer_shields = true;
+        static bool edit_forge_include_ecm_eccm = true;
+
+        static float edit_forge_min_speed_km_s = 0.0f;
+        static float edit_forge_min_range_mkm = 0.0f;
+        static float edit_forge_max_mass_tons = 0.0f;
+        static float edit_forge_min_cargo_tons = 0.0f;
+        static float edit_forge_min_mining_tons_per_day = 0.0f;
+        static float edit_forge_min_colony_capacity_millions = 0.0f;
+        static float edit_forge_min_troop_capacity = 0.0f;
+        static float edit_forge_min_sensor_range_mkm = 0.0f;
+        static float edit_forge_max_signature_multiplier = 0.0f;
+        static float edit_forge_min_beam_damage = 0.0f;
+        static float edit_forge_min_missile_damage = 0.0f;
+        static float edit_forge_min_point_defense_damage = 0.0f;
+        static float edit_forge_min_shields = 0.0f;
+        static float edit_forge_min_hp = 0.0f;
+        static float edit_forge_min_ecm_strength = 0.0f;
+        static float edit_forge_min_eccm_strength = 0.0f;
+        static float edit_forge_min_power_margin = 0.0f;
+        static std::string edit_forge_last_debug;
+
         const char* roles[] = {"Freighter", "Surveyor", "Combatant"};
         role_idx = std::clamp(role_idx, 0, 2);
 
@@ -8868,6 +8902,150 @@ if (colony->shipyard_queue.empty()) {
 
           if (ImGui::Button("Add")) {
             comp_list.push_back(avail_components[add_comp_idx]);
+          }
+        }
+
+        // --- Auto forge (Design Forge) ---
+        if (ImGui::CollapsingHeader("Auto forge (Design Forge)", ImGuiTreeNodeFlags_DefaultOpen)) {
+          ImGui::TextDisabled("Generate variants from the current component list using only the selected faction's unlocked components.");
+
+          ImGui::SetNextItemWidth(120.0f);
+          ImGui::InputInt("Seed", &edit_forge_seed);
+          ImGui::SameLine();
+          ImGui::SetNextItemWidth(140.0f);
+          ImGui::SliderInt("Quality", &edit_forge_quality, 1, 64);
+          ImGui::SameLine();
+          ImGui::SetNextItemWidth(140.0f);
+          ImGui::SliderInt("Mutations", &edit_forge_mutations, 0, 10);
+
+          ImGui::SetNextItemWidth(140.0f);
+          ImGui::SliderInt("Max components", &edit_forge_max_components, 6, 32);
+
+          ImGui::Checkbox("Prefer missiles", &edit_forge_prefer_missiles);
+          ImGui::SameLine();
+          ImGui::Checkbox("Prefer shields", &edit_forge_prefer_shields);
+          ImGui::SameLine();
+          ImGui::Checkbox("Include ECM/ECCM", &edit_forge_include_ecm_eccm);
+
+          ImGui::Spacing();
+          ImGui::Checkbox("Constraints", &edit_forge_use_constraints);
+          ImGui::SameLine();
+          ImGui::Checkbox("Only valid outputs", &edit_forge_only_meeting_constraints);
+          ImGui::SameLine();
+          ImGui::Checkbox("Require power balance", &edit_forge_require_power_balance);
+
+          if (edit_forge_use_constraints) {
+            if (ImGui::BeginTable("design_editor_forge_constraints", 2, ImGuiTableFlags_SizingFixedFit)) {
+              auto row_float = [&](const char* label, float* v) {
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                ImGui::TextUnformatted(label);
+                ImGui::TableSetColumnIndex(1);
+                ImGui::SetNextItemWidth(160.0f);
+                ImGui::InputFloat((std::string("##") + label).c_str(), v, 0.0f, 0.0f, "%.2f");
+              };
+
+              row_float("Min speed (km/s)", &edit_forge_min_speed_km_s);
+              row_float("Min range (mkm)", &edit_forge_min_range_mkm);
+              row_float("Max mass (t, 0=off)", &edit_forge_max_mass_tons);
+              row_float("Min cargo (t)", &edit_forge_min_cargo_tons);
+              row_float("Min mining (t/day)", &edit_forge_min_mining_tons_per_day);
+              row_float("Min colony cap (M)", &edit_forge_min_colony_capacity_millions);
+              row_float("Min troop cap", &edit_forge_min_troop_capacity);
+              row_float("Min sensor range (mkm)", &edit_forge_min_sensor_range_mkm);
+              row_float("Max signature mult (0=off)", &edit_forge_max_signature_multiplier);
+              row_float("Min beam dmg", &edit_forge_min_weapon_damage);
+              row_float("Min missile dmg", &edit_forge_min_missile_damage);
+              row_float("Min point-defense dmg", &edit_forge_min_point_defense_damage);
+              row_float("Min shields", &edit_forge_min_shields);
+              row_float("Min HP", &edit_forge_min_hp);
+              row_float("Min ECM strength", &edit_forge_min_ecm_strength);
+              row_float("Min ECCM strength", &edit_forge_min_eccm_strength);
+              if (edit_forge_require_power_balance) {
+                row_float("Min power margin", &edit_forge_min_power_margin);
+              } else {
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                ImGui::TextDisabled("Min power margin");
+                ImGui::TableSetColumnIndex(1);
+                ImGui::TextDisabled("(enable Require power balance)");
+              }
+              ImGui::EndTable();
+            }
+            ImGui::TextDisabled("0 disables a constraint.");
+          }
+
+          if (ImGui::Button("Forge and apply best")) {
+            if (!selected_faction) {
+              edit_forge_last_debug = "No faction selected.";
+            } else {
+              ShipDesign base;
+              base.id = new_id;
+              base.name = new_name;
+              base.role = (role_idx == 0) ? ShipRole::Freighter : (role_idx == 1) ? ShipRole::Surveyor : ShipRole::Combatant;
+              base.components = comp_list;
+
+              DesignForgeOptions opt;
+              opt.desired_count = 16;
+              opt.candidate_multiplier = std::clamp(edit_forge_quality, 1, 64);
+              opt.mutations_per_candidate = std::clamp(edit_forge_mutations, 0, 10);
+              opt.role = base.role;
+              opt.prefer_missiles = edit_forge_prefer_missiles;
+              opt.prefer_shields = edit_forge_prefer_shields;
+              opt.include_ecm_eccm = edit_forge_include_ecm_eccm;
+              opt.id_prefix = "tmp";
+              opt.name_prefix = "Forge";
+              opt.max_components = std::clamp(edit_forge_max_components, 6, 64);
+
+              if (edit_forge_use_constraints) {
+                opt.constraints.min_speed_km_s = edit_forge_min_speed_km_s;
+                opt.constraints.min_range_mkm = edit_forge_min_range_mkm;
+                opt.constraints.max_mass_tons = edit_forge_max_mass_tons;
+                opt.constraints.min_cargo_tons = edit_forge_min_cargo_tons;
+                opt.constraints.min_mining_tons_per_day = edit_forge_min_mining_tons_per_day;
+                opt.constraints.min_colony_capacity_millions = edit_forge_min_colony_capacity_millions;
+                opt.constraints.min_troop_capacity = edit_forge_min_troop_capacity;
+                opt.constraints.min_sensor_range_mkm = edit_forge_min_sensor_range_mkm;
+                opt.constraints.max_signature_multiplier = edit_forge_max_signature_multiplier;
+                opt.constraints.min_weapon_damage = edit_forge_min_weapon_damage;
+                opt.constraints.min_missile_damage = edit_forge_min_missile_damage;
+                opt.constraints.min_point_defense_damage = edit_forge_min_point_defense_damage;
+                opt.constraints.min_shields = edit_forge_min_shields;
+                opt.constraints.min_hp = edit_forge_min_hp;
+                opt.constraints.min_ecm_strength = edit_forge_min_ecm_strength;
+                opt.constraints.min_eccm_strength = edit_forge_min_eccm_strength;
+                opt.constraints.require_power_balance = edit_forge_require_power_balance;
+                opt.constraints.min_power_margin = edit_forge_min_power_margin;
+                opt.only_meeting_constraints = edit_forge_only_meeting_constraints;
+              }
+
+              // Deterministic-ish seed based on user input and design id.
+              std::uint64_t seed = static_cast<std::uint64_t>(static_cast<std::uint32_t>(edit_forge_seed));
+              seed ^= static_cast<std::uint64_t>(selected_faction_id) * 0x9E3779B185EBCA87ull;
+              seed ^= procgen_obscure::fnv1a_64(base.id);
+              seed = procgen_obscure::splitmix64(seed);
+
+              std::string dbg;
+              auto forged = forge_design_variants(sim.content(), selected_faction->unlocked_components, base, seed, opt, &dbg);
+              edit_forge_last_debug = dbg;
+
+              if (forged.empty()) {
+                status = "Forge produced no designs.";
+              } else {
+                const ForgedDesign* best = &forged.front();
+                for (const auto& fd : forged) {
+                  if (fd.meets_constraints) {
+                    best = &fd;
+                    break;
+                  }
+                }
+                comp_list = best->design.components;
+                status = std::string("Forge applied best variant. ") + (best->meets_constraints ? "(meets constraints)" : "(constraints unmet)");
+              }
+            }
+          }
+          if (!edit_forge_last_debug.empty()) {
+            ImGui::TextDisabled("%s", edit_forge_last_debug.c_str());
           }
         }
 

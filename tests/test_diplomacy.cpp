@@ -347,6 +347,85 @@ int test_diplomacy() {
 
 
   {
+    ContentDB c3b;
+    Simulation sim3b(c3b, SimConfig{});
+
+    GameState st3b;
+    st3b.save_version = GameState{}.save_version;
+
+    Faction a;
+    a.id = 1;
+    a.name = "Alpha";
+    st3b.factions[a.id] = a;
+
+    Faction b;
+    b.id = 2;
+    b.name = "Beta";
+    st3b.factions[b.id] = b;
+
+    StarSystem sys1;
+    sys1.id = 1;
+    sys1.name = "Sys-1";
+    st3b.systems[sys1.id] = sys1;
+
+    StarSystem sys2;
+    sys2.id = 2;
+    sys2.name = "Sys-2";
+    st3b.systems[sys2.id] = sys2;
+
+    JumpPoint jp;
+    jp.id = 500;
+    jp.name = "JP";
+    jp.system_id = sys2.id;
+    st3b.jump_points[jp.id] = jp;
+    st3b.systems[sys2.id].jump_points.push_back(jp.id);
+
+    Ship sa;
+    sa.id = 10;
+    sa.name = "A";
+    sa.faction_id = a.id;
+    sa.system_id = sys2.id;
+    st3b.ships[sa.id] = sa;
+    st3b.systems[sys2.id].ships.push_back(sa.id);
+
+    Ship sx;
+    sx.id = 300;
+    sx.name = "X";
+    sx.faction_id = 3;
+    sx.system_id = sys2.id;
+    st3b.ships[sx.id] = sx;
+    st3b.systems[sys2.id].ships.push_back(sx.id);
+
+    Contact cx;
+    cx.ship_id = sx.id;
+    cx.system_id = sys2.id;
+    cx.last_seen_day = 0;
+    cx.last_seen_faction_id = sx.faction_id;
+    cx.last_seen_position_mkm = Vec2{0.0, 0.0};
+    st3b.factions[a.id].ship_contacts[cx.ship_id] = cx;
+
+    sim3b.load_game(st3b);
+
+    std::string err;
+    const Id t_research = sim3b.create_treaty(a.id, b.id, TreatyType::ResearchAgreement, /*duration_days=*/-1,
+                                            /*push_event=*/false, &err);
+    N4X_ASSERT(t_research != kInvalidId, std::string("create_treaty(research) succeeds: ") + err);
+
+    // Research agreement should share charts, but not contacts.
+    {
+      const auto& db = sim3b.state().factions.at(b.id).discovered_systems;
+      N4X_ASSERT(std::find(db.begin(), db.end(), sys2.id) != db.end(), "research shares discovered systems");
+    }
+    {
+      const auto& sj = sim3b.state().factions.at(b.id).surveyed_jump_points;
+      N4X_ASSERT(std::find(sj.begin(), sj.end(), jp.id) != sj.end(), "research shares jump surveys");
+    }
+    N4X_ASSERT(sim3b.state().factions.at(b.id).ship_contacts.find(sx.id) == sim3b.state().factions.at(b.id).ship_contacts.end(),
+               "research does not share contacts");
+  }
+
+
+  {
     ContentDB c4;
 
     ShipDesign hauler;

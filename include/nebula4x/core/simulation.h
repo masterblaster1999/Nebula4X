@@ -1629,6 +1629,20 @@ int colony_condition_max_active{4};
   double trade_network_volume_mult_hostile{0.30};
 
 
+  // --- Research agreements (diplomacy -> research cooperation) ---
+  //
+  // A Research Agreement treaty (and Alliances) can provide:
+  //  - a per-partner research output bonus (applied to research point generation),
+  //  - a symmetric collaboration bonus based on shared daily RP generation,
+  //  - and a tech assistance bonus when researching a tech already known by a partner.
+  bool enable_research_agreement_bonuses{true};
+  double research_agreement_output_bonus_per_partner{0.05};
+  double research_agreement_output_bonus_cap{0.25};
+  double research_agreement_collaboration_bonus_fraction{0.10};
+  double research_agreement_tech_help_bonus_per_partner{0.10};
+  double research_agreement_tech_help_bonus_cap{0.50};
+
+
   // --- AI trade security patrols (procedural) ---
   //
   // When enabled, AI-controlled explorer empires will periodically retask their

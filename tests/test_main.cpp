@@ -66,6 +66,7 @@ int test_ship_repairs();
 int test_crew_experience();
 int test_electronic_warfare();
 int test_procgen_surface();
+int test_design_forge_constraints();
 int test_nebula_microfields();
 int test_nebula_storm_cells();
 int test_jump_transit_hazards();
@@ -247,6 +248,7 @@ int main(int argc, char** argv) {
       {"anomalies", test_anomalies},
       {"anomaly_discovery", test_anomaly_discovery},
       {"procgen_surface", test_procgen_surface},
+      {"design_forge_constraints", test_design_forge_constraints},
       {"nebula_microfields", test_nebula_microfields},
       {"nebula_storm_cells", test_nebula_storm_cells},
       {"jump_transit_hazards", test_jump_transit_hazards},

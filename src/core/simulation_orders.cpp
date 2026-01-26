@@ -48,6 +48,7 @@ const char* treaty_type_display_name(TreatyType t) {
     case TreatyType::NonAggressionPact: return "non-aggression pact";
     case TreatyType::Alliance: return "alliance";
     case TreatyType::TradeAgreement: return "trade agreement";
+    case TreatyType::ResearchAgreement: return "research agreement";
   }
   return "treaty";
 }

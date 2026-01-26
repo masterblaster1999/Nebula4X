@@ -87,6 +87,8 @@ const char* treaty_type_label(TreatyType t) {
       return "Alliance";
     case TreatyType::TradeAgreement:
       return "Trade Agreement";
+    case TreatyType::ResearchAgreement:
+      return "Research Agreement";
   }
   return "Treaty";
 }
@@ -1228,9 +1230,10 @@ void draw_diplomacy_window(Simulation& sim, UIState& ui, Id& /*selected_ship*/, 
           ImGui::SeparatorText("Sign / renew treaty");
 
           static const TreatyType kTreatyTypes[] = {TreatyType::Ceasefire, TreatyType::NonAggressionPact,
-                                                    TreatyType::Alliance, TreatyType::TradeAgreement};
-          static const char* kTreatyTypeLabels[] = {"Ceasefire", "Non-Aggression Pact", "Alliance",
-                                                    "Trade Agreement"};
+                                                    TreatyType::TradeAgreement, TreatyType::ResearchAgreement,
+                                                    TreatyType::Alliance};
+          static const char* kTreatyTypeLabels[] = {"Ceasefire", "Non-Aggression Pact", "Trade Agreement",
+                                                    "Research Agreement", "Alliance"};
           static_assert(IM_ARRAYSIZE(kTreatyTypes) == IM_ARRAYSIZE(kTreatyTypeLabels));
 
           g.new_treaty_type_index = std::clamp(g.new_treaty_type_index, 0, (int)IM_ARRAYSIZE(kTreatyTypes) - 1);

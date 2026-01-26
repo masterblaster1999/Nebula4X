@@ -3,6 +3,7 @@
 #include "ui/imgui_includes.h"
 
 #include "nebula4x/core/contract_planner.h"
+#include "nebula4x/core/contact_prediction.h"
 
 #include <algorithm>
 #include <cmath>
@@ -20,6 +21,7 @@ const char* contract_kind_label(ContractKind k) {
     case ContractKind::InvestigateAnomaly: return "Investigate Anomaly";
     case ContractKind::SalvageWreck: return "Salvage Wreck";
     case ContractKind::SurveyJumpPoint: return "Survey Jump Point";
+    case ContractKind::BountyPirate: return "Bounty";
     case ContractKind::EscortConvoy: return "Escort Convoy";
   }
   return "(Unknown)";
@@ -61,7 +63,7 @@ std::string fleet_label(const GameState& st, Id fleet_id) {
   return "Fleet " + std::to_string((unsigned long long)fleet_id);
 }
 
-std::string contract_target_label(const GameState& st, const Contract& c) {
+std::string contract_target_label(const Simulation& sim, Id viewer_faction_id, const GameState& st, const Contract& c) {
   if (c.target_id == kInvalidId) return "(None)";
   switch (c.kind) {
     case ContractKind::InvestigateAnomaly: {
@@ -82,6 +84,35 @@ std::string contract_target_label(const GameState& st, const Contract& c) {
       if (!other) return "JumpPoint " + std::to_string((unsigned long long)c.target_id);
       return "Exit to " + system_label(st, other->system_id);
     }
+    case ContractKind::BountyPirate: {
+      // Avoid omniscience: prefer live detection, otherwise use the faction's
+      // last seen contact record.
+      std::string ship_name;
+
+      if (viewer_faction_id != kInvalidId && sim.is_ship_detected_by_faction(viewer_faction_id, c.target_id)) {
+        ship_name = ship_label(st, c.target_id);
+        if (const auto* sh = find_ptr(st.ships, c.target_id)) {
+          return ship_name + "  @  " + system_label(st, sh->system_id);
+        }
+        return ship_name;
+      }
+
+      if (const auto* vf = find_ptr(st.factions, viewer_faction_id)) {
+        if (auto it = vf->ship_contacts.find(c.target_id); it != vf->ship_contacts.end()) {
+          const Contact& ct = it->second;
+          ship_name = !ct.last_seen_name.empty() ? ct.last_seen_name
+                                                 : ("Pirate " + std::to_string((unsigned long long)ct.ship_id));
+          const std::int64_t age = std::max<std::int64_t>(0, st.date.days_since_epoch() - ct.last_seen_day);
+          std::string label = ship_name + "  @  " + system_label(st, ct.system_id);
+          if (age > 0) label += " (" + std::to_string((long long)age) + "d old)";
+          return label;
+        }
+      }
+
+      ship_name = "Pirate " + std::to_string((unsigned long long)c.target_id);
+      if (c.system_id != kInvalidId) return ship_name + "  @  " + system_label(st, c.system_id);
+      return ship_name;
+    }
     case ContractKind::EscortConvoy: {
       const std::string convoy = ship_label(st, c.target_id);
       const std::string dest = system_label(st, c.target_id2);
@@ -91,7 +122,7 @@ std::string contract_target_label(const GameState& st, const Contract& c) {
   return "(Unknown)";
 }
 
-bool contract_target_pos(const GameState& st, const Contract& c, Id* out_sys, Vec2* out_pos) {
+bool contract_target_pos(const Simulation& sim, Id viewer_faction_id, const GameState& st, const Contract& c, Id* out_sys, Vec2* out_pos) {
   if (out_sys) *out_sys = kInvalidId;
   if (out_pos) *out_pos = Vec2{0.0, 0.0};
   if (c.target_id == kInvalidId) return false;
@@ -117,6 +148,44 @@ bool contract_target_pos(const GameState& st, const Contract& c, Id* out_sys, Ve
       if (out_sys) *out_sys = jp->system_id;
       if (out_pos) *out_pos = jp->position_mkm;
       return jp->system_id != kInvalidId;
+    }
+    case ContractKind::BountyPirate: {
+      // Fog-of-war aware: use detections/contacts, not omniscience.
+      if (c.target_destroyed_day != 0) {
+        const Id sys = (c.target_id2 != kInvalidId) ? c.target_id2 : c.system_id;
+        if (out_sys) *out_sys = sys;
+        if (out_pos) *out_pos = Vec2{0.0, 0.0};
+        return sys != kInvalidId;
+      }
+
+      if (viewer_faction_id != kInvalidId && sim.is_ship_detected_by_faction(viewer_faction_id, c.target_id)) {
+        const auto* sh = find_ptr(st.ships, c.target_id);
+        if (!sh) return false;
+        if (out_sys) *out_sys = sh->system_id;
+        if (out_pos) *out_pos = sh->position_mkm;
+        return sh->system_id != kInvalidId;
+      }
+
+      if (const auto* vf = find_ptr(st.factions, viewer_faction_id)) {
+        if (auto it = vf->ship_contacts.find(c.target_id); it != vf->ship_contacts.end()) {
+          const Contact& ct = it->second;
+          if (out_sys) *out_sys = ct.system_id;
+          if (out_pos) {
+            const int now_day = static_cast<int>(st.date.days_since_epoch());
+            const auto pred = predict_contact_position(ct, now_day, sim.cfg().contact_prediction_max_days);
+            *out_pos = pred.predicted_position_mkm;
+          }
+          return ct.system_id != kInvalidId;
+        }
+      }
+
+      // Fallback: focus the contract's last recorded system.
+      if (c.system_id != kInvalidId) {
+        if (out_sys) *out_sys = c.system_id;
+        if (out_pos) *out_pos = Vec2{0.0, 0.0};
+        return true;
+      }
+      return false;
     }
     case ContractKind::EscortConvoy: {
       const auto* sh = find_ptr(st.ships, c.target_id);
@@ -164,7 +233,7 @@ void focus_contract_target(const Contract& c, Simulation& sim, UIState& ui) {
   auto& st = sim.state();
   Id sys_id = kInvalidId;
   Vec2 pos{0.0, 0.0};
-  if (!contract_target_pos(st, c, &sys_id, &pos)) return;
+  if (!contract_target_pos(sim, ui.viewer_faction_id, st, c, &sys_id, &pos)) return;
   if (sys_id == kInvalidId) return;
 
   st.selected_system = sys_id;
@@ -471,10 +540,64 @@ void draw_contracts_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& 
   ImGui::TextDisabled("ID: %llu", (unsigned long long)c->id);
   ImGui::Text("Kind: %s", contract_kind_label(c->kind));
   ImGui::Text("Status: %s", contract_status_label(c->status));
-  ImGui::Text("Target: %s", contract_target_label(st, *c).c_str());
+  ImGui::Text("Target: %s", contract_target_label(sim, fid, st, *c).c_str());
   ImGui::Text("System: %s", system_label(st, c->system_id).c_str());
   ImGui::Text("Reward: %.0f RP", std::max(0.0, c->reward_research_points));
   ImGui::Text("Risk: %.2f   Hops: %d", std::clamp(c->risk_estimate, 0.0, 1.0), std::max(0, c->hops_estimate));
+
+  if (c->kind == ContractKind::BountyPirate) {
+    ImGui::Separator();
+    ImGui::Text("Bounty details");
+
+    if (c->target_destroyed_day != 0) {
+      ImGui::TextDisabled("Target destroyed day: %lld", (long long)c->target_destroyed_day);
+
+      std::string killer_faction = "(unknown)";
+      if (const auto* f = find_ptr(st.factions, c->target_destroyed_by_faction_id)) {
+        killer_faction = !f->name.empty() ? f->name : ("Faction " + std::to_string((unsigned long long)f->id));
+      }
+      ImGui::Text("Destroyed by: %s", killer_faction.c_str());
+
+      if (c->target_destroyed_by_ship_id != kInvalidId) {
+        ImGui::Text("Killer ship: %s", ship_label(st, c->target_destroyed_by_ship_id).c_str());
+      }
+
+      const Id kill_sys = (c->target_id2 != kInvalidId) ? c->target_id2 : c->system_id;
+      if (kill_sys != kInvalidId) {
+        ImGui::Text("Kill system: %s", system_label(st, kill_sys).c_str());
+      }
+    } else {
+      const bool detected = (fid != kInvalidId) && sim.is_ship_detected_by_faction(fid, c->target_id);
+
+      if (detected) {
+        if (const auto* sh = find_ptr(st.ships, c->target_id)) {
+          ImGui::Text("Target currently detected.");
+          ImGui::Text("System: %s", system_label(st, sh->system_id).c_str());
+          ImGui::TextDisabled("Pos: (%.1f, %.1f) mkm", sh->position_mkm.x, sh->position_mkm.y);
+        } else {
+          ImGui::TextDisabled("Target currently detected, but entity is missing.");
+        }
+      } else if (const auto* vf = find_ptr(st.factions, fid)) {
+        if (auto it = vf->ship_contacts.find(c->target_id); it != vf->ship_contacts.end()) {
+          const Contact& ct = it->second;
+          const std::int64_t age = std::max<std::int64_t>(0, st.date.days_since_epoch() - ct.last_seen_day);
+
+          ImGui::Text("Last seen system: %s", system_label(st, ct.system_id).c_str());
+          ImGui::TextDisabled("Last seen day: %lld  (%lld day(s) ago)", (long long)ct.last_seen_day, (long long)age);
+          ImGui::TextDisabled("Last seen pos: (%.1f, %.1f) mkm", ct.last_seen_position_mkm.x, ct.last_seen_position_mkm.y);
+
+          const int now_day = static_cast<int>(st.date.days_since_epoch());
+          const auto pred = predict_contact_position(ct, now_day, sim.cfg().contact_prediction_max_days);
+          ImGui::TextDisabled("Predicted pos: (%.1f, %.1f) mkm  (σ=%.1f mkm)",
+                              pred.predicted_position_mkm.x, pred.predicted_position_mkm.y, pred.sigma_mkm);
+        } else {
+          ImGui::TextDisabled("No current intel on target.");
+        }
+      } else {
+        ImGui::TextDisabled("No intel available.");
+      }
+    }
+  }
 
   if (c->kind == ContractKind::EscortConvoy) {
     ImGui::Separator();
@@ -612,7 +735,7 @@ void draw_contracts_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& 
   {
     Id target_sys = kInvalidId;
     Vec2 target_pos{0.0, 0.0};
-    if (ws.assign_ship != kInvalidId && contract_target_pos(st, *c, &target_sys, &target_pos) && target_sys != kInvalidId) {
+    if (ws.assign_ship != kInvalidId && contract_target_pos(sim, fid, st, *c, &target_sys, &target_pos) && target_sys != kInvalidId) {
       const bool include_queued_jumps = !ws.clear_orders_on_assign;
       const auto plan = sim.plan_jump_route_for_ship_to_pos(ws.assign_ship, target_sys, target_pos,
                                                            ws.restrict_to_discovered, include_queued_jumps);
@@ -785,7 +908,7 @@ void draw_contracts_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& 
 
       Id target_sys = kInvalidId;
       Vec2 target_pos{0.0, 0.0};
-      if (contract_target_pos(st, *c, &target_sys, &target_pos) && target_sys != kInvalidId) {
+      if (contract_target_pos(sim, fid, st, *c, &target_sys, &target_pos) && target_sys != kInvalidId) {
         const bool include_queued_jumps = !ws.clear_orders_on_assign;
         const auto plan = sim.plan_jump_route_for_ship_to_pos(primary_ship, target_sys, target_pos,
                                                              ws.restrict_to_discovered, include_queued_jumps);

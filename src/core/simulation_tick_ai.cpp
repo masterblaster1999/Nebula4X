@@ -685,6 +685,9 @@ void Simulation::tick_ai() {
   std::unordered_map<Id, std::unordered_set<Id>> reserved_explore_wreck_targets;
   reserved_explore_wreck_targets.reserve(faction_ids.size() * 2 + 8);
 
+  std::unordered_map<Id, std::unordered_set<Id>> reserved_explore_bounty_targets;
+  reserved_explore_bounty_targets.reserve(faction_ids.size() * 2 + 8);
+
   // Reserve targets that are already being handled by an active contract assignment.
   // This prevents multiple auto-explore ships from duplicating the same work.
   if (cfg_.enable_contracts && !state_.contracts.empty()) {
@@ -702,6 +705,9 @@ void Simulation::tick_ai() {
           break;
         case ContractKind::SurveyJumpPoint:
           reserved_explore_jump_targets[c.assignee_faction_id].insert(c.target_id);
+          break;
+        case ContractKind::BountyPirate:
+          reserved_explore_bounty_targets[c.assignee_faction_id].insert(c.target_id);
           break;
         case ContractKind::EscortConvoy:
           // Escort contracts are handled by combat/civilian escort logic, not auto-explore.
@@ -731,6 +737,10 @@ void Simulation::tick_ai() {
     if (fleet_for_ship(ship_id) != kInvalidId) return false;
 
     const Id fid = ship->faction_id;
+    const auto* ship_design = find_design(ship->design_id);
+    const double ship_weapons = ship_design ? (std::max(0.0, ship_design->weapon_damage) +
+                                               std::max(0.0, ship_design->missile_damage))
+                                            : 0.0;
     const auto* sys = find_ptr(state_.systems, ship->system_id);
     if (!sys) return false;
 
@@ -741,6 +751,7 @@ void Simulation::tick_ai() {
     auto& reserved_frontiers = reserved_explore_frontier_targets[fid];
     auto& reserved_anoms = reserved_explore_anomaly_targets[fid];
     auto& reserved_wrecks = reserved_explore_wreck_targets[fid];
+    auto& reserved_bounties = reserved_explore_bounty_targets[fid];
 
     // Contracts: if a ship is idle and has a mission-board assignment (or there is
     // an available unassigned contract for its faction), prefer fulfilling that
@@ -754,6 +765,7 @@ void Simulation::tick_ai() {
           case ContractKind::InvestigateAnomaly: reserved_anoms.insert(c.target_id); break;
           case ContractKind::SalvageWreck: reserved_wrecks.insert(c.target_id); break;
           case ContractKind::SurveyJumpPoint: reserved_jumps.insert(c.target_id); break;
+          case ContractKind::BountyPirate: reserved_bounties.insert(c.target_id); break;
           case ContractKind::EscortConvoy: break;
         }
       };
@@ -786,6 +798,32 @@ void Simulation::tick_ai() {
             if (out_pos) *out_pos = jp->position_mkm;
             return jp->system_id != kInvalidId;
           }
+          case ContractKind::BountyPirate: {
+            if (c.target_destroyed_day != 0) return false;
+
+            // Prefer live detections for pursuit. Otherwise use the last seen
+            // contact location or the contract's stored system.
+            if (is_ship_detected_by_faction(fid, c.target_id)) {
+              const auto* sh = find_ptr(state_.ships, c.target_id);
+              if (!sh || sh->hp <= 0.0) return false;
+              if (out_sys) *out_sys = sh->system_id;
+              if (out_pos) *out_pos = sh->position_mkm;
+              return sh->system_id != kInvalidId;
+            }
+
+            if (const auto* fac = find_ptr(state_.factions, fid)) {
+              if (auto it = fac->ship_contacts.find(c.target_id); it != fac->ship_contacts.end()) {
+                const Contact& ct = it->second;
+                if (out_sys) *out_sys = ct.system_id;
+                if (out_pos) *out_pos = ct.last_seen_position_mkm;
+                return ct.system_id != kInvalidId;
+              }
+            }
+
+            if (out_sys) *out_sys = c.system_id;
+            if (out_pos) *out_pos = Vec2{0.0, 0.0};
+            return c.system_id != kInvalidId;
+          }
           case ContractKind::EscortConvoy: {
             // Auto-explore ships should not attempt to fulfill escort contracts.
             return false;
@@ -804,6 +842,12 @@ void Simulation::tick_ai() {
         Id goal_sys = kInvalidId;
         Vec2 goal_pos{0.0, 0.0};
         if (!contract_goal(c, &goal_sys, &goal_pos)) {
+          clear_contract_assignment(cid);
+          break;
+        }
+
+        if (c.kind == ContractKind::BountyPirate && ship_weapons <= 1e-9) {
+          // Don't assign bounties to unarmed ships.
           clear_contract_assignment(cid);
           break;
         }
@@ -833,10 +877,12 @@ void Simulation::tick_ai() {
           if (c.kind == ContractKind::InvestigateAnomaly && reserved_anoms.contains(c.target_id)) continue;
           if (c.kind == ContractKind::SalvageWreck && reserved_wrecks.contains(c.target_id)) continue;
           if (c.kind == ContractKind::SurveyJumpPoint && reserved_jumps.contains(c.target_id)) continue;
+          if (c.kind == ContractKind::BountyPirate && reserved_bounties.contains(c.target_id)) continue;
         }
 
         const bool offered_ok = allow_auto_accept && c.status == ContractStatus::Offered;
         if (c.status != ContractStatus::Accepted && !offered_ok) continue;
+        if (c.kind == ContractKind::BountyPirate && ship_weapons <= 1e-9) continue;
 
         Id goal_sys = kInvalidId;
         Vec2 goal_pos{0.0, 0.0};
@@ -849,6 +895,7 @@ void Simulation::tick_ai() {
         double kind_mult = 1.0;
         if (c.kind == ContractKind::InvestigateAnomaly) kind_mult = 1.10;
         if (c.kind == ContractKind::SalvageWreck) kind_mult = 0.85;
+        if (c.kind == ContractKind::BountyPirate) kind_mult = 0.95;
 
         const double rp = std::max(0.0, c.reward_research_points);
         const double score = kind_mult * (rp + 1.0) / (eta + 1.0) - c.risk_estimate * 0.25;
@@ -4383,6 +4430,15 @@ void Simulation::tick_ai() {
             offer_expires_days = 45;
             should_offer = true;
           } else if (has_active_treaty(from_id, to_id, TreatyType::TradeAgreement) &&
+                     !has_active_treaty(from_id, to_id, TreatyType::ResearchAgreement) &&
+                     !has_pending_offer(from_id, to_id, TreatyType::ResearchAgreement) &&
+                     (now_day % 60 == 0)) {
+            // Offer a research agreement as a mid-tier cooperation step.
+            offer_tt = TreatyType::ResearchAgreement;
+            offer_treaty_days = -1;
+            offer_expires_days = 45;
+            should_offer = true;
+          } else if (has_active_treaty(from_id, to_id, TreatyType::TradeAgreement) &&
                      !has_active_treaty(from_id, to_id, TreatyType::Alliance) &&
                      !has_pending_offer(from_id, to_id, TreatyType::Alliance) &&
                      (now_day % 90 == 0)) {
@@ -4453,6 +4509,7 @@ void Simulation::tick_ai() {
         bool accept = false;
         switch (o->treaty_type) {
           case TreatyType::TradeAgreement:
+          case TreatyType::ResearchAgreement:
           case TreatyType::NonAggressionPact:
             accept = !mutual_hostile;
             break;

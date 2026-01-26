@@ -64,6 +64,7 @@ inline const char* treaty_type_title(TreatyType t) {
     case TreatyType::NonAggressionPact: return "Non-Aggression Pact";
     case TreatyType::Alliance: return "Alliance";
     case TreatyType::TradeAgreement: return "Trade Agreement";
+    case TreatyType::ResearchAgreement: return "Research Agreement";
   }
   return "Treaty";
 }
@@ -2719,6 +2720,7 @@ DiplomacyStatus Simulation::diplomatic_status(Id from_faction_id, Id to_faction_
         case TreatyType::Ceasefire:
         case TreatyType::NonAggressionPact:
         case TreatyType::TradeAgreement:
+        case TreatyType::ResearchAgreement:
           at_least_neutral = true;
           break;
       }
@@ -2803,7 +2805,7 @@ Id Simulation::create_treaty(Id faction_a, Id faction_b, TreatyType type, int du
     // Trade agreements and alliances should actually do something tangible:
     // exchange star charts (discovered systems + surveyed jump points), and for
     // alliances, also share contact intel.
-    const bool share_map = (tt == TreatyType::Alliance || tt == TreatyType::TradeAgreement);
+    const bool share_map = (tt == TreatyType::Alliance || tt == TreatyType::TradeAgreement || tt == TreatyType::ResearchAgreement);
     const bool share_contacts = (tt == TreatyType::Alliance);
     if (!share_map) return;
 

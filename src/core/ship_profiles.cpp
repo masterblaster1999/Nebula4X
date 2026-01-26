@@ -43,6 +43,7 @@ ShipAutomationProfile make_ship_profile_from_ship(const Ship& sh) {
   p.auto_repair_threshold_fraction = sh.auto_repair_threshold_fraction;
   p.auto_rearm = sh.auto_rearm;
   p.auto_rearm_threshold_fraction = sh.auto_rearm_threshold_fraction;
+  p.auto_munitions_tender = sh.auto_munitions_tender;
   p.repair_priority = sh.repair_priority;
 
   // Policy.
@@ -84,6 +85,7 @@ void apply_ship_profile(Ship& sh, const ShipAutomationProfile& p, const ShipProf
 
     sh.auto_rearm = p.auto_rearm;
     sh.auto_rearm_threshold_fraction = sane_fraction(p.auto_rearm_threshold_fraction, sh.auto_rearm_threshold_fraction);
+    sh.auto_munitions_tender = p.auto_munitions_tender;
   }
 
   if (opt.apply_repair_priority) {

@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <limits>
+#include <queue>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -52,6 +54,62 @@ std::string need_kind_label(LogisticsNeedKind k, const std::string& context_id) 
   }
   return "Need";
 }
+
+// Priority queue ordering for freight candidates.
+//
+// We want the "best" candidate at the top:
+//   1) lowest eta/tons (efficiency)
+//   2) lowest eta_total
+//   3) highest total_tons
+//   4) lowest ship id (determinism)
+//   5) lowest dest id
+//   6) lowest source id
+struct FreightCandidate {
+  FreightAssignmentKind kind{FreightAssignmentKind::PickupAndDeliver};
+
+  Id ship_id{kInvalidId};
+  Id source{kInvalidId};
+  Id dest{kInvalidId};
+
+  bool restrict_to_discovered{true};
+
+  std::vector<FreightPlanItem> items;
+
+  double eta1{0.0};
+  double eta2{0.0};
+  double eta_total{0.0};
+
+  double total_tons{0.0};
+  double eff{std::numeric_limits<double>::infinity()};
+
+  // Per-ship stamp used to invalidate stale heap entries.
+  std::uint64_t stamp{0};
+};
+
+struct FreightCandidateWorse {
+  bool operator()(const FreightCandidate& a, const FreightCandidate& b) const {
+    auto gt = [](double x, double y) { return x > y + 1e-9; };
+    auto lt = [](double x, double y) { return x < y - 1e-9; };
+
+    if (gt(a.eff, b.eff)) return true;
+    if (gt(b.eff, a.eff)) return false;
+
+    if (gt(a.eta_total, b.eta_total)) return true;
+    if (gt(b.eta_total, a.eta_total)) return false;
+
+    if (lt(a.total_tons, b.total_tons)) return true;
+    if (lt(b.total_tons, a.total_tons)) return false;
+
+    if (a.ship_id != b.ship_id) return a.ship_id > b.ship_id;
+    if (a.dest != b.dest) return a.dest > b.dest;
+    if (a.source != b.source) return a.source > b.source;
+
+    if (a.kind != b.kind) return static_cast<int>(a.kind) > static_cast<int>(b.kind);
+
+    // stamp shouldn't matter, but keep strict weak ordering.
+    return a.stamp > b.stamp;
+  }
+};
 
 }  // namespace
 
@@ -220,14 +278,40 @@ FreightPlannerResult compute_freight_plan(const Simulation& sim, Id faction_id,
     return plan->total_eta_days;
   };
 
+  auto first_reason = [&](Id dest_cid, const std::string& mineral) -> std::string {
+    auto itr = reasons_by_colony_mineral.find(dest_cid);
+    if (itr == reasons_by_colony_mineral.end()) return {};
+    auto itm = itr->second.find(mineral);
+    if (itm == itr->second.end() || itm->second.empty()) return {};
+    return itm->second.front();
+  };
+
   // --- Candidate ships ---
+  struct ShipPlanData {
+    Id ship_id{kInvalidId};
+    const Ship* sh{nullptr};
+    const ShipDesign* d{nullptr};
+
+    double cap{0.0};
+    double used{0.0};
+    double free{0.0};
+
+    std::vector<std::string> cargo_minerals;
+
+    // Used to invalidate stale heap entries.
+    std::uint64_t stamp{0};
+  };
+
   std::vector<Id> ship_ids;
   ship_ids.reserve(st.ships.size());
   for (const auto& [sid, _] : st.ships) ship_ids.push_back(sid);
   std::sort(ship_ids.begin(), ship_ids.end());
 
-  std::vector<Id> candidate_ships;
-  candidate_ships.reserve(64);
+  std::vector<ShipPlanData> ships;
+  ships.reserve(64);
+
+  std::unordered_map<Id, std::size_t> ship_index;
+  ship_index.reserve(128);
 
   for (Id sid : ship_ids) {
     const Ship* sh = find_ptr(st.ships, sid);
@@ -253,8 +337,29 @@ FreightPlannerResult compute_freight_plan(const Simulation& sim, Id faction_id,
     const double cap = std::max(0.0, d->cargo_tons);
     if (cap < min_tons) continue;
 
-    candidate_ships.push_back(sid);
-    if (static_cast<int>(candidate_ships.size()) >= std::max(1, opt.max_ships)) {
+    ShipPlanData sd;
+    sd.ship_id = sid;
+    sd.sh = sh;
+    sd.d = d;
+    sd.cap = cap;
+
+    // Current cargo.
+    sd.used = 0.0;
+    sd.cargo_minerals.reserve(sh->cargo.size());
+    for (const auto& [mineral, tons_raw] : sh->cargo) {
+      const double tons = std::max(0.0, tons_raw);
+      if (tons <= kEps) continue;
+      sd.used += tons;
+      sd.cargo_minerals.push_back(mineral);
+    }
+    std::sort(sd.cargo_minerals.begin(), sd.cargo_minerals.end());
+
+    sd.free = std::max(0.0, cap - sd.used);
+
+    ship_index[sid] = ships.size();
+    ships.push_back(std::move(sd));
+
+    if (static_cast<int>(ships.size()) >= std::max(1, opt.max_ships)) {
       if (sid != ship_ids.back()) {
         out.truncated = true;
         out.message = "Candidate ships truncated by max_ships.";
@@ -264,277 +369,344 @@ FreightPlannerResult compute_freight_plan(const Simulation& sim, Id faction_id,
   }
 
   // No work available.
-  if (candidate_ships.empty()) {
+  if (ships.empty()) {
     out.ok = true;
     if (out.message.empty()) out.message = "No eligible ships.";
     return out;
   }
 
-  // --- Planning loop (mirrors the auto-freight assignment logic) ---
-  out.assignments.reserve(candidate_ships.size());
+  // --- Candidate generation helpers ---
+  auto make_delivery_candidate = [&](const ShipPlanData& sd, Id dest_cid) -> std::optional<FreightCandidate> {
+    if (!sd.sh) return std::nullopt;
+    if (sd.used < min_tons) return std::nullopt;
 
-  for (Id sid : candidate_ships) {
-    const Ship* sh = find_ptr(st.ships, sid);
-    if (!sh) continue;
-    const ShipDesign* d = sim.find_design(sh->design_id);
-    if (!d) continue;
+    auto it_need = missing_by_colony.find(dest_cid);
+    if (it_need == missing_by_colony.end()) return std::nullopt;
+    auto it_dest_sys = colony_system.find(dest_cid);
+    auto it_dest_pos = colony_pos.find(dest_cid);
+    if (it_dest_sys == colony_system.end() || it_dest_pos == colony_pos.end()) return std::nullopt;
 
-    const double cap = std::max(0.0, d->cargo_tons);
-    if (cap < min_tons) continue;
+    std::vector<FreightPlanItem> items;
+    items.reserve(bundle_multi ? sd.cargo_minerals.size() : 1);
 
-    // Current cargo.
-    double used = 0.0;
-    std::vector<std::string> cargo_minerals;
-    cargo_minerals.reserve(sh->cargo.size());
+    double total = 0.0;
 
-    for (const auto& [mineral, tons_raw] : sh->cargo) {
-      const double tons = std::max(0.0, tons_raw);
-      if (tons <= kEps) continue;
-      used += tons;
-      cargo_minerals.push_back(mineral);
+    for (const std::string& mineral : sd.cargo_minerals) {
+      const double have = map_get(sd.sh->cargo, mineral);
+      if (have < min_tons) continue;
+
+      auto itm = it_need->second.find(mineral);
+      if (itm == it_need->second.end()) continue;
+      const double miss = std::max(0.0, itm->second);
+      if (miss < min_tons) continue;
+
+      const double amount = std::min(have, miss);
+      if (amount < min_tons) continue;
+
+      FreightPlanItem pi;
+      pi.mineral = mineral;
+      pi.tons = amount;
+      pi.reason = first_reason(dest_cid, mineral);
+
+      items.push_back(std::move(pi));
+      total += amount;
+
+      if (!bundle_multi) break;
     }
-    std::sort(cargo_minerals.begin(), cargo_minerals.end());
 
-    const double free = std::max(0.0, cap - used);
+    if (total < min_tons) return std::nullopt;
 
-    bool assigned = false;
+    const double eta = estimate_eta_days_to_pos(sd.sh->system_id, sd.sh->position_mkm, sd.sh->speed_km_s,
+                                                it_dest_sys->second, it_dest_pos->second);
+    if (!std::isfinite(eta)) return std::nullopt;
 
-    // 1) If ship already has cargo, deliver it to the best destination that needs it.
-    if (used >= min_tons && !dests_with_needs.empty()) {
-      struct Choice {
-        Id dest{kInvalidId};
-        double eff{std::numeric_limits<double>::infinity()};
-        double eta{std::numeric_limits<double>::infinity()};
-        double total{0.0};
-        std::vector<FreightPlanItem> items;
-      } best;
+    FreightCandidate c;
+    c.kind = FreightAssignmentKind::DeliverCargo;
+    c.ship_id = sd.ship_id;
+    c.source = kInvalidId;
+    c.dest = dest_cid;
+    c.restrict_to_discovered = opt.restrict_to_discovered;
+    c.items = std::move(items);
+    c.eta1 = 0.0;
+    c.eta2 = eta;
+    c.eta_total = eta;
+    c.total_tons = total;
+    c.eff = eta / std::max(1e-9, total);
+    return c;
+  };
 
-      for (Id dest_cid : dests_with_needs) {
-        auto it_need = missing_by_colony.find(dest_cid);
-        if (it_need == missing_by_colony.end()) continue;
-        auto it_dest_sys = colony_system.find(dest_cid);
-        auto it_dest_pos = colony_pos.find(dest_cid);
-        if (it_dest_sys == colony_system.end() || it_dest_pos == colony_pos.end()) continue;
+  auto make_pickup_candidate = [&](const ShipPlanData& sd, Id src_cid, Id dest_cid) -> std::optional<FreightCandidate> {
+    if (!sd.sh) return std::nullopt;
+    if (sd.used >= min_tons) return std::nullopt;  // keep pickup logic for "empty" ships only
+    if (sd.free < min_tons) return std::nullopt;
 
-        std::vector<FreightPlanItem> items;
-        items.reserve(bundle_multi ? cargo_minerals.size() : 1);
-        double total = 0.0;
+    if (src_cid == dest_cid) return std::nullopt;
 
-        for (const std::string& mineral : cargo_minerals) {
-          const double have = map_get(sh->cargo, mineral);
-          if (have < min_tons) continue;
+    auto it_need_list = need_minerals_by_colony.find(dest_cid);
+    if (it_need_list == need_minerals_by_colony.end()) return std::nullopt;
 
-          auto itm = it_need->second.find(mineral);
-          if (itm == it_need->second.end()) continue;
-          const double miss = std::max(0.0, itm->second);
-          if (miss < min_tons) continue;
+    auto it_exp_c = exportable_by_colony.find(src_cid);
+    if (it_exp_c == exportable_by_colony.end()) return std::nullopt;
 
-          const double amount = std::min(have, miss);
-          if (amount < min_tons) continue;
+    auto it_src_sys = colony_system.find(src_cid);
+    auto it_src_pos = colony_pos.find(src_cid);
+    auto it_dest_sys = colony_system.find(dest_cid);
+    auto it_dest_pos = colony_pos.find(dest_cid);
+    if (it_src_sys == colony_system.end() || it_src_pos == colony_pos.end()) return std::nullopt;
+    if (it_dest_sys == colony_system.end() || it_dest_pos == colony_pos.end()) return std::nullopt;
 
-          FreightPlanItem pi;
-          pi.mineral = mineral;
-          pi.tons = amount;
-          // Reason (best-effort).
-          auto itr = reasons_by_colony_mineral.find(dest_cid);
-          if (itr != reasons_by_colony_mineral.end()) {
-            auto itm2 = itr->second.find(mineral);
-            if (itm2 != itr->second.end() && !itm2->second.empty()) {
-              pi.reason = itm2->second.front();
-            }
-          }
+    std::vector<FreightPlanItem> items;
+    items.reserve(bundle_multi ? it_need_list->second.size() : 1);
 
-          items.push_back(std::move(pi));
-          total += amount;
+    double remaining = sd.free;
+    double total = 0.0;
 
-          if (!bundle_multi) break;
-        }
+    for (const std::string& mineral : it_need_list->second) {
+      if (remaining < min_tons) break;
 
-        if (total < min_tons) continue;
+      const double miss = [&]() {
+        auto itc = missing_by_colony.find(dest_cid);
+        if (itc == missing_by_colony.end()) return 0.0;
+        auto itm = itc->second.find(mineral);
+        if (itm == itc->second.end()) return 0.0;
+        return std::max(0.0, itm->second);
+      }();
+      if (miss < min_tons) continue;
 
-        const double eta = estimate_eta_days_to_pos(sh->system_id, sh->position_mkm, sh->speed_km_s,
-                                                    it_dest_sys->second, it_dest_pos->second);
-        if (!std::isfinite(eta)) continue;
+      auto it_exp = it_exp_c->second.find(mineral);
+      if (it_exp == it_exp_c->second.end()) continue;
+      const double avail = std::max(0.0, it_exp->second);
+      if (avail < min_tons) continue;
 
-        const double eff = eta / std::max(1e-9, total);
-        if (best.dest == kInvalidId || eff < best.eff - 1e-9 ||
-            (std::abs(eff - best.eff) <= 1e-9 && (eta < best.eta - 1e-9 ||
-                                                 (std::abs(eta - best.eta) <= 1e-9 &&
-                                                  (total > best.total + 1e-9 ||
-                                                   (std::abs(total - best.total) <= 1e-9 && dest_cid < best.dest)))))) {
-          best.dest = dest_cid;
-          best.eff = eff;
-          best.eta = eta;
-          best.total = total;
-          best.items = std::move(items);
-        }
+      const double take_cap = avail * take_frac;
+      const double amount = std::min({remaining, miss, take_cap});
+      if (amount < min_tons) continue;
+
+      FreightPlanItem pi;
+      pi.mineral = mineral;
+      pi.tons = amount;
+      pi.reason = first_reason(dest_cid, mineral);
+
+      items.push_back(std::move(pi));
+      total += amount;
+      remaining -= amount;
+
+      if (!bundle_multi) break;
+    }
+
+    if (total < min_tons) return std::nullopt;
+
+    const double eta1 = estimate_eta_days_to_pos(sd.sh->system_id, sd.sh->position_mkm, sd.sh->speed_km_s,
+                                                 it_src_sys->second, it_src_pos->second);
+    if (!std::isfinite(eta1)) return std::nullopt;
+
+    const double eta2 = estimate_eta_days_to_pos(it_src_sys->second, it_src_pos->second, sd.sh->speed_km_s,
+                                                 it_dest_sys->second, it_dest_pos->second);
+    if (!std::isfinite(eta2)) return std::nullopt;
+
+    const double eta_total = eta1 + eta2;
+
+    FreightCandidate c;
+    c.kind = FreightAssignmentKind::PickupAndDeliver;
+    c.ship_id = sd.ship_id;
+    c.source = src_cid;
+    c.dest = dest_cid;
+    c.restrict_to_discovered = opt.restrict_to_discovered;
+    c.items = std::move(items);
+    c.eta1 = eta1;
+    c.eta2 = eta2;
+    c.eta_total = eta_total;
+    c.total_tons = total;
+    c.eff = eta_total / std::max(1e-9, total);
+    return c;
+  };
+
+  FreightCandidateWorse worse;
+
+  auto better = [&](const FreightCandidate& a, const FreightCandidate& b) -> bool {
+    return worse(b, a);
+  };
+
+  auto best_delivery_for_ship = [&](const ShipPlanData& sd) -> std::optional<FreightCandidate> {
+    if (sd.used < min_tons) return std::nullopt;
+    if (dests_with_needs.empty()) return std::nullopt;
+
+    std::optional<FreightCandidate> best;
+    for (Id dest_cid : dests_with_needs) {
+      auto cand = make_delivery_candidate(sd, dest_cid);
+      if (!cand) continue;
+      if (!best || better(*cand, *best)) {
+        best = std::move(cand);
       }
-
-      if (best.dest != kInvalidId && !best.items.empty()) {
-        FreightAssignment asg;
-        asg.kind = FreightAssignmentKind::DeliverCargo;
-        asg.ship_id = sid;
-        asg.source_colony_id = kInvalidId;
-        asg.dest_colony_id = best.dest;
-        asg.restrict_to_discovered = opt.restrict_to_discovered;
-        asg.items = std::move(best.items);
-        asg.eta_to_source_days = 0.0;
-        asg.eta_to_dest_days = best.eta;
-        asg.eta_total_days = best.eta;
-        asg.note = "Deliver existing cargo";
-
-        // Consume missing for subsequent ships.
-        for (const auto& it : asg.items) {
-          dec_missing(asg.dest_colony_id, it.mineral, it.tons);
-        }
-
-        out.assignments.push_back(std::move(asg));
-        assigned = true;
-      }
     }
+    return best;
+  };
 
-    if (assigned) continue;
+  auto best_pickup_for_ship = [&](const ShipPlanData& sd) -> std::optional<FreightCandidate> {
+    if (sd.used >= min_tons) return std::nullopt;
+    if (sd.free < min_tons) return std::nullopt;
+    if (dests_with_needs.empty()) return std::nullopt;
+    if (exportable_by_colony.empty()) return std::nullopt;
 
-    // 2) Otherwise pick a source+dest to satisfy missing minerals.
-    if (free < min_tons) continue;
-    if (dests_with_needs.empty()) continue;
-    if (exportable_by_colony.empty()) continue;
-
-    // Candidate sources (sorted by colony id for determinism).
-    std::vector<Id> sources;
-    sources.reserve(exportable_by_colony.size());
-    for (Id cid : colony_ids) {
-      if (exportable_by_colony.find(cid) != exportable_by_colony.end()) sources.push_back(cid);
-    }
-
-    struct LoadChoice {
-      Id source{kInvalidId};
-      Id dest{kInvalidId};
-      double eff{std::numeric_limits<double>::infinity()};
-      double eta_total{std::numeric_limits<double>::infinity()};
-      double total{0.0};
-      double eta1{0.0};
-      double eta2{0.0};
-      std::vector<FreightPlanItem> items;
-    } best;
+    std::optional<FreightCandidate> best;
 
     for (Id dest_cid : dests_with_needs) {
-      auto it_need_list = need_minerals_by_colony.find(dest_cid);
-      if (it_need_list == need_minerals_by_colony.end()) continue;
-      auto it_dest_sys = colony_system.find(dest_cid);
-      auto it_dest_pos = colony_pos.find(dest_cid);
-      if (it_dest_sys == colony_system.end() || it_dest_pos == colony_pos.end()) continue;
+      if (need_minerals_by_colony.find(dest_cid) == need_minerals_by_colony.end()) continue;
 
-      for (Id src_cid : sources) {
-        if (src_cid == dest_cid) continue;
-        auto it_src_sys = colony_system.find(src_cid);
-        auto it_src_pos = colony_pos.find(src_cid);
-        if (it_src_sys == colony_system.end() || it_src_pos == colony_pos.end()) continue;
-
-        auto it_exp_c = exportable_by_colony.find(src_cid);
-        if (it_exp_c == exportable_by_colony.end()) continue;
-
-        std::vector<FreightPlanItem> items;
-        items.reserve(bundle_multi ? it_need_list->second.size() : 1);
-        double remaining = free;
-        double total = 0.0;
-
-        for (const std::string& mineral : it_need_list->second) {
-          if (remaining < min_tons) break;
-
-          const double miss = [&]() {
-            auto itc = missing_by_colony.find(dest_cid);
-            if (itc == missing_by_colony.end()) return 0.0;
-            auto itm = itc->second.find(mineral);
-            if (itm == itc->second.end()) return 0.0;
-            return std::max(0.0, itm->second);
-          }();
-          if (miss < min_tons) continue;
-
-          auto it_exp = it_exp_c->second.find(mineral);
-          if (it_exp == it_exp_c->second.end()) continue;
-          const double avail = std::max(0.0, it_exp->second);
-          if (avail < min_tons) continue;
-
-          const double take_cap = avail * take_frac;
-          const double amount = std::min({remaining, miss, take_cap});
-          if (amount < min_tons) continue;
-
-          FreightPlanItem pi;
-          pi.mineral = mineral;
-          pi.tons = amount;
-          // Reason (best-effort).
-          auto itr = reasons_by_colony_mineral.find(dest_cid);
-          if (itr != reasons_by_colony_mineral.end()) {
-            auto itm2 = itr->second.find(mineral);
-            if (itm2 != itr->second.end() && !itm2->second.empty()) {
-              pi.reason = itm2->second.front();
-            }
-          }
-
-          items.push_back(std::move(pi));
-          total += amount;
-          remaining -= amount;
-
-          if (!bundle_multi) break;
-        }
-
-        if (total < min_tons) continue;
-
-        const double eta1 = estimate_eta_days_to_pos(sh->system_id, sh->position_mkm, sh->speed_km_s,
-                                                     it_src_sys->second, it_src_pos->second);
-        if (!std::isfinite(eta1)) continue;
-        const double eta2 = estimate_eta_days_to_pos(it_src_sys->second, it_src_pos->second, sh->speed_km_s,
-                                                     it_dest_sys->second, it_dest_pos->second);
-        if (!std::isfinite(eta2)) continue;
-
-        const double eta_total = eta1 + eta2;
-        const double eff = eta_total / std::max(1e-9, total);
-
-        if (best.source == kInvalidId || eff < best.eff - 1e-9 ||
-            (std::abs(eff - best.eff) <= 1e-9 && (eta_total < best.eta_total - 1e-9 ||
-                                                 (std::abs(eta_total - best.eta_total) <= 1e-9 &&
-                                                  (total > best.total + 1e-9 ||
-                                                   (std::abs(total - best.total) <= 1e-9 &&
-                                                    (dest_cid < best.dest ||
-                                                     (dest_cid == best.dest && src_cid < best.source)))))))) {
-          best.source = src_cid;
-          best.dest = dest_cid;
-          best.eff = eff;
-          best.eta_total = eta_total;
-          best.total = total;
-          best.eta1 = eta1;
-          best.eta2 = eta2;
-          best.items = std::move(items);
+      for (Id src_cid : colony_ids) {
+        if (exportable_by_colony.find(src_cid) == exportable_by_colony.end()) continue;
+        auto cand = make_pickup_candidate(sd, src_cid, dest_cid);
+        if (!cand) continue;
+        if (!best || better(*cand, *best)) {
+          best = std::move(cand);
         }
       }
     }
 
-    if (best.source != kInvalidId && best.dest != kInvalidId && !best.items.empty()) {
-      FreightAssignment asg;
-      asg.kind = FreightAssignmentKind::PickupAndDeliver;
-      asg.ship_id = sid;
-      asg.source_colony_id = best.source;
-      asg.dest_colony_id = best.dest;
-      asg.restrict_to_discovered = opt.restrict_to_discovered;
-      asg.items = std::move(best.items);
-      asg.eta_to_source_days = best.eta1;
-      asg.eta_to_dest_days = best.eta2;
-      asg.eta_total_days = best.eta_total;
-      asg.note = "Pickup + deliver";
+    return best;
+  };
 
-      for (const auto& it : asg.items) {
-        dec_exportable(asg.source_colony_id, it.mineral, it.tons);
-        dec_missing(asg.dest_colony_id, it.mineral, it.tons);
+  auto push_candidate = [&](ShipPlanData& sd, FreightCandidate cand,
+                            std::priority_queue<FreightCandidate, std::vector<FreightCandidate>, FreightCandidateWorse>& pq) {
+    sd.stamp++;
+    cand.stamp = sd.stamp;
+    pq.push(std::move(cand));
+  };
+
+  // --- Planning: globally greedy (best next assignment across all ships), with lazy PQ updates ---
+  std::unordered_set<Id> assigned;
+  assigned.reserve(ships.size() * 2 + 8);
+
+  out.assignments.reserve(ships.size());
+
+  // Phase 1: deliver existing cargo first (does not consume exportable, only missing).
+  {
+    std::priority_queue<FreightCandidate, std::vector<FreightCandidate>, FreightCandidateWorse> pq;
+
+    for (auto& sd : ships) {
+      if (sd.used < min_tons) continue;
+      auto best_cand = best_delivery_for_ship(sd);
+      if (best_cand) push_candidate(sd, std::move(*best_cand), pq);
+    }
+
+    int safety = 0;
+    const int safety_limit = 500000;
+
+    while (!pq.empty() && safety++ < safety_limit) {
+      FreightCandidate cand = pq.top();
+      pq.pop();
+
+      auto it = ship_index.find(cand.ship_id);
+      if (it == ship_index.end()) continue;
+      ShipPlanData& sd = ships[it->second];
+
+      if (assigned.find(cand.ship_id) != assigned.end()) continue;
+      if (cand.stamp != sd.stamp) continue;  // stale
+
+      auto best_now = best_delivery_for_ship(sd);
+      if (!best_now) continue;
+
+      // If another candidate is currently better, reinsert updated best for this ship.
+      if (!pq.empty() && worse(*best_now, pq.top())) {
+        push_candidate(sd, std::move(*best_now), pq);
+        continue;
       }
 
+      // Commit.
+      FreightAssignment asg;
+      asg.kind = FreightAssignmentKind::DeliverCargo;
+      asg.ship_id = best_now->ship_id;
+      asg.source_colony_id = kInvalidId;
+      asg.dest_colony_id = best_now->dest;
+      asg.restrict_to_discovered = best_now->restrict_to_discovered;
+      asg.items = std::move(best_now->items);
+      asg.eta_to_source_days = 0.0;
+      asg.eta_to_dest_days = best_now->eta_total;
+      asg.eta_total_days = best_now->eta_total;
+      asg.note = "Deliver existing cargo";
+
+      for (const auto& it_item : asg.items) {
+        dec_missing(asg.dest_colony_id, it_item.mineral, it_item.tons);
+      }
+
+      assigned.insert(asg.ship_id);
       out.assignments.push_back(std::move(asg));
-      continue;
+    }
+  }
+
+  // Phase 2: pickup + deliver with empty ships.
+  {
+    std::priority_queue<FreightCandidate, std::vector<FreightCandidate>, FreightCandidateWorse> pq;
+
+    for (auto& sd : ships) {
+      if (assigned.find(sd.ship_id) != assigned.end()) continue;
+      if (sd.used >= min_tons) continue;
+      if (sd.free < min_tons) continue;
+
+      auto best_cand = best_pickup_for_ship(sd);
+      if (best_cand) push_candidate(sd, std::move(*best_cand), pq);
+    }
+
+    int safety = 0;
+    const int safety_limit = 1000000;
+
+    while (!pq.empty() && safety++ < safety_limit) {
+      FreightCandidate cand = pq.top();
+      pq.pop();
+
+      auto it = ship_index.find(cand.ship_id);
+      if (it == ship_index.end()) continue;
+      ShipPlanData& sd = ships[it->second];
+
+      if (assigned.find(cand.ship_id) != assigned.end()) continue;
+      if (cand.stamp != sd.stamp) continue;  // stale
+
+      auto best_now = best_pickup_for_ship(sd);
+      if (!best_now) continue;
+
+      // If another candidate is currently better, reinsert updated best for this ship.
+      if (!pq.empty() && worse(*best_now, pq.top())) {
+        push_candidate(sd, std::move(*best_now), pq);
+        continue;
+      }
+
+      // Commit.
+      FreightAssignment asg;
+      asg.kind = FreightAssignmentKind::PickupAndDeliver;
+      asg.ship_id = best_now->ship_id;
+      asg.source_colony_id = best_now->source;
+      asg.dest_colony_id = best_now->dest;
+      asg.restrict_to_discovered = best_now->restrict_to_discovered;
+      asg.items = std::move(best_now->items);
+      asg.eta_to_source_days = best_now->eta1;
+      asg.eta_to_dest_days = best_now->eta2;
+      asg.eta_total_days = best_now->eta_total;
+      asg.note = "Pickup + deliver";
+
+      for (const auto& it_item : asg.items) {
+        dec_exportable(asg.source_colony_id, it_item.mineral, it_item.tons);
+        dec_missing(asg.dest_colony_id, it_item.mineral, it_item.tons);
+      }
+
+      assigned.insert(asg.ship_id);
+      out.assignments.push_back(std::move(asg));
     }
   }
 
   out.ok = true;
-  if (out.message.empty()) out.message = "OK";
+
+  // Message / summary.
+  if (out.message.empty()) {
+    if (out.assignments.empty()) {
+      out.message = "No matching freight tasks.";
+    } else {
+      out.message = "OK";
+    }
+  } else {
+    // Preserve any earlier warning (e.g. truncation) but add a small summary.
+    out.message += " (" + std::to_string(out.assignments.size()) + " assignments)";
+  }
+
   return out;
 }
 

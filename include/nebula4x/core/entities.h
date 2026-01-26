@@ -78,6 +78,7 @@ enum class TreatyType : std::uint8_t {
   NonAggressionPact = 1,
   Alliance = 2,
   TradeAgreement = 3,
+  ResearchAgreement = 4,
 };
 
 struct Treaty {
@@ -769,6 +770,10 @@ struct Ship {
   // Fraction of magazine capacity at which auto-rearm triggers.
   double auto_rearm_threshold_fraction{0.25};
 
+  // Automation: when enabled, this ship will act as a forward munitions tender,
+  // transferring Munitions carried in cargo to friendly ships with finite missile magazines.
+  bool auto_munitions_tender{false};
+
   // Repair scheduling priority when docked at a shipyard.
   // Higher priority ships are repaired first when shipyard capacity is limited.
   RepairPriority repair_priority{RepairPriority::Normal};
@@ -994,6 +999,7 @@ enum class ContractKind : std::uint8_t {
   SalvageWreck = 1,
   SurveyJumpPoint = 2,
   EscortConvoy = 3,
+  BountyPirate = 4,
 };
 
 enum class ContractStatus : std::uint8_t {
@@ -1029,6 +1035,14 @@ struct Contract {
   // Interpretation depends on kind:
   // - EscortConvoy: destination system id.
   Id target_id2{kInvalidId};
+
+
+  // For BountyPirate and similar contracts: if the target entity is destroyed,
+  // record who destroyed it and when, so completion can be attributed without
+  // relying on transient combat logs.
+  Id target_destroyed_by_faction_id{kInvalidId};
+  Id target_destroyed_by_ship_id{kInvalidId};
+  std::int64_t target_destroyed_day{0};
 
   // Optional assignment (UI convenience).
   Id assigned_ship_id{kInvalidId};
@@ -1334,6 +1348,8 @@ struct ShipAutomationProfile {
 
   bool auto_rearm{false};
   double auto_rearm_threshold_fraction{0.25};
+
+  bool auto_munitions_tender{false};
 
   // Dockyard scheduling priority.
   RepairPriority repair_priority{RepairPriority::Normal};

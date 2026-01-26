@@ -186,6 +186,16 @@ std::vector<std::string> validate_game_state(const GameState& s, const ContentDB
             push(errors, join("Contract ", id_u64(cid), " targets missing jump point id ", id_u64(c.target_id)));
           }
           break;
+        case ContractKind::BountyPirate:
+          // Bounty contracts may legitimately have a missing target_id if the target
+          // has already been destroyed and attribution has been recorded.
+          if (!has_ship(c.target_id) && c.target_destroyed_day == 0) {
+            push(errors, join("Contract ", id_u64(cid), " targets missing bounty ship id ", id_u64(c.target_id)));
+          }
+          if (c.target_id2 != kInvalidId && !has_system(c.target_id2)) {
+            push(errors, join("Contract ", id_u64(cid), " bounty contract references missing system id ", id_u64(c.target_id2)));
+          }
+          break;
         case ContractKind::EscortConvoy:
           if (!has_ship(c.target_id)) {
             push(errors, join("Contract ", id_u64(cid), " targets missing convoy ship id ", id_u64(c.target_id)));
@@ -1744,7 +1754,8 @@ FixReport fix_game_state(GameState& s, const ContentDB* content) {
     // Normalize enum ranges (defensive vs corrupt saves).
     {
       const int k = static_cast<int>(c.kind);
-      const int kMaxKind = static_cast<int>(ContractKind::EscortConvoy);
+      // Keep this in sync with the last ContractKind enumerator.
+      const int kMaxKind = static_cast<int>(ContractKind::BountyPirate);
       if (k < 0 || k > kMaxKind) {
         note(join("Fix: Contract ", id_u64(cid), " had invalid kind ", k, "; set to investigate_anomaly"));
         c.kind = ContractKind::InvestigateAnomaly;
@@ -1794,6 +1805,24 @@ FixReport fix_game_state(GameState& s, const ContentDB* content) {
       c.assigned_fleet_id = kInvalidId;
     }
 
+    if (c.target_destroyed_by_faction_id != kInvalidId && !has_faction(c.target_destroyed_by_faction_id)) {
+      note(join("Fix: Contract ", id_u64(cid), " had missing target_destroyed_by_faction_id ",
+                id_u64(c.target_destroyed_by_faction_id), "; cleared"));
+      c.target_destroyed_by_faction_id = kInvalidId;
+    }
+    if (c.target_destroyed_day < 0) {
+      note(join("Fix: Contract ", id_u64(cid), " had negative target_destroyed_day; clamped"));
+      c.target_destroyed_day = 0;
+    }
+    if (c.kind == ContractKind::BountyPirate) {
+      // target_id2 is optionally used as last-known / kill system id; keep it valid.
+      if (c.target_id2 != kInvalidId && !has_system(c.target_id2)) {
+        note(join("Fix: Contract ", id_u64(cid), " bounty contract had missing target_id2 system ",
+                  id_u64(c.target_id2), "; cleared"));
+        c.target_id2 = kInvalidId;
+      }
+    }
+
     // Target integrity: if the target entity is missing, drop the contract entirely.
     bool target_ok = true;
     if (c.kind == ContractKind::EscortConvoy) {
@@ -1805,6 +1834,11 @@ FixReport fix_game_state(GameState& s, const ContentDB* content) {
         case ContractKind::InvestigateAnomaly: target_ok = has_anomaly(c.target_id); break;
         case ContractKind::SalvageWreck: target_ok = has_wreck(c.target_id); break;
         case ContractKind::SurveyJumpPoint: target_ok = has_jump(c.target_id); break;
+        case ContractKind::BountyPirate:
+          // If the target ship has been destroyed and the save captured the attribution,
+          // keep the contract so it can be resolved later (e.g. next daily tick).
+          target_ok = has_ship(c.target_id) || (c.target_destroyed_day != 0);
+          break;
         case ContractKind::EscortConvoy: break;
       }
     }

@@ -661,6 +661,7 @@ void Simulation::tick_treaties() {
       case TreatyType::NonAggressionPact: return "Non-Aggression Pact";
       case TreatyType::Alliance: return "Alliance";
       case TreatyType::TradeAgreement: return "Trade Agreement";
+      case TreatyType::ResearchAgreement: return "Research Agreement";
     }
     return "Treaty";
   };
@@ -703,6 +704,7 @@ void Simulation::tick_treaties() {
   // - Alliances share contacts in addition to maps.
   // - Trade Agreements exchange maps (discovered systems + surveyed jump points)
   //   but do not share contacts.
+  // - Research Agreements exchange maps but do not share contacts.
   // - Multiple treaties can exist between the same pair; pick the strongest
   //   sharing policy for the pair.
   std::map<std::pair<Id, Id>, bool> share_contacts_by_pair;
@@ -714,6 +716,9 @@ void Simulation::tick_treaties() {
       share_map = true;
       share_contacts = true;
     } else if (t.type == TreatyType::TradeAgreement) {
+      share_map = true;
+      share_contacts = false;
+    } else if (t.type == TreatyType::ResearchAgreement) {
       share_map = true;
       share_contacts = false;
     }

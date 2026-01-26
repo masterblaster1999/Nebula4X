@@ -9,6 +9,7 @@
 #include <limits>
 #include <string>
 #include <utility>
+#include <unordered_map>
 #include <vector>
 
 #include "nebula4x/core/freight_planner.h"
@@ -246,6 +247,62 @@ void draw_freight_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& se
       ImGui::TextDisabled("(truncated)");
     }
     ImGui::TextDisabled("Assignments: %d", static_cast<int>(fw.plan.assignments.size()));
+
+    if (fw.plan.ok && !fw.plan.assignments.empty()) {
+      double total_tons = 0.0;
+      double sum_eta = 0.0;
+      double min_eta = std::numeric_limits<double>::infinity();
+      double max_eta = 0.0;
+      std::unordered_map<std::string, double> tons_by_mineral;
+
+      for (const auto& asg : fw.plan.assignments) {
+        const double eta = std::max(0.0, asg.eta_total_days);
+        sum_eta += eta;
+        min_eta = std::min(min_eta, eta);
+        max_eta = std::max(max_eta, eta);
+
+        for (const auto& it : asg.items) {
+          const double tons = std::max(0.0, it.tons);
+          total_tons += tons;
+          tons_by_mineral[it.mineral] += tons;
+        }
+      }
+
+      const double avg_eta = sum_eta / std::max(1.0, static_cast<double>(fw.plan.assignments.size()));
+      const double throughput = total_tons / std::max(1e-9, avg_eta);
+
+      if (std::isfinite(min_eta) && std::isfinite(max_eta)) {
+        ImGui::TextDisabled("Total cargo: %.1f tons | Avg ETA: %.2f d | ~%.1f tons/day | Range: %.2f–%.2f d", total_tons,
+                            avg_eta, throughput, min_eta, max_eta);
+      } else {
+        ImGui::TextDisabled("Total cargo: %.1f tons | Avg ETA: %.2f d | ~%.1f tons/day", total_tons, avg_eta, throughput);
+      }
+
+      // Top minerals by tonnage moved.
+      std::vector<std::pair<std::string, double>> minerals;
+      minerals.reserve(tons_by_mineral.size());
+      for (const auto& kv : tons_by_mineral) {
+        if (kv.second <= 0.0) continue;
+        minerals.push_back(kv);
+      }
+      std::sort(minerals.begin(), minerals.end(), [](const auto& a, const auto& b) {
+        if (a.second > b.second + 1e-9) return true;
+        if (b.second > a.second + 1e-9) return false;
+        return a.first < b.first;
+      });
+
+      if (!minerals.empty()) {
+        std::string top;
+        const int n = std::min<int>(3, static_cast<int>(minerals.size()));
+        for (int i = 0; i < n; ++i) {
+          if (i) top += ", ";
+          char buf[64];
+          std::snprintf(buf, sizeof(buf), "%.1f", minerals[i].second);
+          top += minerals[i].first + " " + buf + "t";
+        }
+        ImGui::TextDisabled("Top minerals: %s", top.c_str());
+      }
+    }
 
     if (!fw.plan.ok) {
       ImGui::Spacing();

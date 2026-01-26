@@ -105,6 +105,74 @@ double score_for_role(const ShipDesign& d, ShipRole role) {
   }
 }
 
+bool constraints_enabled(const DesignForgeConstraints& c) {
+  return c.min_speed_km_s > 0.0 || c.min_range_mkm > 0.0 || c.max_mass_tons > 0.0 || c.min_cargo_tons > 0.0 ||
+         c.min_mining_tons_per_day > 0.0 || c.min_colony_capacity_millions > 0.0 || c.min_troop_capacity > 0.0 ||
+         c.min_sensor_range_mkm > 0.0 || c.max_signature_multiplier > 0.0 || c.min_ecm_strength > 0.0 ||
+         c.min_eccm_strength > 0.0 || c.min_beam_damage > 0.0 || c.min_missile_damage > 0.0 ||
+         c.min_point_defense_damage > 0.0 || c.min_shields > 0.0 || c.min_hp > 0.0 ||
+         c.require_power_balance || c.min_power_margin > 0.0;
+}
+
+struct ConstraintEval {
+  bool meets{true};
+  double penalty{0.0};
+};
+
+ConstraintEval eval_constraints(const ShipDesign& d, const DesignForgeConstraints& c) {
+  ConstraintEval e;
+  const double range = safe_range_mkm(d);
+  const double speed = std::max(0.0, d.speed_km_s);
+  const double mass = std::max(0.0, d.mass_tons);
+
+  auto need_min = [&](double val, double min, double weight) {
+    if (!(min > 0.0)) return;
+    if (val + 1e-9 >= min) return;
+    e.meets = false;
+    const double def = min - val;
+    const double denom = std::max(1.0, std::fabs(min));
+    e.penalty += (def / denom) * weight;
+  };
+
+  auto need_max = [&](double val, double max, double weight) {
+    if (!(max > 0.0)) return;
+    if (val <= max + 1e-9) return;
+    e.meets = false;
+    const double def = val - max;
+    const double denom = std::max(1.0, std::fabs(max));
+    e.penalty += (def / denom) * weight;
+  };
+
+  need_min(speed, c.min_speed_km_s, 2200.0);
+  need_min(range, c.min_range_mkm, 2200.0);
+  need_max(mass, c.max_mass_tons, 1600.0);
+
+  need_min(std::max(0.0, d.cargo_tons), c.min_cargo_tons, 2200.0);
+  need_min(std::max(0.0, d.mining_tons_per_day), c.min_mining_tons_per_day, 1800.0);
+  need_min(std::max(0.0, d.colony_capacity_millions), c.min_colony_capacity_millions, 2200.0);
+  need_min(std::max(0.0, d.troop_capacity), c.min_troop_capacity, 1800.0);
+
+  need_min(std::max(0.0, d.sensor_range_mkm), c.min_sensor_range_mkm, 2200.0);
+  if (c.max_signature_multiplier > 0.0) {
+    // 0..1 where smaller is better.
+    need_max(std::clamp(d.signature_multiplier, 0.0, 1.0), c.max_signature_multiplier, 1400.0);
+  }
+  need_min(std::max(0.0, d.ecm_strength), c.min_ecm_strength, 1200.0);
+  need_min(std::max(0.0, d.eccm_strength), c.min_eccm_strength, 1200.0);
+
+  need_min(std::max(0.0, d.weapon_damage), c.min_beam_damage, 2600.0);
+  need_min(std::max(0.0, d.missile_damage), c.min_missile_damage, 2600.0);
+  need_min(std::max(0.0, d.point_defense_damage), c.min_point_defense_damage, 2200.0);
+  need_min(std::max(0.0, d.max_shields), c.min_shields, 1600.0);
+  need_min(std::max(0.0, d.max_hp), c.min_hp, 1600.0);
+
+  if (c.require_power_balance) {
+    const double margin = d.power_generation - d.power_use_total;
+    need_min(margin, c.min_power_margin, 2200.0);
+  }
+  return e;
+}
+
 struct Pools {
   std::vector<std::string> engines;
   std::vector<std::string> reactors;
@@ -260,21 +328,28 @@ void try_balance_power(const ContentDB& content,
                        const Pools& pools,
                        HashRng& rng,
                        std::vector<std::string>& comps,
-                       bool prefer_shields) {
+                       bool prefer_shields,
+                       int max_components,
+                       double required_margin) {
+  const int cap = std::clamp(max_components, 6, 64);
   // Add reactors to cover deficits, up to a small cap.
   for (int i = 0; i < 4; ++i) {
-    if (power_margin(content, comps) >= -0.25) return;
+    if (power_margin(content, comps) >= required_margin) return;
     // Pick the highest output reactor (power per mass isn't modeled yet).
     const std::string best = pick_best(pools.reactors, content, [&](const ComponentDef& c) {
       return c.power_output;
     });
     if (best.empty()) break;
-    comps.push_back(best);
+    if ((int)comps.size() < cap) {
+      comps.push_back(best);
+    } else {
+      break;
+    }
   }
 
   // If still underpowered, shed optional power loads.
   for (int i = 0; i < 8; ++i) {
-    if (power_margin(content, comps) >= -0.25) return;
+    if (power_margin(content, comps) >= required_margin) return;
 
     // Shields are expensive; drop them first unless explicitly preferred.
     if (!prefer_shields && count_type(content, comps, ComponentType::Shield) > 0) {
@@ -329,6 +404,7 @@ void mutate_components(const ContentDB& content,
                        std::vector<std::string>& comps,
                        ShipRole role,
                        const DesignForgeOptions& opt) {
+  const int cap = std::clamp(opt.max_components, 6, 64);
   if (comps.empty()) return;
 
   // Mutation target types by role.
@@ -396,7 +472,7 @@ void mutate_components(const ContentDB& content,
       replace_one_of_type(content, comps, t, pick);
     } else if (op < 85) {
       // Add (bounded).
-      if ((int)comps.size() < 14) {
+      if ((int)comps.size() < cap) {
         comps.push_back(pick_random(rng, pool));
       }
     } else {
@@ -418,6 +494,7 @@ void ensure_role_minimums(const ContentDB& content,
                           std::vector<std::string>& comps,
                           ShipRole role,
                           const DesignForgeOptions& opt) {
+  const int cap = std::clamp(opt.max_components, 6, 64);
   // Always: engine + fuel.
   const std::string best_engine = pick_best(pools.engines, content, [&](const ComponentDef& c) {
     return c.speed_km_s;
@@ -439,13 +516,17 @@ void ensure_role_minimums(const ContentDB& content,
 
     // If it already has cargo, allow a little bloat.
     if (!pools.cargo.empty() && count_type(content, comps, ComponentType::Cargo) < 3 && rng.next_u01() < 0.55) {
-      comps.push_back(pick_random(rng, pools.cargo));
+      if ((int)comps.size() < cap) comps.push_back(pick_random(rng, pools.cargo));
     }
 
-    if (!pools.colony.empty() && rng.next_u01() < 0.20) comps.push_back(pick_random(rng, pools.colony));
-    if (!pools.troops.empty() && rng.next_u01() < 0.15) comps.push_back(pick_random(rng, pools.troops));
+    if (!pools.colony.empty() && rng.next_u01() < 0.20) {
+      if ((int)comps.size() < cap) comps.push_back(pick_random(rng, pools.colony));
+    }
+    if (!pools.troops.empty() && rng.next_u01() < 0.15) {
+      if ((int)comps.size() < cap) comps.push_back(pick_random(rng, pools.troops));
+    }
     if (!pools.sensors.empty() && count_type(content, comps, ComponentType::Sensor) <= 0 && rng.next_u01() < 0.45) {
-      comps.push_back(pick_random(rng, pools.sensors));
+      if ((int)comps.size() < cap) comps.push_back(pick_random(rng, pools.sensors));
     }
   } else if (role == ShipRole::Surveyor) {
     const std::string best_sensor = pick_best(pools.sensors, content, [&](const ComponentDef& c) {
@@ -454,7 +535,9 @@ void ensure_role_minimums(const ContentDB& content,
     ensure_type(content, comps, ComponentType::Sensor, best_sensor);
 
     // ECM/ECCM are sensor-typed in content; include occasionally.
-    if (opt.include_ecm_eccm && !pools.sensors.empty() && rng.next_u01() < 0.30) comps.push_back(pick_random(rng, pools.sensors));
+    if (opt.include_ecm_eccm && !pools.sensors.empty() && rng.next_u01() < 0.30) {
+      if ((int)comps.size() < cap) comps.push_back(pick_random(rng, pools.sensors));
+    }
   } else if (role == ShipRole::Combatant) {
     const std::string best_sensor = pick_best(pools.sensors, content, [&](const ComponentDef& c) {
       return c.sensor_range_mkm;
@@ -471,19 +554,21 @@ void ensure_role_minimums(const ContentDB& content,
 
     // Extra weapon sometimes.
     if (!pools.weapons.empty() && count_type(content, comps, ComponentType::Weapon) < 3 && rng.next_u01() < 0.55) {
-      comps.push_back(pick_random(rng, pools.weapons));
+      if ((int)comps.size() < cap) comps.push_back(pick_random(rng, pools.weapons));
     }
 
     // Survivability.
     if (!pools.armor.empty() && count_type(content, comps, ComponentType::Armor) <= 0 && rng.next_u01() < 0.55) {
-      comps.push_back(pick_random(rng, pools.armor));
+      if ((int)comps.size() < cap) comps.push_back(pick_random(rng, pools.armor));
     }
     if (opt.prefer_shields && !pools.shields.empty() && count_type(content, comps, ComponentType::Shield) <= 0 && rng.next_u01() < 0.60) {
-      comps.push_back(pick_random(rng, pools.shields));
+      if ((int)comps.size() < cap) comps.push_back(pick_random(rng, pools.shields));
     }
 
     // E-warfare is useful for combatants too.
-    if (opt.include_ecm_eccm && !pools.sensors.empty() && rng.next_u01() < 0.25) comps.push_back(pick_random(rng, pools.sensors));
+    if (opt.include_ecm_eccm && !pools.sensors.empty() && rng.next_u01() < 0.25) {
+      if ((int)comps.size() < cap) comps.push_back(pick_random(rng, pools.sensors));
+    }
   }
 
   // If we have power-hungry components and reactors exist, make sure we have at least one.
@@ -493,6 +578,234 @@ void ensure_role_minimums(const ContentDB& content,
       comps.push_back(pick_random(rng, pools.reactors));
     }
   }
+}
+
+void tune_to_constraints(const ContentDB& content,
+                         const Pools& pools,
+                         HashRng& rng,
+                         std::vector<std::string>& comps,
+                         ShipRole role,
+                         const DesignForgeOptions& opt) {
+  const auto& c = opt.constraints;
+  if (!constraints_enabled(c)) return;
+
+  const int cap = std::clamp(opt.max_components, 6, 64);
+
+  // Targeted swaps for "single-choice" stats.
+  if (c.min_speed_km_s > 0.0 && !pools.engines.empty()) {
+    const std::string best_engine = pick_best(pools.engines, content, [&](const ComponentDef& cd) {
+      return cd.speed_km_s;
+    });
+    if (!best_engine.empty()) ensure_type(content, comps, ComponentType::Engine, best_engine);
+  }
+  if (c.min_sensor_range_mkm > 0.0 && !pools.sensors.empty()) {
+    const std::string best_sensor = pick_best(pools.sensors, content, [&](const ComponentDef& cd) {
+      return cd.sensor_range_mkm;
+    });
+    if (!best_sensor.empty()) ensure_type(content, comps, ComponentType::Sensor, best_sensor);
+  }
+
+  // Rough local totals (cheap; final derived stats are computed later).
+  double mass = 0.0;
+  double hp_bonus = 0.0;
+  double fuel_cap = 0.0;
+  double fuel_use = 0.0;
+  double cargo = 0.0;
+  double mining = 0.0;
+  double colony = 0.0;
+  double troop = 0.0;
+  double ecm = 0.0;
+  double eccm = 0.0;
+  double beam = 0.0;
+  double missile = 0.0;
+  double pd = 0.0;
+  double shields = 0.0;
+  for (const auto& cid : comps) {
+    auto it = content.components.find(cid);
+    if (it == content.components.end()) continue;
+    const auto& cd = it->second;
+    mass += cd.mass_tons;
+    hp_bonus += cd.hp_bonus;
+    fuel_cap += cd.fuel_capacity_tons;
+    fuel_use += cd.fuel_use_per_mkm;
+    cargo += cd.cargo_tons;
+    mining += cd.mining_tons_per_day;
+    colony += cd.colony_capacity_millions;
+    troop += cd.troop_capacity;
+    ecm += std::max(0.0, cd.ecm_strength);
+    eccm += std::max(0.0, cd.eccm_strength);
+    if (cd.type == ComponentType::Weapon) {
+      beam += cd.weapon_damage;
+      missile += std::max(0.0, cd.missile_damage);
+      pd += std::max(0.0, cd.point_defense_damage);
+    }
+    if (cd.type == ComponentType::Shield) {
+      shields += std::max(0.0, cd.shield_hp);
+    }
+  }
+
+  auto can_add = [&](const std::string& cid) -> bool {
+    if ((int)comps.size() >= cap) return false;
+    auto it = content.components.find(cid);
+    if (it == content.components.end()) return false;
+    if (c.max_mass_tons > 0.0 && (mass + it->second.mass_tons) > c.max_mass_tons + 1e-6) return false;
+    return true;
+  };
+
+  // Range.
+  if (c.min_range_mkm > 0.0 && fuel_use > 0.0) {
+    const std::string best_fuel = pick_best(pools.fuel, content, [&](const ComponentDef& cd) {
+      return cd.fuel_capacity_tons;
+    });
+    while (!best_fuel.empty() && can_add(best_fuel) && (fuel_cap / fuel_use) + 1e-9 < c.min_range_mkm) {
+      const auto& cd = content.components.at(best_fuel);
+      comps.push_back(best_fuel);
+      mass += cd.mass_tons;
+      fuel_cap += cd.fuel_capacity_tons;
+    }
+  }
+
+  // Cargo.
+  if (c.min_cargo_tons > 0.0) {
+    const std::string best_cargo = pick_best(pools.cargo, content, [&](const ComponentDef& cd) {
+      return cd.cargo_tons;
+    });
+    while (!best_cargo.empty() && can_add(best_cargo) && cargo + 1e-9 < c.min_cargo_tons) {
+      const auto& cd = content.components.at(best_cargo);
+      comps.push_back(best_cargo);
+      mass += cd.mass_tons;
+      cargo += cd.cargo_tons;
+    }
+  }
+
+  // Mining.
+  if (c.min_mining_tons_per_day > 0.0) {
+    const std::string best_mining = pick_best(pools.mining, content, [&](const ComponentDef& cd) {
+      return cd.mining_tons_per_day;
+    });
+    while (!best_mining.empty() && can_add(best_mining) && mining + 1e-9 < c.min_mining_tons_per_day) {
+      const auto& cd = content.components.at(best_mining);
+      comps.push_back(best_mining);
+      mass += cd.mass_tons;
+      mining += cd.mining_tons_per_day;
+    }
+  }
+
+  // Colonization / troops.
+  if (c.min_colony_capacity_millions > 0.0) {
+    const std::string best_colony = pick_best(pools.colony, content, [&](const ComponentDef& cd) {
+      return cd.colony_capacity_millions;
+    });
+    while (!best_colony.empty() && can_add(best_colony) && colony + 1e-9 < c.min_colony_capacity_millions) {
+      const auto& cd = content.components.at(best_colony);
+      comps.push_back(best_colony);
+      mass += cd.mass_tons;
+      colony += cd.colony_capacity_millions;
+    }
+  }
+  if (c.min_troop_capacity > 0.0) {
+    const std::string best_troop = pick_best(pools.troops, content, [&](const ComponentDef& cd) {
+      return cd.troop_capacity;
+    });
+    while (!best_troop.empty() && can_add(best_troop) && troop + 1e-9 < c.min_troop_capacity) {
+      const auto& cd = content.components.at(best_troop);
+      comps.push_back(best_troop);
+      mass += cd.mass_tons;
+      troop += cd.troop_capacity;
+    }
+  }
+
+  // Combat.
+  if (role == ShipRole::Combatant || c.min_beam_damage > 0.0 || c.min_missile_damage > 0.0 || c.min_point_defense_damage > 0.0) {
+    const std::string best_beam = pick_best(pools.weapons, content, [&](const ComponentDef& cd) {
+      return cd.weapon_damage;
+    });
+    const std::string best_missile = pick_best(pools.weapons, content, [&](const ComponentDef& cd) {
+      return cd.missile_damage;
+    });
+    const std::string best_pd = pick_best(pools.weapons, content, [&](const ComponentDef& cd) {
+      return cd.point_defense_damage;
+    });
+
+    while (!best_beam.empty() && can_add(best_beam) && beam + 1e-9 < c.min_beam_damage) {
+      const auto& cd = content.components.at(best_beam);
+      comps.push_back(best_beam);
+      mass += cd.mass_tons;
+      beam += cd.weapon_damage;
+      missile += std::max(0.0, cd.missile_damage);
+      pd += std::max(0.0, cd.point_defense_damage);
+    }
+    while (!best_missile.empty() && can_add(best_missile) && missile + 1e-9 < c.min_missile_damage) {
+      const auto& cd = content.components.at(best_missile);
+      comps.push_back(best_missile);
+      mass += cd.mass_tons;
+      beam += cd.weapon_damage;
+      missile += std::max(0.0, cd.missile_damage);
+      pd += std::max(0.0, cd.point_defense_damage);
+    }
+    while (!best_pd.empty() && can_add(best_pd) && pd + 1e-9 < c.min_point_defense_damage) {
+      const auto& cd = content.components.at(best_pd);
+      comps.push_back(best_pd);
+      mass += cd.mass_tons;
+      beam += cd.weapon_damage;
+      missile += std::max(0.0, cd.missile_damage);
+      pd += std::max(0.0, cd.point_defense_damage);
+    }
+
+    if (c.min_shields > 0.0) {
+      const std::string best_shield = pick_best(pools.shields, content, [&](const ComponentDef& cd) {
+        return cd.shield_hp;
+      });
+      while (!best_shield.empty() && can_add(best_shield) && shields + 1e-9 < c.min_shields) {
+        const auto& cd = content.components.at(best_shield);
+        comps.push_back(best_shield);
+        mass += cd.mass_tons;
+        shields += std::max(0.0, cd.shield_hp);
+      }
+    }
+  }
+
+  // HP: approximate with the same formula as design_stats (mass*2 + hp_bonus).
+  if (c.min_hp > 0.0) {
+    const std::string best_armor = pick_best(pools.armor, content, [&](const ComponentDef& cd) {
+      return cd.hp_bonus;
+    });
+    while (!best_armor.empty() && can_add(best_armor) && (mass * 2.0 + hp_bonus) + 1e-9 < c.min_hp) {
+      const auto& cd = content.components.at(best_armor);
+      comps.push_back(best_armor);
+      mass += cd.mass_tons;
+      hp_bonus += cd.hp_bonus;
+    }
+  }
+
+  // E-warfare.
+  if (c.min_ecm_strength > 0.0) {
+    const std::string best_ecm = pick_best(pools.sensors, content, [&](const ComponentDef& cd) {
+      return cd.ecm_strength;
+    });
+    while (!best_ecm.empty() && can_add(best_ecm) && ecm + 1e-9 < c.min_ecm_strength) {
+      const auto& cd = content.components.at(best_ecm);
+      comps.push_back(best_ecm);
+      mass += cd.mass_tons;
+      ecm += std::max(0.0, cd.ecm_strength);
+      eccm += std::max(0.0, cd.eccm_strength);
+    }
+  }
+  if (c.min_eccm_strength > 0.0) {
+    const std::string best_eccm = pick_best(pools.sensors, content, [&](const ComponentDef& cd) {
+      return cd.eccm_strength;
+    });
+    while (!best_eccm.empty() && can_add(best_eccm) && eccm + 1e-9 < c.min_eccm_strength) {
+      const auto& cd = content.components.at(best_eccm);
+      comps.push_back(best_eccm);
+      mass += cd.mass_tons;
+      ecm += std::max(0.0, cd.ecm_strength);
+      eccm += std::max(0.0, cd.eccm_strength);
+    }
+  }
+
+  // Power balancing is handled by the main forge loop so constraints are
+  // evaluated on the post-balance design.
 }
 
 std::string components_key(std::vector<std::string> comps) {
@@ -550,7 +863,10 @@ std::vector<ForgedDesign> forge_design_variants(const ContentDB& content,
     ensure_role_minimums(content, pools, crng, comps, role, opt);
     mutate_components(content, pools, crng, comps, role, opt);
     ensure_role_minimums(content, pools, crng, comps, role, opt);
-    try_balance_power(content, pools, crng, comps, opt.prefer_shields);
+    tune_to_constraints(content, pools, crng, comps, role, opt);
+
+    const double required_margin = opt.constraints.require_power_balance ? opt.constraints.min_power_margin : -0.25;
+    try_balance_power(content, pools, crng, comps, opt.prefer_shields, opt.max_components, required_margin);
 
     // De-dup by component multiset.
     const std::string key = components_key(comps);
@@ -568,19 +884,42 @@ std::vector<ForgedDesign> forge_design_variants(const ContentDB& content,
     const auto res = derive_ship_design_stats(content, d);
     if (!res.ok) continue;
 
-    const double s = score_for_role(d, role);
-    candidates.push_back(ForgedDesign{std::move(d), s});
+    const bool use_constraints = constraints_enabled(opt.constraints);
+    const double base_score = score_for_role(d, role);
+    const ConstraintEval ce = use_constraints ? eval_constraints(d, opt.constraints) : ConstraintEval{};
+    const double s = base_score - ce.penalty;
+
+    if (use_constraints && opt.only_meeting_constraints && !ce.meets) continue;
+
+    ForgedDesign fd;
+    fd.design = std::move(d);
+    fd.score = s;
+    fd.meets_constraints = use_constraints ? ce.meets : true;
+    fd.constraint_penalty = use_constraints ? ce.penalty : 0.0;
+    candidates.push_back(std::move(fd));
   }
 
-  std::sort(candidates.begin(), candidates.end(), [](const ForgedDesign& a, const ForgedDesign& b) {
+  const bool use_constraints = constraints_enabled(opt.constraints);
+  std::sort(candidates.begin(), candidates.end(), [&](const ForgedDesign& a, const ForgedDesign& b) {
+    if (use_constraints && a.meets_constraints != b.meets_constraints) {
+      return a.meets_constraints > b.meets_constraints;
+    }
     return a.score > b.score;
   });
 
   if ((int)candidates.size() > desired) candidates.resize((size_t)desired);
 
   if (out_debug) {
-    *out_debug = "Generated " + std::to_string(candidates.size()) + " / " + std::to_string(desired) +
-                 " designs from " + std::to_string(total_candidates) + " candidates.";
+    const int returned = (int)candidates.size();
+    int meets = 0;
+    for (const auto& cd : candidates) {
+      if (cd.meets_constraints) meets += 1;
+    }
+    *out_debug = "Generated " + std::to_string(returned) + " / " + std::to_string(desired) + " designs from " +
+                 std::to_string(total_candidates) + " candidates.";
+    if (use_constraints) {
+      *out_debug += " " + std::to_string(meets) + " meet constraints.";
+    }
   }
   return candidates;
 }

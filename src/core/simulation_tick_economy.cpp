@@ -872,6 +872,77 @@ void Simulation::tick_colony_conditions(double dt_days, bool day_advanced) {
 void Simulation::tick_research(double dt_days) {
   if (dt_days <= 0.0) return;
   NEBULA4X_TRACE_SCOPE("tick_research", "sim.econ");
+
+  // --- Research agreements (diplomacy-driven research cooperation) ---
+  //
+  // A Research Agreement is a mid-tier treaty between a Trade Agreement and an
+  // Alliance. It provides:
+  //  1) A small research output multiplier based on the number of research partners.
+  //  2) A collaboration bonus based on the *shared* daily research capacity of the
+  //     partners (to avoid "free riding").
+  //  3) A tech assistance multiplier when researching a tech already known by a
+  //     research partner (knowledge diffusion).
+  //
+  // Alliances also count as research cooperation.
+  std::unordered_map<Id, std::vector<Id>> research_partners;
+  research_partners.reserve(state_.factions.size());
+  for (Id fid : sorted_keys(state_.factions)) {
+    research_partners.emplace(fid, std::vector<Id>{});
+  }
+
+  // Unique normalized (a<b) pairs with research cooperation.
+  std::vector<std::pair<Id, Id>> coop_pairs;
+  coop_pairs.reserve(state_.treaties.size());
+
+  if (!state_.treaties.empty()) {
+    for (Id tid : sorted_keys(state_.treaties)) {
+      const Treaty& t = state_.treaties.at(tid);
+      if (t.type != TreatyType::Alliance && t.type != TreatyType::ResearchAgreement) continue;
+      coop_pairs.emplace_back(t.faction_a, t.faction_b);
+      research_partners[t.faction_a].push_back(t.faction_b);
+      research_partners[t.faction_b].push_back(t.faction_a);
+    }
+  }
+
+  std::sort(coop_pairs.begin(), coop_pairs.end());
+  coop_pairs.erase(std::unique(coop_pairs.begin(), coop_pairs.end()), coop_pairs.end());
+
+  for (Id fid : sorted_keys(state_.factions)) {
+    auto& v = research_partners[fid];
+    std::sort(v.begin(), v.end());
+    v.erase(std::unique(v.begin(), v.end()), v.end());
+  }
+
+  auto research_agreement_output_multiplier_for_faction = [&](Id fid) -> double {
+    if (!cfg_.enable_research_agreement_bonuses) return 1.0;
+    const auto it = research_partners.find(fid);
+    const int partners = (it == research_partners.end()) ? 0 : static_cast<int>(it->second.size());
+    if (partners <= 0) return 1.0;
+    const double bonus = std::clamp(cfg_.research_agreement_output_bonus_per_partner * static_cast<double>(partners),
+                                    0.0, std::max(0.0, cfg_.research_agreement_output_bonus_cap));
+    return 1.0 + bonus;
+  };
+
+  auto tech_assistance_multiplier_for_faction = [&](Id fid, const std::string& tech_id) -> double {
+    if (!cfg_.enable_research_agreement_bonuses) return 1.0;
+    if (tech_id.empty()) return 1.0;
+    const auto it = research_partners.find(fid);
+    if (it == research_partners.end() || it->second.empty()) return 1.0;
+
+    int helpers = 0;
+    for (Id pid : it->second) {
+      const auto pit = state_.factions.find(pid);
+      if (pit == state_.factions.end()) continue;
+      if (faction_has_tech(pit->second, tech_id)) ++helpers;
+    }
+    if (helpers <= 0) return 1.0;
+
+    const double bonus = std::clamp(cfg_.research_agreement_tech_help_bonus_per_partner * static_cast<double>(helpers),
+                                    0.0, std::max(0.0, cfg_.research_agreement_tech_help_bonus_cap));
+    return 1.0 + bonus;
+  };
+
+  // Precompute faction-wide output multipliers (tech bonuses + trade treaties + research treaties).
   std::unordered_map<Id, FactionEconomyMultipliers> fac_mult;
   fac_mult.reserve(state_.factions.size());
   for (Id fid : sorted_keys(state_.factions)) {
@@ -881,6 +952,10 @@ void Simulation::tick_research(double dt_days) {
     m.research *= trade;
     m.construction *= trade;
     m.shipyard *= trade;
+
+    const double ra = research_agreement_output_multiplier_for_faction(fid);
+    m.research *= ra;
+
     fac_mult.emplace(fid, m);
   }
 
@@ -890,6 +965,10 @@ void Simulation::tick_research(double dt_days) {
     if (it == fac_mult.end()) return default_mult;
     return it->second;
   };
+
+  // Track per-faction research generation this tick so we can compute symmetric collaboration bonuses.
+  std::unordered_map<Id, double> generated_rp;
+  generated_rp.reserve(state_.factions.size());
 
   for (Id cid : sorted_keys(state_.colonies)) {
     auto& col = state_.colonies.at(cid);
@@ -905,9 +984,35 @@ void Simulation::tick_research(double dt_days) {
     rp_per_day *= trade_prosperity_output_multiplier_for_colony(col.id);
     rp_per_day *= colony_condition_multipliers(col).research;
     if (rp_per_day <= 0.0) continue;
+
     auto fit = state_.factions.find(col.faction_id);
     if (fit == state_.factions.end()) continue;
-    fit->second.research_points += rp_per_day * dt_days;
+
+    const double add = rp_per_day * dt_days;
+    fit->second.research_points += add;
+    generated_rp[col.faction_id] += add;
+  }
+
+  // Collaboration bonus: each partner gains a small bonus derived from the shared
+  // research capacity (min of the two). This is intentionally symmetric and
+  // discourages one-sided agreements.
+  if (cfg_.enable_research_agreement_bonuses && cfg_.research_agreement_collaboration_bonus_fraction > 0.0 &&
+      !coop_pairs.empty()) {
+    const double frac = std::max(0.0, cfg_.research_agreement_collaboration_bonus_fraction);
+    for (const auto& [a, b] : coop_pairs) {
+      const double ga = generated_rp.count(a) ? generated_rp[a] : 0.0;
+      const double gb = generated_rp.count(b) ? generated_rp[b] : 0.0;
+      const double base = std::min(ga, gb);
+      if (base <= 0.0) continue;
+
+      const double bonus = base * frac;
+      if (bonus <= 0.0) continue;
+
+      auto ita = state_.factions.find(a);
+      auto itb = state_.factions.find(b);
+      if (ita != state_.factions.end()) ita->second.research_points += bonus;
+      if (itb != state_.factions.end()) itb->second.research_points += bonus;
+    }
   }
 
   auto prereqs_met = [&](const Faction& f, const TechDef& t) {
@@ -1025,12 +1130,16 @@ void Simulation::tick_research(double dt_days) {
       }
 
       if (fac.research_points <= 0.0) break;
-      const double spend = std::min(fac.research_points, remaining);
+
+      const double assist_mult = tech_assistance_multiplier_for_faction(fid, tech.id);
+      const double eff_remaining = remaining / std::max(1e-9, assist_mult);
+      const double spend = std::min(fac.research_points, eff_remaining);
       fac.research_points -= spend;
-      fac.active_research_progress += spend;
+      fac.active_research_progress += spend * assist_mult;
     }
   }
 }
+
 
 
 void Simulation::tick_shipyards(double dt_days) {

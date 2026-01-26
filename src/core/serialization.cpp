@@ -27,6 +27,7 @@ std::string contract_kind_to_string(ContractKind k) {
     case ContractKind::SalvageWreck: return "salvage_wreck";
     case ContractKind::SurveyJumpPoint: return "survey_jump_point";
     case ContractKind::EscortConvoy: return "escort_convoy";
+    case ContractKind::BountyPirate: return "bounty_pirate";
   }
   return "investigate_anomaly";
 }
@@ -36,6 +37,7 @@ ContractKind contract_kind_from_string(const std::string& s) {
   if (s == "salvage_wreck" || s == "wreck" || s == "salvage") return ContractKind::SalvageWreck;
   if (s == "survey_jump_point" || s == "jump_point" || s == "survey") return ContractKind::SurveyJumpPoint;
   if (s == "escort_convoy" || s == "convoy" || s == "escort") return ContractKind::EscortConvoy;
+  if (s == "bounty_pirate" || s == "bounty" || s == "pirate_bounty") return ContractKind::BountyPirate;
   return ContractKind::InvestigateAnomaly;
 }
 
@@ -188,6 +190,7 @@ std::string treaty_type_to_string(TreatyType t) {
     case TreatyType::NonAggressionPact: return "non_aggression";
     case TreatyType::Alliance: return "alliance";
     case TreatyType::TradeAgreement: return "trade";
+    case TreatyType::ResearchAgreement: return "research";
   }
   return "ceasefire";
 }
@@ -197,6 +200,7 @@ TreatyType treaty_type_from_string(const std::string& s) {
   if (s == "non_aggression" || s == "nonaggression" || s == "nap" || s == "pact") return TreatyType::NonAggressionPact;
   if (s == "alliance" || s == "ally" || s == "allied") return TreatyType::Alliance;
   if (s == "trade" || s == "trade_agreement" || s == "commerce") return TreatyType::TradeAgreement;
+  if (s == "research" || s == "research_agreement" || s == "science" || s == "science_pact") return TreatyType::ResearchAgreement;
   return TreatyType::Ceasefire;
 }
 
@@ -1088,6 +1092,8 @@ Object ship_automation_profile_to_json(const ShipAutomationProfile& p) {
     o["auto_rearm_threshold_fraction"] = p.auto_rearm_threshold_fraction;
   }
 
+  if (p.auto_munitions_tender) o["auto_munitions_tender"] = true;
+
   if (p.repair_priority != RepairPriority::Normal) {
     o["repair_priority"] = repair_priority_to_string(p.repair_priority);
   }
@@ -1203,6 +1209,10 @@ ShipAutomationProfile ship_automation_profile_from_json_value(const Value& v) {
   if (auto it = o.find("auto_rearm"); it != o.end()) p.auto_rearm = it->second.bool_value(false);
   if (auto it = o.find("auto_rearm_threshold_fraction"); it != o.end()) {
     p.auto_rearm_threshold_fraction = it->second.number_value(p.auto_rearm_threshold_fraction);
+  }
+
+  if (auto it = o.find("auto_munitions_tender"); it != o.end()) {
+    p.auto_munitions_tender = it->second.bool_value(false);
   }
 
   if (auto it = o.find("repair_priority"); it != o.end()) {
@@ -1463,6 +1473,7 @@ json::Value serialize_game_to_json_value(const GameState& s) {
     if (sh.auto_rearm_threshold_fraction != 0.25) {
       o["auto_rearm_threshold_fraction"] = sh.auto_rearm_threshold_fraction;
     }
+    o["auto_munitions_tender"] = sh.auto_munitions_tender;
     if (sh.repair_priority != RepairPriority::Normal) {
       o["repair_priority"] = repair_priority_to_string(sh.repair_priority);
     }
@@ -1622,6 +1633,13 @@ json::Value serialize_game_to_json_value(const GameState& s) {
     if (c.resolved_day != 0) o["resolved_day"] = static_cast<double>(c.resolved_day);
     if (std::abs(c.reward_research_points) > 1e-12) o["reward_research_points"] = c.reward_research_points;
     if (c.hops_estimate != 0) o["hops_estimate"] = static_cast<double>(c.hops_estimate);
+    if (c.target_destroyed_by_faction_id != kInvalidId) {
+      o["target_destroyed_by_faction_id"] = static_cast<double>(c.target_destroyed_by_faction_id);
+    }
+    if (c.target_destroyed_by_ship_id != kInvalidId) {
+      o["target_destroyed_by_ship_id"] = static_cast<double>(c.target_destroyed_by_ship_id);
+    }
+    if (c.target_destroyed_day != 0) o["target_destroyed_day"] = static_cast<double>(c.target_destroyed_day);
     if (c.risk_estimate > 1e-12) o["risk_estimate"] = c.risk_estimate;
     contracts.push_back(o);
   }
@@ -2484,6 +2502,9 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     if (auto it = o.find("auto_rearm_threshold_fraction"); it != o.end()) {
       sh.auto_rearm_threshold_fraction = it->second.number_value(sh.auto_rearm_threshold_fraction);
     }
+    if (auto it = o.find("auto_munitions_tender"); it != o.end()) {
+      sh.auto_munitions_tender = it->second.bool_value(false);
+    }
     if (auto it = o.find("repair_priority"); it != o.end()) {
       sh.repair_priority = repair_priority_from_string(it->second.string_value("normal"));
     }
@@ -2682,6 +2703,7 @@ GameState deserialize_game_from_json(const std::string& json_text) {
             if (kv == 1) c.kind = ContractKind::SalvageWreck;
             else if (kv == 2) c.kind = ContractKind::SurveyJumpPoint;
             else if (kv == 3) c.kind = ContractKind::EscortConvoy;
+            else if (kv == 4) c.kind = ContractKind::BountyPirate;
             else c.kind = ContractKind::InvestigateAnomaly;
           }
         }
@@ -2721,6 +2743,15 @@ GameState deserialize_game_from_json(const std::string& json_text) {
         if (auto itd = o.find("expires_day"); itd != o.end()) c.expires_day = static_cast<std::int64_t>(itd->second.int_value(0));
         if (auto itd = o.find("accepted_day"); itd != o.end()) c.accepted_day = static_cast<std::int64_t>(itd->second.int_value(0));
         if (auto itd = o.find("resolved_day"); itd != o.end()) c.resolved_day = static_cast<std::int64_t>(itd->second.int_value(0));
+        if (auto itdby = o.find("target_destroyed_by_faction_id"); itdby != o.end()) {
+          c.target_destroyed_by_faction_id = static_cast<Id>(itdby->second.int_value(kInvalidId));
+        }
+        if (auto itdsh = o.find("target_destroyed_by_ship_id"); itdsh != o.end()) {
+          c.target_destroyed_by_ship_id = static_cast<Id>(itdsh->second.int_value(kInvalidId));
+        }
+        if (auto ittd = o.find("target_destroyed_day"); ittd != o.end()) {
+          c.target_destroyed_day = static_cast<std::int64_t>(ittd->second.int_value(0));
+        }
         if (auto itr = o.find("reward_research_points"); itr != o.end()) {
           c.reward_research_points = std::max(0.0, itr->second.number_value(0.0));
         }

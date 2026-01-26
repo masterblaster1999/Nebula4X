@@ -425,10 +425,33 @@ void draw_design_studio_window(Simulation& sim, UIState& ui, Id& selected_ship, 
   static int forge_seed = 0;
   static int forge_quality = 8;
   static int forge_mutations = 4;
+  static int forge_max_components = 14;
   static int forge_role_idx = 0;
   static bool forge_prefer_missiles = false;
   static bool forge_prefer_shields = true;
   static bool forge_include_ecm_eccm = true;
+
+  // Optional constraints.
+  static bool forge_use_constraints = false;
+  static bool forge_only_meeting_constraints = true;
+  static bool forge_require_power_balance = false;
+  static float forge_min_speed_km_s = 0.0f;
+  static float forge_min_range_mkm = 0.0f;
+  static float forge_max_mass_tons = 0.0f;
+  static float forge_min_cargo_tons = 0.0f;
+  static float forge_min_sensor_range_mkm = 0.0f;
+  static float forge_max_signature_multiplier = 0.0f;
+  static float forge_min_weapon_damage = 0.0f;
+  static float forge_min_missile_damage = 0.0f;
+  static float forge_min_point_defense_damage = 0.0f;
+  static float forge_min_shields = 0.0f;
+  static float forge_min_hp = 0.0f;
+  static float forge_min_power_margin = 0.0f;
+  static float forge_min_mining_tons_per_day = 0.0f;
+  static float forge_min_colony_capacity_millions = 0.0f;
+  static float forge_min_troop_capacity = 0.0f;
+  static float forge_min_ecm_strength = 0.0f;
+  static float forge_min_eccm_strength = 0.0f;
   static char forge_id_prefix[32] = "forge";
   static char forge_name_prefix[64] = "Forge";
   static std::string forge_status;
@@ -618,6 +641,9 @@ void draw_design_studio_window(Simulation& sim, UIState& ui, Id& selected_ship, 
         ImGui::SetNextItemWidth(140.0f);
         ImGui::SliderInt("Mutations", &forge_mutations, 0, 10);
 
+        ImGui::SetNextItemWidth(140.0f);
+        ImGui::SliderInt("Max components", &forge_max_components, 6, 32);
+
         const char* role_labels[] = {"Freighter", "Surveyor", "Combatant"};
         ImGui::SetNextItemWidth(160.0f);
         ImGui::Combo("Role", &forge_role_idx, role_labels, IM_ARRAYSIZE(role_labels));
@@ -631,7 +657,55 @@ void draw_design_studio_window(Simulation& sim, UIState& ui, Id& selected_ship, 
         ImGui::SameLine();
         ImGui::Checkbox("Include ECM/ECCM", &forge_include_ecm_eccm);
 
-        ImGui::Separator();
+        ImGui::Spacing();
+        ImGui::Checkbox("Constraints", &forge_use_constraints);
+        ImGui::SameLine();
+        ImGui::Checkbox("Only valid", &forge_only_meeting_constraints);
+        ImGui::SameLine();
+        ImGui::Checkbox("Require power balance", &forge_require_power_balance);
+
+        if (forge_use_constraints) {
+          if (ImGui::BeginTable("forge_constraints", 2, ImGuiTableFlags_SizingFixedFit)) {
+            auto row_float = [](const char* label, const char* id, float* v) {
+              ImGui::TableNextRow();
+              ImGui::TableSetColumnIndex(0);
+              ImGui::TextUnformatted(label);
+              ImGui::TableSetColumnIndex(1);
+              ImGui::SetNextItemWidth(160.0f);
+              ImGui::InputFloat(id, v, 0.0f, 0.0f, "%.2f");
+            };
+
+            row_float("Min speed (km/s)", "##forge_min_speed", &forge_min_speed_km_s);
+            row_float("Min range (mkm)", "##forge_min_range", &forge_min_range_mkm);
+            row_float("Max mass (t)", "##forge_max_mass", &forge_max_mass_tons);
+            row_float("Min cargo (t)", "##forge_min_cargo", &forge_min_cargo_tons);
+            row_float("Min mining (t/day)", "##forge_min_mining", &forge_min_mining_tons_per_day);
+            row_float("Min colony cap (M)", "##forge_min_colony", &forge_min_colony_capacity_millions);
+            row_float("Min troop cap", "##forge_min_troop", &forge_min_troop_capacity);
+            row_float("Min sensor range (mkm)", "##forge_min_sensor", &forge_min_sensor_range_mkm);
+            row_float("Max signature mult", "##forge_max_sig", &forge_max_signature_multiplier);
+            row_float("Min beam damage", "##forge_min_beam", &forge_min_weapon_damage);
+            row_float("Min missile damage", "##forge_min_missile", &forge_min_missile_damage);
+            row_float("Min point defense dmg", "##forge_min_pd", &forge_min_point_defense_damage);
+            row_float("Min shields", "##forge_min_shields", &forge_min_shields);
+            row_float("Min HP", "##forge_min_hp", &forge_min_hp);
+            row_float("Min ECM strength", "##forge_min_ecm", &forge_min_ecm_strength);
+            row_float("Min ECCM strength", "##forge_min_eccm", &forge_min_eccm_strength);
+
+            if (forge_require_power_balance) {
+              row_float("Min power margin", "##forge_min_pwr", &forge_min_power_margin);
+            } else {
+              ImGui::TableNextRow();
+              ImGui::TableSetColumnIndex(0);
+              ImGui::TextDisabled("Min power margin");
+              ImGui::TableSetColumnIndex(1);
+              ImGui::TextDisabled("(requires power balance)");
+            }
+
+            ImGui::EndTable();
+          }
+          ImGui::TextDisabled("0 disables a constraint.");
+        }
 
         if (ImGui::Button("Forge")) {
           std::vector<std::string> pool;
@@ -651,6 +725,29 @@ void draw_design_studio_window(Simulation& sim, UIState& ui, Id& selected_ship, 
           opt.include_ecm_eccm = forge_include_ecm_eccm;
           opt.id_prefix = forge_id_prefix;
           opt.name_prefix = forge_name_prefix;
+          opt.max_components = forge_max_components;
+
+          if (forge_use_constraints) {
+            opt.only_meeting_constraints = forge_only_meeting_constraints;
+            opt.constraints.min_speed_km_s = forge_min_speed_km_s;
+            opt.constraints.min_range_mkm = forge_min_range_mkm;
+            opt.constraints.max_mass_tons = forge_max_mass_tons;
+            opt.constraints.min_cargo_tons = forge_min_cargo_tons;
+            opt.constraints.min_mining_tons_per_day = forge_min_mining_tons_per_day;
+            opt.constraints.min_colony_capacity_millions = forge_min_colony_capacity_millions;
+            opt.constraints.min_troop_capacity = forge_min_troop_capacity;
+            opt.constraints.min_sensor_range_mkm = forge_min_sensor_range_mkm;
+            opt.constraints.max_signature_multiplier = forge_max_signature_multiplier;
+            opt.constraints.min_weapon_damage = forge_min_weapon_damage;
+            opt.constraints.min_missile_damage = forge_min_missile_damage;
+            opt.constraints.min_point_defense_damage = forge_min_point_defense_damage;
+            opt.constraints.min_shields = forge_min_shields;
+            opt.constraints.min_hp = forge_min_hp;
+            opt.constraints.min_ecm_strength = forge_min_ecm_strength;
+            opt.constraints.min_eccm_strength = forge_min_eccm_strength;
+            opt.constraints.require_power_balance = forge_require_power_balance;
+            opt.constraints.min_power_margin = forge_min_power_margin;
+          }
 
           if (forge_role_idx == 1) opt.role = ShipRole::Surveyor;
           else if (forge_role_idx == 2) opt.role = ShipRole::Combatant;

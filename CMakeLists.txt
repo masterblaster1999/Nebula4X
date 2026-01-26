@@ -420,6 +420,7 @@ if(NEBULA4X_BUILD_TESTS)
     tests/test_anomalies.cpp
     tests/test_anomaly_discovery.cpp
     tests/test_procgen_surface.cpp
+    tests/test_design_forge_constraints.cpp
     tests/test_nebula_microfields.cpp
     tests/test_nebula_storm_cells.cpp
     tests/test_jump_transit_hazards.cpp
