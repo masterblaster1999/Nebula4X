@@ -513,6 +513,7 @@ void draw_main_menu(Simulation& sim, UIState& ui, char* save_path, char* load_pa
       ImGui::MenuItem("Regions (Sectors Overview)", "Ctrl+Shift+R", &ui.show_regions_window);
       ImGui::MenuItem("Star Atlas (Constellations)", nullptr, &ui.show_star_atlas_window);
       ImGui::MenuItem("Freight Planner (Auto-freight Preview)", nullptr, &ui.show_freight_window);
+      ImGui::MenuItem("Mine Planner (Auto-mine Preview)", nullptr, &ui.show_mine_window);
       ImGui::MenuItem("Fuel Planner (Auto-tanker Preview)", nullptr, &ui.show_fuel_window);
       ImGui::MenuItem("Salvage Planner (Wreck Salvage Runs)", nullptr, &ui.show_salvage_window);
       ImGui::MenuItem("Contracts (Mission Board)", nullptr, &ui.show_contracts_window);
@@ -617,6 +618,9 @@ void draw_main_menu(Simulation& sim, UIState& ui, char* save_path, char* load_pa
       }
       if (ImGui::MenuItem("Open Freight Planner")) {
         ui.show_freight_window = true;
+      }
+      if (ImGui::MenuItem("Open Mine Planner")) {
+        ui.show_mine_window = true;
       }
       if (ImGui::MenuItem("Open Fuel Planner")) {
         ui.show_fuel_window = true;

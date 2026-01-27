@@ -26,6 +26,7 @@
 #include "ui/planner_window.h"
 #include "ui/regions_window.h"
 #include "ui/freight_window.h"
+#include "ui/mine_window.h"
 #include "ui/fuel_window.h"
 #include "ui/salvage_window.h"
 #include "ui/contracts_window.h"
@@ -520,6 +521,10 @@ void App::frame() {
   if (ui_.show_freight_window) {
     prepare_window_for_draw(ui_, "freight");
     draw_freight_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  }
+  if (ui_.show_mine_window) {
+    prepare_window_for_draw(ui_, "mine");
+    draw_mine_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   }
   if (ui_.show_fuel_window) {
     prepare_window_for_draw(ui_, "fuel");
@@ -1920,6 +1925,9 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       if (auto it = obj->find("show_freight_window"); it != obj->end()) {
         ui_.show_freight_window = it->second.bool_value(ui_.show_freight_window);
       }
+      if (auto it = obj->find("show_mine_window"); it != obj->end()) {
+        ui_.show_mine_window = it->second.bool_value(ui_.show_mine_window);
+      }
       if (auto it = obj->find("show_fuel_window"); it != obj->end()) {
         ui_.show_fuel_window = it->second.bool_value(ui_.show_fuel_window);
       }
@@ -3079,6 +3087,7 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     o["show_planner_window"] = ui_.show_planner_window;
     o["show_regions_window"] = ui_.show_regions_window;
     o["show_freight_window"] = ui_.show_freight_window;
+    o["show_mine_window"] = ui_.show_mine_window;
     o["show_fuel_window"] = ui_.show_fuel_window;
     o["show_sustainment_window"] = ui_.show_sustainment_window;
     o["show_fleet_manager_window"] = ui_.show_fleet_manager_window;
@@ -3503,6 +3512,7 @@ void App::reset_window_layout_defaults() {
   ui_.show_planner_window = false;
   ui_.show_regions_window = false;
   ui_.show_freight_window = false;
+  ui_.show_mine_window = false;
   ui_.show_fuel_window = false;
   ui_.show_sustainment_window = false;
   ui_.show_fleet_manager_window = false;

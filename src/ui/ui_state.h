@@ -593,6 +593,7 @@ struct UIState {
   bool show_planner_window{false};
   bool show_regions_window{false};
   bool show_freight_window{false};
+  bool show_mine_window{false};
   bool show_fuel_window{false};
   bool show_salvage_window{false};
   bool show_contracts_window{false};

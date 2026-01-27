@@ -16,6 +16,11 @@ struct Vec2 {
   Vec2 operator-(const Vec2& rhs) const { return {x - rhs.x, y - rhs.y}; }
   Vec2 operator*(double s) const { return {x * s, y * s}; }
 
+  // Exact equality. Use with care for computed floating-point values; it is
+  // primarily intended for comparisons against stored/serialized coordinates.
+  bool operator==(const Vec2& rhs) const { return x == rhs.x && y == rhs.y; }
+  bool operator!=(const Vec2& rhs) const { return !(*this == rhs); }
+
   Vec2& operator+=(const Vec2& rhs) {
     x += rhs.x;
     y += rhs.y;

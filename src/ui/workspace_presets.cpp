@@ -42,6 +42,7 @@ void apply_workspace_preset(const char* preset_name, UIState& ui) {
     ui.show_economy_window = false;
     ui.show_planner_window = false;
     ui.show_freight_window = false;
+    ui.show_mine_window = false;
     ui.show_fuel_window = false;
     ui.show_sustainment_window = false;
     ui.show_time_warp_window = false;

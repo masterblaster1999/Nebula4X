@@ -377,6 +377,7 @@ void activate_palette_item(PaletteItem& item, Simulation& sim, UIState& ui, Id& 
           ui.show_economy_window = false;
           ui.show_planner_window = false;
           ui.show_freight_window = false;
+          ui.show_mine_window = false;
           ui.show_fuel_window = false;
           ui.show_time_warp_window = false;
           ui.show_timeline_window = false;
@@ -395,6 +396,7 @@ void activate_palette_item(PaletteItem& item, Simulation& sim, UIState& ui, Id& 
           ui.show_economy_window = false;
           ui.show_planner_window = false;
           ui.show_freight_window = false;
+          ui.show_mine_window = false;
           ui.show_fuel_window = false;
           ui.show_time_warp_window = false;
           ui.show_timeline_window = false;
@@ -413,6 +415,7 @@ void activate_palette_item(PaletteItem& item, Simulation& sim, UIState& ui, Id& 
           ui.show_economy_window = true;
           ui.show_planner_window = true;
           ui.show_freight_window = false;
+          ui.show_mine_window = false;
           ui.show_fuel_window = false;
           ui.show_time_warp_window = false;
           ui.show_timeline_window = true;
@@ -431,6 +434,7 @@ void activate_palette_item(PaletteItem& item, Simulation& sim, UIState& ui, Id& 
           ui.show_economy_window = false;
           ui.show_planner_window = false;
           ui.show_freight_window = false;
+          ui.show_mine_window = false;
           ui.show_fuel_window = false;
           ui.show_time_warp_window = false;
           ui.show_timeline_window = false;
@@ -449,6 +453,7 @@ void activate_palette_item(PaletteItem& item, Simulation& sim, UIState& ui, Id& 
           ui.show_economy_window = false;
           ui.show_planner_window = false;
           ui.show_freight_window = false;
+          ui.show_mine_window = false;
           ui.show_fuel_window = false;
           ui.show_time_warp_window = false;
           ui.show_timeline_window = true;
@@ -1049,6 +1054,12 @@ void draw_status_bar(Simulation& sim, UIState& ui, HUDState& /*hud*/, Id& select
   }
 
   ImGui::SameLine();
+  if (ImGui::SmallButton("Mine")) ui.show_mine_window = true;
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip("Open the Mine Planner (auto-mine preview)");
+  }
+
+  ImGui::SameLine();
   if (ImGui::SmallButton("Fuel")) ui.show_fuel_window = true;
   if (ImGui::IsItemHovered()) {
     ImGui::SetTooltip("Open the Fuel Planner (auto-tanker preview)");
@@ -1442,6 +1453,7 @@ void draw_help_window(UIState& ui) {
         ui.show_economy_window = false;
         ui.show_planner_window = false;
         ui.show_freight_window = false;
+        ui.show_mine_window = false;
         ui.show_fuel_window = false;
         ui.show_time_warp_window = false;
         ui.show_timeline_window = false;
@@ -1460,6 +1472,7 @@ void draw_help_window(UIState& ui) {
         ui.show_economy_window = false;
         ui.show_planner_window = false;
         ui.show_freight_window = false;
+        ui.show_mine_window = false;
         ui.show_fuel_window = false;
         ui.show_time_warp_window = false;
         ui.show_timeline_window = false;
@@ -1478,6 +1491,7 @@ void draw_help_window(UIState& ui) {
         ui.show_economy_window = true;
         ui.show_planner_window = true;
         ui.show_freight_window = false;
+        ui.show_mine_window = false;
         ui.show_fuel_window = false;
         ui.show_time_warp_window = false;
         ui.show_timeline_window = true;
@@ -1496,6 +1510,7 @@ void draw_help_window(UIState& ui) {
         ui.show_economy_window = false;
         ui.show_planner_window = false;
         ui.show_freight_window = false;
+        ui.show_mine_window = false;
         ui.show_fuel_window = false;
         ui.show_time_warp_window = false;
         ui.show_timeline_window = false;
@@ -1514,6 +1529,7 @@ void draw_help_window(UIState& ui) {
         ui.show_economy_window = false;
         ui.show_planner_window = false;
         ui.show_freight_window = false;
+        ui.show_mine_window = false;
         ui.show_fuel_window = false;
         ui.show_time_warp_window = false;
         ui.show_timeline_window = true;

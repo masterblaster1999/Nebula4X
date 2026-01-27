@@ -242,6 +242,7 @@ FetchContent_Declare(
     src/ui/planner_window.cpp
     src/ui/regions_window.cpp
     src/ui/freight_window.cpp
+	    src/ui/mine_window.cpp
     src/ui/fuel_window.cpp
     src/ui/salvage_window.cpp
     src/ui/contracts_window.cpp

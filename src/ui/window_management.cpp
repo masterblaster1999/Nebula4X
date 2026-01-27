@@ -83,6 +83,8 @@ static const std::vector<WindowSpec>& build_specs() {
       // Logistics planners.
       {"freight", "Freight Planner", "Freight Planner", "Logistics", ImVec2(980, 720), &UIState::show_freight_window,
        false, true, WindowLaunchMode::Popup},
+      {"mine", "Mine Planner", "Mine Planner", "Logistics", ImVec2(1040, 690), &UIState::show_mine_window, false, true,
+       WindowLaunchMode::Popup},
       {"fuel", "Fuel Planner", "Fuel Planner", "Logistics", ImVec2(980, 720), &UIState::show_fuel_window, false, true,
        WindowLaunchMode::Popup},
       {"salvage", "Salvage Planner", "Salvage Planner", "Logistics", ImVec2(980, 720), &UIState::show_salvage_window,

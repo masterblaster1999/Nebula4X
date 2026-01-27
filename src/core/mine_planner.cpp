@@ -82,17 +82,23 @@ MinePlannerResult compute_mine_plan(const Simulation& sim, Id faction_id, const 
 
   // --- Mineral shortages (used for smarter mineral selection and delivery).
   //
-  // The logistics system reports multiple kinds of needs (fuel, rearm, etc.).
-  // Mobile miners can only directly provide *minerals*, so we focus on
-  // stockpile targets and stalled construction needs.
+  // The logistics system reports many kinds of needs (fuel, shipyards, industry
+  // inputs, etc.). Mobile miners can only directly provide *mineable resources*
+  // (whatever exists as a mineral deposit key on bodies), so we focus on the
+  // mineral-backed needs that are meaningful to satisfy with mining.
   std::unordered_map<Id, std::unordered_map<std::string, double>> missing_by_colony;
   std::unordered_map<std::string, double> missing_total;
   for (const auto& need : sim.logistics_needs_for_faction(faction_id)) {
     if (!(need.missing_tons > 0.0)) continue;
-    if (need.kind != LogisticsNeedKind::StockpileTarget &&
-        need.kind != LogisticsNeedKind::StalledConstruction) {
-      continue;
-    }
+
+    const bool relevant = (need.kind == LogisticsNeedKind::StockpileTarget) ||
+                          (need.kind == LogisticsNeedKind::Shipyard) ||
+                          (need.kind == LogisticsNeedKind::Construction) ||
+                          (need.kind == LogisticsNeedKind::IndustryInput) ||
+                          (need.kind == LogisticsNeedKind::TroopTraining) ||
+                          (need.kind == LogisticsNeedKind::Fuel);
+    if (!relevant) continue;
+
     missing_by_colony[need.colony_id][need.mineral] += need.missing_tons;
     missing_total[need.mineral] += need.missing_tons;
   }
@@ -135,7 +141,7 @@ MinePlannerResult compute_mine_plan(const Simulation& sim, Id faction_id, const 
     Id id{kInvalidId};
     Id system_id{kInvalidId};
     Vec2 pos_mkm{0.0, 0.0};
-    BodyType type{BodyType::Unknown};
+    BodyType type{BodyType::Planet};
   };
 
   std::vector<Id> body_ids;
