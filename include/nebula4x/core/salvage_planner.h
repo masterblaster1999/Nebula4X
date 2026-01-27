@@ -75,6 +75,23 @@ struct SalvageAssignment {
 };
 
 struct SalvagePlannerOptions {
+  // If true, only consider ships with Ship::auto_salvage enabled.
+  bool require_auto_salvage_flag{false};
+
+  // If true and require_auto_salvage_flag is enabled, skip ships that have
+  // other "primary" automation modes enabled (auto-mine/freight/explore/etc.).
+  //
+  // This mirrors the simulation tick's "one major job per ship" behaviour and
+  // prevents salvage plans from stealing ships intended for other automation.
+  bool exclude_conflicting_automation_flags{false};
+
+  // If true, treat wrecks already targeted by existing salvage orders as
+  // reserved and exclude them from new assignments.
+  bool reserve_wrecks_targeted_by_existing_orders{true};
+
+  // Caller-provided extra reserved wreck ids (excluded from planning).
+  std::vector<Id> reserved_wreck_ids;
+
   // If true, only consider ships that are currently idle (no queued orders, or repeat completed).
   bool require_idle{true};
 

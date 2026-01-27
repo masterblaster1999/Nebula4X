@@ -44,6 +44,45 @@ SalvagePlannerResult compute_salvage_plan(const Simulation& sim, Id faction_id, 
   const double min_tons = (opt.min_tons > 0.0) ? std::max(1e-6, opt.min_tons)
                                                : std::max(1e-6, sim.cfg().auto_freight_min_transfer_tons);
 
+  // --- Reserved wrecks (existing orders / caller-provided).
+  //
+  // We populate this *before* selecting/truncating candidate wrecks so that
+  // reserved wrecks don't crowd out valid candidates when max_wrecks is small.
+  std::unordered_set<Id> reserved_wrecks;
+  reserved_wrecks.reserve(st.wrecks.size() * 2 + opt.reserved_wreck_ids.size() + 16);
+
+  for (Id wid : opt.reserved_wreck_ids) {
+    if (wid != kInvalidId) reserved_wrecks.insert(wid);
+  }
+
+  if (opt.reserve_wrecks_targeted_by_existing_orders) {
+    auto mark_if_salvage = [&](const Order& o) {
+      if (const auto* sw = std::get_if<SalvageWreck>(&o)) {
+        if (sw->wreck_id != kInvalidId) reserved_wrecks.insert(sw->wreck_id);
+      } else if (const auto* sl = std::get_if<SalvageWreckLoop>(&o)) {
+        if (sl->wreck_id != kInvalidId) reserved_wrecks.insert(sl->wreck_id);
+      }
+    };
+
+    for (const auto& [sid, so] : st.ship_orders) {
+      const Ship* sh = find_ptr(st.ships, sid);
+      if (!sh || sh->faction_id != faction_id) continue;
+
+      for (const auto& o : so.queue) mark_if_salvage(o);
+
+      if (so.repeat) {
+        for (const auto& o : so.repeat_template) mark_if_salvage(o);
+      }
+
+      if (so.suspended) {
+        for (const auto& o : so.suspended_queue) mark_if_salvage(o);
+        if (so.suspended_repeat) {
+          for (const auto& o : so.suspended_repeat_template) mark_if_salvage(o);
+        }
+      }
+    }
+  }
+
   // --- Friendly colonies (owned only; mirrors freight planner).
   std::vector<Id> colony_ids;
   colony_ids.reserve(st.colonies.size());
@@ -91,6 +130,8 @@ SalvagePlannerResult compute_salvage_plan(const Simulation& sim, Id faction_id, 
     if (wid == kInvalidId) continue;
     if (w.system_id == kInvalidId) continue;
     if (!find_ptr(st.systems, w.system_id)) continue;
+
+    if (reserved_wrecks.contains(wid)) continue;
 
     if (opt.restrict_to_discovered && !sim.is_system_discovered_by_faction(faction_id, w.system_id)) continue;
     if (opt.avoid_hostile_systems && !sim.detected_hostile_ships_in_system(faction_id, w.system_id).empty()) continue;
@@ -141,6 +182,15 @@ SalvagePlannerResult compute_salvage_plan(const Simulation& sim, Id faction_id, 
     if (!sh) continue;
     if (sh->faction_id != faction_id) continue;
 
+    if (opt.require_auto_salvage_flag && !sh->auto_salvage) continue;
+    if (opt.exclude_conflicting_automation_flags) {
+      if (sh->auto_mine) continue;
+      if (sh->auto_freight) continue;
+      if (sh->auto_explore) continue;
+      if (sh->auto_colonize) continue;
+      if (sh->auto_tanker) continue;
+    }
+
     if (opt.exclude_fleet_ships && sim.fleet_for_ship(sid) != kInvalidId) continue;
 
     if (opt.require_idle) {
@@ -190,9 +240,6 @@ SalvagePlannerResult compute_salvage_plan(const Simulation& sim, Id faction_id, 
   }
 
   // --- Assignments ---
-  std::unordered_set<Id> reserved_wrecks;
-  reserved_wrecks.reserve(wrecks.size() * 2 + 8);
-
   // (A) Deliver existing cargo first.
   std::vector<ShipInfo> salvage_ships;
   salvage_ships.reserve(ships.size());
