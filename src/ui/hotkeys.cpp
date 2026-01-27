@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <string>
+#include <istream>
 #include <sstream>
 #include <unordered_map>
 

@@ -157,7 +157,7 @@ void focus_context(Simulation& sim, UIState& ui, const NotificationEntry& e, Id&
   if (e.ship_id != kInvalidId) {
     selected_ship = e.ship_id;
     ui.show_details_window = true;
-    ui.request_details_tab = DetailsTab::Orders;
+    ui.request_details_tab = DetailsTab::Ship;
     return;
   }
   if (e.colony_id != kInvalidId) {
@@ -247,7 +247,7 @@ void promote_to_journal(Simulation& sim, UIState& ui, const NotificationEntry& e
   je.anomaly_id = e.anomaly_id;
   je.wreck_id = e.wreck_id;
 
-  sim.push_journal_entry(target_faction, je);
+  sim.add_journal_entry(target_faction, je);
 
   // Surface the result.
   ui.show_intel_notebook_window = true;
@@ -416,7 +416,7 @@ void draw_notifications_window(Simulation& sim, UIState& ui, Id& selected_ship, 
           ImGui::SameLine();
 
           const bool selected = (s.selected_id == e.id);
-          ImGuiSelectableFlags sel_flags = ImGuiSelectableFlags_SpanAvailWidth;
+          ImGuiSelectableFlags sel_flags = ImGuiSelectableFlags_SpanAllColumns;
           if (ImGui::Selectable(e.message.c_str(), selected, sel_flags)) {
             s.selected_id = e.id;
             e.unread = false;

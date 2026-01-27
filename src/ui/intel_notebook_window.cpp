@@ -1008,7 +1008,7 @@ void draw_intel_notebook_window(Simulation& sim, UIState& ui, Id& selected_ship,
             if (!st.compose_attach_system) je.system_id = s.selected_system;
           }
 
-          sim.push_journal_entry(viewer_faction_id, je);
+          sim.add_journal_entry(viewer_faction_id, je);
 
           // Reset compose buffer but keep category.
           st.compose_title.clear();

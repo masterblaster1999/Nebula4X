@@ -53,7 +53,7 @@ void prune_by_age(const Simulation& sim, UIState& ui) {
   clamp_retention(ui);
   if (ui.notifications_keep_days <= 0) return;
   const auto& st = sim.state();
-  const std::int64_t now_day = st.date.days_since_epoch;
+  const std::int64_t now_day = st.date.days_since_epoch();
   const std::int64_t min_day = now_day - static_cast<std::int64_t>(ui.notifications_keep_days);
   ui.notifications.erase(
       std::remove_if(ui.notifications.begin(), ui.notifications.end(), [&](const NotificationEntry& e) {

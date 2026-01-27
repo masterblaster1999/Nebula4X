@@ -6,6 +6,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <utility>
 
 #include "nebula4x/core/game_state.h"
 
@@ -2961,6 +2962,13 @@ bool move_construction_order(Id colony_id, int from_index, int to_index);
 
   // Design lookup (includes custom designs).
   const ShipDesign* find_design(const std::string& design_id) const;
+
+  // Append a narrative journal entry to a faction.
+  //
+  // This is a curated story layer over the raw event log and is safe for UI use.
+  void add_journal_entry(Id faction_id, JournalEntry entry) {
+    push_journal_entry(faction_id, std::move(entry));
+  }
 
  private:
   void recompute_body_positions();

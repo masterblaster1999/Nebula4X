@@ -368,6 +368,9 @@ struct NotificationEntry {
   Id system_id{kInvalidId};
   Id ship_id{kInvalidId};
   Id colony_id{kInvalidId};
+  Id body_id{kInvalidId};
+  Id anomaly_id{kInvalidId};
+  Id wreck_id{kInvalidId};
   Id faction_id{kInvalidId};
   Id faction_id2{kInvalidId};
 

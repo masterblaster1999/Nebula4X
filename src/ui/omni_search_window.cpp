@@ -2031,7 +2031,7 @@ void draw_omni_search_window(Simulation& sim, UIState& ui, Id& selected_ship, Id
                     ImGui::SameLine();
                     ImGui::TextDisabled("[%zu]", idx);
                     ImGui::SameLine();
-                    ImGui::TextDisabled("%s", json_type_name((*a)[idx]).c_str());
+                    ImGui::TextDisabled("%s", json_type_name((*a)[idx]));
                     ImGui::SameLine();
                     const std::string pv = json_node_preview((*a)[idx], 80);
                     ImGui::TextUnformatted(pv.c_str());
@@ -2061,7 +2061,7 @@ void draw_omni_search_window(Simulation& sim, UIState& ui, Id& selected_ship, Id
                     ImGui::SameLine();
                     ImGui::TextDisabled("%s", kv.first.c_str());
                     ImGui::SameLine();
-                    ImGui::TextDisabled("%s", json_type_name(kv.second).c_str());
+                    ImGui::TextDisabled("%s", json_type_name(kv.second));
                     ImGui::SameLine();
                     const std::string pv = json_node_preview(kv.second, 80);
                     ImGui::TextUnformatted(pv.c_str());
