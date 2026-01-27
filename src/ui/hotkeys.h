@@ -2,6 +2,7 @@
 
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include "ui/ui_state.h"
@@ -61,6 +62,9 @@ bool capture_hotkey_chord(HotkeyChord* out, bool* capture_cancelled = nullptr);
 
 // Export/import: newline-separated "id=Chord" text. Intended for clipboard share.
 std::string export_hotkeys_text(const UIState& ui);
+bool parse_hotkeys_text(std::string_view text,
+                        std::unordered_map<std::string, HotkeyChord>* out,
+                        std::string* error = nullptr);
 bool import_hotkeys_text(UIState& ui, std::string_view text, std::string* error = nullptr);
 
 } // namespace nebula4x::ui

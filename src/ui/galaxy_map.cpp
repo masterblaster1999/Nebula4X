@@ -4000,8 +4000,7 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
             if (ImGui::SmallButton(("#" + t).c_str())) {
               // Quick jump back into search for this tag.
               std::string qq = "#" + t;
-              std::strncpy(find_query, qq.c_str(), sizeof(find_query));
-              find_query[sizeof(find_query) - 1] = '\0';
+              std::snprintf(find_query, sizeof(find_query), "%s", qq.c_str());
               pinned_only = false;
             }
             if (ImGui::BeginPopupContextItem()) {

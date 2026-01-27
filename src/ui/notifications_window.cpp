@@ -230,6 +230,36 @@ void promote_to_journal(Simulation& sim, UIState& ui, const NotificationEntry& e
   je.text += "Original time: " + original_ts + "\n\n";
   je.text += e.message;
 
+  // Capture the user's current selection context (useful when the notification is generic).
+  {
+    std::string ctx;
+    if (selected_ship != kInvalidId) {
+      if (const auto* sh = find_ptr(sim.state().ships, selected_ship)) {
+        ctx += "- Ship: " + sh->name + " (" + std::to_string(selected_ship) + ")\n";
+      } else {
+        ctx += "- Ship: (" + std::to_string(selected_ship) + ")\n";
+      }
+    }
+    if (selected_colony != kInvalidId) {
+      if (const auto* c = find_ptr(sim.state().colonies, selected_colony)) {
+        ctx += "- Colony: " + c->name + " (" + std::to_string(selected_colony) + ")\n";
+      } else {
+        ctx += "- Colony: (" + std::to_string(selected_colony) + ")\n";
+      }
+    }
+    if (selected_body != kInvalidId) {
+      if (const auto* b = find_ptr(sim.state().bodies, selected_body)) {
+        ctx += "- Body: " + b->name + " (" + std::to_string(selected_body) + ")\n";
+      } else {
+        ctx += "- Body: (" + std::to_string(selected_body) + ")\n";
+      }
+    }
+    if (!ctx.empty()) {
+      je.text += "\n\n---\nContext at capture:\n";
+      je.text += ctx;
+    }
+  }
+
   if (e.source == NotificationSource::WatchboardAlert) {
     if (!e.watch_label.empty()) {
       je.text += "\n\nWatchboard: " + e.watch_label;

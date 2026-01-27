@@ -5,8 +5,8 @@
 #include <algorithm>
 #include <cctype>
 #include <string>
-#include <istream>
 #include <sstream>
+#include <string_view>
 #include <unordered_map>
 
 #include "nebula4x/util/strings.h"
@@ -55,6 +55,32 @@ bool ieq(std::string_view a, std::string_view b) {
     if (std::tolower(static_cast<unsigned char>(a[i])) != std::tolower(static_cast<unsigned char>(b[i]))) return false;
   }
   return true;
+}
+
+std::string_view consume_line(std::string_view* s) {
+  if (!s || s->empty()) return {};
+  const std::size_t p = s->find_first_of("\r\n");
+  if (p == std::string_view::npos) {
+    const std::string_view line = *s;
+    s->remove_prefix(s->size());
+    return line;
+  }
+  const std::string_view line = s->substr(0, p);
+  std::size_t adv = 1;
+  if (p + 1 < s->size()) {
+    const char c0 = (*s)[p];
+    const char c1 = (*s)[p + 1];
+    if ((c0 == '\r' && c1 == '\n') || (c0 == '\n' && c1 == '\r')) adv = 2;
+  }
+  s->remove_prefix(p + adv);
+  return line;
+}
+
+bool hotkey_id_known(std::string_view id) {
+  for (const auto& d : hotkey_defs()) {
+    if (id == d.id) return true;
+  }
+  return false;
 }
 
 ImGuiKey find_key_by_name(std::string_view name) {
@@ -410,22 +436,26 @@ std::string export_hotkeys_text(const UIState& ui) {
   return oss.str();
 }
 
-bool import_hotkeys_text(UIState& ui, std::string_view text, std::string* error) {
+bool parse_hotkeys_text(std::string_view text,
+                        std::unordered_map<std::string, HotkeyChord>* out,
+                        std::string* error) {
   if (error) error->clear();
+  if (!out) return false;
+  out->clear();
 
-  std::istringstream iss(std::string(text));
-  std::string line;
   int line_no = 0;
-  int applied = 0;
+  int meaningful_no = 0;
   int failed = 0;
 
-  while (std::getline(iss, line)) {
+  std::string_view remain = text;
+  while (!remain.empty()) {
     ++line_no;
-    // Trim.
-    line = trim_ascii(line);
+    std::string line = trim_ascii(consume_line(&remain));
     if (line.empty()) continue;
     if (line[0] == '#') continue;
-    if (line_no == 1 && nebula4x::to_lower(line) == "nebula-hotkeys-v1") continue;
+
+    ++meaningful_no;
+    if (meaningful_no == 1 && nebula4x::to_lower(line) == "nebula-hotkeys-v1") continue;
 
     const auto eq = line.find('=');
     if (eq == std::string::npos) {
@@ -441,6 +471,13 @@ bool import_hotkeys_text(UIState& ui, std::string_view text, std::string* error)
       if (error && error->empty()) *error = "Empty hotkey id at line " + std::to_string(line_no);
       continue;
     }
+    if (!hotkey_id_known(id)) {
+      ++failed;
+      if (error && error->empty()) {
+        *error = "Unknown hotkey id '" + id + "' at line " + std::to_string(line_no);
+      }
+      continue;
+    }
 
     HotkeyChord c;
     std::string perr;
@@ -451,12 +488,24 @@ bool import_hotkeys_text(UIState& ui, std::string_view text, std::string* error)
       }
       continue;
     }
-    hotkey_set(ui, id, c);
-    ++applied;
+
+    // Keep the last assignment if the id is repeated.
+    (*out)[id] = c;
   }
 
-  if (failed > 0) return false;
-  (void)applied;
+  if (failed > 0) {
+    out->clear();
+    return false;
+  }
+  return true;
+}
+
+bool import_hotkeys_text(UIState& ui, std::string_view text, std::string* error) {
+  std::unordered_map<std::string, HotkeyChord> parsed;
+  if (!parse_hotkeys_text(text, &parsed, error)) return false;
+  for (const auto& [id, chord] : parsed) {
+    (void)hotkey_set(ui, id, chord);
+  }
   return true;
 }
 

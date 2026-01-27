@@ -31,6 +31,15 @@ void draw_hotkeys_settings_tab(UIState& ui, UIPrefActions& actions) {
   static std::string status;
   static std::string last_error;
 
+  struct PendingImport {
+    bool open = false;
+    std::string text;
+    std::unordered_map<std::string, HotkeyChord> parsed;
+    bool show_only_changes = true;
+    bool show_conflicts_only = false;
+  };
+  static PendingImport imp;
+
   // Clear capture state if we are not waiting for a chord anymore.
   ui.hotkeys_capture_active = !ui.hotkeys_capture_id.empty();
 
@@ -60,12 +69,18 @@ void draw_hotkeys_settings_tab(UIState& ui, UIPrefActions& actions) {
       last_error = "Clipboard is empty.";
       status.clear();
     } else {
+      imp.text = clip;
+      imp.parsed.clear();
       std::string err;
-      if (!import_hotkeys_text(ui, clip, &err)) {
-        last_error = err.empty() ? "Failed to import hotkeys." : err;
+      if (!parse_hotkeys_text(imp.text, &imp.parsed, &err)) {
+        last_error = err.empty() ? "Failed to parse hotkeys." : err;
         status.clear();
       } else {
-        status = "Imported hotkeys from clipboard.";
+        imp.open = true;
+        imp.show_only_changes = true;
+        imp.show_conflicts_only = false;
+        ImGui::OpenPopup("Import Hotkeys");
+        status.clear();
         last_error.clear();
       }
     }
@@ -84,6 +99,132 @@ void draw_hotkeys_settings_tab(UIState& ui, UIPrefActions& actions) {
   if (!last_error.empty()) {
     ImGui::Spacing();
     ImGui::TextColored(ImVec4(1, 0.35f, 0.35f, 1), "%s", last_error.c_str());
+  }
+
+  if (ImGui::BeginPopupModal("Import Hotkeys", &imp.open, ImGuiWindowFlags_AlwaysAutoResize)) {
+    // Build preview + conflict info against the current state.
+    std::unordered_map<std::string, std::vector<std::string>> chord_to_ids;
+    chord_to_ids.reserve(hotkey_defs().size());
+
+    int changes = 0;
+    for (const auto& d : hotkey_defs()) {
+      const std::string id = d.id;
+      const std::string cur_s = hotkey_to_string(hotkey_get(ui, id));
+      std::string next_s = cur_s;
+      if (auto it = imp.parsed.find(id); it != imp.parsed.end()) {
+        next_s = hotkey_to_string(it->second);
+      }
+      if (next_s != cur_s) ++changes;
+      if (!next_s.empty()) chord_to_ids[next_s].push_back(id);
+    }
+
+    int conflict_groups = 0;
+    for (const auto& [ch, ids] : chord_to_ids) {
+      if (ids.size() > 1) ++conflict_groups;
+    }
+
+    ImGui::TextWrapped("Previewing %zu imported bindings.", imp.parsed.size());
+    ImGui::TextDisabled("This will change %d bindings. Conflicting chord groups after import: %d.", changes,
+                        conflict_groups);
+
+    ImGui::Checkbox("Show only changes", &imp.show_only_changes);
+    ImGui::SameLine();
+    ImGui::Checkbox("Show conflicts only", &imp.show_conflicts_only);
+
+    ImGui::Spacing();
+
+    const ImGuiTableFlags tf = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_Resizable |
+                               ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_ScrollY;
+    if (ImGui::BeginTable("##import_preview", 6, tf, ImVec2(980, 420))) {
+      ImGui::TableSetupColumn("Category", ImGuiTableColumnFlags_WidthFixed, 140.0f);
+      ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthStretch);
+      ImGui::TableSetupColumn("Current", ImGuiTableColumnFlags_WidthFixed, 140.0f);
+      ImGui::TableSetupColumn("Imported", ImGuiTableColumnFlags_WidthFixed, 140.0f);
+      ImGui::TableSetupColumn("Result", ImGuiTableColumnFlags_WidthFixed, 140.0f);
+      ImGui::TableSetupColumn("Conflict", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+      ImGui::TableHeadersRow();
+
+      for (const auto& d : hotkey_defs()) {
+        const std::string id = d.id;
+        const std::string cur_s = hotkey_to_string(hotkey_get(ui, id));
+        const auto it = imp.parsed.find(id);
+        const bool has_imp = (it != imp.parsed.end());
+        const std::string imp_s = has_imp ? hotkey_to_string(it->second) : std::string();
+        const std::string next_s = has_imp ? imp_s : cur_s;
+
+        const std::string cur_disp = cur_s.empty() ? "Unbound" : cur_s;
+        const std::string imp_disp = !has_imp ? "-" : (imp_s.empty() ? "Unbound" : imp_s);
+        const std::string next_disp = next_s.empty() ? "Unbound" : next_s;
+
+        const bool changed = (next_s != cur_s);
+        const bool conflict = !next_s.empty() && chord_to_ids[next_s].size() > 1;
+        if (imp.show_only_changes && !changed) continue;
+        if (imp.show_conflicts_only && !conflict) continue;
+
+        ImGui::TableNextRow();
+        ImGui::TableSetColumnIndex(0);
+        ImGui::TextUnformatted(d.category);
+
+        ImGui::TableSetColumnIndex(1);
+        ImGui::TextUnformatted(d.label);
+        if (d.description && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+          ImGui::SetTooltip("%s", d.description);
+        }
+
+        ImGui::TableSetColumnIndex(2);
+        ImGui::TextDisabled("%s", cur_disp.c_str());
+
+        ImGui::TableSetColumnIndex(3);
+        if (!has_imp) {
+          ImGui::TextDisabled("-");
+        } else {
+          ImGui::TextUnformatted(imp_disp.c_str());
+        }
+
+        ImGui::TableSetColumnIndex(4);
+        if (changed) {
+          ImGui::TextUnformatted(next_disp.c_str());
+        } else {
+          ImGui::TextDisabled("%s", next_disp.c_str());
+        }
+
+        ImGui::TableSetColumnIndex(5);
+        if (conflict) {
+          ImGui::TextColored(ImVec4(1, 0.8f, 0.2f, 1), "Yes");
+          if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+            const auto& ids = chord_to_ids[next_s];
+            std::string tip = "Conflicts with:\n";
+            for (const auto& other : ids) {
+              if (other == id) continue;
+              tip += "  - " + other + "\n";
+            }
+            ImGui::SetTooltip("%s", tip.c_str());
+          }
+        } else {
+          ImGui::TextDisabled("-");
+        }
+      }
+
+      ImGui::EndTable();
+    }
+
+    ImGui::Spacing();
+    if (ImGui::Button("Apply")) {
+      for (const auto& [id, chord] : imp.parsed) {
+        (void)hotkey_set(ui, id, chord);
+      }
+      status = "Imported hotkeys from clipboard.";
+      last_error.clear();
+      imp.open = false;
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel")) {
+      imp.open = false;
+      ImGui::CloseCurrentPopup();
+    }
+
+    ImGui::EndPopup();
   }
 
   ImGui::Spacing();
