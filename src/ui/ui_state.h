@@ -1036,6 +1036,9 @@ bool viewports_no_decoration{false};
 
   // UI-only feedback (not persisted).
   std::string layout_profile_status;
+  // UI-only time marker (ImGui::GetTime()) for layout_profile_status.
+  // Useful for fading/auto-clearing status messages.
+  double layout_profile_status_time{0.0};
 
   // Event toast notifications (warn/error popups).
   bool show_event_toasts{true};

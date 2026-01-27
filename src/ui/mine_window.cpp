@@ -459,7 +459,8 @@ void draw_mine_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& selec
         if (ImGui::SmallButton("Apply")) {
           const bool ok = nebula4x::apply_mine_assignment(sim, asg, mw.clear_orders_before_apply);
           if (!ok) {
-            nebula4x::log::warn("Mine Planner: failed to apply assignment for ship {}", static_cast<unsigned long long>(asg.ship_id));
+            nebula4x::log::warn(std::string("Mine Planner: failed to apply assignment for ship ") +
+                               std::to_string(static_cast<unsigned long long>(asg.ship_id)));
           }
           mw.have_plan = false;
         }

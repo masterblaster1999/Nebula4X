@@ -456,6 +456,7 @@ struct SearchResult {
   std::string key;     // For JsonNode pins.
   std::string type;    // Kind label ("ship", "doc", "string", etc).
   std::string preview; // Small preview snippet/value.
+  std::string hint;    // Optional additional guidance (e.g., shortcut hint).
 
   // Action payload.
   int action_id{0};
@@ -684,8 +685,9 @@ void refresh_doc(OmniSearchState& s, Simulation& sim, const UIState& ui, bool fo
 
   // Ensure we have a reasonably fresh game-state JSON snapshot.
   ensure_game_json_cache(sim, now, ui.omni_search_refresh_sec, force);
-  s.root = game_json_cache_root();
-  s.doc_revision = game_json_cache_revision();
+  const auto& cache = game_json_cache();
+  s.root = cache.root;
+  s.doc_revision = cache.revision;
   s.doc_loaded = static_cast<bool>(s.root);
   s.last_refresh_time = now;
 
@@ -720,15 +722,8 @@ void add_action_results(OmniSearchState& s, const UIState& ui) {
     r.type = "action";
     r.path = label;
     r.preview = a.desc ? a.desc : "";
+    r.hint = a.shortcut_hint ? a.shortcut_hint : "";
     r.action_id = static_cast<int>(a.id);
-
-    if (a.shortcut_hint && !r.preview.empty()) {
-      r.preview += " (";
-      r.preview += a.shortcut_hint;
-      r.preview += ")";
-    } else if (a.shortcut_hint && r.preview.empty()) {
-      r.preview = a.shortcut_hint;
-    }
 
     s.results.push_back(std::move(r));
   }
@@ -1509,6 +1504,11 @@ void draw_omni_search_window(Simulation& sim, UIState& ui, Id& selected_ship, Id
   // Query input.
   bool query_enter = false;
   {
+    // Focus the query field when the window is opened.
+    if (ImGui::IsWindowAppearing()) {
+      ImGui::SetKeyboardFocusHere();
+    }
+
     ImGui::SetNextItemWidth(-FLT_MIN);
     query_enter = ImGui::InputTextWithHint("##omni_query",
                                           "Search…  (prefix: '>' commands, '@' entities, '?' docs, '#' UI)",
@@ -1523,6 +1523,9 @@ void draw_omni_search_window(Simulation& sim, UIState& ui, Id& selected_ship, Id
 
   if (query_changed) {
     s.last_query = q_now;
+    start_scan(s, sim, ui, selected_ship, selected_colony, selected_body);
+  } else if (ImGui::IsWindowAppearing()) {
+    // First open: populate initial results for the current query.
     start_scan(s, sim, ui, selected_ship, selected_colony, selected_body);
   }
 
@@ -1559,7 +1562,31 @@ void draw_omni_search_window(Simulation& sim, UIState& ui, Id& selected_ship, Id
 
   ImGui::Separator();
 
-  // Left: results table.
+  // Keyboard navigation (while typing): Ctrl+Up/Down/… moves selection.
+  {
+    const ImGuiIO& io = ImGui::GetIO();
+    const int n = (int)s.results.size();
+    if (n > 0) {
+      auto clamp = [&](int idx) {
+        if (idx < 0) return 0;
+        if (idx >= n) return n - 1;
+        return idx;
+      };
+
+      const int cur = (s.selected_idx >= 0) ? s.selected_idx : 0;
+
+      if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_UpArrow)) s.selected_idx = clamp(cur - 1);
+      if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_DownArrow)) s.selected_idx = clamp(cur + 1);
+      if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_PageUp)) s.selected_idx = clamp(cur - 10);
+      if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_PageDown)) s.selected_idx = clamp(cur + 10);
+      if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Home)) s.selected_idx = 0;
+      if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_End)) s.selected_idx = n - 1;
+    } else {
+      s.selected_idx = -1;
+    }
+  }
+
+  // Split view: results list (left) + details panel (right).
   const float left_w = ImGui::GetContentRegionAvail().x * 0.58f;
   ImGui::BeginChild("##omni_left", ImVec2(left_w, 0.0f), true);
   {
@@ -1568,6 +1595,7 @@ void draw_omni_search_window(Simulation& sim, UIState& ui, Id& selected_ship, Id
       ImGui::BulletText("> map");
       ImGui::BulletText("@ terra");
       ImGui::BulletText("? hotkeys");
+      ImGui::BulletText("# layout");
       ImGui::BulletText("research labs");
     } else {
       const ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_BordersInnerV |
@@ -1580,273 +1608,487 @@ void draw_omni_search_window(Simulation& sim, UIState& ui, Id& selected_ship, Id
         ImGui::TableSetupColumn("Preview", ImGuiTableColumnFlags_WidthStretch, 0.45f);
         ImGui::TableHeadersRow();
 
-        for (int i = 0; i < (int)s.results.size(); ++i) {
-          const auto& r = s.results[(std::size_t)i];
-          ImGui::PushID(i);
+        ImGuiListClipper clipper;
+        clipper.Begin((int)s.results.size());
+        while (clipper.Step()) {
+          for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
+            const SearchResult& r = s.results[(std::size_t)i];
+            ImGui::PushID(i);
 
-          ImGui::TableNextRow();
-          ImGui::TableSetColumnIndex(0);
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
 
-          const bool selected = (i == s.selected_idx);
-          const bool row_clicked =
-              ImGui::Selectable("##row", selected, ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowItemOverlap);
-          if (row_clicked) s.selected_idx = i;
+            const bool selected = (i == s.selected_idx);
+            const bool row_clicked =
+                ImGui::Selectable("##row", selected,
+                                 ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowItemOverlap);
+            if (row_clicked) s.selected_idx = i;
 
-          // Double-click to activate.
-          if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
-            if (activate_result(r, sim, ui, selected_ship, selected_colony, selected_body)) {
-              ui.show_omni_search_window = false;
-            }
-          }
-
-          // Context menu.
-          if (ImGui::BeginPopupContextItem("##omni_ctx")) {
-            if (s.selected_idx >= 0 && s.selected_idx < (int)s.results.size()) {
-              const SearchResult& r = s.results[s.selected_idx];
-
-              if (r.kind == ResultKind::Action) {
-        ImGui::TextDisabled("Command:");
-        ImGui::TextWrapped("%s", r.path.c_str());
-        if (!r.preview.empty()) {
-          ImGui::TextDisabled("Description:");
-          ImGui::TextWrapped("%s", r.preview.c_str());
-        }
-        if (!r.hint.empty()) {
-          ImGui::TextDisabled("Hint:");
-          ImGui::TextWrapped("%s", r.hint.c_str());
-        }
-        ImGui::Separator();
-        if (ImGui::Button("Run")) {
-          activate_result(r, sim, ui, selected_ship, selected_colony, selected_body);
-          ui.show_omni_search_window = false;
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Copy name")) {
-          ImGui::SetClipboardText(r.path.c_str());
-        }
-      } else if (r.kind == ResultKind::Window) {
-        const WindowSpec* spec = find_window_spec(r.window_id.c_str());
-        if (!spec) {
-          ImGui::TextDisabled("Window spec not found.");
-        } else {
-          const bool is_open = ui.*(spec->open_flag);
-
-          ImGui::TextDisabled("Window:");
-          ImGui::TextWrapped("%s", spec->label);
-          ImGui::TextDisabled("Category:");
-          ImGui::TextWrapped("%s", spec->category);
-          ImGui::TextDisabled("ID:");
-          ImGui::TextWrapped("%s", spec->id);
-
-          ImGui::TextDisabled("State:");
-          ImGui::Text("%s", is_open ? "Open" : "Closed");
-
-          if (spec->supports_popup) {
-            const WindowLaunchMode eff = effective_launch_mode(ui, *spec);
-            ImGui::SameLine();
-            ImGui::TextDisabled("  Launch: %s", window_launch_mode_label(eff).c_str());
-          } else {
-            ImGui::SameLine();
-            ImGui::TextDisabled("  Launch: fixed");
-          }
-
-          if (spec->core) {
-            ImGui::TextDisabled("Core window (not hidden by Focus Mode).");
-          }
-
-          ImGui::Separator();
-          if (ImGui::Button(is_open ? "Close" : "Open")) {
-            ui.*(spec->open_flag) = !is_open;
-          }
-          if (spec->supports_popup) {
-            ImGui::SameLine();
-            if (ImGui::Button("Pop out now")) {
-              ui.*(spec->open_flag) = true;
-              request_popout(ui, spec->id);
-              ui.show_omni_search_window = false;
-            }
-          }
-          ImGui::SameLine();
-          if (ImGui::Button("Window Manager")) {
-            ui.show_window_manager_window = true;
-          }
-
-          if (spec->supports_popup) {
-            ImGui::SeparatorText("Launch override");
-            const bool has_override =
-                (ui.window_launch_overrides.find(spec->id) != ui.window_launch_overrides.end());
-            if (ImGui::Button("Docked")) {
-              ui.window_launch_overrides[spec->id] = static_cast<int>(WindowLaunchMode::Docked);
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("Pop out (floating)")) {
-              ui.window_launch_overrides[spec->id] = static_cast<int>(WindowLaunchMode::Popup);
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("Clear")) {
-              ui.window_launch_overrides.erase(spec->id);
+            // Double-click to activate.
+            if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
+              if (activate_result(r, sim, ui, selected_ship, selected_colony, selected_body)) {
+                ui.show_omni_search_window = false;
+              }
             }
 
-            if (!has_override) {
-              ImGui::TextDisabled("Tip: hold Shift while activating a window result to pop it out.");
+            // Context menu: quick actions.
+            if (ImGui::BeginPopupContextItem("##omni_ctx")) {
+              bool close = false;
+
+              if (ImGui::MenuItem("Activate")) {
+                if (activate_result(r, sim, ui, selected_ship, selected_colony, selected_body)) close = true;
+              }
+
+              if (r.kind == ResultKind::Window) {
+                const WindowSpec* spec = find_window_spec(r.window_id.c_str());
+                if (spec) {
+                  const bool is_open = ui.*(spec->open_flag);
+                  if (ImGui::MenuItem(is_open ? "Close" : "Open")) ui.*(spec->open_flag) = !is_open;
+                  if (spec->supports_popup && ImGui::MenuItem("Pop out (floating)")) {
+                    ui.*(spec->open_flag) = true;
+                    request_popout(ui, spec->id);
+                  }
+                }
+              } else if (r.kind == ResultKind::JsonNode) {
+                if (ImGui::MenuItem("Open in JSON Explorer")) {
+                  open_in_json_explorer(ui, r.path);
+                  close = true;
+                }
+                if (ImGui::MenuItem("Pin to Watchboard")) {
+                  (void)add_watch_item(ui, r.path);
+                  ui.show_watchboard_window = true;
+                }
+
+                // Power shortcuts for arrays (spawn tooling around a JSON array).
+                if (s.root) {
+                  std::string err;
+                  const auto* v = nebula4x::resolve_json_pointer(*s.root, r.path,
+                                                               /*accept_root_slash=*/true,
+                                                               &err);
+                  if (v && v->is_array()) {
+                    ImGui::Separator();
+                    if (ImGui::MenuItem("Create Data Lens")) {
+                      (void)add_json_table_view(ui, r.path);
+                      ui.show_data_lenses_window = true;
+                    }
+                    if (ImGui::MenuItem("Create Dashboard")) {
+                      (void)add_json_dashboard_for_path(ui, r.path);
+                      ui.show_dashboards_window = true;
+                    }
+                    if (ImGui::MenuItem("Create Pivot")) {
+                      (void)add_json_pivot_for_path(ui, r.path);
+                      ui.show_pivot_tables_window = true;
+                    }
+                  } else {
+                    (void)err;
+                  }
+                }
+              } else if (r.kind == ResultKind::Entity) {
+                if (ImGui::MenuItem("Inspect")) {
+                  ui.show_entity_inspector_window = true;
+                  ui.entity_inspector_id = r.entity_id;
+                  close = true;
+                }
+                if (!r.entity_json_path.empty() && ImGui::MenuItem("Open JSON")) {
+                  open_in_json_explorer(ui, r.entity_json_path);
+                  close = true;
+                }
+              } else if (r.kind == ResultKind::Doc) {
+                if (ImGui::MenuItem("Open in Codex")) {
+                  open_doc_in_codex(ui, r.doc_ref);
+                  close = true;
+                }
+              }
+
+              if (!r.path.empty() && ImGui::MenuItem("Copy path/title")) {
+                ImGui::SetClipboardText(r.path.c_str());
+              }
+
+              if (close) ui.show_omni_search_window = false;
+              ImGui::EndPopup();
             }
-          }
-        }
-      } else if (r.kind == ResultKind::WorkspacePreset) {
-        ImGui::TextDisabled("Workspace preset:");
-        ImGui::TextWrapped("%s", r.workspace_preset.c_str());
 
-        if (!r.preview.empty()) {
-          ImGui::TextDisabled("Description:");
-          ImGui::TextWrapped("%s", r.preview.c_str());
-        }
+            // Row contents.
+            ImGui::TableSetColumnIndex(0);
+            ImGui::Text("%d", r.score);
 
-        if (focus_mode_enabled(ui)) {
-          ImGui::TextDisabled("Note: applying a workspace exits Focus Mode.");
-        }
+            ImGui::TableSetColumnIndex(1);
+            ImGui::TextUnformatted(r.type.c_str());
 
-        ImGui::Separator();
-        if (ImGui::Button("Apply preset")) {
-          activate_result(r, sim, ui, selected_ship, selected_colony, selected_body);
-          ui.show_omni_search_window = false;
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Copy name")) {
-          ImGui::SetClipboardText(r.workspace_preset.c_str());
-        }
-      } else if (r.kind == ResultKind::LayoutProfile) {
-        const std::string dir =
-            (ui.layout_profiles_dir[0] ? std::string(ui.layout_profiles_dir) : std::string("ui_layouts"));
-        const std::string name = sanitize_layout_profile_name(r.layout_profile);
-        const std::string active = sanitize_layout_profile_name(ui.layout_profile);
+            ImGui::TableSetColumnIndex(2);
+            ImGui::TextUnformatted(r.path.c_str());
 
-        ImGui::TextDisabled("Layout profile:");
-        ImGui::TextWrapped("%s", name.c_str());
-
-        ImGui::TextDisabled("Status:");
-        ImGui::Text("%s", (name == active) ? "Active" : "Inactive");
-
-        ImGui::TextDisabled("Ini path:");
-        const std::string ini_path = make_layout_profile_ini_path(dir.c_str(), name);
-        ImGui::TextWrapped("%s", ini_path.c_str());
-
-        ImGui::Separator();
-        if (ImGui::Button("Activate")) {
-          activate_result(r, sim, ui, selected_ship, selected_colony, selected_body);
-          ui.show_omni_search_window = false;
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Manage Profiles")) {
-          ui.show_layout_profiles_window = true;
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Copy name")) {
-          ImGui::SetClipboardText(name.c_str());
-        }
-      } else if (r.kind == ResultKind::Doc) {
-        ImGui::TextDisabled("Doc:");
-        ImGui::TextWrapped("%s", r.path.c_str());
-        if (!r.preview.empty()) {
-          ImGui::TextDisabled("Summary:");
-          ImGui::TextWrapped("%s", r.preview.c_str());
-        }
-        ImGui::Separator();
-        if (ImGui::Button("Open")) {
-          activate_result(r, sim, ui, selected_ship, selected_colony, selected_body);
-          ui.show_omni_search_window = false;
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Copy ref")) {
-          ImGui::SetClipboardText(r.doc_ref.c_str());
-        }
-      } else if (r.kind == ResultKind::Entity) {
-        ImGui::TextDisabled("Entity:");
-        ImGui::TextWrapped("%s", r.path.c_str());
-        if (!r.preview.empty()) {
-          ImGui::TextDisabled("Details:");
-          ImGui::TextWrapped("%s", r.preview.c_str());
-        }
-        if (r.nav_valid) {
-          ImGui::Separator();
-          if (ImGui::Button("Jump to")) {
-            activate_result(r, sim, ui, selected_ship, selected_colony, selected_body);
-            ui.show_omni_search_window = false;
-          }
-          ImGui::SameLine();
-          if (ImGui::Button("Jump + open windows")) {
-            const NavTarget t{r.nav_kind, r.nav_id};
-            if (nav_target_exists(sim, t)) {
-              apply_nav_target(sim, ui, selected_ship, selected_colony, selected_body, t, /*open_windows=*/true);
-              ui.show_omni_search_window = false;
+            ImGui::TableSetColumnIndex(3);
+            ImGui::TextUnformatted(r.preview.c_str());
+            if (r.kind == ResultKind::Action && !r.hint.empty()) {
+              ImGui::SameLine();
+              ImGui::TextDisabled("(%s)", r.hint.c_str());
             }
+
+            ImGui::PopID();
           }
-        }
-        ImGui::Separator();
-        if (ImGui::Button("Inspect")) {
-          ui.show_entity_inspector_window = true;
-          ui.entity_inspector_id = r.entity_id;
-          ui.show_omni_search_window = false;
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Open JSON")) {
-          open_in_json_explorer(ui, r.entity_json_path);
-          ui.show_omni_search_window = false;
-        }
-      } else {
-        // JsonNode
-        ImGui::TextDisabled("JSON path:");
-        ImGui::TextWrapped("%s", r.path.c_str());
-        if (!r.preview.empty()) {
-          ImGui::TextDisabled("Preview:");
-          ImGui::TextWrapped("%s", r.preview.c_str());
-        }
-        ImGui::Separator();
-        if (ImGui::Button("Open in JSON Explorer")) {
-          activate_result(r, sim, ui, selected_ship, selected_colony, selected_body);
-          ui.show_omni_search_window = false;
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Pin")) {
-          add_watch(ui, r.path, WatchKind::Json);
-          ui.show_watchboard_window = true;
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Copy")) {
-          ImGui::SetClipboardText(r.path.c_str());
         }
 
-        // Resolve node for richer shortcuts.
-        std::string err;
-        const json11::Json* v = resolve_pointer(s.root, r.path, err);
-        if (v && v->is_array()) {
-          ImGui::Separator();
-          if (ImGui::Button("Create Data Lens")) {
-            add_json_table_view(ui, r.path);
-            ui.show_data_lenses_window = true;
-          }
-          ImGui::SameLine();
-          if (ImGui::Button("Create Dashboard")) {
-            add_json_dashboard_for_path(ui, r.path);
-            ui.show_dashboards_window = true;
-          }
-          ImGui::SameLine();
-          if (ImGui::Button("Create Pivot")) {
-            add_json_pivot_for_path(ui, r.path);
-            ui.show_pivot_tables_window = true;
-          }
-        } else if (!err.empty()) {
-          ImGui::TextColored(ImVec4(1, 0.5f, 0.5f, 1), "Resolve error: %s", err.c_str());
-        }
+        ImGui::EndTable();
       }
+    }
+  }
+  ImGui::EndChild();
+
+  ImGui::SameLine();
+  ImGui::BeginChild("##omni_right", ImVec2(0.0f, 0.0f), true);
+  {
+    const SearchResult* sel = nullptr;
+    if (s.selected_idx >= 0 && s.selected_idx < (int)s.results.size()) {
+      sel = &s.results[(std::size_t)s.selected_idx];
+    }
+
+    bool request_close = false;
+
+    if (!sel) {
+      ImGui::TextDisabled("No selection.");
+    } else {
+      ImGui::TextDisabled("Selected");
+      ImGui::TextWrapped("%s", sel->path.c_str());
+      ImGui::TextDisabled("Type: %s", sel->type.c_str());
+      ImGui::Separator();
+
+      switch (sel->kind) {
+        case ResultKind::Action: {
+          if (!sel->preview.empty()) {
+            ImGui::TextDisabled("Description:");
+            ImGui::TextWrapped("%s", sel->preview.c_str());
+          }
+          if (!sel->hint.empty()) {
+            ImGui::TextDisabled("Hint:");
+            ImGui::TextWrapped("%s", sel->hint.c_str());
+          }
+          ImGui::Separator();
+          if (ImGui::Button("Run")) {
+            activate_result(*sel, sim, ui, selected_ship, selected_colony, selected_body);
+            request_close = true;
+          }
+          ImGui::SameLine();
+          if (ImGui::Button("Copy name")) {
+            ImGui::SetClipboardText(sel->path.c_str());
+          }
+        } break;
+
+        case ResultKind::Window: {
+          const WindowSpec* spec = find_window_spec(sel->window_id.c_str());
+          if (!spec) {
+            ImGui::TextDisabled("Window spec not found.");
+          } else {
+            const bool is_open = ui.*(spec->open_flag);
+            ImGui::TextDisabled("Window:");
+            ImGui::TextWrapped("%s", spec->label);
+            ImGui::TextDisabled("Category:");
+            ImGui::TextWrapped("%s", spec->category);
+            ImGui::TextDisabled("ID:");
+            ImGui::TextWrapped("%s", spec->id);
+            ImGui::TextDisabled("State:");
+            ImGui::TextUnformatted(is_open ? "Open" : "Closed");
+
+            if (spec->supports_popup) {
+              const WindowLaunchMode eff = effective_launch_mode(ui, *spec);
+              ImGui::SameLine();
+              ImGui::TextDisabled("  Launch: %s", window_launch_mode_label(eff).c_str());
+            } else {
+              ImGui::SameLine();
+              ImGui::TextDisabled("  Launch: fixed");
+            }
+
+            if (spec->core) {
+              ImGui::TextDisabled("Core window (not hidden by Focus Mode).");
+            }
+
+            ImGui::Separator();
+            if (ImGui::Button(is_open ? "Close" : "Open")) {
+              ui.*(spec->open_flag) = !is_open;
+            }
+            if (spec->supports_popup) {
+              ImGui::SameLine();
+              if (ImGui::Button("Pop out now")) {
+                ui.*(spec->open_flag) = true;
+                request_popout(ui, spec->id);
+                request_close = true;
+              }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Window Manager")) {
+              ui.show_window_manager_window = true;
+            }
+
+            if (spec->supports_popup) {
+              ImGui::SeparatorText("Launch override");
+              const bool has_override =
+                  (ui.window_launch_overrides.find(spec->id) != ui.window_launch_overrides.end());
+              if (ImGui::Button("Docked")) {
+                ui.window_launch_overrides[spec->id] = static_cast<int>(WindowLaunchMode::Docked);
+              }
+              ImGui::SameLine();
+              if (ImGui::Button("Pop out (floating)")) {
+                ui.window_launch_overrides[spec->id] = static_cast<int>(WindowLaunchMode::Popup);
+              }
+              ImGui::SameLine();
+              if (ImGui::Button("Clear")) {
+                ui.window_launch_overrides.erase(spec->id);
+              }
+
+              if (!has_override) {
+                ImGui::TextDisabled("Tip: hold Shift while activating a window result to pop it out.");
+              }
+            }
+          }
+        } break;
+
+        case ResultKind::WorkspacePreset: {
+          ImGui::TextDisabled("Workspace preset:");
+          ImGui::TextWrapped("%s", sel->workspace_preset.c_str());
+          if (!sel->preview.empty()) {
+            ImGui::TextDisabled("Description:");
+            ImGui::TextWrapped("%s", sel->preview.c_str());
+          }
+          if (focus_mode_enabled(ui)) {
+            ImGui::TextDisabled("Note: applying a workspace exits Focus Mode.");
+          }
+          ImGui::Separator();
+          if (ImGui::Button("Apply preset")) {
+            activate_result(*sel, sim, ui, selected_ship, selected_colony, selected_body);
+            request_close = true;
+          }
+          ImGui::SameLine();
+          if (ImGui::Button("Copy name")) {
+            ImGui::SetClipboardText(sel->workspace_preset.c_str());
+          }
+        } break;
+
+        case ResultKind::LayoutProfile: {
+          const std::string dir =
+              (ui.layout_profiles_dir[0] ? std::string(ui.layout_profiles_dir) : std::string("ui_layouts"));
+          const std::string name = sanitize_layout_profile_name(sel->layout_profile);
+          const std::string active = sanitize_layout_profile_name(ui.layout_profile);
+
+          ImGui::TextDisabled("Layout profile:");
+          ImGui::TextWrapped("%s", name.c_str());
+
+          ImGui::TextDisabled("Status:");
+          ImGui::TextUnformatted((name == active) ? "Active" : "Inactive");
+
+          ImGui::TextDisabled("Ini path:");
+          const std::string ini_path = make_layout_profile_ini_path(dir.c_str(), name);
+          ImGui::TextWrapped("%s", ini_path.c_str());
+
+          ImGui::Separator();
+          if (ImGui::Button("Activate")) {
+            activate_result(*sel, sim, ui, selected_ship, selected_colony, selected_body);
+            request_close = true;
+          }
+          ImGui::SameLine();
+          if (ImGui::Button("Manage Profiles")) {
+            ui.show_layout_profiles_window = true;
+          }
+          ImGui::SameLine();
+          if (ImGui::Button("Copy name")) {
+            ImGui::SetClipboardText(name.c_str());
+          }
+        } break;
+
+        case ResultKind::Doc: {
+          ImGui::TextDisabled("Doc:");
+          ImGui::TextWrapped("%s", sel->path.c_str());
+          ImGui::TextDisabled("Ref:");
+          ImGui::TextWrapped("%s", sel->doc_ref.c_str());
+          if (!sel->preview.empty()) {
+            ImGui::SeparatorText("Preview");
+            ImGui::TextWrapped("%s", sel->preview.c_str());
+          }
+          ImGui::Separator();
+          if (ImGui::Button("Open")) {
+            activate_result(*sel, sim, ui, selected_ship, selected_colony, selected_body);
+            request_close = true;
+          }
+          ImGui::SameLine();
+          if (ImGui::Button("Copy ref")) {
+            ImGui::SetClipboardText(sel->doc_ref.c_str());
+          }
+        } break;
+
+        case ResultKind::Entity: {
+          ImGui::TextDisabled("Entity id:");
+          ImGui::Text("%llu", (unsigned long long)sel->entity_id);
+          if (!sel->entity_kind.empty()) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("  kind: %s", sel->entity_kind.c_str());
+          }
+
+          if (!sel->preview.empty()) {
+            ImGui::SeparatorText("Details");
+            ImGui::TextWrapped("%s", sel->preview.c_str());
+          }
+          if (sel->nav_valid) {
+            ImGui::Separator();
+            if (ImGui::Button("Jump to")) {
+              activate_result(*sel, sim, ui, selected_ship, selected_colony, selected_body);
+              request_close = true;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Jump + open windows")) {
+              const NavTarget t{sel->nav_kind, sel->nav_id};
+              if (nav_target_exists(sim, t)) {
+                apply_nav_target(sim, ui, selected_ship, selected_colony, selected_body, t, /*open_windows=*/true);
+                request_close = true;
+              }
+            }
+          }
+          ImGui::Separator();
+          if (ImGui::Button("Inspect")) {
+            ui.show_entity_inspector_window = true;
+            ui.entity_inspector_id = sel->entity_id;
+            request_close = true;
+          }
+          ImGui::SameLine();
+          if (ImGui::Button("Open JSON")) {
+            if (!sel->entity_json_path.empty()) {
+              open_in_json_explorer(ui, sel->entity_json_path);
+              request_close = true;
+            }
+          }
+          ImGui::SameLine();
+          if (ImGui::Button("Copy id")) {
+            const std::string txt = std::to_string((unsigned long long)sel->entity_id);
+            ImGui::SetClipboardText(txt.c_str());
+          }
+        } break;
+
+        case ResultKind::JsonNode: {
+          if (!sel->preview.empty()) {
+            ImGui::TextDisabled("Preview:");
+            ImGui::TextWrapped("%s", sel->preview.c_str());
+          }
+          ImGui::Separator();
+          if (ImGui::Button("Open in JSON Explorer")) {
+            open_in_json_explorer(ui, sel->path);
+            request_close = true;
+          }
+          ImGui::SameLine();
+          if (ImGui::Button("Pin")) {
+            (void)add_watch_item(ui, sel->path);
+            ui.show_watchboard_window = true;
+          }
+          ImGui::SameLine();
+          if (ImGui::Button("Copy")) {
+            ImGui::SetClipboardText(sel->path.c_str());
+          }
+
+          // Resolve node for richer shortcuts.
+          if (s.root) {
+            std::string err;
+            const nebula4x::json::Value* v = nebula4x::resolve_json_pointer(*s.root, sel->path,
+                                                                           /*accept_root_slash=*/true,
+                                                                           &err);
+            if (v) {
+              ImGui::SeparatorText("Resolved");
+              const std::string t = json_type_name(*v);
+              ImGui::TextDisabled("Type:");
+              ImGui::SameLine();
+              ImGui::TextUnformatted(t.c_str());
+
+              if (v->is_array()) {
+                const auto* a = v->as_array();
+                const std::size_t n = a ? a->size() : 0;
+                ImGui::SameLine();
+                ImGui::TextDisabled("  len: %zu", n);
+
+                // Tooling shortcuts for arrays.
+                ImGui::Separator();
+                if (ImGui::Button("Create Data Lens")) {
+                  (void)add_json_table_view(ui, sel->path);
+                  ui.show_data_lenses_window = true;
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Create Dashboard")) {
+                  (void)add_json_dashboard_for_path(ui, sel->path);
+                  ui.show_dashboards_window = true;
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Create Pivot")) {
+                  (void)add_json_pivot_for_path(ui, sel->path);
+                  ui.show_pivot_tables_window = true;
+                }
+
+                // Lightweight inline peek: first few elements.
+                if (a && !a->empty()) {
+                  ImGui::SeparatorText("Sample elements");
+                  const std::size_t show_n = std::min<std::size_t>(a->size(), 12);
+                  for (std::size_t idx = 0; idx < show_n; ++idx) {
+                    ImGui::PushID((int)idx);
+                    const std::string child_ptr = nebula4x::json_pointer_join_index(sel->path, idx);
+                    if (ImGui::SmallButton("Open")) {
+                      open_in_json_explorer(ui, child_ptr);
+                      request_close = true;
+                    }
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("[%zu]", idx);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("%s", json_type_name((*a)[idx]).c_str());
+                    ImGui::SameLine();
+                    const std::string pv = json_node_preview((*a)[idx], 80);
+                    ImGui::TextUnformatted(pv.c_str());
+                    ImGui::PopID();
+                  }
+                  if (a->size() > show_n) {
+                    ImGui::TextDisabled("… (%zu more)", a->size() - show_n);
+                  }
+                }
+              } else if (v->is_object()) {
+                const auto* o = v->as_object();
+                const std::size_t n = o ? o->size() : 0;
+                ImGui::SameLine();
+                ImGui::TextDisabled("  keys: %zu", n);
+
+                if (o && !o->empty()) {
+                  ImGui::SeparatorText("Sample keys");
+                  std::size_t shown = 0;
+                  for (const auto& kv : *o) {
+                    if (shown++ >= 18) break;
+                    const std::string child_ptr = nebula4x::json_pointer_join(sel->path, kv.first);
+                    ImGui::PushID((int)shown);
+                    if (ImGui::SmallButton("Open")) {
+                      open_in_json_explorer(ui, child_ptr);
+                      request_close = true;
+                    }
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("%s", kv.first.c_str());
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("%s", json_type_name(kv.second).c_str());
+                    ImGui::SameLine();
+                    const std::string pv = json_node_preview(kv.second, 80);
+                    ImGui::TextUnformatted(pv.c_str());
+                    ImGui::PopID();
+                  }
+                  if (o->size() > 18) {
+                    ImGui::TextDisabled("… (%zu more)", o->size() - 18);
+                  }
+                }
+              }
+            } else if (!err.empty()) {
+              ImGui::TextColored(ImVec4(1, 0.5f, 0.5f, 1), "Resolve error: %s", err.c_str());
+            }
+          }
+        } break;
+      }
+
+      if (request_close) ui.show_omni_search_window = false;
     }
 
     ImGui::Separator();
     ImGui::TextDisabled("Tips");
-    ImGui::BulletText("Ctrl+F opens OmniSearch. (Ctrl+P opens the Command Palette.)");
+    ImGui::BulletText("Enter or double-click activates the selected result.");
+    ImGui::BulletText("Ctrl+Up/Down navigates results while typing (also Ctrl+PageUp/Down).");
     ImGui::BulletText("Prefixes: '>' commands, '@' entities, '?' docs, '#' UI.");
     ImGui::BulletText("Window results: hold Shift while activating to pop out (floating).");
-    ImGui::BulletText("Enter or double-click activates the selected result.");
-    ImGui::BulletText("Right-click a result for context actions.");
+    ImGui::BulletText("Right-click a result for quick actions.");
     ImGui::BulletText("For JSON arrays: create Data Lenses / Dashboards / Pivot Tables.");
   }
   ImGui::EndChild();
