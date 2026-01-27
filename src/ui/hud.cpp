@@ -5,7 +5,6 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
-#include <iterator>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -791,7 +790,7 @@ std::string make_action_persistent_id(const ActionMeta& m) {
 const std::vector<std::pair<PaletteAction, std::string>>& action_id_table() {
   static const std::vector<std::pair<PaletteAction, std::string>> kTable = [] {
     std::vector<std::pair<PaletteAction, std::string>> tbl;
-    tbl.reserve(std::size(kActionMetas));
+    tbl.reserve(kActionMetas.size());
     for (const auto& m : kActionMetas) {
       tbl.emplace_back(m.action, make_action_persistent_id(m));
     }
