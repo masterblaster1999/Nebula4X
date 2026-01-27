@@ -1,8 +1,12 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <limits>
 #include <random>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -109,6 +113,14 @@ struct TestCase {
   int (*fn)();
 };
 
+struct TestRunResult {
+  std::string name;
+  int rc{0};
+  double time_s{0.0};
+  std::string captured_out;
+  std::string captured_err;
+};
+
 std::string get_env_str(const char* key) {
 #if defined(_MSC_VER)
   // MSVC warns that getenv() is unsafe. _dupenv_s allocates a copy that we own.
@@ -141,6 +153,32 @@ int env_int(const char* key, int def) {
   }
 }
 
+bool parse_int_strict(const std::string& s, int* out) {
+  try {
+    std::size_t idx = 0;
+    const long long v = std::stoll(s, &idx, 10);
+    if (idx != s.size()) return false;
+    if (v < std::numeric_limits<int>::min() || v > std::numeric_limits<int>::max()) return false;
+    *out = static_cast<int>(v);
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
+bool parse_uint_strict(const std::string& s, unsigned* out) {
+  try {
+    std::size_t idx = 0;
+    const unsigned long long v = std::stoull(s, &idx, 10);
+    if (idx != s.size()) return false;
+    if (v > std::numeric_limits<unsigned>::max()) return false;
+    *out = static_cast<unsigned>(v);
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
 unsigned env_uint(const char* key, unsigned def) {
   const std::string v = get_env_str(key);
   if (v.empty()) return def;
@@ -157,6 +195,42 @@ bool contains_substr(const std::string& haystack, const std::string& needle) {
   return haystack.find(needle) != std::string::npos;
 }
 
+std::string xml_escape(const std::string& in) {
+  std::string out;
+  out.reserve(in.size());
+  for (const char c : in) {
+    switch (c) {
+      case '&': out += "&amp;"; break;
+      case '<': out += "&lt;"; break;
+      case '>': out += "&gt;"; break;
+      case '\"': out += "&quot;"; break;
+      case '\'': out += "&apos;"; break;
+      default: out.push_back(c); break;
+    }
+  }
+  return out;
+}
+
+struct StreamCapture {
+  bool enabled{false};
+  std::streambuf* old_out{nullptr};
+  std::streambuf* old_err{nullptr};
+  std::ostringstream out_buf;
+  std::ostringstream err_buf;
+
+  explicit StreamCapture(bool enable) : enabled(enable) {
+    if (!enabled) return;
+    old_out = std::cout.rdbuf(out_buf.rdbuf());
+    old_err = std::cerr.rdbuf(err_buf.rdbuf());
+  }
+
+  ~StreamCapture() {
+    if (!enabled) return;
+    std::cout.rdbuf(old_out);
+    std::cerr.rdbuf(old_err);
+  }
+};
+
 void print_usage(const char* argv0) {
   std::cout << "Nebula4X test runner\n\n";
   std::cout << "Usage: " << argv0 << " [options]\n\n";
@@ -166,12 +240,16 @@ void print_usage(const char* argv0) {
   std::cout << "  -s, --shuffle              Shuffle test order\n";
   std::cout << "      --seed <n>             RNG seed for shuffle (0 = random)\n";
   std::cout << "  -r, --repeat <n>           Repeat selected tests n times (for flake hunting)\n";
+  std::cout << "      --shard-count <n>      Split tests into N shards and run only one shard\n";
+  std::cout << "      --shard-index <i>      Shard index in [0, N-1] (used with --shard-count)\n";
+  std::cout << "      --junit <path>         Write JUnit XML report to <path>\n";
   std::cout << "  -x, --fail-fast            Stop on first failing test\n";
   std::cout << "  -v, --verbose              Print per-test timing and PASS/FAIL\n";
   std::cout << "  -h, --help                 Show this help\n\n";
   std::cout << "Env vars (defaults):\n";
   std::cout << "  N4X_TEST_FILTER, N4X_TEST_SHUFFLE, N4X_TEST_SEED, N4X_TEST_REPEAT,\n";
-  std::cout << "  N4X_TEST_FAIL_FAST, N4X_TEST_VERBOSE\n";
+  std::cout << "  N4X_TEST_FAIL_FAST, N4X_TEST_VERBOSE, N4X_TEST_SHARD_COUNT, N4X_TEST_SHARD_INDEX,\n";
+  std::cout << "  N4X_TEST_JUNIT\n";
 }
 
 } // namespace
@@ -282,6 +360,11 @@ int main(int argc, char** argv) {
   unsigned seed = env_uint("N4X_TEST_SEED", 0);
   int repeat = std::max(1, env_int("N4X_TEST_REPEAT", 1));
   std::string filter = get_env_str("N4X_TEST_FILTER");
+  const int shard_count_default = std::max(1, env_int("N4X_TEST_SHARD_COUNT", 1));
+  const int shard_index_default = std::max(0, env_int("N4X_TEST_SHARD_INDEX", 0));
+  int shard_count = shard_count_default;
+  int shard_index = shard_index_default;
+  std::string junit_path = get_env_str("N4X_TEST_JUNIT");
 
   // Parse arguments (override env defaults).
   for (int i = 1; i < argc; ++i) {
@@ -306,6 +389,70 @@ int main(int argc, char** argv) {
       verbose = true;
       continue;
     }
+    if (a == "--shard-count") {
+      if (i + 1 >= argc) {
+        std::cerr << "Missing value for --shard-count\n";
+        return 2;
+      }
+      {
+        int v = 1;
+        if (!parse_int_strict(argv[++i], &v)) {
+          std::cerr << "Invalid value for --shard-count\n";
+          return 2;
+        }
+        shard_count = std::max(1, v);
+      }
+      continue;
+    }
+    if (a.rfind("--shard-count=", 0) == 0) {
+      {
+        int v = 1;
+        if (!parse_int_strict(a.substr(std::string("--shard-count=").size()), &v)) {
+          std::cerr << "Invalid value for --shard-count\n";
+          return 2;
+        }
+        shard_count = std::max(1, v);
+      }
+      continue;
+    }
+    if (a == "--shard-index") {
+      if (i + 1 >= argc) {
+        std::cerr << "Missing value for --shard-index\n";
+        return 2;
+      }
+      {
+        int v = 0;
+        if (!parse_int_strict(argv[++i], &v)) {
+          std::cerr << "Invalid value for --shard-index\n";
+          return 2;
+        }
+        shard_index = std::max(0, v);
+      }
+      continue;
+    }
+    if (a.rfind("--shard-index=", 0) == 0) {
+      {
+        int v = 0;
+        if (!parse_int_strict(a.substr(std::string("--shard-index=").size()), &v)) {
+          std::cerr << "Invalid value for --shard-index\n";
+          return 2;
+        }
+        shard_index = std::max(0, v);
+      }
+      continue;
+    }
+    if (a == "--junit") {
+      if (i + 1 >= argc) {
+        std::cerr << "Missing value for --junit\n";
+        return 2;
+      }
+      junit_path = argv[++i];
+      continue;
+    }
+    if (a.rfind("--junit=", 0) == 0) {
+      junit_path = a.substr(std::string("--junit=").size());
+      continue;
+    }
     if (a == "-f" || a == "--filter") {
       if (i + 1 >= argc) {
         std::cerr << "Missing value for --filter\n";
@@ -323,11 +470,25 @@ int main(int argc, char** argv) {
         std::cerr << "Missing value for --seed\n";
         return 2;
       }
-      seed = static_cast<unsigned>(std::stoul(argv[++i]));
+      {
+        unsigned v = 0;
+        if (!parse_uint_strict(argv[++i], &v)) {
+          std::cerr << "Invalid value for --seed\n";
+          return 2;
+        }
+        seed = v;
+      }
       continue;
     }
     if (a.rfind("--seed=", 0) == 0) {
-      seed = static_cast<unsigned>(std::stoul(a.substr(std::string("--seed=").size())));
+      {
+        unsigned v = 0;
+        if (!parse_uint_strict(a.substr(std::string("--seed=").size()), &v)) {
+          std::cerr << "Invalid value for --seed\n";
+          return 2;
+        }
+        seed = v;
+      }
       continue;
     }
     if (a == "-r" || a == "--repeat") {
@@ -335,11 +496,25 @@ int main(int argc, char** argv) {
         std::cerr << "Missing value for --repeat\n";
         return 2;
       }
-      repeat = std::max(1, std::stoi(argv[++i]));
+      {
+        int v = 1;
+        if (!parse_int_strict(argv[++i], &v)) {
+          std::cerr << "Invalid value for --repeat\n";
+          return 2;
+        }
+        repeat = std::max(1, v);
+      }
       continue;
     }
     if (a.rfind("--repeat=", 0) == 0) {
-      repeat = std::max(1, std::stoi(a.substr(std::string("--repeat=").size())));
+      {
+        int v = 1;
+        if (!parse_int_strict(a.substr(std::string("--repeat=").size()), &v)) {
+          std::cerr << "Invalid value for --repeat\n";
+          return 2;
+        }
+        repeat = std::max(1, v);
+      }
       continue;
     }
 
@@ -372,6 +547,13 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  if (shard_count < 1) shard_count = 1;
+  if (shard_index < 0) shard_index = 0;
+  if (shard_index >= shard_count) {
+    std::cerr << "Invalid shard index " << shard_index << " for shard count " << shard_count << "\n";
+    return 2;
+  }
+
   // Shuffle order if requested.
   unsigned actual_seed = seed;
   if (shuffle) {
@@ -382,13 +564,56 @@ int main(int argc, char** argv) {
     std::shuffle(selected.begin(), selected.end(), rng);
   }
 
+  // Apply sharding after selection and optional shuffle for predictable subsets.
+  if (shard_count > 1) {
+    std::vector<TestCase> sharded;
+    sharded.reserve(selected.size());
+    for (std::size_t i = 0; i < selected.size(); ++i) {
+      if (static_cast<int>(i % static_cast<std::size_t>(shard_count)) == shard_index) {
+        sharded.push_back(selected[i]);
+      }
+    }
+    selected.swap(sharded);
+  }
+
   if (verbose) {
     std::cout << "Running " << selected.size() << " test(s)";
     if (!filter.empty()) std::cout << " (filter='" << filter << "')";
     if (repeat > 1) std::cout << " x" << repeat;
     if (shuffle) std::cout << " (shuffled, seed=" << actual_seed << ")";
+    if (shard_count > 1) std::cout << " (shard " << shard_index << "/" << shard_count << ")";
+    if (!junit_path.empty()) std::cout << " (junit='" << junit_path << "')";
     std::cout << "\n";
   }
+
+  if (selected.empty()) {
+    // It's valid for a shard to be empty when the number of tests is not a multiple of shard_count.
+    if (verbose && shard_count > 1) {
+      std::cout << "No tests assigned to this shard (index=" << shard_index << ", count=" << shard_count << ")\n";
+    }
+    if (!junit_path.empty()) {
+      try {
+        std::filesystem::path p(junit_path);
+        if (p.has_parent_path()) {
+          std::filesystem::create_directories(p.parent_path());
+        }
+      } catch (...) {
+        // Ignore: we'll still attempt to open the file and let it fail loudly.
+      }
+
+      std::ofstream ofs(junit_path, std::ios::binary);
+      if (ofs) {
+        ofs << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
+        ofs << "<testsuite name=\"nebula4x_tests\" tests=\"0\" failures=\"0\" errors=\"0\" time=\"0\">\n";
+        ofs << "</testsuite>\n";
+      }
+    }
+    return 0;
+  }
+
+  const bool capture = !junit_path.empty();
+  std::vector<TestRunResult> results;
+  if (capture) results.reserve(static_cast<std::size_t>(repeat) * selected.size());
 
   int fails = 0;
   const auto t0 = std::chrono::steady_clock::now();
@@ -401,12 +626,46 @@ int main(int argc, char** argv) {
 
     for (const auto& t : selected) {
       const auto start = std::chrono::steady_clock::now();
-      const int r = t.fn();
+      int r = 0;
+      std::string captured_out;
+      std::string captured_err;
+      {
+        StreamCapture cap(capture);
+        try {
+          r = t.fn();
+        } catch (const std::exception& e) {
+          std::cerr << "Unhandled exception: " << e.what() << "\n";
+          r = 1;
+        } catch (...) {
+          std::cerr << "Unhandled non-standard exception\n";
+          r = 1;
+        }
+        if (capture) {
+          captured_out = cap.out_buf.str();
+          captured_err = cap.err_buf.str();
+        }
+      }
       const auto end = std::chrono::steady_clock::now();
       const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
 
+      if (capture) {
+        TestRunResult tr;
+        tr.name = (repeat > 1) ? (std::string(t.name) + "#" + std::to_string(rep)) : std::string(t.name);
+        tr.rc = r;
+        tr.time_s = static_cast<double>(ms) / 1000.0;
+        tr.captured_out = captured_out;
+        tr.captured_err = captured_err;
+        results.push_back(std::move(tr));
+      }
+
       if (verbose) {
         std::cout << (r == 0 ? "PASS" : "FAIL") << "  " << t.name << "  (" << ms << " ms)\n";
+      }
+
+      if (capture && r != 0) {
+        // Make failures actionable even when output is being captured for JUnit.
+        if (!captured_err.empty()) std::cerr << captured_err;
+        if (!captured_out.empty()) std::cerr << captured_out;
       }
 
       if (r != 0) {
@@ -421,6 +680,56 @@ int main(int argc, char** argv) {
 
   const auto t1 = std::chrono::steady_clock::now();
   const auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+
+  if (!junit_path.empty()) {
+    try {
+      std::filesystem::path p(junit_path);
+      if (p.has_parent_path()) {
+        std::filesystem::create_directories(p.parent_path());
+      }
+
+      int failures = 0;
+      for (const auto& r : results) {
+        if (r.rc != 0) failures++;
+      }
+
+      std::ofstream ofs(junit_path, std::ios::binary);
+      if (!ofs) {
+        std::cerr << "Failed to open JUnit output file: " << junit_path << "\n";
+      } else {
+        const double total_s = static_cast<double>(total_ms) / 1000.0;
+        ofs << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
+        ofs << "<testsuite name=\"nebula4x_tests\" tests=\"" << results.size() << "\"";
+        ofs << " failures=\"" << failures << "\"";
+        ofs << " errors=\"0\"";
+        ofs << " time=\"" << total_s << "\">\n";
+
+        for (const auto& r : results) {
+          ofs << "  <testcase classname=\"nebula4x_tests\" name=\"" << xml_escape(r.name) << "\" time=\"" << r.time_s
+              << "\">\n";
+          if (r.rc != 0) {
+            ofs << "    <failure message=\"rc=" << r.rc << "\">";
+            const std::string combined = r.captured_err + r.captured_out;
+            ofs << xml_escape(combined);
+            ofs << "</failure>\n";
+          }
+          if (!r.captured_out.empty()) {
+            ofs << "    <system-out>" << xml_escape(r.captured_out) << "</system-out>\n";
+          }
+          if (!r.captured_err.empty()) {
+            ofs << "    <system-err>" << xml_escape(r.captured_err) << "</system-err>\n";
+          }
+          ofs << "  </testcase>\n";
+        }
+
+        ofs << "</testsuite>\n";
+      }
+    } catch (const std::exception& e) {
+      std::cerr << "Failed to write JUnit report: " << e.what() << "\n";
+    } catch (...) {
+      std::cerr << "Failed to write JUnit report (unknown error)\n";
+    }
+  }
 
   if (fails == 0) {
     std::cout << "All tests passed (" << selected.size() << " test(s), " << total_ms << " ms)\n";
