@@ -1178,6 +1178,8 @@ void Simulation::tick_ai() {
     }
   }
 
+  }
+
   // --- Ship-level automation: Auto-salvage (wreck recovery) ---
   // Reserve wreck targets that are already being salvaged (or en-route) so we don't
   // send multiple automated ships to the same wreck.

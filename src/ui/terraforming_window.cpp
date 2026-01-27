@@ -89,7 +89,10 @@ void focus_colony(Simulation& sim, UIState& ui, Id colony_id, Id& selected_ship,
   selected_body = kInvalidId;
   selected_ship = kInvalidId;
   if (const auto* c = find_ptr(sim.state().colonies, colony_id)) {
-    sim.state().selected_system = c->system_id;
+    // Colonies live on a body; the system is derived from that body.
+    if (const auto* b = find_ptr(sim.state().bodies, c->body_id)) {
+      sim.state().selected_system = b->system_id;
+    }
   }
   ui.show_details_window = true;
   ui.request_details_tab = DetailsTab::Colony;

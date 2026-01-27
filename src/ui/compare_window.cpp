@@ -377,7 +377,7 @@ void draw_entity_picker_popup(const char* popup_id,
   ImGui::Separator();
 
   const auto& idx = game_entity_index();
-  if (!idx.built) {
+  if (idx.by_id.empty()) {
     ImGui::TextUnformatted("Entity index not built yet.");
     ImGui::EndPopup();
     return;
@@ -474,7 +474,7 @@ void draw_slot_controls(Simulation& sim,
   ImGui::SameLine();
   if (ImGui::SmallButton("Use Selected")) {
     const NavTarget cur = current_nav_target(sim, selected_ship, selected_colony, selected_body);
-    if (cur.kind != NavTargetKind::None && cur.id != kInvalidId) {
+    if (cur.id != kInvalidId) {
       *slot.id = cur.id;
       if (slot.use_snapshot) *slot.use_snapshot = false;
       if (slot.snapshot_label) slot.snapshot_label->clear();
@@ -619,7 +619,6 @@ bool should_recompute(const UIState& ui, const CompareRuntime& rt, std::uint64_t
 void recompute_diff(UIState& ui,
                    const nebula4x::json::Value& root,
                    std::uint64_t root_rev) {
-  (void)sim;
   auto& rt = runtime();
   rt.valid = false;
   rt.error.clear();
