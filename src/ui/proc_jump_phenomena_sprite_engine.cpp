@@ -10,6 +10,8 @@
 #include "nebula4x/core/procgen_jump_phenomena.h"
 #include "nebula4x/util/log.h"
 
+#include "ui/imgui_texture.h"
+
 #if NEBULA4X_UI_RENDERER_OPENGL2
 #include <SDL_opengl.h>
 #endif
@@ -221,15 +223,14 @@ void ProcJumpPhenomenaSpriteEngine::begin_frame() {
 }
 
 void ProcJumpPhenomenaSpriteEngine::destroy_texture(ImTextureID id) {
-  if (!id) return;
+  if (!imgui_texture_id_is_valid(id)) return;
   if (backend_ == UIRendererBackend::SDLRenderer2) {
-    SDL_DestroyTexture(static_cast<SDL_Texture*>(id));
+    SDL_DestroyTexture(sdl_texture_from_imgui_texture_id(id));
     return;
   }
 #if NEBULA4X_UI_RENDERER_OPENGL2
   if (backend_ == UIRendererBackend::OpenGL2) {
-    const std::intptr_t tex_i = reinterpret_cast<std::intptr_t>(id);
-    const GLuint tex = static_cast<GLuint>(tex_i);
+    const GLuint tex = gl_texture_from_imgui_texture_id<GLuint>(id);
     if (tex != 0) glDeleteTextures(1, &tex);
   }
 #endif
@@ -238,7 +239,7 @@ void ProcJumpPhenomenaSpriteEngine::destroy_texture(ImTextureID id) {
 void ProcJumpPhenomenaSpriteEngine::shutdown() {
   for (auto& [k, e] : cache_) {
     destroy_texture(e.sprite.tex_id);
-    e.sprite.tex_id = nullptr;
+    e.sprite.tex_id = imgui_null_texture_id();
   }
   cache_.clear();
 }
@@ -267,8 +268,8 @@ void ProcJumpPhenomenaSpriteEngine::trim_cache(std::size_t max_entries) {
 }
 
 ImTextureID ProcJumpPhenomenaSpriteEngine::upload_rgba(const std::uint8_t* rgba, int w, int h) {
-  if (!rgba || w <= 0 || h <= 0) return nullptr;
-  if (!ready()) return nullptr;
+  if (!rgba || w <= 0 || h <= 0) return imgui_null_texture_id();
+  if (!ready()) return imgui_null_texture_id();
 
   if (backend_ == UIRendererBackend::SDLRenderer2) {
     std::uint32_t rmask, gmask, bmask, amask;
@@ -289,7 +290,7 @@ ImTextureID ProcJumpPhenomenaSpriteEngine::upload_rgba(const std::uint8_t* rgba,
     if (!surf) {
       nebula4x::log::warn(std::string("ProcJumpPhenomenaSpriteEngine: SDL_CreateRGBSurfaceFrom failed: ") +
                           SDL_GetError());
-      return nullptr;
+      return imgui_null_texture_id();
     }
 
     SDL_Texture* tex = SDL_CreateTextureFromSurface(sdl_renderer_, surf);
@@ -298,11 +299,11 @@ ImTextureID ProcJumpPhenomenaSpriteEngine::upload_rgba(const std::uint8_t* rgba,
     if (!tex) {
       nebula4x::log::warn(std::string("ProcJumpPhenomenaSpriteEngine: SDL_CreateTextureFromSurface failed: ") +
                           SDL_GetError());
-      return nullptr;
+      return imgui_null_texture_id();
     }
 
     SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
-    return static_cast<ImTextureID>(tex);
+    return imgui_texture_id_from_sdl_texture(tex);
   }
 
 #if NEBULA4X_UI_RENDERER_OPENGL2
@@ -317,11 +318,11 @@ ImTextureID ProcJumpPhenomenaSpriteEngine::upload_rgba(const std::uint8_t* rgba,
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
     glBindTexture(GL_TEXTURE_2D, 0);
-    return reinterpret_cast<ImTextureID>(static_cast<std::intptr_t>(tex));
+    return imgui_texture_id_from_gl_texture(tex);
   }
 #endif
 
-  return nullptr;
+  return imgui_null_texture_id();
 }
 
 std::uint64_t ProcJumpPhenomenaSpriteEngine::style_hash_from_cfg(const ProcJumpPhenomenaSpriteConfig& cfg) {

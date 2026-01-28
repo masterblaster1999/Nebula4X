@@ -13,6 +13,8 @@
 #include "nebula4x/util/hash_rng.h"
 #include "nebula4x/util/log.h"
 
+#include "ui/imgui_texture.h"
+
 #if NEBULA4X_UI_RENDERER_OPENGL2
 #include <SDL_opengl.h>
 #endif
@@ -308,8 +310,8 @@ ProcAnomalyPhenomenaSpriteEngine::SpriteInfo ProcAnomalyPhenomenaSpriteEngine::g
 // --- Upload / destroy -----------------------------------------------------
 
 ImTextureID ProcAnomalyPhenomenaSpriteEngine::upload_rgba(const std::uint8_t* rgba, int w, int h) {
-  if (!rgba || w <= 0 || h <= 0) return nullptr;
-  if (!ready()) return nullptr;
+  if (!rgba || w <= 0 || h <= 0) return imgui_null_texture_id();
+  if (!ready()) return imgui_null_texture_id();
 
   if (backend_ == UIRendererBackend::SDLRenderer2) {
     std::uint32_t rmask, gmask, bmask, amask;
@@ -330,7 +332,7 @@ ImTextureID ProcAnomalyPhenomenaSpriteEngine::upload_rgba(const std::uint8_t* rg
     if (!surf) {
       nebula4x::log::warn(std::string("ProcAnomalyPhenomenaSpriteEngine: SDL_CreateRGBSurfaceFrom failed: ") +
                           SDL_GetError());
-      return nullptr;
+      return imgui_null_texture_id();
     }
 
     SDL_Texture* tex = SDL_CreateTextureFromSurface(sdl_renderer_, surf);
@@ -339,11 +341,11 @@ ImTextureID ProcAnomalyPhenomenaSpriteEngine::upload_rgba(const std::uint8_t* rg
     if (!tex) {
       nebula4x::log::warn(std::string("ProcAnomalyPhenomenaSpriteEngine: SDL_CreateTextureFromSurface failed: ") +
                           SDL_GetError());
-      return nullptr;
+      return imgui_null_texture_id();
     }
 
     SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
-    return static_cast<ImTextureID>(tex);
+    return imgui_texture_id_from_sdl_texture(tex);
   }
 
 #if NEBULA4X_UI_RENDERER_OPENGL2
@@ -358,25 +360,25 @@ ImTextureID ProcAnomalyPhenomenaSpriteEngine::upload_rgba(const std::uint8_t* rg
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
     glBindTexture(GL_TEXTURE_2D, 0);
-    return reinterpret_cast<ImTextureID>(static_cast<std::intptr_t>(tex));
+    return imgui_texture_id_from_gl_texture(tex);
   }
 #endif
 
-  return nullptr;
+  return imgui_null_texture_id();
 }
 
 void ProcAnomalyPhenomenaSpriteEngine::destroy_texture(ImTextureID id) {
-  if (!id) return;
+  if (!imgui_texture_id_is_valid(id)) return;
 
   if (backend_ == UIRendererBackend::SDLRenderer2) {
-    SDL_Texture* tex = static_cast<SDL_Texture*>(id);
+    SDL_Texture* tex = sdl_texture_from_imgui_texture_id(id);
     SDL_DestroyTexture(tex);
     return;
   }
 
 #if NEBULA4X_UI_RENDERER_OPENGL2
   if (backend_ == UIRendererBackend::OpenGL2) {
-    const GLuint tex = static_cast<GLuint>(reinterpret_cast<std::intptr_t>(id));
+    const GLuint tex = gl_texture_from_imgui_texture_id<GLuint>(id);
     glDeleteTextures(1, &tex);
     return;
   }

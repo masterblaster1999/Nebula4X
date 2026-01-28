@@ -1,5 +1,6 @@
-#include "core/content_db.h"
-#include "core/serialization.h"
+#include "nebula4x/core/serialization.h"
+#include "nebula4x/core/simulation.h"
+#include "nebula4x/core/tech.h"
 #include "nebula4x/util/file_io.h"
 #include "ui/app.h"
 
@@ -14,6 +15,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <filesystem>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -203,6 +205,39 @@ int main(int argc, char** argv) {
 
   const RendererRequest request = parse_renderer_request(argc, argv);
 
+  // Load content and initial save *before* bringing up the window so we can
+  // fail fast with a useful error message if content files are missing.
+  nebula4x::ContentDB db;
+  try {
+    db = nebula4x::load_content_db_from_files({"data/blueprints/starting_blueprints.json"});
+    db.techs = nebula4x::load_tech_db_from_files({"data/tech/tech_tree.json"});
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "Error: failed to load content database: %s\n", e.what());
+    SDL_Quit();
+    return 1;
+  }
+
+  nebula4x::Simulation sim(std::move(db), nebula4x::SimConfig{});
+
+  if (std::filesystem::exists("saves/save.json")) {
+    try {
+      const std::string save_text = nebula4x::read_text_file("saves/save.json");
+      nebula4x::GameState loaded = nebula4x::deserialize_game_from_json(save_text);
+      sim.load_game(std::move(loaded));
+    } catch (const std::exception& e) {
+      std::fprintf(stderr,
+                   "Warning: failed to load save 'saves/save.json' (%s). Starting a new game.\n",
+                   e.what());
+      // Simulation constructor already started a new game.
+    }
+  }
+
+  // Create simulation UI app.
+  nebula4x::ui::App app(std::move(sim));
+
+  // Load UI prefs if present.
+  app.load_ui_prefs("ui_prefs.json");
+
   const Uint32 base_window_flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
   const int window_width = 1280;
   const int window_height = 720;
@@ -314,26 +349,6 @@ int main(int argc, char** argv) {
     ImGui_ImplSDL2_InitForSDLRenderer(renderer.window, renderer.sdl_renderer);
     ImGui_ImplSDLRenderer2_Init(renderer.sdl_renderer);
   }
-
-  // Load content and initial save.
-  nebula4x::ContentDB db = nebula4x::ContentDB::load("content");
-
-  nebula4x::State st;
-  if (nebula4x::read_text_file("saves/save.json", &st.serialized_state)) {
-    try {
-      st = nebula4x::load_state_from_json(st.serialized_state, db);
-    } catch (const std::exception&) {
-      // ignore load failures; fall back to a fresh start.
-    }
-  }
-
-  // Create simulation and UI app.
-  nebula4x::Simulation sim(db, std::move(st));
-  sim.initialize_star_system();
-  nebula4x::ui::App app(std::move(sim));
-
-  // Load UI prefs if present.
-  app.load_ui_prefs("ui_prefs.json");
 
   // Propagate runtime renderer diagnostics into UIState (used for settings + startup popup).
   {

@@ -68,7 +68,7 @@ struct ProcJumpPhenomenaSpriteStats {
 class ProcJumpPhenomenaSpriteEngine {
  public:
   struct SpriteInfo {
-    ImTextureID tex_id{nullptr};
+    ImTextureID tex_id{};
     int w{0};
     int h{0};
   };

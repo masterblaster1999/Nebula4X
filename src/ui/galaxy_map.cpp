@@ -1384,7 +1384,7 @@ void draw_galaxy_map(Simulation& sim,
 
           // Deduplicate consecutive points (and collapse closing duplicate).
           if (out.size() >= 2) {
-            auto near = [](const Vec2& a, const Vec2& b) -> bool {
+            auto is_near_pt = [](const Vec2& a, const Vec2& b) -> bool {
               const double dx = a.x - b.x;
               const double dy = a.y - b.y;
               return (dx * dx + dy * dy) <= 1.0e-16;
@@ -1392,9 +1392,9 @@ void draw_galaxy_map(Simulation& sim,
             std::vector<Vec2> dedup;
             dedup.reserve(out.size());
             for (const Vec2& p : out) {
-              if (dedup.empty() || !near(dedup.back(), p)) dedup.push_back(p);
+              if (dedup.empty() || !is_near_pt(dedup.back(), p)) dedup.push_back(p);
             }
-            if (dedup.size() >= 2 && near(dedup.front(), dedup.back())) dedup.pop_back();
+            if (dedup.size() >= 2 && is_near_pt(dedup.front(), dedup.back())) dedup.pop_back();
             out.swap(dedup);
           }
 

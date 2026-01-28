@@ -113,8 +113,8 @@ class ProcRenderEngine {
 
   struct TileEntry {
     // Backend handle is stored in the union-ish way so we can destroy correctly.
-    // (ImTextureID is a void*).
-    ImTextureID tex_id = nullptr;
+    // (ImTextureID may be a pointer or an integer depending on the ImGui version).
+    ImTextureID tex_id{};
     std::uint64_t last_used_frame = 0;
     int w = 0;
     int h = 0;

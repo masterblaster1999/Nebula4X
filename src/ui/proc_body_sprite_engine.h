@@ -53,7 +53,7 @@ struct ProcBodySpriteStats {
 class ProcBodySpriteEngine {
  public:
   struct SpriteInfo {
-    ImTextureID tex_id = nullptr;
+    ImTextureID tex_id{};
     int w = 0;
     int h = 0;
 
@@ -109,7 +109,7 @@ class ProcBodySpriteEngine {
   };
 
   struct SpriteEntry {
-    ImTextureID tex_id = nullptr;
+    ImTextureID tex_id{};
     int w = 0;
     int h = 0;
     float sphere_radius_norm = 1.0f;

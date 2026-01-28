@@ -16,6 +16,12 @@ class ProcTrailEngine;
 class ProcFlowFieldEngine;
 class ProcGravityContourEngine;
 
+// Converts simulation time to days as a floating-point value.
+//
+// Defined in system_map.cpp and used by other UI subsystems that animate based on
+// sim time (particle fields, trails, flow fields, etc.).
+double sim_time_days(const GameState& s);
+
 void draw_system_map(Simulation& sim,
                      UIState& ui,
                      Id& selected_ship,

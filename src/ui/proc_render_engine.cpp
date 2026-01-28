@@ -10,6 +10,8 @@
 
 #include "nebula4x/util/log.h"
 
+#include "ui/imgui_texture.h"
+
 #if NEBULA4X_UI_RENDERER_OPENGL2
 #include <SDL_opengl.h>
 #endif
@@ -321,22 +323,22 @@ void ProcRenderEngine::trim_cache(int max_tiles) {
 }
 
 void ProcRenderEngine::destroy_tile(TileEntry& entry) {
-  if (!entry.tex_id) return;
+  if (!imgui_texture_id_is_valid(entry.tex_id)) return;
 
   if (backend_ == UIRendererBackend::SDLRenderer2) {
-    SDL_Texture* tex = static_cast<SDL_Texture*>(entry.tex_id);
+    SDL_Texture* tex = sdl_texture_from_imgui_texture_id(entry.tex_id);
     SDL_DestroyTexture(tex);
-    entry.tex_id = nullptr;
+    entry.tex_id = imgui_null_texture_id();
     return;
   }
 
 #if NEBULA4X_UI_RENDERER_OPENGL2
   if (backend_ == UIRendererBackend::OpenGL2) {
-    const GLuint tex = static_cast<GLuint>(reinterpret_cast<std::intptr_t>(entry.tex_id));
+    const GLuint tex = gl_texture_from_imgui_texture_id<GLuint>(entry.tex_id);
     if (tex != 0) {
       glDeleteTextures(1, &tex);
     }
-    entry.tex_id = nullptr;
+    entry.tex_id = imgui_null_texture_id();
   }
 #else
   (void)entry;
@@ -344,8 +346,8 @@ void ProcRenderEngine::destroy_tile(TileEntry& entry) {
 }
 
 ImTextureID ProcRenderEngine::upload_rgba_tile(const std::uint8_t* rgba, int w, int h) {
-  if (!rgba || w <= 0 || h <= 0) return nullptr;
-  if (!ready()) return nullptr;
+  if (!rgba || w <= 0 || h <= 0) return imgui_null_texture_id();
+  if (!ready()) return imgui_null_texture_id();
 
   if (backend_ == UIRendererBackend::SDLRenderer2) {
     // Create a surface wrapping RGBA bytes with explicit masks, then let SDL
@@ -369,7 +371,7 @@ ImTextureID ProcRenderEngine::upload_rgba_tile(const std::uint8_t* rgba, int w, 
         const_cast<std::uint8_t*>(rgba), w, h, 32, w * 4, rmask, gmask, bmask, amask);
     if (!surf) {
       nebula4x::log::warn(std::string("ProcRenderEngine: SDL_CreateRGBSurfaceFrom failed: ") + SDL_GetError());
-      return nullptr;
+      return imgui_null_texture_id();
     }
 
     SDL_Texture* tex = SDL_CreateTextureFromSurface(sdl_renderer_, surf);
@@ -377,11 +379,11 @@ ImTextureID ProcRenderEngine::upload_rgba_tile(const std::uint8_t* rgba, int w, 
 
     if (!tex) {
       nebula4x::log::warn(std::string("ProcRenderEngine: SDL_CreateTextureFromSurface failed: ") + SDL_GetError());
-      return nullptr;
+      return imgui_null_texture_id();
     }
 
     SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
-    return static_cast<ImTextureID>(tex);
+    return imgui_texture_id_from_sdl_texture(tex);
   }
 
 #if NEBULA4X_UI_RENDERER_OPENGL2
@@ -397,11 +399,11 @@ ImTextureID ProcRenderEngine::upload_rgba_tile(const std::uint8_t* rgba, int w, 
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
     glBindTexture(GL_TEXTURE_2D, 0);
 
-    return reinterpret_cast<ImTextureID>(static_cast<std::intptr_t>(tex));
+    return imgui_texture_id_from_gl_texture(tex);
   }
 #endif
 
-  return nullptr;
+  return imgui_null_texture_id();
 }
 
 ImTextureID ProcRenderEngine::get_or_create_tile(const TileKey& key, const ProcRenderConfig& cfg) {
@@ -422,7 +424,7 @@ ImTextureID ProcRenderEngine::get_or_create_tile(const TileKey& key, const ProcR
   ImTextureID tex_id = upload_rgba_tile(rgba.data(), key.tile_px, key.tile_px);
   stats_.upload_ms_this_frame += ms_since(t1);
 
-  if (!tex_id) return nullptr;
+  if (!imgui_texture_id_is_valid(tex_id)) return imgui_null_texture_id();
 
   TileEntry e;
   e.tex_id = tex_id;
@@ -593,16 +595,17 @@ void ProcRenderEngine::generate_tile_rgba(std::vector<std::uint8_t>& out_rgba,
   const float density = std::clamp(cfg.star_density, 0.0f, 4.0f);
   if (density <= 0.001f) return;
 
-  const bool near = (layer == 2);
-  const float cell_base = near ? 46.0f : 18.0f;
+  const bool near_layer = (layer == 2);
+  const float cell_base = near_layer ? 46.0f : 18.0f;
   const float cell = std::clamp(cell_base / std::sqrt(std::max(0.15f, density)), 8.0f, 128.0f);
   const int nx = std::max(1, static_cast<int>(std::ceil(static_cast<float>(w) / cell)));
   const int ny = std::max(1, static_cast<int>(std::ceil(static_cast<float>(h) / cell)));
-  const float prob = std::clamp((near ? 0.16f : 0.55f) * density, 0.0f, 1.0f);
+  const float prob = std::clamp((near_layer ? 0.16f : 0.55f) * density, 0.0f, 1.0f);
 
   for (int cy = 0; cy < ny; ++cy) {
     for (int cx = 0; cx < nx; ++cx) {
-      const std::uint32_t h0 = hash_2d_i32(tile_x * 8192 + cx, tile_y * 8192 + cy, seed ^ (near ? 0x02u : 0x01u));
+      const std::uint32_t h0 =
+          hash_2d_i32(tile_x * 8192 + cx, tile_y * 8192 + cy, seed ^ (near_layer ? 0x02u : 0x01u));
       Rng rng(h0);
       if (rng.next_f01() > prob) continue;
 
@@ -612,7 +615,7 @@ void ProcRenderEngine::generate_tile_rgba(std::vector<std::uint8_t>& out_rgba,
 
       // Brightness distribution: many dim stars, few bright.
       const float m = rng.next_f01();
-      float brightness = near ? std::pow(m, 1.6f) : std::pow(m, 3.2f);
+      float brightness = near_layer ? std::pow(m, 1.6f) : std::pow(m, 3.2f);
       brightness = std::clamp(brightness, 0.02f, 1.0f);
 
       // Subtle color temperature variation.
@@ -632,12 +635,13 @@ void ProcRenderEngine::generate_tile_rgba(std::vector<std::uint8_t>& out_rgba,
       float sr, sg, sb;
       ImGui::ColorConvertHSVtoRGB(hue, sat, 1.0f, sr, sg, sb);
 
-      const float radius = near ? (1.0f + 2.6f * std::sqrt(brightness)) : (0.55f + 1.25f * std::sqrt(brightness));
-      const float alpha = near ? (0.55f + 0.40f * brightness) : (0.30f + 0.30f * brightness);
+      const float radius =
+          near_layer ? (1.0f + 2.6f * std::sqrt(brightness)) : (0.55f + 1.25f * std::sqrt(brightness));
+      const float alpha = near_layer ? (0.55f + 0.40f * brightness) : (0.30f + 0.30f * brightness);
       stamp_star(out_rgba, w, h, px, py, radius, sr, sg, sb, alpha);
 
       // Bright stars get a tiny extra bloom.
-      if (near && brightness > 0.82f) {
+      if (near_layer && brightness > 0.82f) {
         stamp_star(out_rgba, w, h, px, py, radius * 2.0f, sr, sg, sb, alpha * 0.10f);
       }
     }

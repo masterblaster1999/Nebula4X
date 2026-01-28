@@ -1688,8 +1688,8 @@ void Simulation::tick_combat(double dt_days) {
                 for (int si = 0; si < samples; ++si) {
                   const double t = (samples <= 1) ? 0.0 : static_cast<double>(si) / static_cast<double>(samples - 1);
                   const Vec2 p = a + ab * t;
-                  const auto near = idx.query_radius(p, radius, 0.0);
-                  for (Id cid : near) candidates.insert(cid);
+                  const auto near_ids = idx.query_radius(p, radius, 0.0);
+                  for (Id cid : near_ids) candidates.insert(cid);
                 }
 
                 struct W {
@@ -1828,8 +1828,8 @@ void Simulation::tick_combat(double dt_days) {
                 for (int si = 0; si < samples; ++si) {
                   const double t = (samples <= 1) ? 0.0 : static_cast<double>(si) / static_cast<double>(samples - 1);
                   const Vec2 p = a + ab * t;
-                  const auto near = idx2.query_radius(p, radius, 0.0);
-                  for (Id cid : near) candidates.insert(cid);
+                  const auto near_ids = idx2.query_radius(p, radius, 0.0);
+                  for (Id cid : near_ids) candidates.insert(cid);
                 }
 
                 struct W {

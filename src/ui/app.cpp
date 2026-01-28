@@ -4002,9 +4002,9 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     o["galaxy_map_territory_fill_opacity"] = ui_.galaxy_map_territory_fill_opacity;
     o["galaxy_map_territory_boundary_opacity"] = ui_.galaxy_map_territory_boundary_opacity;
     o["galaxy_map_territory_boundary_thickness_px"] = ui_.galaxy_map_territory_boundary_thickness_px;
-    o["galaxy_map_territory_tile_px"] = ui_.galaxy_map_territory_tile_px;
-    o["galaxy_map_territory_cache_tiles"] = ui_.galaxy_map_territory_cache_tiles;
-    o["galaxy_map_territory_samples_per_tile"] = ui_.galaxy_map_territory_samples_per_tile;
+    o["galaxy_map_territory_tile_px"] = static_cast<double>(ui_.galaxy_map_territory_tile_px);
+    o["galaxy_map_territory_cache_tiles"] = static_cast<double>(ui_.galaxy_map_territory_cache_tiles);
+    o["galaxy_map_territory_samples_per_tile"] = static_cast<double>(ui_.galaxy_map_territory_samples_per_tile);
     o["galaxy_map_territory_influence_base_spacing_mult"] = ui_.galaxy_map_territory_influence_base_spacing_mult;
     o["galaxy_map_territory_influence_pop_spacing_mult"] = ui_.galaxy_map_territory_influence_pop_spacing_mult;
     o["galaxy_map_territory_influence_pop_log_bias"] = ui_.galaxy_map_territory_influence_pop_log_bias;
