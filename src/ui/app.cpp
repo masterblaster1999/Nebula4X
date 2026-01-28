@@ -14,6 +14,7 @@
 #include "nebula4x/util/json.h"
 #include "nebula4x/util/log.h"
 #include "nebula4x/util/trace_events.h"
+#include "nebula4x/util/time.h"
 
 #include "nebula4x/core/serialization.h"
 #include "nebula4x/core/trade_network.h"
@@ -111,6 +112,22 @@ App::App(Simulation sim) : sim_(std::move(sim)) {
   }
 }
 
+void App::set_renderer_context(UIRendererBackend backend, SDL_Renderer* sdl_renderer) {
+  proc_render_engine_.set_backend(backend, sdl_renderer);
+  proc_body_sprite_engine_.set_backend(backend, sdl_renderer);
+  proc_icon_sprite_engine_.set_backend(backend, sdl_renderer);
+  proc_jump_phenomena_sprite_engine_.set_backend(backend, sdl_renderer);
+  proc_anomaly_phenomena_sprite_engine_.set_backend(backend, sdl_renderer);
+}
+
+void App::shutdown_renderer_resources() {
+  proc_render_engine_.shutdown();
+  proc_body_sprite_engine_.shutdown();
+  proc_icon_sprite_engine_.shutdown();
+  proc_jump_phenomena_sprite_engine_.shutdown();
+  proc_anomaly_phenomena_sprite_engine_.shutdown();
+}
+
 const char* App::imgui_ini_filename() const {
   return imgui_ini_path_.empty() ? nullptr : imgui_ini_path_.c_str();
 }
@@ -151,20 +168,21 @@ void App::pre_frame() {
   io.ConfigDockingTransparentPayload = ui_.docking_transparent_payload;
 
 #ifdef IMGUI_HAS_VIEWPORT
-#if NEBULA4X_UI_RENDERER_OPENGL2
-  // Multi-viewport enables detachable OS windows for floating ImGui windows.
-  if (ui_.viewports_enable) {
-    io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
-  } else {
+  if (!ui_.runtime_renderer_supports_viewports) {
+    // Active backend cannot render platform windows; ensure viewports are off.
+    ui_.viewports_enable = false;
     io.ConfigFlags &= ~ImGuiConfigFlags_ViewportsEnable;
+  } else {
+    // Multi-viewport enables detachable OS windows for floating ImGui windows.
+    if (ui_.viewports_enable) {
+      io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
+    } else {
+      io.ConfigFlags &= ~ImGuiConfigFlags_ViewportsEnable;
+    }
+    io.ConfigViewportsNoTaskBarIcon = ui_.viewports_no_taskbar_icon;
+    io.ConfigViewportsNoAutoMerge = ui_.viewports_no_auto_merge;
+    io.ConfigViewportsNoDecoration = ui_.viewports_no_decoration;
   }
-  io.ConfigViewportsNoTaskBarIcon = ui_.viewports_no_taskbar_icon;
-  io.ConfigViewportsNoAutoMerge = ui_.viewports_no_auto_merge;
-  io.ConfigViewportsNoDecoration = ui_.viewports_no_decoration;
-#else
-  // SDL_Renderer2 backend cannot render platform windows; ensure viewports are off.
-  io.ConfigFlags &= ~ImGuiConfigFlags_ViewportsEnable;
-#endif
 #endif
 
   // Reload request or ini path change: load before NewFrame for best results.
@@ -205,6 +223,92 @@ void App::pre_frame() {
   dock_layout_initialized_ = false;
 }
 
+
+static void draw_graphics_safe_mode_popup(UIState& ui) {
+  if (!ui.show_graphics_safe_mode_popup) return;
+
+  if (!ui.graphics_safe_mode_popup_opened) {
+    ImGui::OpenPopup("Graphics Safe Mode");
+    ui.graphics_safe_mode_popup_opened = true;
+  }
+
+  bool open = true;
+  if (ImGui::BeginPopupModal("Graphics Safe Mode", &open, ImGuiWindowFlags_AlwaysAutoResize)) {
+    ImGui::TextWrapped("Nebula4X started in a graphics safe mode.");
+    ImGui::TextWrapped(
+        "This usually means an OpenGL context could not be created, so the UI is running with an "
+        "alternate renderer backend.");
+    ImGui::Separator();
+
+    ImGui::Text("Active backend: %s", ui_renderer_backend_name(ui.runtime_renderer_backend));
+
+    if (!ui.runtime_renderer_fallback_reason.empty()) {
+      ImGui::SeparatorText("Details");
+      ImGui::TextWrapped("%s", ui.runtime_renderer_fallback_reason.c_str());
+    }
+
+    if (!ui.runtime_opengl_vendor.empty()) {
+      ImGui::SeparatorText("OpenGL Driver Info");
+      ImGui::Text("Vendor:   %s", ui.runtime_opengl_vendor.c_str());
+      ImGui::Text("Renderer: %s", ui.runtime_opengl_renderer.c_str());
+      ImGui::Text("Version:  %s", ui.runtime_opengl_version.c_str());
+      if (!ui.runtime_opengl_glsl_version.empty()) {
+        ImGui::Text("GLSL:     %s", ui.runtime_opengl_glsl_version.c_str());
+      }
+    }
+
+    ImGui::SeparatorText("Tips");
+    ImGui::BulletText("Update your GPU driver.");
+    ImGui::BulletText("If you're running over Remote Desktop, try launching locally.");
+    ImGui::BulletText("Force safe mode: --renderer sdl (or set NEBULA4X_RENDERER=sdl).");
+    ImGui::BulletText("Retry OpenGL: --renderer opengl.");
+
+    // Copy a diagnostics bundle for bug reports.
+    std::string copy;
+    copy.reserve(512 + ui.runtime_renderer_fallback_reason.size());
+    copy += "Nebula4X Graphics Safe Mode\n";
+    copy += "Backend: ";
+    copy += ui_renderer_backend_name(ui.runtime_renderer_backend);
+    copy += "\n";
+    if (!ui.runtime_opengl_vendor.empty()) {
+      copy += "GL_VENDOR: ";
+      copy += ui.runtime_opengl_vendor;
+      copy += "\nGL_RENDERER: ";
+      copy += ui.runtime_opengl_renderer;
+      copy += "\nGL_VERSION: ";
+      copy += ui.runtime_opengl_version;
+      if (!ui.runtime_opengl_glsl_version.empty()) {
+        copy += "\nGLSL: ";
+        copy += ui.runtime_opengl_glsl_version;
+      }
+      copy += "\n";
+    }
+    if (!ui.runtime_renderer_fallback_reason.empty()) {
+      copy += "\n";
+      copy += ui.runtime_renderer_fallback_reason;
+      copy += "\n";
+    }
+
+    if (ImGui::Button("Copy details")) {
+      ImGui::SetClipboardText(copy.c_str());
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Close")) {
+      ui.show_graphics_safe_mode_popup = false;
+      ui.graphics_safe_mode_popup_opened = false;
+      ImGui::CloseCurrentPopup();
+    }
+
+    ImGui::EndPopup();
+  }
+
+  if (!open) {
+    ui.show_graphics_safe_mode_popup = false;
+    ui.graphics_safe_mode_popup_opened = false;
+  }
+}
+
+
 void App::frame() {
   NEBULA4X_TRACE_SCOPE("ui.frame", "ui");
   auto sync_on_state_generation_change = [&]() {
@@ -234,6 +338,9 @@ void App::frame() {
     // simulation snapshot; clear it on load.
     notifications_reset(ui_);
 
+    // Clear UI-only motion trails; entity IDs may be reused across loads.
+    proc_trail_engine_.clear_all();
+
     // Reset autosave cadence when the underlying state is replaced.
     autosave_mgr_.reset();
     ui_.last_autosave_game_path.clear();
@@ -246,6 +353,42 @@ void App::frame() {
     ImGuiIO& io = ImGui::GetIO();
     ui_.ui_scale = std::clamp(ui_.ui_scale, 0.65f, 2.5f);
     io.FontGlobalScale = ui_.ui_scale;
+  }
+
+  // Per-frame bookkeeping for procedural render caches.
+  proc_render_engine_.begin_frame();
+  proc_particle_field_engine_.begin_frame(sim_time_days(sim_.state()), ImGui::GetTime());
+  proc_body_sprite_engine_.begin_frame();
+  proc_icon_sprite_engine_.begin_frame();
+  proc_jump_phenomena_sprite_engine_.begin_frame();
+  proc_anomaly_phenomena_sprite_engine_.begin_frame();
+  proc_trail_engine_.begin_frame(sim_time_days(sim_.state()));
+  proc_flow_field_engine_.begin_frame(sim_time_days(sim_.state()));
+  proc_gravity_contour_engine_.begin_frame(sim_time_days(sim_.state()));
+  proc_territory_field_engine_.begin_frame();
+
+  // UI action: clear cached motion trails (runtime only, not persisted).
+  if (ui_.system_map_motion_trails_clear_requested) {
+    proc_trail_engine_.clear_all();
+    ui_.system_map_motion_trails_clear_requested = false;
+  }
+
+  // UI action: clear cached flow field tiles (runtime only, not persisted).
+  if (ui_.system_map_flow_field_clear_requested) {
+    proc_flow_field_engine_.clear();
+    ui_.system_map_flow_field_clear_requested = false;
+  }
+
+  // UI action: clear cached gravity contour tiles (runtime only, not persisted).
+  if (ui_.system_map_gravity_contours_clear_requested) {
+    proc_gravity_contour_engine_.clear();
+    ui_.system_map_gravity_contours_clear_requested = false;
+  }
+
+  // UI action: clear cached galaxy territory tiles (runtime only, not persisted).
+  if (ui_.galaxy_map_territory_clear_cache_requested) {
+    proc_territory_field_engine_.clear();
+    ui_.galaxy_map_territory_clear_cache_requested = false;
   }
 
   // Apply last-frame style overrides so the menu/settings windows reflect them.
@@ -388,6 +531,8 @@ void App::frame() {
 
   UIPrefActions actions;
   draw_main_menu(sim_, ui_, save_path_, load_path_, ui_prefs_path_, actions);
+
+    draw_graphics_safe_mode_popup(ui_);
   if (ui_.show_settings_window) {
     draw_settings_window(ui_, ui_prefs_path_, actions);
   }
@@ -472,11 +617,16 @@ void App::frame() {
         if (req == MapTab::Galaxy) gal_flags |= ImGuiTabItemFlags_SetSelected;
 
         if (ImGui::BeginTabItem("System", nullptr, sys_flags)) {
-          draw_system_map(sim_, ui_, selected_ship_, selected_colony_, selected_body_, map_zoom_, map_pan_);
+          draw_system_map(sim_, ui_, selected_ship_, selected_colony_, selected_body_, map_zoom_, map_pan_,
+                          &proc_render_engine_, &proc_particle_field_engine_, &proc_body_sprite_engine_,
+                          &proc_icon_sprite_engine_, &proc_jump_phenomena_sprite_engine_, &proc_anomaly_phenomena_sprite_engine_,
+                          &proc_trail_engine_,
+                          &proc_flow_field_engine_,
+                          &proc_gravity_contour_engine_);
           ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("Galaxy", nullptr, gal_flags)) {
-          draw_galaxy_map(sim_, ui_, selected_ship_, galaxy_zoom_, galaxy_pan_);
+          draw_galaxy_map(sim_, ui_, selected_ship_, galaxy_zoom_, galaxy_pan_, &proc_render_engine_, &proc_particle_field_engine_, &proc_territory_field_engine_);
           ImGui::EndTabItem();
         }
         ImGui::EndTabBar();
@@ -806,6 +956,61 @@ void App::frame() {
     }
   }
 
+  // Expose procedural render engine telemetry to the UI (runtime only).
+  {
+    const auto& st = proc_render_engine_.stats();
+    ui_.map_proc_render_stats_cache_tiles = st.cache_tiles;
+    ui_.map_proc_render_stats_generated_this_frame = st.generated_this_frame;
+    ui_.map_proc_render_stats_gen_ms_this_frame = static_cast<float>(st.gen_ms_this_frame);
+    ui_.map_proc_render_stats_upload_ms_this_frame = static_cast<float>(st.upload_ms_this_frame);
+  }
+
+  // Expose procedural body sprite telemetry to the UI (runtime only).
+  {
+    const auto& st = proc_body_sprite_engine_.stats();
+    ui_.system_map_body_sprite_stats_cache_sprites = st.cache_sprites;
+    ui_.system_map_body_sprite_stats_generated_this_frame = st.generated_this_frame;
+    ui_.system_map_body_sprite_stats_gen_ms_this_frame = static_cast<float>(st.gen_ms_this_frame);
+    ui_.system_map_body_sprite_stats_upload_ms_this_frame = static_cast<float>(st.upload_ms_this_frame);
+  }
+
+  // Expose procedural contact icon telemetry to the UI (runtime only).
+  {
+    const auto& st = proc_icon_sprite_engine_.stats();
+    ui_.system_map_contact_icon_stats_cache_sprites = st.cache_sprites;
+    ui_.system_map_contact_icon_stats_generated_this_frame = st.generated_this_frame;
+    ui_.system_map_contact_icon_stats_gen_ms_this_frame = static_cast<float>(st.gen_ms_this_frame);
+    ui_.system_map_contact_icon_stats_upload_ms_this_frame = static_cast<float>(st.upload_ms_this_frame);
+  }
+
+  // Expose procedural jump-point phenomena telemetry to the UI (runtime only).
+  {
+    const auto& st = proc_jump_phenomena_sprite_engine_.stats();
+    ui_.system_map_jump_phenomena_stats_cache_sprites = st.cache_sprites;
+    ui_.system_map_jump_phenomena_stats_generated_this_frame = st.generated_this_frame;
+    ui_.system_map_jump_phenomena_stats_gen_ms_this_frame = static_cast<float>(st.gen_ms_this_frame);
+    ui_.system_map_jump_phenomena_stats_upload_ms_this_frame = static_cast<float>(st.upload_ms_this_frame);
+  }
+
+  {
+    const auto& st = proc_anomaly_phenomena_sprite_engine_.stats();
+    ui_.system_map_anomaly_phenomena_stats_cache_sprites = st.cache_sprites;
+    ui_.system_map_anomaly_phenomena_stats_generated_this_frame = st.generated_this_frame;
+    ui_.system_map_anomaly_phenomena_stats_gen_ms_this_frame = static_cast<float>(st.gen_ms_this_frame);
+    ui_.system_map_anomaly_phenomena_stats_upload_ms_this_frame = static_cast<float>(st.upload_ms_this_frame);
+  }
+
+
+
+  // Expose galaxy territory overlay telemetry to the UI (runtime only).
+  {
+    const auto st = proc_territory_field_engine_.stats();
+    ui_.galaxy_map_territory_stats_cache_tiles = st.cache_tiles;
+    ui_.galaxy_map_territory_stats_tiles_used_this_frame = st.tiles_used_this_frame;
+    ui_.galaxy_map_territory_stats_tiles_generated_this_frame = st.tiles_generated_this_frame;
+    ui_.galaxy_map_territory_stats_cells_drawn = st.cells_drawn;
+    ui_.galaxy_map_territory_stats_gen_ms_this_frame = static_cast<float>(st.gen_ms_this_frame);
+  }
   // Update popup/launch tracking after all UI interactions for the frame.
   window_management_end_frame(ui_);
 }
@@ -1486,6 +1691,7 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       if (auto it = obj->find("system_map_starfield"); it != obj->end()) {
         ui_.system_map_starfield = it->second.bool_value(ui_.system_map_starfield);
       }
+
       if (auto it = obj->find("system_map_grid"); it != obj->end()) {
         ui_.system_map_grid = it->second.bool_value(ui_.system_map_grid);
       }
@@ -1599,6 +1805,7 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       if (auto it = obj->find("galaxy_map_starfield"); it != obj->end()) {
         ui_.galaxy_map_starfield = it->second.bool_value(ui_.galaxy_map_starfield);
       }
+
       if (auto it = obj->find("galaxy_map_grid"); it != obj->end()) {
         ui_.galaxy_map_grid = it->second.bool_value(ui_.galaxy_map_grid);
       }
@@ -1626,6 +1833,79 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       if (auto it = obj->find("map_route_opacity"); it != obj->end()) {
         ui_.map_route_opacity = static_cast<float>(it->second.number_value(ui_.map_route_opacity));
         ui_.map_route_opacity = std::clamp(ui_.map_route_opacity, 0.0f, 1.0f);
+      }
+
+      // Procedural particle field (dust)
+      if (auto it = obj->find("galaxy_map_particle_field"); it != obj->end()) {
+        ui_.galaxy_map_particle_field = it->second.bool_value(ui_.galaxy_map_particle_field);
+      }
+      if (auto it = obj->find("system_map_particle_field"); it != obj->end()) {
+        ui_.system_map_particle_field = it->second.bool_value(ui_.system_map_particle_field);
+      }
+      if (auto it = obj->find("map_particle_tile_px"); it != obj->end()) {
+        ui_.map_particle_tile_px = static_cast<int>(it->second.int_value(ui_.map_particle_tile_px));
+        ui_.map_particle_tile_px = std::clamp(ui_.map_particle_tile_px, 64, 1024);
+      }
+      if (auto it = obj->find("map_particle_particles_per_tile"); it != obj->end()) {
+        ui_.map_particle_particles_per_tile = static_cast<int>(it->second.int_value(ui_.map_particle_particles_per_tile));
+        ui_.map_particle_particles_per_tile = std::clamp(ui_.map_particle_particles_per_tile, 8, 1024);
+      }
+      if (auto it = obj->find("map_particle_layers"); it != obj->end()) {
+        ui_.map_particle_layers = static_cast<int>(it->second.int_value(ui_.map_particle_layers));
+        ui_.map_particle_layers = std::clamp(ui_.map_particle_layers, 1, 3);
+      }
+      if (auto it = obj->find("map_particle_opacity"); it != obj->end()) {
+        ui_.map_particle_opacity = static_cast<float>(it->second.number_value(ui_.map_particle_opacity));
+        ui_.map_particle_opacity = std::clamp(ui_.map_particle_opacity, 0.0f, 1.0f);
+      }
+      if (auto it = obj->find("map_particle_base_radius_px"); it != obj->end()) {
+        ui_.map_particle_base_radius_px = static_cast<float>(it->second.number_value(ui_.map_particle_base_radius_px));
+        ui_.map_particle_base_radius_px = std::clamp(ui_.map_particle_base_radius_px, 0.1f, 8.0f);
+      }
+      if (auto it = obj->find("map_particle_radius_jitter_px"); it != obj->end()) {
+        ui_.map_particle_radius_jitter_px = static_cast<float>(it->second.number_value(ui_.map_particle_radius_jitter_px));
+        ui_.map_particle_radius_jitter_px = std::clamp(ui_.map_particle_radius_jitter_px, 0.0f, 12.0f);
+      }
+      if (auto it = obj->find("map_particle_twinkle_strength"); it != obj->end()) {
+        ui_.map_particle_twinkle_strength = static_cast<float>(it->second.number_value(ui_.map_particle_twinkle_strength));
+        ui_.map_particle_twinkle_strength = std::clamp(ui_.map_particle_twinkle_strength, 0.0f, 1.0f);
+      }
+      if (auto it = obj->find("map_particle_twinkle_speed"); it != obj->end()) {
+        ui_.map_particle_twinkle_speed = static_cast<float>(it->second.number_value(ui_.map_particle_twinkle_speed));
+        ui_.map_particle_twinkle_speed = std::clamp(ui_.map_particle_twinkle_speed, 0.0f, 8.0f);
+      }
+      if (auto it = obj->find("map_particle_drift"); it != obj->end()) {
+        ui_.map_particle_drift = it->second.bool_value(ui_.map_particle_drift);
+      }
+      if (auto it = obj->find("map_particle_drift_px_per_day"); it != obj->end()) {
+        ui_.map_particle_drift_px_per_day = static_cast<float>(it->second.number_value(ui_.map_particle_drift_px_per_day));
+        ui_.map_particle_drift_px_per_day = std::clamp(ui_.map_particle_drift_px_per_day, 0.0f, 500.0f);
+      }
+      if (auto it = obj->find("map_particle_layer0_parallax"); it != obj->end()) {
+        ui_.map_particle_layer0_parallax = static_cast<float>(it->second.number_value(ui_.map_particle_layer0_parallax));
+        ui_.map_particle_layer0_parallax = std::clamp(ui_.map_particle_layer0_parallax, 0.0f, 1.0f);
+      }
+      if (auto it = obj->find("map_particle_layer1_parallax"); it != obj->end()) {
+        ui_.map_particle_layer1_parallax = static_cast<float>(it->second.number_value(ui_.map_particle_layer1_parallax));
+        ui_.map_particle_layer1_parallax = std::clamp(ui_.map_particle_layer1_parallax, 0.0f, 1.0f);
+      }
+      if (auto it = obj->find("map_particle_layer2_parallax"); it != obj->end()) {
+        ui_.map_particle_layer2_parallax = static_cast<float>(it->second.number_value(ui_.map_particle_layer2_parallax));
+        ui_.map_particle_layer2_parallax = std::clamp(ui_.map_particle_layer2_parallax, 0.0f, 1.0f);
+      }
+      if (auto it = obj->find("map_particle_sparkles"); it != obj->end()) {
+        ui_.map_particle_sparkles = it->second.bool_value(ui_.map_particle_sparkles);
+      }
+      if (auto it = obj->find("map_particle_sparkle_chance"); it != obj->end()) {
+        ui_.map_particle_sparkle_chance = static_cast<float>(it->second.number_value(ui_.map_particle_sparkle_chance));
+        ui_.map_particle_sparkle_chance = std::clamp(ui_.map_particle_sparkle_chance, 0.0f, 1.0f);
+      }
+      if (auto it = obj->find("map_particle_sparkle_length_px"); it != obj->end()) {
+        ui_.map_particle_sparkle_length_px = static_cast<float>(it->second.number_value(ui_.map_particle_sparkle_length_px));
+        ui_.map_particle_sparkle_length_px = std::clamp(ui_.map_particle_sparkle_length_px, 0.0f, 64.0f);
+      }
+      if (auto it = obj->find("map_particle_debug_tiles"); it != obj->end()) {
+        ui_.map_particle_debug_tiles = it->second.bool_value(ui_.map_particle_debug_tiles);
       }
 
       // Ray-marched SDF nebula (map background chrome).
@@ -1667,6 +1947,461 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       }
       if (auto it = obj->find("map_raymarch_nebula_debug"); it != obj->end()) {
         ui_.map_raymarch_nebula_debug = it->second.bool_value(ui_.map_raymarch_nebula_debug);
+      }
+
+      // --- Map procedural background engine ---
+      if (auto it = obj->find("map_proc_render_engine"); it != obj->end()) {
+        ui_.map_proc_render_engine = it->second.bool_value(ui_.map_proc_render_engine);
+      }
+      if (auto it = obj->find("map_proc_render_tile_px"); it != obj->end()) {
+        ui_.map_proc_render_tile_px = static_cast<int>(it->second.number_value(ui_.map_proc_render_tile_px));
+        ui_.map_proc_render_tile_px = std::clamp(ui_.map_proc_render_tile_px, 64, 1024);
+      }
+      if (auto it = obj->find("map_proc_render_cache_tiles"); it != obj->end()) {
+        ui_.map_proc_render_cache_tiles = static_cast<int>(it->second.number_value(ui_.map_proc_render_cache_tiles));
+        ui_.map_proc_render_cache_tiles = std::clamp(ui_.map_proc_render_cache_tiles, 8, 2048);
+      }
+      if (auto it = obj->find("map_proc_render_nebula_enable"); it != obj->end()) {
+        ui_.map_proc_render_nebula_enable = it->second.bool_value(ui_.map_proc_render_nebula_enable);
+      }
+      if (auto it = obj->find("map_proc_render_nebula_strength"); it != obj->end()) {
+        ui_.map_proc_render_nebula_strength =
+            static_cast<float>(it->second.number_value(ui_.map_proc_render_nebula_strength));
+        ui_.map_proc_render_nebula_strength = std::clamp(ui_.map_proc_render_nebula_strength, 0.0f, 2.0f);
+      }
+      if (auto it = obj->find("map_proc_render_nebula_scale"); it != obj->end()) {
+        ui_.map_proc_render_nebula_scale =
+            static_cast<float>(it->second.number_value(ui_.map_proc_render_nebula_scale));
+        ui_.map_proc_render_nebula_scale = std::clamp(ui_.map_proc_render_nebula_scale, 0.1f, 8.0f);
+      }
+      if (auto it = obj->find("map_proc_render_nebula_warp"); it != obj->end()) {
+        ui_.map_proc_render_nebula_warp =
+            static_cast<float>(it->second.number_value(ui_.map_proc_render_nebula_warp));
+        ui_.map_proc_render_nebula_warp = std::clamp(ui_.map_proc_render_nebula_warp, 0.0f, 3.0f);
+      }
+      if (auto it = obj->find("map_proc_render_debug_tiles"); it != obj->end()) {
+        ui_.map_proc_render_debug_tiles = it->second.bool_value(ui_.map_proc_render_debug_tiles);
+      }
+
+      // --- System map procedural body sprites ---
+      if (auto it = obj->find("system_map_body_sprites"); it != obj->end()) {
+        ui_.system_map_body_sprites = it->second.bool_value(ui_.system_map_body_sprites);
+      }
+      if (auto it = obj->find("system_map_body_sprite_px"); it != obj->end()) {
+        ui_.system_map_body_sprite_px = static_cast<int>(it->second.number_value(ui_.system_map_body_sprite_px));
+        ui_.system_map_body_sprite_px = std::clamp(ui_.system_map_body_sprite_px, 24, 512);
+      }
+      if (auto it = obj->find("system_map_body_sprite_cache"); it != obj->end()) {
+        ui_.system_map_body_sprite_cache = static_cast<int>(it->second.number_value(ui_.system_map_body_sprite_cache));
+        ui_.system_map_body_sprite_cache = std::clamp(ui_.system_map_body_sprite_cache, 16, 4096);
+      }
+      if (auto it = obj->find("system_map_body_sprite_light_steps"); it != obj->end()) {
+        ui_.system_map_body_sprite_light_steps =
+            static_cast<int>(it->second.number_value(ui_.system_map_body_sprite_light_steps));
+        ui_.system_map_body_sprite_light_steps = std::clamp(ui_.system_map_body_sprite_light_steps, 4, 128);
+      }
+      if (auto it = obj->find("system_map_body_sprite_rings"); it != obj->end()) {
+        ui_.system_map_body_sprite_rings = it->second.bool_value(ui_.system_map_body_sprite_rings);
+      }
+      if (auto it = obj->find("system_map_body_sprite_ring_chance"); it != obj->end()) {
+        ui_.system_map_body_sprite_ring_chance =
+            static_cast<float>(it->second.number_value(ui_.system_map_body_sprite_ring_chance));
+        ui_.system_map_body_sprite_ring_chance = std::clamp(ui_.system_map_body_sprite_ring_chance, 0.0f, 1.0f);
+      }
+      if (auto it = obj->find("system_map_body_sprite_ambient"); it != obj->end()) {
+        ui_.system_map_body_sprite_ambient =
+            static_cast<float>(it->second.number_value(ui_.system_map_body_sprite_ambient));
+        ui_.system_map_body_sprite_ambient = std::clamp(ui_.system_map_body_sprite_ambient, 0.0f, 1.0f);
+      }
+      if (auto it = obj->find("system_map_body_sprite_diffuse"); it != obj->end()) {
+        ui_.system_map_body_sprite_diffuse =
+            static_cast<float>(it->second.number_value(ui_.system_map_body_sprite_diffuse));
+        ui_.system_map_body_sprite_diffuse = std::clamp(ui_.system_map_body_sprite_diffuse, 0.0f, 2.0f);
+      }
+      if (auto it = obj->find("system_map_body_sprite_specular"); it != obj->end()) {
+        ui_.system_map_body_sprite_specular =
+            static_cast<float>(it->second.number_value(ui_.system_map_body_sprite_specular));
+        ui_.system_map_body_sprite_specular = std::clamp(ui_.system_map_body_sprite_specular, 0.0f, 2.0f);
+      }
+      if (auto it = obj->find("system_map_body_sprite_specular_power"); it != obj->end()) {
+        ui_.system_map_body_sprite_specular_power =
+            static_cast<float>(it->second.number_value(ui_.system_map_body_sprite_specular_power));
+        ui_.system_map_body_sprite_specular_power = std::clamp(ui_.system_map_body_sprite_specular_power, 1.0f, 128.0f);
+      }
+
+      // --- System map procedural contact icons ---
+      if (auto it = obj->find("system_map_contact_icons"); it != obj->end()) {
+        ui_.system_map_contact_icons = it->second.bool_value(ui_.system_map_contact_icons);
+      }
+      if (auto it = obj->find("system_map_contact_icon_px"); it != obj->end()) {
+        ui_.system_map_contact_icon_px = static_cast<int>(it->second.number_value(ui_.system_map_contact_icon_px));
+        ui_.system_map_contact_icon_px = std::clamp(ui_.system_map_contact_icon_px, 16, 256);
+      }
+      if (auto it = obj->find("system_map_contact_icon_cache"); it != obj->end()) {
+        ui_.system_map_contact_icon_cache = static_cast<int>(it->second.number_value(ui_.system_map_contact_icon_cache));
+        ui_.system_map_contact_icon_cache = std::clamp(ui_.system_map_contact_icon_cache, 32, 4096);
+      }
+      if (auto it = obj->find("system_map_ship_icon_size_px"); it != obj->end()) {
+        ui_.system_map_ship_icon_size_px = static_cast<float>(it->second.number_value(ui_.system_map_ship_icon_size_px));
+        ui_.system_map_ship_icon_size_px = std::clamp(ui_.system_map_ship_icon_size_px, 4.0f, 96.0f);
+      }
+      if (auto it = obj->find("system_map_ship_icon_thrusters"); it != obj->end()) {
+        ui_.system_map_ship_icon_thrusters = it->second.bool_value(ui_.system_map_ship_icon_thrusters);
+      }
+      if (auto it = obj->find("system_map_ship_icon_thruster_opacity"); it != obj->end()) {
+        ui_.system_map_ship_icon_thruster_opacity =
+            static_cast<float>(it->second.number_value(ui_.system_map_ship_icon_thruster_opacity));
+        ui_.system_map_ship_icon_thruster_opacity = std::clamp(ui_.system_map_ship_icon_thruster_opacity, 0.0f, 1.0f);
+      }
+      if (auto it = obj->find("system_map_ship_icon_thruster_length_px"); it != obj->end()) {
+        ui_.system_map_ship_icon_thruster_length_px =
+            static_cast<float>(it->second.number_value(ui_.system_map_ship_icon_thruster_length_px));
+        ui_.system_map_ship_icon_thruster_length_px = std::clamp(ui_.system_map_ship_icon_thruster_length_px, 0.0f, 128.0f);
+      }
+      if (auto it = obj->find("system_map_ship_icon_thruster_width_px"); it != obj->end()) {
+        ui_.system_map_ship_icon_thruster_width_px =
+            static_cast<float>(it->second.number_value(ui_.system_map_ship_icon_thruster_width_px));
+        ui_.system_map_ship_icon_thruster_width_px = std::clamp(ui_.system_map_ship_icon_thruster_width_px, 0.0f, 128.0f);
+      }
+      if (auto it = obj->find("system_map_missile_icon_size_px"); it != obj->end()) {
+        ui_.system_map_missile_icon_size_px =
+            static_cast<float>(it->second.number_value(ui_.system_map_missile_icon_size_px));
+        ui_.system_map_missile_icon_size_px = std::clamp(ui_.system_map_missile_icon_size_px, 4.0f, 64.0f);
+      }
+      if (auto it = obj->find("system_map_wreck_icon_size_px"); it != obj->end()) {
+        ui_.system_map_wreck_icon_size_px = static_cast<float>(it->second.number_value(ui_.system_map_wreck_icon_size_px));
+        ui_.system_map_wreck_icon_size_px = std::clamp(ui_.system_map_wreck_icon_size_px, 4.0f, 96.0f);
+      }
+      if (auto it = obj->find("system_map_anomaly_icon_size_px"); it != obj->end()) {
+        ui_.system_map_anomaly_icon_size_px =
+            static_cast<float>(it->second.number_value(ui_.system_map_anomaly_icon_size_px));
+        ui_.system_map_anomaly_icon_size_px = std::clamp(ui_.system_map_anomaly_icon_size_px, 4.0f, 96.0f);
+      }
+      if (auto it = obj->find("system_map_anomaly_icon_pulse"); it != obj->end()) {
+        ui_.system_map_anomaly_icon_pulse = it->second.bool_value(ui_.system_map_anomaly_icon_pulse);
+      }
+      if (auto it = obj->find("system_map_contact_icon_debug_bounds"); it != obj->end()) {
+        ui_.system_map_contact_icon_debug_bounds = it->second.bool_value(ui_.system_map_contact_icon_debug_bounds);
+      }
+
+      // --- System map jump-point phenomena ---
+      if (auto it = obj->find("system_map_jump_phenomena"); it != obj->end()) {
+        ui_.system_map_jump_phenomena = it->second.bool_value(ui_.system_map_jump_phenomena);
+      }
+      if (auto it = obj->find("system_map_jump_phenomena_reveal_unsurveyed"); it != obj->end()) {
+        ui_.system_map_jump_phenomena_reveal_unsurveyed =
+            it->second.bool_value(ui_.system_map_jump_phenomena_reveal_unsurveyed);
+      }
+      if (auto it = obj->find("system_map_jump_phenomena_sprite_px"); it != obj->end()) {
+        ui_.system_map_jump_phenomena_sprite_px =
+            static_cast<int>(it->second.number_value(ui_.system_map_jump_phenomena_sprite_px));
+        ui_.system_map_jump_phenomena_sprite_px = std::clamp(ui_.system_map_jump_phenomena_sprite_px, 16, 512);
+      }
+      if (auto it = obj->find("system_map_jump_phenomena_cache"); it != obj->end()) {
+        ui_.system_map_jump_phenomena_cache =
+            static_cast<int>(it->second.number_value(ui_.system_map_jump_phenomena_cache));
+        ui_.system_map_jump_phenomena_cache = std::clamp(ui_.system_map_jump_phenomena_cache, 16, 4096);
+      }
+      if (auto it = obj->find("system_map_jump_phenomena_size_mult"); it != obj->end()) {
+        ui_.system_map_jump_phenomena_size_mult =
+            static_cast<float>(it->second.number_value(ui_.system_map_jump_phenomena_size_mult));
+        ui_.system_map_jump_phenomena_size_mult = std::clamp(ui_.system_map_jump_phenomena_size_mult, 1.0f, 16.0f);
+      }
+      if (auto it = obj->find("system_map_jump_phenomena_opacity"); it != obj->end()) {
+        ui_.system_map_jump_phenomena_opacity =
+            static_cast<float>(it->second.number_value(ui_.system_map_jump_phenomena_opacity));
+        ui_.system_map_jump_phenomena_opacity = std::clamp(ui_.system_map_jump_phenomena_opacity, 0.0f, 1.0f);
+      }
+      if (auto it = obj->find("system_map_jump_phenomena_animate"); it != obj->end()) {
+        ui_.system_map_jump_phenomena_animate = it->second.bool_value(ui_.system_map_jump_phenomena_animate);
+      }
+      if (auto it = obj->find("system_map_jump_phenomena_anim_speed_cycles_per_day"); it != obj->end()) {
+        ui_.system_map_jump_phenomena_anim_speed_cycles_per_day = static_cast<float>(
+            it->second.number_value(ui_.system_map_jump_phenomena_anim_speed_cycles_per_day));
+        ui_.system_map_jump_phenomena_anim_speed_cycles_per_day =
+            std::clamp(ui_.system_map_jump_phenomena_anim_speed_cycles_per_day, 0.0f, 4.0f);
+      }
+      if (auto it = obj->find("system_map_jump_phenomena_pulse"); it != obj->end()) {
+        ui_.system_map_jump_phenomena_pulse = it->second.bool_value(ui_.system_map_jump_phenomena_pulse);
+      }
+      if (auto it = obj->find("system_map_jump_phenomena_pulse_cycles_per_day"); it != obj->end()) {
+        ui_.system_map_jump_phenomena_pulse_cycles_per_day =
+            static_cast<float>(it->second.number_value(ui_.system_map_jump_phenomena_pulse_cycles_per_day));
+        ui_.system_map_jump_phenomena_pulse_cycles_per_day =
+            std::clamp(ui_.system_map_jump_phenomena_pulse_cycles_per_day, 0.0f, 6.0f);
+      }
+      if (auto it = obj->find("system_map_jump_phenomena_filaments"); it != obj->end()) {
+        ui_.system_map_jump_phenomena_filaments = it->second.bool_value(ui_.system_map_jump_phenomena_filaments);
+      }
+      if (auto it = obj->find("system_map_jump_phenomena_filaments_max"); it != obj->end()) {
+        ui_.system_map_jump_phenomena_filaments_max =
+            static_cast<int>(it->second.number_value(ui_.system_map_jump_phenomena_filaments_max));
+        ui_.system_map_jump_phenomena_filaments_max = std::clamp(ui_.system_map_jump_phenomena_filaments_max, 0, 32);
+      }
+      if (auto it = obj->find("system_map_jump_phenomena_filament_strength"); it != obj->end()) {
+        ui_.system_map_jump_phenomena_filament_strength =
+            static_cast<float>(it->second.number_value(ui_.system_map_jump_phenomena_filament_strength));
+        ui_.system_map_jump_phenomena_filament_strength =
+            std::clamp(ui_.system_map_jump_phenomena_filament_strength, 0.0f, 4.0f);
+      }
+      if (auto it = obj->find("system_map_jump_phenomena_debug_bounds"); it != obj->end()) {
+        ui_.system_map_jump_phenomena_debug_bounds = it->second.bool_value(ui_.system_map_jump_phenomena_debug_bounds);
+      }
+
+      // --- System map anomaly phenomena ---
+      if (auto it = obj->find("system_map_anomaly_phenomena"); it != obj->end()) {
+        ui_.system_map_anomaly_phenomena = it->second.bool_value(ui_.system_map_anomaly_phenomena);
+      }
+      if (auto it = obj->find("system_map_anomaly_phenomena_sprite_px"); it != obj->end()) {
+        ui_.system_map_anomaly_phenomena_sprite_px =
+            static_cast<int>(it->second.number_value(ui_.system_map_anomaly_phenomena_sprite_px));
+        ui_.system_map_anomaly_phenomena_sprite_px = std::clamp(ui_.system_map_anomaly_phenomena_sprite_px, 16, 512);
+      }
+      if (auto it = obj->find("system_map_anomaly_phenomena_cache"); it != obj->end()) {
+        ui_.system_map_anomaly_phenomena_cache =
+            static_cast<int>(it->second.number_value(ui_.system_map_anomaly_phenomena_cache));
+        ui_.system_map_anomaly_phenomena_cache = std::clamp(ui_.system_map_anomaly_phenomena_cache, 16, 4096);
+      }
+      if (auto it = obj->find("system_map_anomaly_phenomena_size_mult"); it != obj->end()) {
+        ui_.system_map_anomaly_phenomena_size_mult =
+            static_cast<float>(it->second.number_value(ui_.system_map_anomaly_phenomena_size_mult));
+        ui_.system_map_anomaly_phenomena_size_mult = std::clamp(ui_.system_map_anomaly_phenomena_size_mult, 1.0f, 16.0f);
+      }
+      if (auto it = obj->find("system_map_anomaly_phenomena_opacity"); it != obj->end()) {
+        ui_.system_map_anomaly_phenomena_opacity =
+            static_cast<float>(it->second.number_value(ui_.system_map_anomaly_phenomena_opacity));
+        ui_.system_map_anomaly_phenomena_opacity = std::clamp(ui_.system_map_anomaly_phenomena_opacity, 0.0f, 1.0f);
+      }
+      if (auto it = obj->find("system_map_anomaly_phenomena_animate"); it != obj->end()) {
+        ui_.system_map_anomaly_phenomena_animate = it->second.bool_value(ui_.system_map_anomaly_phenomena_animate);
+      }
+      if (auto it = obj->find("system_map_anomaly_phenomena_anim_speed_cycles_per_day"); it != obj->end()) {
+        ui_.system_map_anomaly_phenomena_anim_speed_cycles_per_day = static_cast<float>(
+            it->second.number_value(ui_.system_map_anomaly_phenomena_anim_speed_cycles_per_day));
+        ui_.system_map_anomaly_phenomena_anim_speed_cycles_per_day =
+            std::clamp(ui_.system_map_anomaly_phenomena_anim_speed_cycles_per_day, 0.0f, 4.0f);
+      }
+      if (auto it = obj->find("system_map_anomaly_phenomena_pulse"); it != obj->end()) {
+        ui_.system_map_anomaly_phenomena_pulse = it->second.bool_value(ui_.system_map_anomaly_phenomena_pulse);
+      }
+      if (auto it = obj->find("system_map_anomaly_phenomena_pulse_cycles_per_day"); it != obj->end()) {
+        ui_.system_map_anomaly_phenomena_pulse_cycles_per_day =
+            static_cast<float>(it->second.number_value(ui_.system_map_anomaly_phenomena_pulse_cycles_per_day));
+        ui_.system_map_anomaly_phenomena_pulse_cycles_per_day =
+            std::clamp(ui_.system_map_anomaly_phenomena_pulse_cycles_per_day, 0.0f, 6.0f);
+      }
+      if (auto it = obj->find("system_map_anomaly_phenomena_filaments"); it != obj->end()) {
+        ui_.system_map_anomaly_phenomena_filaments = it->second.bool_value(ui_.system_map_anomaly_phenomena_filaments);
+      }
+      if (auto it = obj->find("system_map_anomaly_phenomena_filaments_max"); it != obj->end()) {
+        ui_.system_map_anomaly_phenomena_filaments_max =
+            static_cast<int>(it->second.number_value(ui_.system_map_anomaly_phenomena_filaments_max));
+        ui_.system_map_anomaly_phenomena_filaments_max = std::clamp(ui_.system_map_anomaly_phenomena_filaments_max, 0, 64);
+      }
+      if (auto it = obj->find("system_map_anomaly_phenomena_filament_strength"); it != obj->end()) {
+        ui_.system_map_anomaly_phenomena_filament_strength =
+            static_cast<float>(it->second.number_value(ui_.system_map_anomaly_phenomena_filament_strength));
+        ui_.system_map_anomaly_phenomena_filament_strength =
+            std::clamp(ui_.system_map_anomaly_phenomena_filament_strength, 0.0f, 4.0f);
+      }
+      if (auto it = obj->find("system_map_anomaly_phenomena_glyph_overlay"); it != obj->end()) {
+        ui_.system_map_anomaly_phenomena_glyph_overlay =
+            it->second.bool_value(ui_.system_map_anomaly_phenomena_glyph_overlay);
+      }
+      if (auto it = obj->find("system_map_anomaly_phenomena_glyph_strength"); it != obj->end()) {
+        ui_.system_map_anomaly_phenomena_glyph_strength =
+            static_cast<float>(it->second.number_value(ui_.system_map_anomaly_phenomena_glyph_strength));
+        ui_.system_map_anomaly_phenomena_glyph_strength =
+            std::clamp(ui_.system_map_anomaly_phenomena_glyph_strength, 0.0f, 1.0f);
+      }
+      if (auto it = obj->find("system_map_anomaly_phenomena_debug_bounds"); it != obj->end()) {
+        ui_.system_map_anomaly_phenomena_debug_bounds =
+            it->second.bool_value(ui_.system_map_anomaly_phenomena_debug_bounds);
+      }
+
+      // --- System map motion trails (vector FX) ---
+      if (auto it = obj->find("system_map_motion_trails"); it != obj->end()) {
+        ui_.system_map_motion_trails = it->second.bool_value(ui_.system_map_motion_trails);
+      }
+      if (auto it = obj->find("system_map_motion_trails_all_ships"); it != obj->end()) {
+        ui_.system_map_motion_trails_all_ships = it->second.bool_value(ui_.system_map_motion_trails_all_ships);
+      }
+      if (auto it = obj->find("system_map_motion_trails_missiles"); it != obj->end()) {
+        ui_.system_map_motion_trails_missiles = it->second.bool_value(ui_.system_map_motion_trails_missiles);
+      }
+      if (auto it = obj->find("system_map_motion_trails_max_age_days"); it != obj->end()) {
+        ui_.system_map_motion_trails_max_age_days =
+            static_cast<float>(it->second.number_value(ui_.system_map_motion_trails_max_age_days));
+        ui_.system_map_motion_trails_max_age_days = std::clamp(ui_.system_map_motion_trails_max_age_days, 0.25f, 60.0f);
+      }
+      if (auto it = obj->find("system_map_motion_trails_sample_hours"); it != obj->end()) {
+        ui_.system_map_motion_trails_sample_hours =
+            static_cast<float>(it->second.number_value(ui_.system_map_motion_trails_sample_hours));
+        ui_.system_map_motion_trails_sample_hours = std::clamp(ui_.system_map_motion_trails_sample_hours, 0.05f, 72.0f);
+      }
+      if (auto it = obj->find("system_map_motion_trails_min_seg_px"); it != obj->end()) {
+        ui_.system_map_motion_trails_min_seg_px =
+            static_cast<float>(it->second.number_value(ui_.system_map_motion_trails_min_seg_px));
+        ui_.system_map_motion_trails_min_seg_px = std::clamp(ui_.system_map_motion_trails_min_seg_px, 0.5f, 32.0f);
+      }
+      if (auto it = obj->find("system_map_motion_trails_thickness_px"); it != obj->end()) {
+        ui_.system_map_motion_trails_thickness_px =
+            static_cast<float>(it->second.number_value(ui_.system_map_motion_trails_thickness_px));
+        ui_.system_map_motion_trails_thickness_px = std::clamp(ui_.system_map_motion_trails_thickness_px, 0.5f, 12.0f);
+      }
+      if (auto it = obj->find("system_map_motion_trails_alpha"); it != obj->end()) {
+        ui_.system_map_motion_trails_alpha =
+            static_cast<float>(it->second.number_value(ui_.system_map_motion_trails_alpha));
+        ui_.system_map_motion_trails_alpha = std::clamp(ui_.system_map_motion_trails_alpha, 0.0f, 1.0f);
+      }
+      if (auto it = obj->find("system_map_motion_trails_speed_brighten"); it != obj->end()) {
+        ui_.system_map_motion_trails_speed_brighten = it->second.bool_value(ui_.system_map_motion_trails_speed_brighten);
+      }
+
+      // --- System map flow field (space weather) ---
+      if (auto it = obj->find("system_map_flow_field_overlay"); it != obj->end()) {
+        ui_.system_map_flow_field_overlay = it->second.bool_value(ui_.system_map_flow_field_overlay);
+      }
+      if (auto it = obj->find("system_map_flow_field_animate"); it != obj->end()) {
+        ui_.system_map_flow_field_animate = it->second.bool_value(ui_.system_map_flow_field_animate);
+      }
+      if (auto it = obj->find("system_map_flow_field_mask_nebula"); it != obj->end()) {
+        ui_.system_map_flow_field_mask_nebula = it->second.bool_value(ui_.system_map_flow_field_mask_nebula);
+      }
+      if (auto it = obj->find("system_map_flow_field_mask_storms"); it != obj->end()) {
+        ui_.system_map_flow_field_mask_storms = it->second.bool_value(ui_.system_map_flow_field_mask_storms);
+      }
+      if (auto it = obj->find("system_map_flow_field_debug_tiles"); it != obj->end()) {
+        ui_.system_map_flow_field_debug_tiles = it->second.bool_value(ui_.system_map_flow_field_debug_tiles);
+      }
+
+      if (auto it = obj->find("system_map_flow_field_opacity"); it != obj->end()) {
+        ui_.system_map_flow_field_opacity = static_cast<float>(it->second.number_value(ui_.system_map_flow_field_opacity));
+        ui_.system_map_flow_field_opacity = std::clamp(ui_.system_map_flow_field_opacity, 0.0f, 1.0f);
+      }
+      if (auto it = obj->find("system_map_flow_field_thickness_px"); it != obj->end()) {
+        ui_.system_map_flow_field_thickness_px =
+            static_cast<float>(it->second.number_value(ui_.system_map_flow_field_thickness_px));
+        ui_.system_map_flow_field_thickness_px = std::clamp(ui_.system_map_flow_field_thickness_px, 0.5f, 12.0f);
+      }
+      if (auto it = obj->find("system_map_flow_field_step_px"); it != obj->end()) {
+        ui_.system_map_flow_field_step_px = static_cast<float>(it->second.number_value(ui_.system_map_flow_field_step_px));
+        ui_.system_map_flow_field_step_px = std::clamp(ui_.system_map_flow_field_step_px, 1.0f, 64.0f);
+      }
+      if (auto it = obj->find("system_map_flow_field_highlight_wavelength_px"); it != obj->end()) {
+        ui_.system_map_flow_field_highlight_wavelength_px =
+            static_cast<float>(it->second.number_value(ui_.system_map_flow_field_highlight_wavelength_px));
+        ui_.system_map_flow_field_highlight_wavelength_px =
+            std::clamp(ui_.system_map_flow_field_highlight_wavelength_px, 32.0f, 2000.0f);
+      }
+      if (auto it = obj->find("system_map_flow_field_animate_speed_cycles_per_day"); it != obj->end()) {
+        ui_.system_map_flow_field_animate_speed_cycles_per_day =
+            static_cast<float>(it->second.number_value(ui_.system_map_flow_field_animate_speed_cycles_per_day));
+        ui_.system_map_flow_field_animate_speed_cycles_per_day =
+            std::clamp(ui_.system_map_flow_field_animate_speed_cycles_per_day, 0.0f, 4.0f);
+      }
+      if (auto it = obj->find("system_map_flow_field_nebula_threshold"); it != obj->end()) {
+        ui_.system_map_flow_field_nebula_threshold =
+            static_cast<float>(it->second.number_value(ui_.system_map_flow_field_nebula_threshold));
+        ui_.system_map_flow_field_nebula_threshold = std::clamp(ui_.system_map_flow_field_nebula_threshold, 0.0f, 1.0f);
+      }
+      if (auto it = obj->find("system_map_flow_field_storm_threshold"); it != obj->end()) {
+        ui_.system_map_flow_field_storm_threshold =
+            static_cast<float>(it->second.number_value(ui_.system_map_flow_field_storm_threshold));
+        ui_.system_map_flow_field_storm_threshold = std::clamp(ui_.system_map_flow_field_storm_threshold, 0.0f, 1.0f);
+      }
+      if (auto it = obj->find("system_map_flow_field_scale_mkm"); it != obj->end()) {
+        ui_.system_map_flow_field_scale_mkm = static_cast<float>(it->second.number_value(ui_.system_map_flow_field_scale_mkm));
+        ui_.system_map_flow_field_scale_mkm = std::clamp(ui_.system_map_flow_field_scale_mkm, 250.0f, 500000.0f);
+      }
+
+      if (auto it = obj->find("system_map_flow_field_tile_px"); it != obj->end()) {
+        ui_.system_map_flow_field_tile_px = static_cast<int>(it->second.number_value(ui_.system_map_flow_field_tile_px));
+        ui_.system_map_flow_field_tile_px = std::clamp(ui_.system_map_flow_field_tile_px, 64, 1024);
+      }
+      if (auto it = obj->find("system_map_flow_field_cache_tiles"); it != obj->end()) {
+        ui_.system_map_flow_field_cache_tiles =
+            static_cast<int>(it->second.number_value(ui_.system_map_flow_field_cache_tiles));
+        ui_.system_map_flow_field_cache_tiles = std::clamp(ui_.system_map_flow_field_cache_tiles, 0, 100000);
+      }
+      if (auto it = obj->find("system_map_flow_field_lines_per_tile"); it != obj->end()) {
+        ui_.system_map_flow_field_lines_per_tile =
+            static_cast<int>(it->second.number_value(ui_.system_map_flow_field_lines_per_tile));
+        ui_.system_map_flow_field_lines_per_tile = std::clamp(ui_.system_map_flow_field_lines_per_tile, 1, 64);
+      }
+      if (auto it = obj->find("system_map_flow_field_steps_per_line"); it != obj->end()) {
+        ui_.system_map_flow_field_steps_per_line =
+            static_cast<int>(it->second.number_value(ui_.system_map_flow_field_steps_per_line));
+        ui_.system_map_flow_field_steps_per_line = std::clamp(ui_.system_map_flow_field_steps_per_line, 4, 250);
+      }
+
+      // --- System map gravity contours ("gravity wells") ---
+      if (auto it = obj->find("system_map_gravity_contours_overlay"); it != obj->end()) {
+        ui_.system_map_gravity_contours_overlay =
+            it->second.bool_value(ui_.system_map_gravity_contours_overlay);
+      }
+      if (auto it = obj->find("system_map_gravity_contours_debug_tiles"); it != obj->end()) {
+        ui_.system_map_gravity_contours_debug_tiles =
+            it->second.bool_value(ui_.system_map_gravity_contours_debug_tiles);
+      }
+
+      if (auto it = obj->find("system_map_gravity_contours_opacity"); it != obj->end()) {
+        ui_.system_map_gravity_contours_opacity =
+            static_cast<float>(it->second.number_value(ui_.system_map_gravity_contours_opacity));
+        ui_.system_map_gravity_contours_opacity = std::clamp(ui_.system_map_gravity_contours_opacity, 0.0f, 1.0f);
+      }
+      if (auto it = obj->find("system_map_gravity_contours_thickness_px"); it != obj->end()) {
+        ui_.system_map_gravity_contours_thickness_px =
+            static_cast<float>(it->second.number_value(ui_.system_map_gravity_contours_thickness_px));
+        ui_.system_map_gravity_contours_thickness_px =
+            std::clamp(ui_.system_map_gravity_contours_thickness_px, 0.5f, 12.0f);
+      }
+
+      if (auto it = obj->find("system_map_gravity_contours_tile_px"); it != obj->end()) {
+        ui_.system_map_gravity_contours_tile_px =
+            static_cast<int>(it->second.number_value(ui_.system_map_gravity_contours_tile_px));
+        ui_.system_map_gravity_contours_tile_px = std::clamp(ui_.system_map_gravity_contours_tile_px, 64, 2048);
+      }
+      if (auto it = obj->find("system_map_gravity_contours_cache_tiles"); it != obj->end()) {
+        ui_.system_map_gravity_contours_cache_tiles =
+            static_cast<int>(it->second.number_value(ui_.system_map_gravity_contours_cache_tiles));
+        ui_.system_map_gravity_contours_cache_tiles = std::clamp(ui_.system_map_gravity_contours_cache_tiles, 0, 4096);
+      }
+      if (auto it = obj->find("system_map_gravity_contours_samples_per_tile"); it != obj->end()) {
+        ui_.system_map_gravity_contours_samples_per_tile =
+            static_cast<int>(it->second.number_value(ui_.system_map_gravity_contours_samples_per_tile));
+        ui_.system_map_gravity_contours_samples_per_tile =
+            std::clamp(ui_.system_map_gravity_contours_samples_per_tile, 8, 96);
+      }
+      if (auto it = obj->find("system_map_gravity_contours_levels"); it != obj->end()) {
+        ui_.system_map_gravity_contours_levels =
+            static_cast<int>(it->second.number_value(ui_.system_map_gravity_contours_levels));
+        ui_.system_map_gravity_contours_levels = std::clamp(ui_.system_map_gravity_contours_levels, 1, 32);
+      }
+      if (auto it = obj->find("system_map_gravity_contours_level_spacing_decades"); it != obj->end()) {
+        ui_.system_map_gravity_contours_level_spacing_decades =
+            static_cast<float>(it->second.number_value(ui_.system_map_gravity_contours_level_spacing_decades));
+        ui_.system_map_gravity_contours_level_spacing_decades =
+            std::clamp(ui_.system_map_gravity_contours_level_spacing_decades, 0.05f, 2.0f);
+      }
+      if (auto it = obj->find("system_map_gravity_contours_level_offset_decades"); it != obj->end()) {
+        ui_.system_map_gravity_contours_level_offset_decades =
+            static_cast<float>(it->second.number_value(ui_.system_map_gravity_contours_level_offset_decades));
+        ui_.system_map_gravity_contours_level_offset_decades =
+            std::clamp(ui_.system_map_gravity_contours_level_offset_decades, -10.0f, 10.0f);
+      }
+
+      if (auto it = obj->find("system_map_gravity_contours_softening_min_mkm"); it != obj->end()) {
+        ui_.system_map_gravity_contours_softening_min_mkm =
+            static_cast<float>(it->second.number_value(ui_.system_map_gravity_contours_softening_min_mkm));
+        ui_.system_map_gravity_contours_softening_min_mkm =
+            std::clamp(ui_.system_map_gravity_contours_softening_min_mkm, 0.0001f, 10000.0f);
+      }
+      if (auto it = obj->find("system_map_gravity_contours_softening_radius_mult"); it != obj->end()) {
+        ui_.system_map_gravity_contours_softening_radius_mult =
+            static_cast<float>(it->second.number_value(ui_.system_map_gravity_contours_softening_radius_mult));
+        ui_.system_map_gravity_contours_softening_radius_mult =
+            std::clamp(ui_.system_map_gravity_contours_softening_radius_mult, 0.0f, 50.0f);
       }
 
       // Combat / tactical overlays.
@@ -1794,6 +2529,74 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       }
       if (auto it = obj->find("show_galaxy_region_border_links"); it != obj->end()) {
         ui_.show_galaxy_region_border_links = it->second.bool_value(ui_.show_galaxy_region_border_links);
+      }
+
+      if (auto it = obj->find("galaxy_map_territory_overlay"); it != obj->end()) {
+        ui_.galaxy_map_territory_overlay = it->second.bool_value(ui_.galaxy_map_territory_overlay);
+      }
+      if (auto it = obj->find("galaxy_map_territory_fill"); it != obj->end()) {
+        ui_.galaxy_map_territory_fill = it->second.bool_value(ui_.galaxy_map_territory_fill);
+      }
+      if (auto it = obj->find("galaxy_map_territory_boundaries"); it != obj->end()) {
+        ui_.galaxy_map_territory_boundaries = it->second.bool_value(ui_.galaxy_map_territory_boundaries);
+      }
+      if (auto it = obj->find("galaxy_map_territory_fill_opacity"); it != obj->end()) {
+        ui_.galaxy_map_territory_fill_opacity = static_cast<float>(it->second.number_value(ui_.galaxy_map_territory_fill_opacity));
+      }
+      ui_.galaxy_map_territory_fill_opacity = std::clamp(ui_.galaxy_map_territory_fill_opacity, 0.0f, 1.0f);
+      if (auto it = obj->find("galaxy_map_territory_boundary_opacity"); it != obj->end()) {
+        ui_.galaxy_map_territory_boundary_opacity = static_cast<float>(it->second.number_value(ui_.galaxy_map_territory_boundary_opacity));
+      }
+      ui_.galaxy_map_territory_boundary_opacity = std::clamp(ui_.galaxy_map_territory_boundary_opacity, 0.0f, 1.0f);
+      if (auto it = obj->find("galaxy_map_territory_boundary_thickness_px"); it != obj->end()) {
+        ui_.galaxy_map_territory_boundary_thickness_px = static_cast<float>(it->second.number_value(ui_.galaxy_map_territory_boundary_thickness_px));
+      }
+      ui_.galaxy_map_territory_boundary_thickness_px = std::clamp(ui_.galaxy_map_territory_boundary_thickness_px, 0.25f, 8.0f);
+      if (auto it = obj->find("galaxy_map_territory_tile_px"); it != obj->end()) {
+        ui_.galaxy_map_territory_tile_px = static_cast<int>(it->second.number_value(ui_.galaxy_map_territory_tile_px));
+      }
+      ui_.galaxy_map_territory_tile_px = std::clamp(ui_.galaxy_map_territory_tile_px, 96, 1024);
+      if (auto it = obj->find("galaxy_map_territory_cache_tiles"); it != obj->end()) {
+        ui_.galaxy_map_territory_cache_tiles = static_cast<int>(it->second.number_value(ui_.galaxy_map_territory_cache_tiles));
+      }
+      ui_.galaxy_map_territory_cache_tiles = std::clamp(ui_.galaxy_map_territory_cache_tiles, 8, 20000);
+      if (auto it = obj->find("galaxy_map_territory_samples_per_tile"); it != obj->end()) {
+        ui_.galaxy_map_territory_samples_per_tile = static_cast<int>(it->second.number_value(ui_.galaxy_map_territory_samples_per_tile));
+      }
+      ui_.galaxy_map_territory_samples_per_tile = std::clamp(ui_.galaxy_map_territory_samples_per_tile, 8, 128);
+      if (auto it = obj->find("galaxy_map_territory_influence_base_spacing_mult"); it != obj->end()) {
+        ui_.galaxy_map_territory_influence_base_spacing_mult = static_cast<float>(it->second.number_value(ui_.galaxy_map_territory_influence_base_spacing_mult));
+      }
+      ui_.galaxy_map_territory_influence_base_spacing_mult = std::clamp(ui_.galaxy_map_territory_influence_base_spacing_mult, 0.0f, 12.0f);
+      if (auto it = obj->find("galaxy_map_territory_influence_pop_spacing_mult"); it != obj->end()) {
+        ui_.galaxy_map_territory_influence_pop_spacing_mult = static_cast<float>(it->second.number_value(ui_.galaxy_map_territory_influence_pop_spacing_mult));
+      }
+      ui_.galaxy_map_territory_influence_pop_spacing_mult = std::clamp(ui_.galaxy_map_territory_influence_pop_spacing_mult, 0.0f, 12.0f);
+      if (auto it = obj->find("galaxy_map_territory_influence_pop_log_bias"); it != obj->end()) {
+        ui_.galaxy_map_territory_influence_pop_log_bias = static_cast<float>(it->second.number_value(ui_.galaxy_map_territory_influence_pop_log_bias));
+      }
+      ui_.galaxy_map_territory_influence_pop_log_bias = std::clamp(ui_.galaxy_map_territory_influence_pop_log_bias, 0.1f, 1000.0f);
+      if (auto it = obj->find("galaxy_map_territory_presence_falloff_spacing"); it != obj->end()) {
+        ui_.galaxy_map_territory_presence_falloff_spacing = static_cast<float>(it->second.number_value(ui_.galaxy_map_territory_presence_falloff_spacing));
+      }
+      ui_.galaxy_map_territory_presence_falloff_spacing = std::clamp(ui_.galaxy_map_territory_presence_falloff_spacing, 0.1f, 32.0f);
+      if (auto it = obj->find("galaxy_map_territory_dominance_softness_spacing"); it != obj->end()) {
+        ui_.galaxy_map_territory_dominance_softness_spacing = static_cast<float>(it->second.number_value(ui_.galaxy_map_territory_dominance_softness_spacing));
+      }
+      ui_.galaxy_map_territory_dominance_softness_spacing = std::clamp(ui_.galaxy_map_territory_dominance_softness_spacing, 0.05f, 32.0f);
+      if (auto it = obj->find("galaxy_map_territory_contested_dither"); it != obj->end()) {
+        ui_.galaxy_map_territory_contested_dither = it->second.bool_value(ui_.galaxy_map_territory_contested_dither);
+      }
+      if (auto it = obj->find("galaxy_map_territory_contested_threshold"); it != obj->end()) {
+        ui_.galaxy_map_territory_contested_threshold = static_cast<float>(it->second.number_value(ui_.galaxy_map_territory_contested_threshold));
+      }
+      ui_.galaxy_map_territory_contested_threshold = std::clamp(ui_.galaxy_map_territory_contested_threshold, 0.0f, 1.0f);
+      if (auto it = obj->find("galaxy_map_territory_contested_dither_strength"); it != obj->end()) {
+        ui_.galaxy_map_territory_contested_dither_strength = static_cast<float>(it->second.number_value(ui_.galaxy_map_territory_contested_dither_strength));
+      }
+      ui_.galaxy_map_territory_contested_dither_strength = std::clamp(ui_.galaxy_map_territory_contested_dither_strength, 0.0f, 1.0f);
+      if (auto it = obj->find("galaxy_map_territory_debug_tiles"); it != obj->end()) {
+        ui_.galaxy_map_territory_debug_tiles = it->second.bool_value(ui_.galaxy_map_territory_debug_tiles);
       }
       if (auto it = obj->find("galaxy_procgen_lens_mode"); it != obj->end()) {
         ui_.galaxy_procgen_lens_mode = static_cast<ProcGenLensMode>(
@@ -2954,6 +3757,7 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
 
     // Map rendering chrome.
     o["system_map_starfield"] = ui_.system_map_starfield;
+    o["system_map_particle_field"] = ui_.system_map_particle_field;
     o["system_map_grid"] = ui_.system_map_grid;
     o["system_map_order_paths"] = ui_.system_map_order_paths;
     o["system_map_fleet_formation_preview"] = ui_.system_map_fleet_formation_preview;
@@ -2985,6 +3789,7 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     o["system_map_storm_overlay_opacity"] = static_cast<double>(ui_.system_map_storm_overlay_opacity);
     o["system_map_storm_overlay_resolution"] = static_cast<double>(ui_.system_map_storm_overlay_resolution);
     o["galaxy_map_starfield"] = ui_.galaxy_map_starfield;
+    o["galaxy_map_particle_field"] = ui_.galaxy_map_particle_field;
     o["galaxy_map_grid"] = ui_.galaxy_map_grid;
     o["galaxy_map_selected_route"] = ui_.galaxy_map_selected_route;
     o["galaxy_map_show_minimap"] = ui_.galaxy_map_show_minimap;
@@ -2993,6 +3798,25 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     o["map_starfield_parallax"] = static_cast<double>(ui_.map_starfield_parallax);
     o["map_grid_opacity"] = static_cast<double>(ui_.map_grid_opacity);
     o["map_route_opacity"] = static_cast<double>(ui_.map_route_opacity);
+
+    // Procedural particle field (dust)
+    o["map_particle_tile_px"] = static_cast<double>(ui_.map_particle_tile_px);
+    o["map_particle_particles_per_tile"] = static_cast<double>(ui_.map_particle_particles_per_tile);
+    o["map_particle_layers"] = static_cast<double>(ui_.map_particle_layers);
+    o["map_particle_opacity"] = static_cast<double>(ui_.map_particle_opacity);
+    o["map_particle_base_radius_px"] = static_cast<double>(ui_.map_particle_base_radius_px);
+    o["map_particle_radius_jitter_px"] = static_cast<double>(ui_.map_particle_radius_jitter_px);
+    o["map_particle_twinkle_strength"] = static_cast<double>(ui_.map_particle_twinkle_strength);
+    o["map_particle_twinkle_speed"] = static_cast<double>(ui_.map_particle_twinkle_speed);
+    o["map_particle_drift"] = ui_.map_particle_drift;
+    o["map_particle_drift_px_per_day"] = static_cast<double>(ui_.map_particle_drift_px_per_day);
+    o["map_particle_layer0_parallax"] = static_cast<double>(ui_.map_particle_layer0_parallax);
+    o["map_particle_layer1_parallax"] = static_cast<double>(ui_.map_particle_layer1_parallax);
+    o["map_particle_layer2_parallax"] = static_cast<double>(ui_.map_particle_layer2_parallax);
+    o["map_particle_sparkles"] = ui_.map_particle_sparkles;
+    o["map_particle_sparkle_chance"] = static_cast<double>(ui_.map_particle_sparkle_chance);
+    o["map_particle_sparkle_length_px"] = static_cast<double>(ui_.map_particle_sparkle_length_px);
+    o["map_particle_debug_tiles"] = ui_.map_particle_debug_tiles;
 
     // Ray-marched SDF nebula (experimental).
     o["map_raymarch_nebula"] = ui_.map_raymarch_nebula;
@@ -3005,6 +3829,131 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     o["map_raymarch_nebula_animate"] = ui_.map_raymarch_nebula_animate;
     o["map_raymarch_nebula_time_scale"] = static_cast<double>(ui_.map_raymarch_nebula_time_scale);
     o["map_raymarch_nebula_debug"] = ui_.map_raymarch_nebula_debug;
+
+    // Procedural background engine (tile raster).
+    o["map_proc_render_engine"] = ui_.map_proc_render_engine;
+    o["map_proc_render_tile_px"] = static_cast<double>(ui_.map_proc_render_tile_px);
+    o["map_proc_render_cache_tiles"] = static_cast<double>(ui_.map_proc_render_cache_tiles);
+    o["map_proc_render_nebula_enable"] = ui_.map_proc_render_nebula_enable;
+    o["map_proc_render_nebula_strength"] = static_cast<double>(ui_.map_proc_render_nebula_strength);
+    o["map_proc_render_nebula_scale"] = static_cast<double>(ui_.map_proc_render_nebula_scale);
+    o["map_proc_render_nebula_warp"] = static_cast<double>(ui_.map_proc_render_nebula_warp);
+    o["map_proc_render_debug_tiles"] = ui_.map_proc_render_debug_tiles;
+
+    // Procedural body sprites (system map).
+    o["system_map_body_sprites"] = ui_.system_map_body_sprites;
+    o["system_map_body_sprite_px"] = static_cast<double>(ui_.system_map_body_sprite_px);
+    o["system_map_body_sprite_cache"] = static_cast<double>(ui_.system_map_body_sprite_cache);
+    o["system_map_body_sprite_light_steps"] = static_cast<double>(ui_.system_map_body_sprite_light_steps);
+    o["system_map_body_sprite_rings"] = ui_.system_map_body_sprite_rings;
+    o["system_map_body_sprite_ring_chance"] = static_cast<double>(ui_.system_map_body_sprite_ring_chance);
+    o["system_map_body_sprite_ambient"] = static_cast<double>(ui_.system_map_body_sprite_ambient);
+    o["system_map_body_sprite_diffuse"] = static_cast<double>(ui_.system_map_body_sprite_diffuse);
+    o["system_map_body_sprite_specular"] = static_cast<double>(ui_.system_map_body_sprite_specular);
+    o["system_map_body_sprite_specular_power"] = static_cast<double>(ui_.system_map_body_sprite_specular_power);
+
+    // Procedural contact icons (system map).
+    o["system_map_contact_icons"] = ui_.system_map_contact_icons;
+    o["system_map_contact_icon_px"] = static_cast<double>(ui_.system_map_contact_icon_px);
+    o["system_map_contact_icon_cache"] = static_cast<double>(ui_.system_map_contact_icon_cache);
+    o["system_map_ship_icon_size_px"] = static_cast<double>(ui_.system_map_ship_icon_size_px);
+    o["system_map_ship_icon_thrusters"] = ui_.system_map_ship_icon_thrusters;
+    o["system_map_ship_icon_thruster_opacity"] = static_cast<double>(ui_.system_map_ship_icon_thruster_opacity);
+    o["system_map_ship_icon_thruster_length_px"] = static_cast<double>(ui_.system_map_ship_icon_thruster_length_px);
+    o["system_map_ship_icon_thruster_width_px"] = static_cast<double>(ui_.system_map_ship_icon_thruster_width_px);
+    o["system_map_missile_icon_size_px"] = static_cast<double>(ui_.system_map_missile_icon_size_px);
+    o["system_map_wreck_icon_size_px"] = static_cast<double>(ui_.system_map_wreck_icon_size_px);
+    o["system_map_anomaly_icon_size_px"] = static_cast<double>(ui_.system_map_anomaly_icon_size_px);
+    o["system_map_anomaly_icon_pulse"] = ui_.system_map_anomaly_icon_pulse;
+    o["system_map_contact_icon_debug_bounds"] = ui_.system_map_contact_icon_debug_bounds;
+
+    // Procedural jump-point phenomena (system map).
+    o["system_map_jump_phenomena"] = ui_.system_map_jump_phenomena;
+    o["system_map_jump_phenomena_reveal_unsurveyed"] = ui_.system_map_jump_phenomena_reveal_unsurveyed;
+    o["system_map_jump_phenomena_sprite_px"] = static_cast<double>(ui_.system_map_jump_phenomena_sprite_px);
+    o["system_map_jump_phenomena_cache"] = static_cast<double>(ui_.system_map_jump_phenomena_cache);
+    o["system_map_jump_phenomena_size_mult"] = static_cast<double>(ui_.system_map_jump_phenomena_size_mult);
+    o["system_map_jump_phenomena_opacity"] = static_cast<double>(ui_.system_map_jump_phenomena_opacity);
+    o["system_map_jump_phenomena_animate"] = ui_.system_map_jump_phenomena_animate;
+    o["system_map_jump_phenomena_anim_speed_cycles_per_day"] =
+        static_cast<double>(ui_.system_map_jump_phenomena_anim_speed_cycles_per_day);
+    o["system_map_jump_phenomena_pulse"] = ui_.system_map_jump_phenomena_pulse;
+    o["system_map_jump_phenomena_pulse_cycles_per_day"] = static_cast<double>(ui_.system_map_jump_phenomena_pulse_cycles_per_day);
+    o["system_map_jump_phenomena_filaments"] = ui_.system_map_jump_phenomena_filaments;
+    o["system_map_jump_phenomena_filaments_max"] = static_cast<double>(ui_.system_map_jump_phenomena_filaments_max);
+    o["system_map_jump_phenomena_filament_strength"] = static_cast<double>(ui_.system_map_jump_phenomena_filament_strength);
+    o["system_map_jump_phenomena_debug_bounds"] = ui_.system_map_jump_phenomena_debug_bounds;
+
+    // Procedural anomaly phenomena (system map).
+    o["system_map_anomaly_phenomena"] = ui_.system_map_anomaly_phenomena;
+    o["system_map_anomaly_phenomena_sprite_px"] = static_cast<double>(ui_.system_map_anomaly_phenomena_sprite_px);
+    o["system_map_anomaly_phenomena_cache"] = static_cast<double>(ui_.system_map_anomaly_phenomena_cache);
+    o["system_map_anomaly_phenomena_size_mult"] = static_cast<double>(ui_.system_map_anomaly_phenomena_size_mult);
+    o["system_map_anomaly_phenomena_opacity"] = static_cast<double>(ui_.system_map_anomaly_phenomena_opacity);
+    o["system_map_anomaly_phenomena_animate"] = ui_.system_map_anomaly_phenomena_animate;
+    o["system_map_anomaly_phenomena_anim_speed_cycles_per_day"] =
+        static_cast<double>(ui_.system_map_anomaly_phenomena_anim_speed_cycles_per_day);
+    o["system_map_anomaly_phenomena_pulse"] = ui_.system_map_anomaly_phenomena_pulse;
+    o["system_map_anomaly_phenomena_pulse_cycles_per_day"] =
+        static_cast<double>(ui_.system_map_anomaly_phenomena_pulse_cycles_per_day);
+    o["system_map_anomaly_phenomena_filaments"] = ui_.system_map_anomaly_phenomena_filaments;
+    o["system_map_anomaly_phenomena_filaments_max"] = static_cast<double>(ui_.system_map_anomaly_phenomena_filaments_max);
+    o["system_map_anomaly_phenomena_filament_strength"] =
+        static_cast<double>(ui_.system_map_anomaly_phenomena_filament_strength);
+    o["system_map_anomaly_phenomena_glyph_overlay"] = ui_.system_map_anomaly_phenomena_glyph_overlay;
+    o["system_map_anomaly_phenomena_glyph_strength"] = static_cast<double>(ui_.system_map_anomaly_phenomena_glyph_strength);
+    o["system_map_anomaly_phenomena_debug_bounds"] = ui_.system_map_anomaly_phenomena_debug_bounds;
+
+    // Procedural motion trails (system map).
+    o["system_map_motion_trails"] = ui_.system_map_motion_trails;
+    o["system_map_motion_trails_all_ships"] = ui_.system_map_motion_trails_all_ships;
+    o["system_map_motion_trails_missiles"] = ui_.system_map_motion_trails_missiles;
+    o["system_map_motion_trails_max_age_days"] = static_cast<double>(ui_.system_map_motion_trails_max_age_days);
+    o["system_map_motion_trails_sample_hours"] = static_cast<double>(ui_.system_map_motion_trails_sample_hours);
+    o["system_map_motion_trails_min_seg_px"] = static_cast<double>(ui_.system_map_motion_trails_min_seg_px);
+    o["system_map_motion_trails_thickness_px"] = static_cast<double>(ui_.system_map_motion_trails_thickness_px);
+    o["system_map_motion_trails_alpha"] = static_cast<double>(ui_.system_map_motion_trails_alpha);
+    o["system_map_motion_trails_speed_brighten"] = ui_.system_map_motion_trails_speed_brighten;
+
+    // Procedural flow field (space weather).
+    o["system_map_flow_field_overlay"] = ui_.system_map_flow_field_overlay;
+    o["system_map_flow_field_animate"] = ui_.system_map_flow_field_animate;
+    o["system_map_flow_field_mask_nebula"] = ui_.system_map_flow_field_mask_nebula;
+    o["system_map_flow_field_mask_storms"] = ui_.system_map_flow_field_mask_storms;
+    o["system_map_flow_field_debug_tiles"] = ui_.system_map_flow_field_debug_tiles;
+    o["system_map_flow_field_opacity"] = static_cast<double>(ui_.system_map_flow_field_opacity);
+    o["system_map_flow_field_thickness_px"] = static_cast<double>(ui_.system_map_flow_field_thickness_px);
+    o["system_map_flow_field_step_px"] = static_cast<double>(ui_.system_map_flow_field_step_px);
+    o["system_map_flow_field_highlight_wavelength_px"] =
+        static_cast<double>(ui_.system_map_flow_field_highlight_wavelength_px);
+    o["system_map_flow_field_animate_speed_cycles_per_day"] =
+        static_cast<double>(ui_.system_map_flow_field_animate_speed_cycles_per_day);
+    o["system_map_flow_field_nebula_threshold"] = static_cast<double>(ui_.system_map_flow_field_nebula_threshold);
+    o["system_map_flow_field_storm_threshold"] = static_cast<double>(ui_.system_map_flow_field_storm_threshold);
+    o["system_map_flow_field_scale_mkm"] = static_cast<double>(ui_.system_map_flow_field_scale_mkm);
+    o["system_map_flow_field_tile_px"] = static_cast<double>(ui_.system_map_flow_field_tile_px);
+    o["system_map_flow_field_cache_tiles"] = static_cast<double>(ui_.system_map_flow_field_cache_tiles);
+    o["system_map_flow_field_lines_per_tile"] = static_cast<double>(ui_.system_map_flow_field_lines_per_tile);
+    o["system_map_flow_field_steps_per_line"] = static_cast<double>(ui_.system_map_flow_field_steps_per_line);
+
+    // Procedural gravity contours (system map).
+    o["system_map_gravity_contours_overlay"] = ui_.system_map_gravity_contours_overlay;
+    o["system_map_gravity_contours_debug_tiles"] = ui_.system_map_gravity_contours_debug_tiles;
+    o["system_map_gravity_contours_opacity"] = static_cast<double>(ui_.system_map_gravity_contours_opacity);
+    o["system_map_gravity_contours_thickness_px"] = static_cast<double>(ui_.system_map_gravity_contours_thickness_px);
+    o["system_map_gravity_contours_tile_px"] = static_cast<double>(ui_.system_map_gravity_contours_tile_px);
+    o["system_map_gravity_contours_cache_tiles"] = static_cast<double>(ui_.system_map_gravity_contours_cache_tiles);
+    o["system_map_gravity_contours_samples_per_tile"] =
+        static_cast<double>(ui_.system_map_gravity_contours_samples_per_tile);
+    o["system_map_gravity_contours_levels"] = static_cast<double>(ui_.system_map_gravity_contours_levels);
+    o["system_map_gravity_contours_level_spacing_decades"] =
+        static_cast<double>(ui_.system_map_gravity_contours_level_spacing_decades);
+    o["system_map_gravity_contours_level_offset_decades"] =
+        static_cast<double>(ui_.system_map_gravity_contours_level_offset_decades);
+    o["system_map_gravity_contours_softening_min_mkm"] =
+        static_cast<double>(ui_.system_map_gravity_contours_softening_min_mkm);
+    o["system_map_gravity_contours_softening_radius_mult"] =
+        static_cast<double>(ui_.system_map_gravity_contours_softening_radius_mult);
 
     // Combat / tactical overlays.
     o["show_selected_weapon_range"] = ui_.show_selected_weapon_range;
@@ -3047,6 +3996,24 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     o["galaxy_region_boundary_voronoi"] = ui_.galaxy_region_boundary_voronoi;
     o["show_galaxy_region_centers"] = ui_.show_galaxy_region_centers;
     o["show_galaxy_region_border_links"] = ui_.show_galaxy_region_border_links;
+    o["galaxy_map_territory_overlay"] = ui_.galaxy_map_territory_overlay;
+    o["galaxy_map_territory_fill"] = ui_.galaxy_map_territory_fill;
+    o["galaxy_map_territory_boundaries"] = ui_.galaxy_map_territory_boundaries;
+    o["galaxy_map_territory_fill_opacity"] = ui_.galaxy_map_territory_fill_opacity;
+    o["galaxy_map_territory_boundary_opacity"] = ui_.galaxy_map_territory_boundary_opacity;
+    o["galaxy_map_territory_boundary_thickness_px"] = ui_.galaxy_map_territory_boundary_thickness_px;
+    o["galaxy_map_territory_tile_px"] = ui_.galaxy_map_territory_tile_px;
+    o["galaxy_map_territory_cache_tiles"] = ui_.galaxy_map_territory_cache_tiles;
+    o["galaxy_map_territory_samples_per_tile"] = ui_.galaxy_map_territory_samples_per_tile;
+    o["galaxy_map_territory_influence_base_spacing_mult"] = ui_.galaxy_map_territory_influence_base_spacing_mult;
+    o["galaxy_map_territory_influence_pop_spacing_mult"] = ui_.galaxy_map_territory_influence_pop_spacing_mult;
+    o["galaxy_map_territory_influence_pop_log_bias"] = ui_.galaxy_map_territory_influence_pop_log_bias;
+    o["galaxy_map_territory_presence_falloff_spacing"] = ui_.galaxy_map_territory_presence_falloff_spacing;
+    o["galaxy_map_territory_dominance_softness_spacing"] = ui_.galaxy_map_territory_dominance_softness_spacing;
+    o["galaxy_map_territory_contested_dither"] = ui_.galaxy_map_territory_contested_dither;
+    o["galaxy_map_territory_contested_threshold"] = ui_.galaxy_map_territory_contested_threshold;
+    o["galaxy_map_territory_contested_dither_strength"] = ui_.galaxy_map_territory_contested_dither_strength;
+    o["galaxy_map_territory_debug_tiles"] = ui_.galaxy_map_territory_debug_tiles;
     o["galaxy_procgen_lens_mode"] = static_cast<double>(static_cast<int>(ui_.galaxy_procgen_lens_mode));
     o["galaxy_procgen_lens_alpha"] = static_cast<double>(ui_.galaxy_procgen_lens_alpha);
     o["galaxy_procgen_lens_show_legend"] = ui_.galaxy_procgen_lens_show_legend;
@@ -3468,6 +4435,25 @@ void App::reset_ui_theme_defaults() {
   ui_.galaxy_map_fuel_range = false;
   ui_.map_starfield_density = 1.0f;
   ui_.map_starfield_parallax = 0.15f;
+  ui_.galaxy_map_particle_field = true;
+  ui_.system_map_particle_field = true;
+  ui_.map_particle_tile_px = 256;
+  ui_.map_particle_particles_per_tile = 64;
+  ui_.map_particle_layers = 2;
+  ui_.map_particle_opacity = 0.22f;
+  ui_.map_particle_base_radius_px = 1.0f;
+  ui_.map_particle_radius_jitter_px = 1.6f;
+  ui_.map_particle_twinkle_strength = 0.55f;
+  ui_.map_particle_twinkle_speed = 1.0f;
+  ui_.map_particle_drift = true;
+  ui_.map_particle_drift_px_per_day = 4.0f;
+  ui_.map_particle_layer0_parallax = 0.10f;
+  ui_.map_particle_layer1_parallax = 0.28f;
+  ui_.map_particle_layer2_parallax = 0.45f;
+  ui_.map_particle_sparkles = true;
+  ui_.map_particle_sparkle_chance = 0.06f;
+  ui_.map_particle_sparkle_length_px = 6.0f;
+  ui_.map_particle_debug_tiles = false;
   ui_.map_grid_opacity = 1.0f;
   ui_.map_route_opacity = 1.0f;
 
@@ -3482,6 +4468,123 @@ void App::reset_ui_theme_defaults() {
   ui_.map_raymarch_nebula_animate = true;
   ui_.map_raymarch_nebula_time_scale = 0.20f;
   ui_.map_raymarch_nebula_debug = false;
+
+  // Procedural background engine (tile raster).
+  ui_.map_proc_render_engine = false;
+  ui_.map_proc_render_tile_px = 256;
+  ui_.map_proc_render_cache_tiles = 96;
+  ui_.map_proc_render_nebula_enable = true;
+  ui_.map_proc_render_nebula_strength = 0.35f;
+  ui_.map_proc_render_nebula_scale = 1.0f;
+  ui_.map_proc_render_nebula_warp = 0.70f;
+  ui_.map_proc_render_debug_tiles = false;
+
+  // Galaxy procedural territory overlay (political map).
+  ui_.galaxy_map_territory_overlay = false;
+  ui_.galaxy_map_territory_fill = true;
+  ui_.galaxy_map_territory_boundaries = true;
+  ui_.galaxy_map_territory_fill_opacity = 0.16f;
+  ui_.galaxy_map_territory_boundary_opacity = 0.42f;
+  ui_.galaxy_map_territory_boundary_thickness_px = 1.6f;
+  ui_.galaxy_map_territory_tile_px = 420;
+  ui_.galaxy_map_territory_cache_tiles = 220;
+  ui_.galaxy_map_territory_samples_per_tile = 28;
+  ui_.galaxy_map_territory_influence_base_spacing_mult = 1.10f;
+  ui_.galaxy_map_territory_influence_pop_spacing_mult = 0.28f;
+  ui_.galaxy_map_territory_influence_pop_log_bias = 5.0f;
+  ui_.galaxy_map_territory_presence_falloff_spacing = 2.0f;
+  ui_.galaxy_map_territory_dominance_softness_spacing = 0.65f;
+  ui_.galaxy_map_territory_contested_dither = true;
+  ui_.galaxy_map_territory_contested_threshold = 0.22f;
+  ui_.galaxy_map_territory_contested_dither_strength = 0.55f;
+  ui_.galaxy_map_territory_debug_tiles = false;
+
+  // Procedural body sprites (system map).
+  ui_.system_map_body_sprites = true;
+  ui_.system_map_body_sprite_px = 96;
+  ui_.system_map_body_sprite_cache = 384;
+  ui_.system_map_body_sprite_light_steps = 32;
+  ui_.system_map_body_sprite_rings = true;
+  ui_.system_map_body_sprite_ring_chance = 0.25f;
+  ui_.system_map_body_sprite_ambient = 0.22f;
+  ui_.system_map_body_sprite_diffuse = 1.0f;
+  ui_.system_map_body_sprite_specular = 0.35f;
+  ui_.system_map_body_sprite_specular_power = 24.0f;
+
+  // Procedural contact icons (system map).
+  ui_.system_map_contact_icons = true;
+  ui_.system_map_contact_icon_px = 64;
+  ui_.system_map_contact_icon_cache = 768;
+  ui_.system_map_ship_icon_size_px = 18.0f;
+  ui_.system_map_ship_icon_thrusters = true;
+  ui_.system_map_ship_icon_thruster_opacity = 0.60f;
+  ui_.system_map_ship_icon_thruster_length_px = 14.0f;
+  ui_.system_map_ship_icon_thruster_width_px = 7.0f;
+  ui_.system_map_missile_icon_size_px = 10.0f;
+  ui_.system_map_wreck_icon_size_px = 14.0f;
+  ui_.system_map_anomaly_icon_size_px = 16.0f;
+  ui_.system_map_anomaly_icon_pulse = true;
+  ui_.system_map_contact_icon_debug_bounds = false;
+
+  // Procedural jump-point phenomena (system map).
+  ui_.system_map_jump_phenomena = true;
+  ui_.system_map_jump_phenomena_reveal_unsurveyed = false;
+  ui_.system_map_jump_phenomena_sprite_px = 96;
+  ui_.system_map_jump_phenomena_cache = 256;
+  ui_.system_map_jump_phenomena_size_mult = 5.6f;
+  ui_.system_map_jump_phenomena_opacity = 0.55f;
+  ui_.system_map_jump_phenomena_animate = true;
+  ui_.system_map_jump_phenomena_anim_speed_cycles_per_day = 0.14f;
+  ui_.system_map_jump_phenomena_pulse = true;
+  ui_.system_map_jump_phenomena_pulse_cycles_per_day = 0.08f;
+  ui_.system_map_jump_phenomena_filaments = true;
+  ui_.system_map_jump_phenomena_filaments_max = 6;
+  ui_.system_map_jump_phenomena_filament_strength = 1.0f;
+  ui_.system_map_jump_phenomena_debug_bounds = false;
+
+  // Procedural motion trails (system map).
+  ui_.system_map_motion_trails = false;
+  ui_.system_map_motion_trails_all_ships = false;
+  ui_.system_map_motion_trails_missiles = false;
+  ui_.system_map_motion_trails_max_age_days = 7.0f;
+  ui_.system_map_motion_trails_sample_hours = 2.0f;
+  ui_.system_map_motion_trails_min_seg_px = 4.0f;
+  ui_.system_map_motion_trails_thickness_px = 2.0f;
+  ui_.system_map_motion_trails_alpha = 0.55f;
+  ui_.system_map_motion_trails_speed_brighten = true;
+
+  // Procedural flow field (space weather).
+  ui_.system_map_flow_field_overlay = true;
+  ui_.system_map_flow_field_animate = true;
+  ui_.system_map_flow_field_mask_nebula = true;
+  ui_.system_map_flow_field_mask_storms = false;
+  ui_.system_map_flow_field_debug_tiles = false;
+  ui_.system_map_flow_field_opacity = 0.35f;
+  ui_.system_map_flow_field_thickness_px = 1.25f;
+  ui_.system_map_flow_field_step_px = 10.0f;
+  ui_.system_map_flow_field_highlight_wavelength_px = 220.0f;
+  ui_.system_map_flow_field_animate_speed_cycles_per_day = 0.08f;
+  ui_.system_map_flow_field_nebula_threshold = 0.02f;
+  ui_.system_map_flow_field_storm_threshold = 0.05f;
+  ui_.system_map_flow_field_scale_mkm = 12000.0f;
+  ui_.system_map_flow_field_tile_px = 420;
+  ui_.system_map_flow_field_cache_tiles = 180;
+  ui_.system_map_flow_field_lines_per_tile = 10;
+  ui_.system_map_flow_field_steps_per_line = 48;
+
+  // Procedural gravity contours (system map).
+  ui_.system_map_gravity_contours_overlay = false;
+  ui_.system_map_gravity_contours_debug_tiles = false;
+  ui_.system_map_gravity_contours_opacity = 0.22f;
+  ui_.system_map_gravity_contours_thickness_px = 1.15f;
+  ui_.system_map_gravity_contours_tile_px = 420;
+  ui_.system_map_gravity_contours_cache_tiles = 160;
+  ui_.system_map_gravity_contours_samples_per_tile = 32;
+  ui_.system_map_gravity_contours_levels = 11;
+  ui_.system_map_gravity_contours_level_spacing_decades = 0.34f;
+  ui_.system_map_gravity_contours_level_offset_decades = 0.0f;
+  ui_.system_map_gravity_contours_softening_min_mkm = 0.05f;
+  ui_.system_map_gravity_contours_softening_radius_mult = 2.0f;
 
   ui_.ui_scale = 1.0f;
   ui_.ui_scale_style = true;

@@ -10088,6 +10088,418 @@ void draw_settings_window(UIState& ui, char* ui_prefs_path, UIPrefActions& actio
     ImGui::SliderFloat("Starfield parallax", &ui.map_starfield_parallax, 0.0f, 1.0f, "%.2f");
     ui.map_starfield_parallax = std::clamp(ui.map_starfield_parallax, 0.0f, 1.0f);
 
+    ImGui::SeparatorText("Procedural particle field (dust)");
+    ImGui::Checkbox("Enable on galaxy map", &ui.galaxy_map_particle_field);
+    ImGui::SameLine();
+    ImGui::Checkbox("Enable on system map", &ui.system_map_particle_field);
+
+    const bool pf_on = (ui.galaxy_map_particle_field || ui.system_map_particle_field);
+    if (pf_on) {
+      ImGui::Indent();
+      ImGui::SliderFloat("Opacity", &ui.map_particle_opacity, 0.0f, 1.0f, "%.2f");
+      ui.map_particle_opacity = std::clamp(ui.map_particle_opacity, 0.0f, 1.0f);
+      ImGui::SliderInt("Tile size (px)", &ui.map_particle_tile_px, 64, 512);
+      ui.map_particle_tile_px = std::clamp(ui.map_particle_tile_px, 64, 1024);
+      ImGui::SliderInt("Particles per tile", &ui.map_particle_particles_per_tile, 8, 512);
+      ui.map_particle_particles_per_tile = std::clamp(ui.map_particle_particles_per_tile, 1, 4096);
+      ImGui::SliderInt("Layers", &ui.map_particle_layers, 1, 3);
+      ui.map_particle_layers = std::clamp(ui.map_particle_layers, 1, 3);
+
+      ImGui::SliderFloat("Base radius (px)", &ui.map_particle_base_radius_px, 0.5f, 3.0f, "%.2f");
+      ui.map_particle_base_radius_px = std::clamp(ui.map_particle_base_radius_px, 0.1f, 10.0f);
+      ImGui::SliderFloat("Radius jitter (px)", &ui.map_particle_radius_jitter_px, 0.0f, 4.0f, "%.2f");
+      ui.map_particle_radius_jitter_px = std::clamp(ui.map_particle_radius_jitter_px, 0.0f, 20.0f);
+
+      ImGui::SliderFloat("Twinkle strength", &ui.map_particle_twinkle_strength, 0.0f, 1.0f, "%.2f");
+      ui.map_particle_twinkle_strength = std::clamp(ui.map_particle_twinkle_strength, 0.0f, 1.0f);
+      ImGui::SliderFloat("Twinkle speed", &ui.map_particle_twinkle_speed, 0.0f, 4.0f, "%.2f");
+      ui.map_particle_twinkle_speed = std::clamp(ui.map_particle_twinkle_speed, 0.0f, 10.0f);
+
+      ImGui::Checkbox("Drift (simulation time)", &ui.map_particle_drift);
+      if (ui.map_particle_drift) {
+        ImGui::SliderFloat("Drift speed (px/day)", &ui.map_particle_drift_px_per_day, 0.0f, 50.0f, "%.1f");
+        ui.map_particle_drift_px_per_day = std::clamp(ui.map_particle_drift_px_per_day, 0.0f, 200.0f);
+      }
+
+      ImGui::Checkbox("Sparkles", &ui.map_particle_sparkles);
+      if (ui.map_particle_sparkles) {
+        ImGui::SliderFloat("Sparkle chance", &ui.map_particle_sparkle_chance, 0.0f, 0.25f, "%.3f");
+        ui.map_particle_sparkle_chance = std::clamp(ui.map_particle_sparkle_chance, 0.0f, 1.0f);
+        ImGui::SliderFloat("Sparkle length (px)", &ui.map_particle_sparkle_length_px, 1.0f, 20.0f, "%.1f");
+        ui.map_particle_sparkle_length_px = std::clamp(ui.map_particle_sparkle_length_px, 0.5f, 100.0f);
+      }
+
+      if (ui.map_particle_layers >= 1) {
+        ImGui::SliderFloat("Parallax L0", &ui.map_particle_layer0_parallax, 0.0f, 1.0f, "%.2f");
+        ui.map_particle_layer0_parallax = std::clamp(ui.map_particle_layer0_parallax, 0.0f, 1.0f);
+      }
+      if (ui.map_particle_layers >= 2) {
+        ImGui::SliderFloat("Parallax L1", &ui.map_particle_layer1_parallax, 0.0f, 1.0f, "%.2f");
+        ui.map_particle_layer1_parallax = std::clamp(ui.map_particle_layer1_parallax, 0.0f, 1.0f);
+      }
+      if (ui.map_particle_layers >= 3) {
+        ImGui::SliderFloat("Parallax L2", &ui.map_particle_layer2_parallax, 0.0f, 1.0f, "%.2f");
+        ui.map_particle_layer2_parallax = std::clamp(ui.map_particle_layer2_parallax, 0.0f, 1.0f);
+      }
+
+      ImGui::Checkbox("Debug tile bounds", &ui.map_particle_debug_tiles);
+      ImGui::TextDisabled("Last frame: L%d | Tiles %d | Particles %d",
+                          ui.map_particle_last_frame_layers_drawn,
+                          ui.map_particle_last_frame_tiles_drawn,
+                          ui.map_particle_last_frame_particles_drawn);
+      ImGui::Unindent();
+    }
+
+    ImGui::SeparatorText("Procedural background engine (tiles)");
+    ImGui::Checkbox("Enable procedural tile renderer", &ui.map_proc_render_engine);
+    if (ui.map_proc_render_engine) {
+      ImGui::Indent();
+      ImGui::SliderInt("Tile size (px)", &ui.map_proc_render_tile_px, 64, 512);
+      ui.map_proc_render_tile_px = std::clamp(ui.map_proc_render_tile_px, 64, 1024);
+      ImGui::SliderInt("Cache limit (tiles)", &ui.map_proc_render_cache_tiles, 16, 512);
+      ui.map_proc_render_cache_tiles = std::clamp(ui.map_proc_render_cache_tiles, 8, 2048);
+
+      ImGui::Checkbox("Nebula haze", &ui.map_proc_render_nebula_enable);
+      if (ui.map_proc_render_nebula_enable) {
+        ImGui::SliderFloat("Nebula strength", &ui.map_proc_render_nebula_strength, 0.0f, 1.0f, "%.2f");
+        ui.map_proc_render_nebula_strength = std::clamp(ui.map_proc_render_nebula_strength, 0.0f, 1.0f);
+        ImGui::SliderFloat("Nebula scale", &ui.map_proc_render_nebula_scale, 0.25f, 3.0f, "%.2f");
+        ui.map_proc_render_nebula_scale = std::clamp(ui.map_proc_render_nebula_scale, 0.05f, 10.0f);
+        ImGui::SliderFloat("Nebula warp", &ui.map_proc_render_nebula_warp, 0.0f, 2.0f, "%.2f");
+        ui.map_proc_render_nebula_warp = std::clamp(ui.map_proc_render_nebula_warp, 0.0f, 5.0f);
+      }
+
+      ImGui::Checkbox("Debug tile bounds", &ui.map_proc_render_debug_tiles);
+      if (ImGui::Button("Clear cached tiles")) {
+        ui.map_proc_render_clear_cache_requested = true;
+      }
+      ImGui::SameLine();
+      ImGui::TextDisabled("Cached: %d | Generated: %d | Gen: %.2f ms | Upload: %.2f ms",
+                          ui.map_proc_render_stats_cache_tiles,
+                          ui.map_proc_render_stats_generated_this_frame,
+                          ui.map_proc_render_stats_gen_ms_this_frame,
+                          ui.map_proc_render_stats_upload_ms_this_frame);
+
+      ImGui::TextDisabled("CPU tile rasterizer + texture upload path (works in both OpenGL2 and SDL_Renderer2 backends).\n"
+                          "Use smaller tiles for faster generation; increase cache if you pan/zoom a lot.");
+      ImGui::Unindent();
+    }
+
+    ImGui::SeparatorText("Procedural body sprites (system map)");
+    ImGui::Checkbox("Enable procedural body sprites", &ui.system_map_body_sprites);
+    if (ui.system_map_body_sprites) {
+      ImGui::Indent();
+      ImGui::SliderInt("Sprite resolution (px)", &ui.system_map_body_sprite_px, 32, 192);
+      ui.system_map_body_sprite_px = std::clamp(ui.system_map_body_sprite_px, 16, 512);
+      ImGui::SliderInt("Cache limit (sprites)", &ui.system_map_body_sprite_cache, 64, 1024);
+      ui.system_map_body_sprite_cache = std::clamp(ui.system_map_body_sprite_cache, 16, 4096);
+
+      ImGui::SliderInt("Lighting quantization", &ui.system_map_body_sprite_light_steps, 8, 128);
+      ui.system_map_body_sprite_light_steps = std::clamp(ui.system_map_body_sprite_light_steps, 4, 128);
+
+      ImGui::Checkbox("Enable rings on some gas giants", &ui.system_map_body_sprite_rings);
+      if (ui.system_map_body_sprite_rings) {
+        ImGui::SliderFloat("Ring chance", &ui.system_map_body_sprite_ring_chance, 0.0f, 0.9f, "%.2f");
+        ui.system_map_body_sprite_ring_chance = std::clamp(ui.system_map_body_sprite_ring_chance, 0.0f, 0.99f);
+      }
+
+      ImGui::SliderFloat("Ambient", &ui.system_map_body_sprite_ambient, 0.0f, 0.6f, "%.2f");
+      ui.system_map_body_sprite_ambient = std::clamp(ui.system_map_body_sprite_ambient, 0.0f, 1.0f);
+      ImGui::SliderFloat("Diffuse", &ui.system_map_body_sprite_diffuse, 0.0f, 1.5f, "%.2f");
+      ui.system_map_body_sprite_diffuse = std::clamp(ui.system_map_body_sprite_diffuse, 0.0f, 3.0f);
+      ImGui::SliderFloat("Specular", &ui.system_map_body_sprite_specular, 0.0f, 1.0f, "%.2f");
+      ui.system_map_body_sprite_specular = std::clamp(ui.system_map_body_sprite_specular, 0.0f, 2.0f);
+      ImGui::SliderFloat("Specular power", &ui.system_map_body_sprite_specular_power, 1.0f, 96.0f, "%.0f");
+      ui.system_map_body_sprite_specular_power = std::clamp(ui.system_map_body_sprite_specular_power, 1.0f, 256.0f);
+
+      if (ImGui::Button("Clear cached sprites")) {
+        ui.system_map_body_sprite_clear_cache_requested = true;
+      }
+      ImGui::SameLine();
+      ImGui::TextDisabled("Cached: %d | Generated: %d | Gen: %.2f ms | Upload: %.2f ms",
+                          ui.system_map_body_sprite_stats_cache_sprites,
+                          ui.system_map_body_sprite_stats_generated_this_frame,
+                          ui.system_map_body_sprite_stats_gen_ms_this_frame,
+                          ui.system_map_body_sprite_stats_upload_ms_this_frame);
+
+      ImGui::TextDisabled(
+          "CPU-rastered planet/gas giant/moon/star sprites cached as backend textures.\n"
+          "Helps readability and looks better when zoomed without shipping extra art assets.");
+      ImGui::Unindent();
+    }
+
+    ImGui::SeparatorText("Procedural contact icons (system map)");
+    ImGui::Checkbox("Enable contact icons", &ui.system_map_contact_icons);
+    if (ui.system_map_contact_icons) {
+      ImGui::Indent();
+      ImGui::SliderInt("Icon sprite resolution (px)", &ui.system_map_contact_icon_px, 32, 128);
+      ui.system_map_contact_icon_px = std::clamp(ui.system_map_contact_icon_px, 16, 256);
+      ImGui::SliderInt("Icon cache limit", &ui.system_map_contact_icon_cache, 128, 2048);
+      ui.system_map_contact_icon_cache = std::clamp(ui.system_map_contact_icon_cache, 32, 4096);
+
+      ImGui::SliderFloat("Ship icon size (px)", &ui.system_map_ship_icon_size_px, 10.0f, 32.0f, "%.0f");
+      ui.system_map_ship_icon_size_px = std::clamp(ui.system_map_ship_icon_size_px, 6.0f, 64.0f);
+
+      ImGui::Checkbox("Thruster plume", &ui.system_map_ship_icon_thrusters);
+      if (ui.system_map_ship_icon_thrusters) {
+        ImGui::SliderFloat("Thruster opacity", &ui.system_map_ship_icon_thruster_opacity, 0.0f, 1.0f, "%.2f");
+        ui.system_map_ship_icon_thruster_opacity = std::clamp(ui.system_map_ship_icon_thruster_opacity, 0.0f, 1.0f);
+        ImGui::SliderFloat("Thruster length (px)", &ui.system_map_ship_icon_thruster_length_px, 4.0f, 32.0f, "%.0f");
+        ui.system_map_ship_icon_thruster_length_px = std::clamp(ui.system_map_ship_icon_thruster_length_px, 0.0f, 64.0f);
+        ImGui::SliderFloat("Thruster width (px)", &ui.system_map_ship_icon_thruster_width_px, 2.0f, 18.0f, "%.0f");
+        ui.system_map_ship_icon_thruster_width_px = std::clamp(ui.system_map_ship_icon_thruster_width_px, 0.0f, 64.0f);
+      }
+
+      ImGui::SliderFloat("Missile icon size (px)", &ui.system_map_missile_icon_size_px, 6.0f, 20.0f, "%.0f");
+      ui.system_map_missile_icon_size_px = std::clamp(ui.system_map_missile_icon_size_px, 4.0f, 40.0f);
+      ImGui::SliderFloat("Wreck icon size (px)", &ui.system_map_wreck_icon_size_px, 8.0f, 26.0f, "%.0f");
+      ui.system_map_wreck_icon_size_px = std::clamp(ui.system_map_wreck_icon_size_px, 4.0f, 48.0f);
+      ImGui::SliderFloat("Anomaly icon size (px)", &ui.system_map_anomaly_icon_size_px, 8.0f, 28.0f, "%.0f");
+      ui.system_map_anomaly_icon_size_px = std::clamp(ui.system_map_anomaly_icon_size_px, 4.0f, 48.0f);
+      ImGui::Checkbox("Anomaly pulse", &ui.system_map_anomaly_icon_pulse);
+      ImGui::Checkbox("Debug icon bounds", &ui.system_map_contact_icon_debug_bounds);
+
+      if (ImGui::Button("Clear cached icons")) {
+        ui.system_map_contact_icon_clear_cache_requested = true;
+      }
+      ImGui::SameLine();
+      ImGui::TextDisabled("Cached: %d | Generated: %d | Gen: %.2f ms | Upload: %.2f ms",
+                          ui.system_map_contact_icon_stats_cache_sprites,
+                          ui.system_map_contact_icon_stats_generated_this_frame,
+                          ui.system_map_contact_icon_stats_gen_ms_this_frame,
+                          ui.system_map_contact_icon_stats_upload_ms_this_frame);
+
+      ImGui::TextDisabled(
+          "Procedural CPU icons: ships are rotated to indicate velocity.\n"
+          "Sprites are grayscale so they can be tinted per faction and reused.");
+      ImGui::Unindent();
+    }
+
+    ImGui::SeparatorText("Procedural jump phenomena (system map)");
+    ImGui::Checkbox("Enable jump phenomena sprites", &ui.system_map_jump_phenomena);
+    if (ui.system_map_jump_phenomena) {
+      ImGui::Indent();
+
+      ImGui::SliderInt("Sprite resolution (px)", &ui.system_map_jump_phenomena_sprite_px, 16, 256);
+      ui.system_map_jump_phenomena_sprite_px = std::clamp(ui.system_map_jump_phenomena_sprite_px, 16, 256);
+      ImGui::SliderInt("Cache limit", &ui.system_map_jump_phenomena_cache, 8, 2048);
+      ui.system_map_jump_phenomena_cache = std::clamp(ui.system_map_jump_phenomena_cache, 8, 2048);
+
+      ImGui::SliderFloat("Size (× glyph)", &ui.system_map_jump_phenomena_size_mult, 1.0f, 16.0f, "%.2f");
+      ui.system_map_jump_phenomena_size_mult = std::clamp(ui.system_map_jump_phenomena_size_mult, 1.0f, 16.0f);
+      ImGui::SliderFloat("Opacity", &ui.system_map_jump_phenomena_opacity, 0.0f, 1.0f, "%.2f");
+      ui.system_map_jump_phenomena_opacity = std::clamp(ui.system_map_jump_phenomena_opacity, 0.0f, 1.0f);
+
+      ImGui::Checkbox("Reveal unsurveyed (spoilers)", &ui.system_map_jump_phenomena_reveal_unsurveyed);
+
+      ImGui::Checkbox("Animate rotation", &ui.system_map_jump_phenomena_animate);
+      if (ui.system_map_jump_phenomena_animate) {
+        ImGui::SliderFloat("Rotation speed (cycles/day)", &ui.system_map_jump_phenomena_anim_speed_cycles_per_day, 0.0f, 2.0f, "%.2f");
+        ui.system_map_jump_phenomena_anim_speed_cycles_per_day =
+            std::clamp(ui.system_map_jump_phenomena_anim_speed_cycles_per_day, 0.0f, 4.0f);
+      }
+
+      ImGui::Checkbox("Pulse", &ui.system_map_jump_phenomena_pulse);
+      if (ui.system_map_jump_phenomena_pulse) {
+        ImGui::SliderFloat("Pulse speed (cycles/day)", &ui.system_map_jump_phenomena_pulse_cycles_per_day, 0.0f, 2.0f, "%.2f");
+        ui.system_map_jump_phenomena_pulse_cycles_per_day =
+            std::clamp(ui.system_map_jump_phenomena_pulse_cycles_per_day, 0.0f, 4.0f);
+      }
+
+      ImGui::Checkbox("Filaments", &ui.system_map_jump_phenomena_filaments);
+      if (ui.system_map_jump_phenomena_filaments) {
+        ImGui::SliderFloat("Filament strength", &ui.system_map_jump_phenomena_filament_strength, 0.0f, 4.0f, "%.2f");
+        ui.system_map_jump_phenomena_filament_strength =
+            std::clamp(ui.system_map_jump_phenomena_filament_strength, 0.0f, 4.0f);
+        ImGui::SliderInt("Max filament arcs", &ui.system_map_jump_phenomena_filaments_max, 0, 24);
+        ui.system_map_jump_phenomena_filaments_max = std::clamp(ui.system_map_jump_phenomena_filaments_max, 0, 48);
+      }
+
+      ImGui::Checkbox("Debug bounds", &ui.system_map_jump_phenomena_debug_bounds);
+
+      if (ImGui::Button("Clear jump cache")) {
+        ui.system_map_jump_phenomena_clear_cache_requested = true;
+      }
+      ImGui::SameLine();
+      ImGui::TextDisabled("Cached: %d | Generated: %d | Gen: %.2f ms | Upload: %.2f ms",
+                          ui.system_map_jump_phenomena_stats_cache_sprites,
+                          ui.system_map_jump_phenomena_stats_generated_this_frame,
+                          ui.system_map_jump_phenomena_stats_gen_ms_this_frame,
+                          ui.system_map_jump_phenomena_stats_upload_ms_this_frame);
+
+      ImGui::TextDisabled(
+          "Cached CPU sprites + vector filaments for jump points.\n"
+          "Encodes stability/turbulence/shear so you can read navigation risk at a glance.");
+      ImGui::Unindent();
+    }
+
+    ImGui::SeparatorText("Procedural motion trails (system map)");
+    ImGui::Checkbox("Enable motion trails", &ui.system_map_motion_trails);
+    if (ui.system_map_motion_trails) {
+      ImGui::Indent();
+      ImGui::Checkbox("All ships (visible)", &ui.system_map_motion_trails_all_ships);
+      ImGui::Checkbox("Missile salvos", &ui.system_map_motion_trails_missiles);
+
+      ImGui::SliderFloat("Retention (days)", &ui.system_map_motion_trails_max_age_days, 0.25f, 30.0f, "%.2f");
+      ui.system_map_motion_trails_max_age_days = std::clamp(ui.system_map_motion_trails_max_age_days, 0.25f, 60.0f);
+      ImGui::SliderFloat("Sample interval (hours)", &ui.system_map_motion_trails_sample_hours, 0.05f, 24.0f, "%.2f");
+      ui.system_map_motion_trails_sample_hours = std::clamp(ui.system_map_motion_trails_sample_hours, 0.05f, 72.0f);
+      ImGui::SliderFloat("Min segment (px)", &ui.system_map_motion_trails_min_seg_px, 0.5f, 16.0f, "%.1f");
+      ui.system_map_motion_trails_min_seg_px = std::clamp(ui.system_map_motion_trails_min_seg_px, 0.5f, 32.0f);
+
+      ImGui::SliderFloat("Thickness (px)", &ui.system_map_motion_trails_thickness_px, 0.5f, 8.0f, "%.1f");
+      ui.system_map_motion_trails_thickness_px = std::clamp(ui.system_map_motion_trails_thickness_px, 0.5f, 12.0f);
+      ImGui::SliderFloat("Alpha", &ui.system_map_motion_trails_alpha, 0.0f, 1.0f, "%.2f");
+      ui.system_map_motion_trails_alpha = std::clamp(ui.system_map_motion_trails_alpha, 0.0f, 1.0f);
+      ImGui::Checkbox("Brighten by speed", &ui.system_map_motion_trails_speed_brighten);
+
+      if (ImGui::Button("Clear trails")) {
+        ui.system_map_motion_trails_clear_requested = true;
+      }
+      ImGui::SameLine();
+      ImGui::TextDisabled("Systems: %d | Tracks: %d | Points: %d | Pruned: %d/%d",
+                          ui.system_map_motion_trails_stats_systems,
+                          ui.system_map_motion_trails_stats_tracks,
+                          ui.system_map_motion_trails_stats_points,
+                          ui.system_map_motion_trails_stats_pruned_points_this_frame,
+                          ui.system_map_motion_trails_stats_pruned_tracks_this_frame);
+
+      ImGui::TextDisabled(
+          "Vector trails are generated from cached world-space samples (no textures).\n"
+          "They are pruned and simplified automatically to stay cheap.");
+      ImGui::Unindent();
+    }
+
+    ImGui::SeparatorText("Procedural flow field (system map)");
+    ImGui::Checkbox("Enable flow field overlay", &ui.system_map_flow_field_overlay);
+    if (ui.system_map_flow_field_overlay) {
+      ImGui::Indent();
+
+      ImGui::Checkbox("Animate highlights", &ui.system_map_flow_field_animate);
+      ImGui::Checkbox("Mask by nebula density", &ui.system_map_flow_field_mask_nebula);
+      ImGui::Checkbox("Mask by storm intensity", &ui.system_map_flow_field_mask_storms);
+
+      ImGui::SliderFloat("Opacity", &ui.system_map_flow_field_opacity, 0.0f, 1.0f, "%.2f");
+      ui.system_map_flow_field_opacity = std::clamp(ui.system_map_flow_field_opacity, 0.0f, 1.0f);
+      ImGui::SliderFloat("Thickness (px)", &ui.system_map_flow_field_thickness_px, 0.5f, 6.0f, "%.2f");
+      ui.system_map_flow_field_thickness_px = std::clamp(ui.system_map_flow_field_thickness_px, 0.25f, 12.0f);
+
+      ImGui::SliderFloat("Step (px)", &ui.system_map_flow_field_step_px, 1.0f, 24.0f, "%.1f");
+      ui.system_map_flow_field_step_px = std::clamp(ui.system_map_flow_field_step_px, 0.5f, 64.0f);
+
+      ImGui::SliderFloat("Highlight wavelength (px)", &ui.system_map_flow_field_highlight_wavelength_px, 32.0f, 800.0f, "%.0f");
+      ui.system_map_flow_field_highlight_wavelength_px =
+          std::clamp(ui.system_map_flow_field_highlight_wavelength_px, 8.0f, 2000.0f);
+
+      ImGui::SliderFloat("Anim speed (cycles/day)", &ui.system_map_flow_field_animate_speed_cycles_per_day, 0.0f, 2.0f,
+                        "%.2f");
+      ui.system_map_flow_field_animate_speed_cycles_per_day =
+          std::clamp(ui.system_map_flow_field_animate_speed_cycles_per_day, 0.0f, 10.0f);
+
+      if (ui.system_map_flow_field_mask_nebula) {
+        ImGui::SliderFloat("Nebula threshold", &ui.system_map_flow_field_nebula_threshold, 0.0f, 0.25f, "%.3f");
+        ui.system_map_flow_field_nebula_threshold = std::clamp(ui.system_map_flow_field_nebula_threshold, 0.0f, 1.0f);
+      }
+      if (ui.system_map_flow_field_mask_storms) {
+        ImGui::SliderFloat("Storm threshold", &ui.system_map_flow_field_storm_threshold, 0.0f, 0.50f, "%.3f");
+        ui.system_map_flow_field_storm_threshold = std::clamp(ui.system_map_flow_field_storm_threshold, 0.0f, 1.0f);
+      }
+
+      ImGui::SeparatorText("Generation & caching");
+      ImGui::SliderFloat("Field scale (mkm)", &ui.system_map_flow_field_scale_mkm, 2000.0f, 60000.0f, "%.0f");
+      ui.system_map_flow_field_scale_mkm = std::clamp(ui.system_map_flow_field_scale_mkm, 250.0f, 250000.0f);
+
+      ImGui::SliderInt("Tile size (px)", &ui.system_map_flow_field_tile_px, 128, 1024);
+      ui.system_map_flow_field_tile_px = std::clamp(ui.system_map_flow_field_tile_px, 64, 2048);
+
+      ImGui::SliderInt("Cache tiles", &ui.system_map_flow_field_cache_tiles, 0, 2000);
+      ui.system_map_flow_field_cache_tiles = std::clamp(ui.system_map_flow_field_cache_tiles, 0, 10000);
+
+      ImGui::SliderInt("Lines per tile", &ui.system_map_flow_field_lines_per_tile, 1, 32);
+      ui.system_map_flow_field_lines_per_tile = std::clamp(ui.system_map_flow_field_lines_per_tile, 1, 256);
+
+      ImGui::SliderInt("Steps per line", &ui.system_map_flow_field_steps_per_line, 8, 128);
+      ui.system_map_flow_field_steps_per_line = std::clamp(ui.system_map_flow_field_steps_per_line, 4, 512);
+
+      ImGui::Checkbox("Debug tile bounds", &ui.system_map_flow_field_debug_tiles);
+
+      if (ImGui::Button("Clear flow cache")) {
+        ui.system_map_flow_field_clear_requested = true;
+      }
+      ImGui::SameLine();
+      ImGui::TextDisabled("Tiles: %d | Used: %d | Gen: %d | Lines: %d | Seg: %d",
+                          ui.system_map_flow_field_stats_cache_tiles,
+                          ui.system_map_flow_field_stats_tiles_used,
+                          ui.system_map_flow_field_stats_tiles_generated,
+                          ui.system_map_flow_field_stats_lines_drawn,
+                          ui.system_map_flow_field_stats_segments_drawn);
+
+      ImGui::TextDisabled(
+          "Divergence-free curl-noise streamlines cached in world-space tiles (no textures).\n"
+          "Hotkey: W (toggle overlay).");
+
+      ImGui::Unindent();
+    }
+
+    ImGui::SeparatorText("Procedural gravity contours (system map)");
+    ImGui::Checkbox("Enable gravity contours overlay", &ui.system_map_gravity_contours_overlay);
+    if (ui.system_map_gravity_contours_overlay) {
+      ImGui::Indent();
+
+      ImGui::SliderFloat("Opacity", &ui.system_map_gravity_contours_opacity, 0.0f, 1.0f, "%.2f");
+      ui.system_map_gravity_contours_opacity = std::clamp(ui.system_map_gravity_contours_opacity, 0.0f, 1.0f);
+
+      ImGui::SliderFloat("Thickness (px)", &ui.system_map_gravity_contours_thickness_px, 0.5f, 6.0f, "%.2f");
+      ui.system_map_gravity_contours_thickness_px = std::clamp(ui.system_map_gravity_contours_thickness_px, 0.25f, 12.0f);
+
+      ImGui::SliderInt("Contour levels", &ui.system_map_gravity_contours_levels, 2, 20);
+      ui.system_map_gravity_contours_levels = std::clamp(ui.system_map_gravity_contours_levels, 1, 64);
+
+      ImGui::SliderFloat("Level spacing (decades)", &ui.system_map_gravity_contours_level_spacing_decades, 0.05f, 1.0f, "%.2f");
+      ui.system_map_gravity_contours_level_spacing_decades =
+          std::clamp(ui.system_map_gravity_contours_level_spacing_decades, 0.01f, 5.0f);
+
+      ImGui::SliderFloat("Level offset (decades)", &ui.system_map_gravity_contours_level_offset_decades, -2.0f, 2.0f, "%.2f");
+      ui.system_map_gravity_contours_level_offset_decades =
+          std::clamp(ui.system_map_gravity_contours_level_offset_decades, -20.0f, 20.0f);
+
+      ImGui::SeparatorText("Generation & caching");
+      ImGui::SliderInt("Tile size (px)", &ui.system_map_gravity_contours_tile_px, 128, 1024);
+      ui.system_map_gravity_contours_tile_px = std::clamp(ui.system_map_gravity_contours_tile_px, 64, 2048);
+
+      ImGui::SliderInt("Cache tiles", &ui.system_map_gravity_contours_cache_tiles, 0, 2000);
+      ui.system_map_gravity_contours_cache_tiles = std::clamp(ui.system_map_gravity_contours_cache_tiles, 0, 10000);
+
+      ImGui::SliderInt("Samples per tile", &ui.system_map_gravity_contours_samples_per_tile, 8, 96);
+      ui.system_map_gravity_contours_samples_per_tile = std::clamp(ui.system_map_gravity_contours_samples_per_tile, 4, 256);
+
+      ImGui::SliderFloat("Softening min (mkm)", &ui.system_map_gravity_contours_softening_min_mkm, 0.0f, 2.0f, "%.3f");
+      ui.system_map_gravity_contours_softening_min_mkm =
+          std::clamp(ui.system_map_gravity_contours_softening_min_mkm, 0.0f, 100.0f);
+
+      ImGui::SliderFloat("Softening radius mult", &ui.system_map_gravity_contours_softening_radius_mult, 0.5f, 10.0f, "%.2f");
+      ui.system_map_gravity_contours_softening_radius_mult =
+          std::clamp(ui.system_map_gravity_contours_softening_radius_mult, 0.01f, 100.0f);
+
+      ImGui::Checkbox("Debug tile bounds", &ui.system_map_gravity_contours_debug_tiles);
+
+      if (ImGui::Button("Clear gravity cache")) {
+        ui.system_map_gravity_contours_clear_requested = true;
+      }
+      ImGui::SameLine();
+      ImGui::TextDisabled("Tiles: %d | Used: %d | Gen: %d | Seg: %d",
+                          ui.system_map_gravity_contours_stats_cache_tiles,
+                          ui.system_map_gravity_contours_stats_tiles_used,
+                          ui.system_map_gravity_contours_stats_tiles_generated,
+                          ui.system_map_gravity_contours_stats_segments_drawn);
+
+      ImGui::TextDisabled(
+          "Marching-squares iso-lines of a simplified Newtonian potential field (no textures).\n"
+          "Hotkey: G (toggle overlay).");
+
+      ImGui::Unindent();
+    }
+
     ImGui::SeparatorText("Ray-marched nebula (SDF)");
     ImGui::Checkbox("Enable ray-marched nebula", &ui.map_raymarch_nebula);
     if (ui.map_raymarch_nebula) {
@@ -10352,27 +10764,65 @@ void draw_settings_window(UIState& ui, char* ui_prefs_path, UIPrefActions& actio
 
   // --- Docking tab ---
   if (ImGui::BeginTabItem("Docking")) {
+    ImGui::SeparatorText("Renderer");
+    ImGui::Text("Active backend: %s", ui_renderer_backend_name(ui.runtime_renderer_backend));
+    ImGui::TextDisabled("Override: --renderer=[auto|opengl|sdl] or NEBULA4X_RENDERER env var.");
+
+    if (ui.runtime_renderer_used_fallback) {
+      ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f),
+                         "Running in safe mode due to graphics initialization failure.");
+      if (!ui.runtime_renderer_fallback_reason.empty()) {
+        ImGui::TextWrapped("%s", ui.runtime_renderer_fallback_reason.c_str());
+      }
+      if (ImGui::Button("Show details")) {
+        ui.show_graphics_safe_mode_popup = true;
+        ui.graphics_safe_mode_popup_opened = false;
+      }
+    }
+
+    if (!ui.runtime_opengl_vendor.empty()) {
+      ImGui::SeparatorText("OpenGL Driver");
+      ImGui::BulletText("GL_VENDOR:   %s", ui.runtime_opengl_vendor.c_str());
+      ImGui::BulletText("GL_RENDERER: %s", ui.runtime_opengl_renderer.c_str());
+      ImGui::BulletText("GL_VERSION:  %s", ui.runtime_opengl_version.c_str());
+      if (!ui.runtime_opengl_glsl_version.empty()) {
+        ImGui::BulletText("GLSL:       %s", ui.runtime_opengl_glsl_version.c_str());
+      }
+    }
+
     ImGui::SeparatorText("Docking");
     ImGui::Checkbox("Hold Shift to dock", &ui.docking_with_shift);
     ImGui::Checkbox("Always show tab bars", &ui.docking_always_tab_bar);
     ImGui::Checkbox("Transparent docking preview", &ui.docking_transparent_payload);
 
     ImGui::SeparatorText("Detachable Windows");
-#if NEBULA4X_UI_RENDERER_OPENGL2
 #ifdef IMGUI_HAS_VIEWPORT
+    const bool can_viewports = ui.runtime_renderer_supports_viewports;
+    if (!can_viewports) {
+      ImGui::TextDisabled("Detachable OS windows require the OpenGL2 backend.");
+#if NEBULA4X_UI_RENDERER_OPENGL2
+      ImGui::TextDisabled("Tip: launch with --renderer opengl (or set NEBULA4X_RENDERER=opengl).");
+#else
+      ImGui::TextDisabled("This build was compiled without OpenGL2 support.");
+      ImGui::TextDisabled("Reconfigure with -DNEBULA4X_UI_USE_OPENGL2=ON.");
+#endif
+      ImGui::BeginDisabled();
+    }
+
     ImGui::Checkbox("Enable detachable tool windows (multi-viewport)", &ui.viewports_enable);
-    ImGui::BeginDisabled(!ui.viewports_enable);
+    ImGui::BeginDisabled(!ui.viewports_enable || !can_viewports);
     ImGui::Checkbox("No taskbar icons for tool windows", &ui.viewports_no_taskbar_icon);
     ImGui::Checkbox("Disable viewport auto-merge", &ui.viewports_no_auto_merge);
     ImGui::Checkbox("No OS window decorations (advanced)", &ui.viewports_no_decoration);
     ImGui::EndDisabled();
-    ImGui::TextDisabled("Tip: drag a window outside the main app window to detach it.");
+
+    if (!can_viewports) {
+      ImGui::EndDisabled();
+    } else {
+      ImGui::TextDisabled("Tip: drag a window outside the main app window to detach it.");
+    }
 #else
     ImGui::TextDisabled("This ImGui build does not have multi-viewport support enabled.");
-#endif
-#else
-    ImGui::TextDisabled("Detachable OS windows require the OpenGL2 UI backend.");
-    ImGui::TextDisabled("Reconfigure with -DNEBULA4X_UI_USE_OPENGL2=ON.");
 #endif
 
     {

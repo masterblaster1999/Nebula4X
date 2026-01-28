@@ -196,6 +196,9 @@ FetchContent_Declare(
     ${imgui_SOURCE_DIR}/imgui_widgets.cpp
     ${imgui_SOURCE_DIR}/misc/cpp/imgui_stdlib.cpp
     ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl2.cpp
+    # Always compile the SDL_Renderer2 backend so the app can fall back at
+    # runtime if an OpenGL context cannot be created on the user's machine.
+    ${imgui_SOURCE_DIR}/backends/imgui_impl_sdlrenderer2.cpp
   )
   if(NEBULA4X_UI_USE_OPENGL2)
     target_sources(imgui_sdl PRIVATE
@@ -204,9 +207,6 @@ FetchContent_Declare(
     target_compile_definitions(imgui_sdl PUBLIC NEBULA4X_UI_RENDERER_OPENGL2=1)
     target_link_libraries(imgui_sdl PUBLIC OpenGL::GL)
   else()
-    target_sources(imgui_sdl PRIVATE
-      ${imgui_SOURCE_DIR}/backends/imgui_impl_sdlrenderer2.cpp
-    )
     target_compile_definitions(imgui_sdl PUBLIC NEBULA4X_UI_RENDERER_OPENGL2=0)
   endif()
   target_include_directories(imgui_sdl PUBLIC
@@ -234,6 +234,16 @@ FetchContent_Declare(
     src/ui/navigation.cpp
     src/ui/navigator_window.cpp
     src/ui/map_render.cpp
+    src/ui/proc_render_engine.cpp
+    src/ui/proc_body_sprite_engine.cpp
+    src/ui/proc_icon_sprite_engine.cpp
+    src/ui/proc_jump_phenomena_sprite_engine.cpp
+    src/ui/proc_anomaly_phenomena_sprite_engine.cpp
+    src/ui/proc_trail_engine.cpp
+  src/ui/proc_flow_field_engine.cpp
+  src/ui/proc_gravity_contour_engine.cpp
+  src/ui/proc_particle_field_engine.cpp
+  src/ui/proc_territory_field_engine.cpp
     src/ui/raymarch_nebula.cpp
     src/ui/raytrace_sensor_heatmap.cpp
     src/ui/map_label_placer.cpp

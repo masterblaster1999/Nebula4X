@@ -7,6 +7,16 @@
 #include "ui/raytrace_sensor_heatmap.h"
 #include "ui/ruler.h"
 
+#include "ui/proc_render_engine.h"
+#include "ui/proc_body_sprite_engine.h"
+#include "ui/proc_icon_sprite_engine.h"
+#include "ui/proc_jump_phenomena_sprite_engine.h"
+#include "ui/proc_anomaly_phenomena_sprite_engine.h"
+#include "ui/proc_trail_engine.h"
+#include "ui/proc_flow_field_engine.h"
+#include "ui/proc_gravity_contour_engine.h"
+#include "ui/proc_particle_field_engine.h"
+
 #include "ui/procgen_graphics.h"
 
 #include "core/simulation_sensors.h"
@@ -15,6 +25,7 @@
 #include "nebula4x/core/fleet_formation.h"
 #include "nebula4x/core/enum_strings.h"
 #include "nebula4x/core/procgen_jump_phenomena.h"
+#include "nebula4x/core/procgen_obscure.h"
 #include "nebula4x/core/power.h"
 #include "nebula4x/util/time.h"
 
@@ -22,6 +33,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdint>
 #include <cstdint>
 #include <cmath>
 #include <cstring>
@@ -448,8 +460,22 @@ Vec2 snap_ruler_point(const Simulation& sim,
 
 } // namespace
 
-void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& selected_colony, Id& selected_body,
-                     double& zoom, Vec2& pan) {
+void draw_system_map(Simulation& sim,
+                     UIState& ui,
+                     Id& selected_ship,
+                     Id& selected_colony,
+                     Id& selected_body,
+                     double& zoom,
+                     Vec2& pan,
+                     ProcRenderEngine* proc_engine,
+                     ProcParticleFieldEngine* particle_engine,
+                     ProcBodySpriteEngine* body_sprites,
+                     ProcIconSpriteEngine* icon_sprites,
+                     ProcJumpPhenomenaSpriteEngine* jump_fx,
+                     ProcAnomalyPhenomenaSpriteEngine* anomaly_fx,
+                     ProcTrailEngine* trail_engine,
+                     ProcFlowFieldEngine* flow_engine,
+                     ProcGravityContourEngine* gravity_engine) {
   const auto& s = sim.state();
   const auto* sys = find_ptr(s.systems, s.selected_system);
   if (!sys) {
@@ -687,8 +713,28 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
       ui.system_map_nebula_microfield_overlay = !ui.system_map_nebula_microfield_overlay;
     }
 
+    if (ImGui::IsKeyPressed(ImGuiKey_G)) {
+      ui.system_map_gravity_contours_overlay = !ui.system_map_gravity_contours_overlay;
+    }
+
+    if (ImGui::IsKeyPressed(ImGuiKey_J)) {
+      ui.system_map_jump_phenomena = !ui.system_map_jump_phenomena;
+    }
+
+    if (ImGui::IsKeyPressed(ImGuiKey_A)) {
+      ui.system_map_anomaly_phenomena = !ui.system_map_anomaly_phenomena;
+    }
+
     if (ImGui::IsKeyPressed(ImGuiKey_S)) {
       ui.system_map_storm_cell_overlay = !ui.system_map_storm_cell_overlay;
+    }
+
+    if (ImGui::IsKeyPressed(ImGuiKey_W)) {
+      ui.system_map_flow_field_overlay = !ui.system_map_flow_field_overlay;
+    }
+
+    if (ImGui::IsKeyPressed(ImGuiKey_B)) {
+      ui.system_map_particle_field = !ui.system_map_particle_field;
     }
 
     const float tstep = ImGui::GetIO().KeyShift ? 10.0f : 1.0f;
@@ -892,14 +938,81 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
                              rs.debug_overlay ? &stats : nullptr);
     }
 
-    StarfieldStyle sf;
-    sf.enabled = ui.system_map_starfield;
-    sf.density = ui.map_starfield_density;
-    sf.parallax = ui.map_starfield_parallax;
-    sf.alpha = 1.0f;
-    draw_starfield(draw, origin, avail, bg, pan_px_x, pan_px_y, chrome_seed, sf);
+    // Starfield / procedural background.
+    //
+    // The legacy path draws stars directly into the ImDrawList every frame.
+    // The procedural engine path rasterizes tiles on-demand, uploads textures,
+    // then just draws textured quads while panning.
+    if (ui.map_proc_render_engine && proc_engine && proc_engine->ready()) {
+      if (ui.map_proc_render_clear_cache_requested) {
+        proc_engine->clear();
+        ui.map_proc_render_clear_cache_requested = false;
+      }
 
-    // Nebula microfield overlay: shows local pockets/filaments of nebula density.
+      ProcRenderConfig pcfg;
+      pcfg.tile_px = ui.map_proc_render_tile_px;
+      pcfg.max_cached_tiles = ui.map_proc_render_cache_tiles;
+      pcfg.star_density = ui.system_map_starfield ? ui.map_starfield_density : 0.0f;
+      pcfg.parallax = ui.map_starfield_parallax;
+      pcfg.nebula_enable = ui.map_proc_render_nebula_enable;
+      pcfg.nebula_strength = ui.map_proc_render_nebula_strength;
+      pcfg.nebula_scale = ui.map_proc_render_nebula_scale;
+      pcfg.nebula_warp = ui.map_proc_render_nebula_warp;
+      pcfg.debug_show_tile_bounds = ui.map_proc_render_debug_tiles;
+
+      // Subtle tinting so the procedural textures respect user theme colors.
+      const ImVec4 bg4 = ImGui::ColorConvertU32ToFloat4(bg);
+      const ImVec4 tint4(0.75f + 0.25f * bg4.x, 0.75f + 0.25f * bg4.y, 0.75f + 0.25f * bg4.z, 1.0f);
+      const ImU32 tint_u32 = ImGui::ColorConvertFloat4ToU32(tint4);
+
+      proc_engine->draw_background(draw, origin, avail, tint_u32, pan_px_x, pan_px_y, chrome_seed, pcfg);
+    } else {
+      StarfieldStyle sf;
+      sf.enabled = ui.system_map_starfield;
+      sf.density = ui.map_starfield_density;
+      sf.parallax = ui.map_starfield_parallax;
+      sf.alpha = 1.0f;
+      draw_starfield(draw, origin, avail, bg, pan_px_x, pan_px_y, chrome_seed, sf);
+    }
+
+    // Procedural particle field: deterministic dust/sparkles in screen space.
+    // Drawn after starfield/proc background and before nebula microfields.
+    if (ui.system_map_particle_field && particle_engine && ui.map_particle_opacity > 0.0f) {
+      ProcParticleFieldConfig pcfg;
+      pcfg.enabled = true;
+      pcfg.tile_px = ui.map_particle_tile_px;
+      pcfg.particles_per_tile = ui.map_particle_particles_per_tile;
+      pcfg.layers = ui.map_particle_layers;
+      pcfg.layer0_parallax = ui.map_particle_layer0_parallax;
+      pcfg.layer1_parallax = ui.map_particle_layer1_parallax;
+      pcfg.layer2_parallax = ui.map_particle_layer2_parallax;
+      pcfg.opacity = ui.map_particle_opacity;
+      pcfg.base_radius_px = ui.map_particle_base_radius_px;
+      pcfg.radius_jitter_px = ui.map_particle_radius_jitter_px;
+      pcfg.twinkle_strength = ui.map_particle_twinkle_strength;
+      pcfg.twinkle_speed = ui.map_particle_twinkle_speed;
+      pcfg.animate_drift = ui.map_particle_drift;
+      pcfg.drift_px_per_day = ui.map_particle_drift_px_per_day;
+      pcfg.sparkles = ui.map_particle_sparkles;
+      pcfg.sparkle_chance = ui.map_particle_sparkle_chance;
+      pcfg.sparkle_length_px = ui.map_particle_sparkle_length_px;
+      pcfg.debug_tile_bounds = ui.map_particle_debug_tiles;
+
+      // Tint towards the theme background so the field belongs.
+      const ImVec4 bg4 = ImGui::ColorConvertU32ToFloat4(bg);
+      const ImVec4 tint4(0.85f + 0.15f * bg4.x, 0.85f + 0.15f * bg4.y, 0.90f + 0.10f * bg4.z, 1.0f);
+      const ImU32 tint_u32 = ImGui::ColorConvertFloat4ToU32(tint4);
+
+      particle_engine->draw_particles(draw, origin, avail, tint_u32, pan_px_x, pan_px_y,
+                                      chrome_seed ^ 0x51A7EEDu, pcfg);
+
+      const auto st = particle_engine->stats();
+      ui.map_particle_last_frame_layers_drawn = st.layers_drawn;
+      ui.map_particle_last_frame_tiles_drawn = st.tiles_drawn;
+      ui.map_particle_last_frame_particles_drawn = st.particles_drawn;
+    }
+
+// Nebula microfield overlay: shows local pockets/filaments of nebula density.
     // Drawn after the starfield but before heatmaps/grid.
     if (ui.system_map_nebula_microfield_overlay && ui.system_map_nebula_overlay_opacity > 0.0f) {
       const int cells_x = std::clamp(ui.system_map_nebula_overlay_resolution, 16, 260);
@@ -921,6 +1034,40 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
       draw_nebula_storm_cell_overlay(draw, origin, avail, center, scale, zoom, pan, sim, sys->id,
                                     cells_x, cells_y, IM_COL32(255, 160, 80, 255),
                                     ui.system_map_storm_overlay_opacity * 0.75f);
+    }
+
+    // Procedural flow field: stylized "space weather" streamlines (curl-noise).
+    // Drawn after nebula/storm overlays, before tactical heatmaps/grid.
+    if (flow_engine) {
+      ProcFlowFieldConfig fcfg;
+      fcfg.enabled = ui.system_map_flow_field_overlay;
+      fcfg.animate = ui.system_map_flow_field_animate;
+      fcfg.opacity = ui.system_map_flow_field_opacity;
+      fcfg.thickness_px = ui.system_map_flow_field_thickness_px;
+      fcfg.step_px = ui.system_map_flow_field_step_px;
+      fcfg.highlight_wavelength_px = ui.system_map_flow_field_highlight_wavelength_px;
+      fcfg.animate_speed_cycles_per_day = ui.system_map_flow_field_animate_speed_cycles_per_day;
+      fcfg.mask_by_nebula = ui.system_map_flow_field_mask_nebula;
+      fcfg.mask_by_storms = ui.system_map_flow_field_mask_storms;
+      fcfg.nebula_threshold = ui.system_map_flow_field_nebula_threshold;
+      fcfg.storm_threshold = ui.system_map_flow_field_storm_threshold;
+      fcfg.field_scale_mkm = ui.system_map_flow_field_scale_mkm;
+      fcfg.tile_px = ui.system_map_flow_field_tile_px;
+      fcfg.max_cached_tiles = ui.system_map_flow_field_cache_tiles;
+      fcfg.lines_per_tile = ui.system_map_flow_field_lines_per_tile;
+      fcfg.steps_per_line = ui.system_map_flow_field_steps_per_line;
+      fcfg.debug_tile_bounds = ui.system_map_flow_field_debug_tiles;
+
+      const std::uint32_t flow_seed = static_cast<std::uint32_t>(sys->id) ^ 0xA79F0F4Bu;
+      flow_engine->draw_streamlines(draw, origin, avail, center, scale, zoom, pan, sim, sys->id,
+                                   flow_seed, fcfg, IM_COL32(140, 220, 255, 255));
+
+      const ProcFlowFieldStats st = flow_engine->stats();
+      ui.system_map_flow_field_stats_cache_tiles = st.cache_tiles;
+      ui.system_map_flow_field_stats_tiles_used = st.tiles_used_this_frame;
+      ui.system_map_flow_field_stats_tiles_generated = st.tiles_generated_this_frame;
+      ui.system_map_flow_field_stats_lines_drawn = st.lines_drawn;
+      ui.system_map_flow_field_stats_segments_drawn = st.segments_drawn;
     }
 
     // Tactical heatmaps: coarse raster overlays for coverage/threat fields.
@@ -983,6 +1130,32 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
       if (ui.system_map_threat_heatmap && viewer_faction_id != kInvalidId && !threat_sources.empty()) {
         draw_heatmap(draw, origin, avail, center, scale, zoom, pan, cells_x, cells_y, threat_sources,
                      IM_COL32(255, 90, 90, 255), ui.system_map_heatmap_opacity * 0.75f);
+      }
+
+      // Procedural gravitational "well" contours (visualises a simplified
+      // potential field sourced by system body masses).
+      if (ui.system_map_gravity_contours_overlay && gravity_engine && sys) {
+        ProcGravityContourConfig gcfg;
+        gcfg.tile_px = std::clamp(ui.system_map_gravity_contours_tile_px, 128, 1024);
+        gcfg.max_cached_tiles = std::clamp(ui.system_map_gravity_contours_cache_tiles, 16, 4096);
+        gcfg.samples_per_tile = std::clamp(ui.system_map_gravity_contours_samples_per_tile, 8, 96);
+        gcfg.contour_levels = std::clamp(ui.system_map_gravity_contours_levels, 1, 32);
+        gcfg.level_spacing_decades = std::clamp(ui.system_map_gravity_contours_level_spacing_decades, 0.05f, 2.0f);
+        gcfg.level_offset_decades = std::clamp(ui.system_map_gravity_contours_level_offset_decades, -6.0f, 6.0f);
+        gcfg.opacity = std::clamp(ui.system_map_gravity_contours_opacity, 0.0f, 1.0f);
+        gcfg.thickness_px = std::clamp(ui.system_map_gravity_contours_thickness_px, 0.5f, 5.0f);
+        gcfg.softening_min_mkm = std::clamp(ui.system_map_gravity_contours_softening_min_mkm, 0.0005f, 250.0f);
+        gcfg.softening_radius_mult = std::clamp(ui.system_map_gravity_contours_softening_radius_mult, 0.1f, 32.0f);
+        gcfg.debug_tile_bounds = ui.system_map_gravity_contours_debug_tiles;
+
+        const ImU32 contour_col = ImGui::GetColorU32(ImGuiCol_PlotLines);
+        gravity_engine->draw_contours(draw, sim, sys->id, origin, avail, center, scale, zoom, pan,
+                                      chrome_seed ^ 0xDEC0ADDEu, gcfg, contour_col);
+
+        ui.system_map_gravity_contours_stats_cache_tiles = gravity_engine->stats().cache_tiles;
+        ui.system_map_gravity_contours_stats_tiles_used = gravity_engine->stats().tiles_used;
+        ui.system_map_gravity_contours_stats_tiles_generated = gravity_engine->stats().tiles_generated;
+        ui.system_map_gravity_contours_stats_segments_drawn = gravity_engine->stats().segments_drawn;
       }
     }
 
@@ -1079,6 +1252,110 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
   std::vector<MapLabelCandidate> map_labels;
   map_labels.reserve(sys->bodies.size() + sys->jump_points.size() + 8);
   const bool declutter_labels = !ImGui::GetIO().KeyAlt; // Alt = show all labels.
+
+  // --- Procedural body sprites (optional) ---
+  // These are cached CPU-rastered sprites uploaded to the active UI renderer backend.
+  const std::uint32_t body_sprite_seed_base = hash_u32(static_cast<std::uint32_t>(sys->id) ^ 0xB0D1E5u);
+  Vec2 primary_light_pos{0.0, 0.0};
+  bool have_primary_light = false;
+  for (Id bid : sys->bodies) {
+    if (const auto* bb = find_ptr(s.bodies, bid)) {
+      if (bb->type == BodyType::Star) {
+        primary_light_pos = bb->position_mkm;
+        have_primary_light = true;
+        break;
+      }
+    }
+  }
+
+  ProcBodySpriteConfig body_sprite_cfg;
+  body_sprite_cfg.sprite_px = ui.system_map_body_sprite_px;
+  body_sprite_cfg.max_cached_sprites = ui.system_map_body_sprite_cache;
+  body_sprite_cfg.light_steps = ui.system_map_body_sprite_light_steps;
+  body_sprite_cfg.enable_rings = ui.system_map_body_sprite_rings;
+  body_sprite_cfg.ring_probability = ui.system_map_body_sprite_ring_chance;
+  body_sprite_cfg.ambient = ui.system_map_body_sprite_ambient;
+  body_sprite_cfg.diffuse_strength = ui.system_map_body_sprite_diffuse;
+  body_sprite_cfg.specular_strength = ui.system_map_body_sprite_specular;
+  body_sprite_cfg.specular_power = ui.system_map_body_sprite_specular_power;
+
+  const bool use_body_sprites =
+      ui.system_map_body_sprites && body_sprites && body_sprites->ready() && body_sprite_cfg.sprite_px >= 16;
+
+  if (use_body_sprites && ui.system_map_body_sprite_clear_cache_requested) {
+    body_sprites->clear();
+    ui.system_map_body_sprite_clear_cache_requested = false;
+  }
+
+  // --- Procedural contact icons (optional) ---
+  ProcIconSpriteConfig icon_cfg;
+  icon_cfg.sprite_px = ui.system_map_contact_icon_px;
+  icon_cfg.max_cached_sprites = ui.system_map_contact_icon_cache;
+  icon_cfg.ship_icon_size_px = ui.system_map_ship_icon_size_px;
+  icon_cfg.ship_thrusters = ui.system_map_ship_icon_thrusters;
+  icon_cfg.ship_thruster_opacity = ui.system_map_ship_icon_thruster_opacity;
+  icon_cfg.ship_thruster_length_px = ui.system_map_ship_icon_thruster_length_px;
+  icon_cfg.ship_thruster_width_px = ui.system_map_ship_icon_thruster_width_px;
+  icon_cfg.missile_icon_size_px = ui.system_map_missile_icon_size_px;
+  icon_cfg.wreck_icon_size_px = ui.system_map_wreck_icon_size_px;
+  icon_cfg.anomaly_icon_size_px = ui.system_map_anomaly_icon_size_px;
+  icon_cfg.anomaly_pulse = ui.system_map_anomaly_icon_pulse;
+  icon_cfg.debug_bounds = ui.system_map_contact_icon_debug_bounds;
+
+  const bool use_contact_icons = ui.system_map_contact_icons && icon_sprites && icon_sprites->ready() &&
+                                 icon_cfg.sprite_px >= 16 && icon_cfg.ship_icon_size_px >= 6.0f;
+
+  if (use_contact_icons && ui.system_map_contact_icon_clear_cache_requested) {
+    icon_sprites->clear();
+    ui.system_map_contact_icon_clear_cache_requested = false;
+  }
+
+  // --- Procedural jump-point phenomena sprites (optional) ---
+  ProcJumpPhenomenaSpriteConfig jump_cfg;
+  jump_cfg.sprite_px = ui.system_map_jump_phenomena_sprite_px;
+  jump_cfg.max_cached_sprites = ui.system_map_jump_phenomena_cache;
+  jump_cfg.size_mult = std::clamp(ui.system_map_jump_phenomena_size_mult, 1.0f, 16.0f);
+  jump_cfg.opacity = std::clamp(ui.system_map_jump_phenomena_opacity, 0.0f, 1.0f);
+  jump_cfg.animate = ui.system_map_jump_phenomena_animate;
+  jump_cfg.animate_speed_cycles_per_day = std::clamp(ui.system_map_jump_phenomena_anim_speed_cycles_per_day, 0.0f, 4.0f);
+  jump_cfg.pulse = ui.system_map_jump_phenomena_pulse;
+  jump_cfg.pulse_speed_cycles_per_day = std::clamp(ui.system_map_jump_phenomena_pulse_cycles_per_day, 0.0f, 6.0f);
+  jump_cfg.filaments = ui.system_map_jump_phenomena_filaments;
+  jump_cfg.filaments_max = std::clamp(ui.system_map_jump_phenomena_filaments_max, 0, 64);
+  jump_cfg.filament_strength = std::clamp(ui.system_map_jump_phenomena_filament_strength, 0.0f, 4.0f);
+  jump_cfg.debug_bounds = ui.system_map_jump_phenomena_debug_bounds;
+
+  const bool use_jump_fx = ui.system_map_jump_phenomena && jump_fx && jump_fx->ready() && jump_cfg.sprite_px >= 16;
+  if (use_jump_fx && ui.system_map_jump_phenomena_clear_cache_requested) {
+    jump_fx->clear();
+    ui.system_map_jump_phenomena_clear_cache_requested = false;
+  }
+
+  // --- Procedural anomaly phenomena sprites (optional) ---
+  ProcAnomalyPhenomenaSpriteConfig anomaly_cfg;
+  anomaly_cfg.sprite_px = ui.system_map_anomaly_phenomena_sprite_px;
+  anomaly_cfg.max_cached_sprites = ui.system_map_anomaly_phenomena_cache;
+  anomaly_cfg.size_mult = std::clamp(ui.system_map_anomaly_phenomena_size_mult, 1.0f, 24.0f);
+  anomaly_cfg.opacity = std::clamp(ui.system_map_anomaly_phenomena_opacity, 0.0f, 1.0f);
+  anomaly_cfg.animate = ui.system_map_anomaly_phenomena_animate;
+  anomaly_cfg.animate_speed_cycles_per_day =
+      std::clamp(ui.system_map_anomaly_phenomena_anim_speed_cycles_per_day, 0.0f, 6.0f);
+  anomaly_cfg.pulse = ui.system_map_anomaly_phenomena_pulse;
+  anomaly_cfg.pulse_speed_cycles_per_day =
+      std::clamp(ui.system_map_anomaly_phenomena_pulse_cycles_per_day, 0.0f, 6.0f);
+  anomaly_cfg.filaments = ui.system_map_anomaly_phenomena_filaments;
+  anomaly_cfg.filaments_max = std::clamp(ui.system_map_anomaly_phenomena_filaments_max, 0, 64);
+  anomaly_cfg.filament_strength = std::clamp(ui.system_map_anomaly_phenomena_filament_strength, 0.0f, 4.0f);
+  anomaly_cfg.glyph_overlay = ui.system_map_anomaly_phenomena_glyph_overlay;
+  anomaly_cfg.glyph_strength = std::clamp(ui.system_map_anomaly_phenomena_glyph_strength, 0.0f, 1.0f);
+  anomaly_cfg.debug_bounds = ui.system_map_anomaly_phenomena_debug_bounds;
+
+  const bool use_anomaly_fx = ui.system_map_anomaly_phenomena && anomaly_fx && anomaly_fx->ready() &&
+                              anomaly_cfg.sprite_px >= 16 && anomaly_cfg.size_mult >= 1.0f;
+  if (use_anomaly_fx && ui.system_map_anomaly_phenomena_clear_cache_requested) {
+    anomaly_fx->clear();
+    ui.system_map_anomaly_phenomena_clear_cache_requested = false;
+  }
 
   // Orbits + bodies
   for (Id bid : sys->bodies) {
@@ -1212,11 +1489,42 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
     }
 
     // Body marker.
-    // Use deterministic procedural glyphs for better readability / identity.
-    if (r >= 2.0f) {
-      procgen_gfx::draw_body_glyph(draw, p, r, *b, 1.0f, /*selected=*/false);
-    } else {
-      draw->AddCircleFilled(p, r, color_body(b->type), 0);
+    // Prefer cached procedural sprites when enabled; fall back to glyphs for
+    // extremely small bodies or if the sprite engine isn't available.
+    bool drew_sprite = false;
+    if (use_body_sprites && r >= 2.0f) {
+      const std::uint32_t bid_lo = static_cast<std::uint32_t>(bid);
+      const std::uint32_t bid_hi = static_cast<std::uint32_t>(static_cast<std::uint64_t>(bid) >> 32);
+      const std::uint32_t seed = hash_u32(body_sprite_seed_base ^ bid_lo ^ (bid_hi * 0x9E3779B1u) ^ 0xC0FFEE11u);
+
+      Vec2 light_dir{1.0, 0.0};
+      if (have_primary_light) {
+        light_dir = (primary_light_pos - b->position_mkm);
+        if (light_dir.length_squared() <= 1e-12) {
+          light_dir = Vec2{1.0, 0.0};
+        } else {
+          light_dir = light_dir.normalized();
+        }
+      }
+
+      const auto sprite = body_sprites->get_body_sprite(*b, seed, light_dir, body_sprite_cfg);
+      if (sprite.tex_id) {
+        const float sr = std::max(0.01f, sprite.sphere_radius_norm);
+        const float half_size = r / sr;
+        const ImVec2 a{p.x - half_size, p.y - half_size};
+        const ImVec2 bmax{p.x + half_size, p.y + half_size};
+        draw->AddImage(sprite.tex_id, a, bmax, ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f), IM_COL32_WHITE);
+        drew_sprite = true;
+      }
+    }
+
+    if (!drew_sprite) {
+      // Use deterministic procedural glyphs for readability / identity.
+      if (r >= 2.0f) {
+        procgen_gfx::draw_body_glyph(draw, p, r, *b, 1.0f, /*selected=*/false);
+      } else {
+        draw->AddCircleFilled(p, r, color_body(b->type), 0);
+      }
     }
 
     // Additional styling.
@@ -1294,9 +1602,62 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
 
     const ImVec2 p = to_screen(jp->position_mkm, center, scale, zoom, pan);
     const float r = 6.0f;
-    const bool surveyed = (!ui.fog_of_war) || sim.is_jump_point_surveyed_by_faction(viewer_faction_id, jid);
+    const bool surveyed =
+        (!ui.fog_of_war) || (viewer_faction_id != kInvalidId && sim.is_jump_point_surveyed_by_faction(viewer_faction_id, jid));
     const ImU32 col = (surveyed ? color_jump() : IM_COL32(90, 90, 100, 255));
     const ImU32 text_col = (surveyed ? IM_COL32(200, 200, 200, 255) : IM_COL32(140, 140, 150, 255));
+
+    // Procedural jump phenomena visualization (cached sprite + optional filaments).
+    if (use_jump_fx && (surveyed || ui.system_map_jump_phenomena_reveal_unsurveyed)) {
+      const std::uint32_t seed =
+          hash_u32(static_cast<std::uint32_t>(jid) ^ static_cast<std::uint32_t>(sys->id) ^ 0x4A504658u);
+      const auto ph = procgen_jump_phenomena::generate(*jp);
+
+      // Map stability->hue (stable=cyan, unstable=magenta), turbulence/shear->saturation.
+      const float stability = static_cast<float>(ph.stability01);
+      const float turbulence = static_cast<float>(ph.turbulence01);
+      const float shear = static_cast<float>(ph.shear01);
+      const float hue = std::clamp(0.85f + (0.52f - 0.85f) * stability, 0.0f, 1.0f);
+      const float sat = std::clamp(0.52f + 0.38f * turbulence + 0.18f * shear, 0.10f, 1.0f);
+      const float val = std::clamp(0.70f + 0.25f * (1.0f - stability) + 0.12f * turbulence, 0.15f, 1.0f);
+
+      float cr = 1.0f, cg = 1.0f, cb = 1.0f;
+      ImGui::ColorConvertHSVtoRGB(hue, sat, val, cr, cg, cb);
+
+      float alpha = jump_cfg.opacity;
+      const double t_anim_days = t_now_days + (ImGui::GetTime() / 86400.0);
+      if (jump_cfg.pulse && jump_cfg.pulse_speed_cycles_per_day > 1e-6f) {
+        const double phase = t_anim_days * static_cast<double>(jump_cfg.pulse_speed_cycles_per_day) * kTwoPi;
+        const float pulse = 0.75f + 0.25f * std::sinf(static_cast<float>(phase + static_cast<double>(jid) * 0.017));
+        alpha *= pulse;
+      }
+      alpha = std::clamp(alpha, 0.0f, 1.0f);
+
+      const ImU32 tint = ImGui::ColorConvertFloat4ToU32(ImVec4(cr, cg, cb, alpha));
+
+      float angle = 0.0f;
+      if (jump_cfg.animate && jump_cfg.animate_speed_cycles_per_day > 1e-6f) {
+        const double phase = t_anim_days * static_cast<double>(jump_cfg.animate_speed_cycles_per_day) * kTwoPi;
+        angle = static_cast<float>(phase + static_cast<double>(seed) * 0.000004);
+      }
+
+      const auto spr = jump_fx->get_jump_sprite(*jp, seed, jump_cfg);
+      if (spr.tex_id) {
+        const float size_px = (r * 2.0f) * jump_cfg.size_mult;
+        ProcJumpPhenomenaSpriteEngine::draw_sprite_rotated(draw, spr.tex_id, p, size_px, angle, tint);
+        if (jump_cfg.debug_bounds) {
+          const ImVec2 a{p.x - 0.5f * size_px, p.y - 0.5f * size_px};
+          const ImVec2 b{p.x + 0.5f * size_px, p.y + 0.5f * size_px};
+          draw->AddRect(a, b, IM_COL32(255, 0, 255, 140), 0.0f, 0, 1.0f);
+        }
+      }
+
+      // Optional vector filaments (low-cost, time-animated) for high shear.
+      if (jump_cfg.filaments) {
+        const float radius_px = r * jump_cfg.size_mult;
+        ProcJumpPhenomenaSpriteEngine::draw_filaments(draw, p, radius_px, ph, tint, t_anim_days, jump_cfg);
+      }
+    }
 
     // Guard overlays: show which jump points are currently being guarded by fleets
     // of the viewer faction, and draw the selected fleet's response radius.
@@ -1476,6 +1837,170 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
     }
   }
 
+  // --- Procedural motion trails (vector FX) ---
+  //
+  // Trails are recorded in world-space (mkm) and rendered via ImDrawList.
+  // They are backend-agnostic (no textures), so they also work in the
+  // SDL_Renderer2 fallback.
+  if (trail_engine) {
+    // Clamp values even if config was edited manually in a JSON file.
+    ui.system_map_motion_trails_max_age_days = std::clamp(ui.system_map_motion_trails_max_age_days, 0.25f, 60.0f);
+    ui.system_map_motion_trails_sample_hours = std::clamp(ui.system_map_motion_trails_sample_hours, 0.05f, 72.0f);
+    ui.system_map_motion_trails_min_seg_px = std::clamp(ui.system_map_motion_trails_min_seg_px, 0.5f, 64.0f);
+    ui.system_map_motion_trails_thickness_px = std::clamp(ui.system_map_motion_trails_thickness_px, 0.5f, 12.0f);
+    ui.system_map_motion_trails_alpha = std::clamp(ui.system_map_motion_trails_alpha, 0.0f, 1.0f);
+
+    const bool enabled = ui.system_map_motion_trails;
+    if (enabled) {
+      const double max_age_days = static_cast<double>(ui.system_map_motion_trails_max_age_days);
+      const double sample_interval_days = static_cast<double>(ui.system_map_motion_trails_sample_hours) / 24.0;
+      const double px_per_mkm = std::max(1e-12, scale * zoom);
+      const double min_dist_mkm = static_cast<double>(ui.system_map_motion_trails_min_seg_px) / px_per_mkm;
+
+      // Always sample all *visible* ships so selecting a ship later shows its recent history.
+      for (Id sid : sys->ships) {
+        const Ship* sh = find_ptr(s.ships, sid);
+        if (!sh) continue;
+
+        if (ui.fog_of_war && viewer_faction_id != kInvalidId && sh->faction_id != viewer_faction_id) {
+          if (!sim.is_ship_detected_by_faction(viewer_faction_id, sid)) {
+            continue; // don't cache hidden info
+          }
+        }
+
+        trail_engine->sample_ship(sys->id, sid, sh->position_mkm, t_now_days, sample_interval_days, min_dist_mkm,
+                                  max_age_days);
+      }
+
+      // Optional: missile salvo trails (respects the same fog-of-war filtering used by the main drawing).
+      if (ui.system_map_motion_trails_missiles && ui.system_map_missile_salvos) {
+        for (const auto& [mid, ms] : s.missile_salvos) {
+          if (ms.system_id != sys->id) continue;
+
+          if (ui.fog_of_war && viewer_faction_id != kInvalidId) {
+            if (ms.attacker_id != kInvalidId) {
+              const Ship* attacker = find_ptr(s.ships, ms.attacker_id);
+              if (attacker && attacker->faction_id != viewer_faction_id) {
+                if (!sim.is_ship_detected_by_faction(viewer_faction_id, ms.attacker_id)) {
+                  continue;
+                }
+              }
+            }
+            if (ms.target_ship_id != kInvalidId) {
+              const Ship* target = find_ptr(s.ships, ms.target_ship_id);
+              if (target && target->faction_id != viewer_faction_id) {
+                if (!sim.is_ship_detected_by_faction(viewer_faction_id, ms.target_ship_id)) {
+                  continue;
+                }
+              }
+            }
+          }
+
+          trail_engine->sample_missile(sys->id, mid, ms.pos_mkm, t_now_days, sample_interval_days, min_dist_mkm,
+                                       std::min(max_age_days, 2.0));
+        }
+      }
+
+      // Recompute counts after sampling so settings/legend can show accurate numbers.
+      trail_engine->rebuild_stats();
+
+      const ProcTrailStats& ts = trail_engine->stats();
+      ui.system_map_motion_trails_stats_systems = ts.systems;
+      ui.system_map_motion_trails_stats_tracks = ts.ship_tracks + ts.missile_tracks;
+      ui.system_map_motion_trails_stats_points = ts.points;
+      ui.system_map_motion_trails_stats_pruned_points_this_frame = ts.points_pruned_this_frame;
+      ui.system_map_motion_trails_stats_pruned_tracks_this_frame = ts.tracks_pruned_this_frame;
+
+      // Draw ship trails beneath icons.
+      const float base_thickness = ui.system_map_motion_trails_thickness_px;
+      const float base_alpha = ui.system_map_motion_trails_alpha;
+
+      auto should_draw_ship = [&](Id sid, const Ship* sh) {
+        if (ui.system_map_motion_trails_all_ships) return true;
+        if (sid == selected_ship) return true;
+        if (selected_fleet_members.find(sid) != selected_fleet_members.end()) return true;
+        // If nothing is selected, default to showing the viewer faction.
+        if (selected_ship == kInvalidId && selected_fleet_members.empty() && viewer_faction_id != kInvalidId) {
+          return sh && sh->faction_id == viewer_faction_id;
+        }
+        return false;
+      };
+
+      for (Id sid : sys->ships) {
+        const Ship* sh = find_ptr(s.ships, sid);
+        if (!sh) continue;
+
+        if (!should_draw_ship(sid, sh)) continue;
+
+        if (ui.fog_of_war && viewer_faction_id != kInvalidId && sh->faction_id != viewer_faction_id) {
+          if (!sim.is_ship_detected_by_faction(viewer_faction_id, sid)) {
+            continue;
+          }
+        }
+
+        const auto* tr = trail_engine->ship_track(sys->id, sid);
+        if (!tr || tr->points.size() < 2) continue;
+
+        // Base color: faction color, but highlight selection.
+        ImU32 base_col_u32 = (sid == selected_ship) ? IM_COL32(255, 255, 255, 255) : color_faction(sh->faction_id);
+
+        // Speed-based brightness (optional).
+        float speed_mul = 1.0f;
+        if (ui.system_map_motion_trails_speed_brighten) {
+          const ShipDesign* d = sim.find_design(sh->design_id);
+          const double vmax = d ? std::max(1e-9, d->max_speed_kms) : 0.0;
+          if (vmax > 0.0) {
+            const double v_km_s = (sh->velocity_mkm_per_day.length() * 1e6) / 86400.0;
+            const double frac = std::clamp(v_km_s / vmax, 0.0, 1.0);
+            speed_mul = static_cast<float>(0.55 + 0.45 * frac);
+          }
+        }
+
+        // Draw segment-by-segment to get a cheap age-based fade gradient.
+        for (std::size_t i = 1; i < tr->points.size(); ++i) {
+          const auto& a = tr->points[i - 1];
+          const auto& b = tr->points[i];
+          const double dt = b.t_days - a.t_days;
+          if (dt <= 1e-12) continue;
+
+          const double seg_age = t_now_days - b.t_days;
+          double fade = 1.0;
+          if (max_age_days > 1e-9) {
+            const double x = std::clamp(seg_age / max_age_days, 0.0, 1.0);
+            // Slight gamma so the newest part is more readable.
+            fade = std::pow(1.0 - x, 1.6);
+          }
+
+          float alpha = base_alpha * static_cast<float>(fade) * speed_mul;
+          if (alpha <= 0.001f) continue;
+
+          const Vec2 seg = b.pos_mkm - a.pos_mkm;
+          const double seg_len_px = seg.length() * px_per_mkm;
+          if (seg_len_px < 0.25) {
+            continue; // avoid tiny segments when zoomed far out
+          }
+
+          ImVec4 col4 = ImGui::ColorConvertU32ToFloat4(base_col_u32);
+          col4.w = std::clamp(col4.w * alpha, 0.0f, 1.0f);
+          const ImU32 col = ImGui::ColorConvertFloat4ToU32(col4);
+
+          const ImVec2 p0 = to_screen(a.pos_mkm, center, scale, zoom, pan);
+          const ImVec2 p1 = to_screen(b.pos_mkm, center, scale, zoom, pan);
+
+          draw->AddLine(p0, p1, col, base_thickness);
+        }
+      }
+    } else {
+      // Keep UI-visible stats reasonably fresh even when disabled.
+      const ProcTrailStats& ts = trail_engine->stats();
+      ui.system_map_motion_trails_stats_systems = ts.systems;
+      ui.system_map_motion_trails_stats_tracks = ts.ship_tracks + ts.missile_tracks;
+      ui.system_map_motion_trails_stats_points = ts.points;
+      ui.system_map_motion_trails_stats_pruned_points_this_frame = ts.points_pruned_this_frame;
+      ui.system_map_motion_trails_stats_pruned_tracks_this_frame = ts.tracks_pruned_this_frame;
+    }
+  }
+
   // Ships
   for (Id sid : sys->ships) {
     const auto* sh = find_ptr(s.ships, sid);
@@ -1594,18 +2119,60 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
       }
     }
 
-    const float r = (selected_ship == sid) ? 5.0f : 4.0f;
-    // Subtle drop shadow to make markers pop over the background.
-    draw->AddCircleFilled(ImVec2(p.x + 1.0f, p.y + 1.0f), r, IM_COL32(0, 0, 0, 140));
-    draw->AddCircleFilled(p, r, ship_col);
-    if (selected_ship == sid) {
-      draw->AddCircle(p, 10.0f, IM_COL32(0, 255, 140, 255), 0, 1.5f);
-    }
+    if (use_contact_icons) {
+      const std::uint32_t ship_seed = hash_u32(static_cast<std::uint32_t>(sid) ^ body_sprite_seed_base ^ 0x51EEDu);
+      const auto sprite = icon_sprites->get_ship_icon(*sh, d, ship_seed, icon_cfg);
 
+      // Heading points along current velocity. In screen-space, y+ is down, which matches the map's screen transform.
+      const Vec2 v = sh->velocity_mkm_per_day;
+      const double speed_mkm_day = v.length();
+      float angle = 0.0f;
+      float speed01 = 0.0f;
+      if (speed_mkm_day > 1e-10) {
+        angle = static_cast<float>(std::atan2(v.y, v.x));
+        speed01 = 1.0f;
+        if (d && d->max_speed_kms > 0.0) {
+          const double max_mkm_day = d->max_speed_kms * 0.0864; // 1 km/s = 0.0864 mkm/day
+          if (max_mkm_day > 1e-12) {
+            speed01 = static_cast<float>(std::clamp(speed_mkm_day / max_mkm_day, 0.0, 1.0));
+          }
+        }
+      }
 
-    // Highlight selected fleet members.
-    if (!selected_fleet_members.empty() && selected_fleet_members.count(sid)) {
-      draw->AddCircle(p, 13.0f, IM_COL32(0, 160, 255, 200), 0, 1.5f);
+      float sz = icon_cfg.ship_icon_size_px;
+      if (is_selected) sz *= 1.15f;
+
+      // Thruster plume (drawn behind the sprite).
+      if (icon_cfg.ship_thrusters && speed01 > 0.05f) {
+        icon_sprites->draw_ship_thruster(draw, p, sz, angle, speed01, icon_cfg);
+      }
+
+      // Subtle drop shadow to make icons pop over the background.
+      ProcIconSpriteEngine::add_image_rotated(draw, sprite.tex_id, ImVec2(p.x + 1.0f, p.y + 1.0f), sz, angle,
+                                              IM_COL32(0, 0, 0, 140));
+      ProcIconSpriteEngine::add_image_rotated(draw, sprite.tex_id, p, sz, angle, ship_col);
+
+      if (is_selected) {
+        const float halo = sz * 0.60f + 2.0f;
+        draw->AddCircle(p, halo, IM_COL32(0, 255, 140, 255), 0, 1.5f);
+      }
+      if (is_fleet_member) {
+        const float halo = sz * 0.60f + 5.0f;
+        draw->AddCircle(p, halo, IM_COL32(0, 160, 255, 200), 0, 1.5f);
+      }
+    } else {
+      const float r = (selected_ship == sid) ? 5.0f : 4.0f;
+      // Subtle drop shadow to make markers pop over the background.
+      draw->AddCircleFilled(ImVec2(p.x + 1.0f, p.y + 1.0f), r, IM_COL32(0, 0, 0, 140));
+      draw->AddCircleFilled(p, r, ship_col);
+      if (selected_ship == sid) {
+        draw->AddCircle(p, 10.0f, IM_COL32(0, 255, 140, 255), 0, 1.5f);
+      }
+
+      // Highlight selected fleet members.
+      if (!selected_fleet_members.empty() && selected_fleet_members.count(sid)) {
+        draw->AddCircle(p, 13.0f, IM_COL32(0, 160, 255, 200), 0, 1.5f);
+      }
     }
   }
 
@@ -1649,8 +2216,18 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
       draw->AddLine(p, t, trail, 1.0f);
 
       // Marker.
-      draw->AddCircleFilled(ImVec2(p.x + 1.0f, p.y + 1.0f), 2.7f, IM_COL32(0, 0, 0, 140));
-      draw->AddCircleFilled(p, 2.7f, base);
+      if (use_contact_icons) {
+        const std::uint32_t seed = hash_u32(static_cast<std::uint32_t>(mid) ^ body_sprite_seed_base ^ 0xA15511Eu);
+        const auto sprite = icon_sprites->get_missile_icon(seed, icon_cfg);
+        const float angle = std::atan2(t.y - p.y, t.x - p.x);
+        const float sz = std::max(6.0f, icon_cfg.missile_icon_size_px);
+        ProcIconSpriteEngine::add_image_rotated(draw, sprite.tex_id, ImVec2(p.x + 1.0f, p.y + 1.0f), sz, angle,
+                                                IM_COL32(0, 0, 0, 140));
+        ProcIconSpriteEngine::add_image_rotated(draw, sprite.tex_id, p, sz, angle, base);
+      } else {
+        draw->AddCircleFilled(ImVec2(p.x + 1.0f, p.y + 1.0f), 2.7f, IM_COL32(0, 0, 0, 140));
+        draw->AddCircleFilled(p, 2.7f, base);
+      }
     }
   }
 
@@ -1658,10 +2235,24 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
   for (const auto& [wid, w] : s.wrecks) {
     if (w.system_id != sys->id) continue;
     const ImVec2 p = to_screen(w.position_mkm, center, scale, zoom, pan);
-    const float r = 5.0f;
-    const ImU32 c = IM_COL32(160, 160, 160, 200);
-    draw->AddLine(ImVec2(p.x - r, p.y - r), ImVec2(p.x + r, p.y + r), c, 2.0f);
-    draw->AddLine(ImVec2(p.x - r, p.y + r), ImVec2(p.x + r, p.y - r), c, 2.0f);
+    if (use_contact_icons) {
+      const std::uint32_t seed = hash_u32(static_cast<std::uint32_t>(wid) ^ body_sprite_seed_base ^ 0xD00DF00Du);
+      const auto sprite = icon_sprites->get_wreck_icon(w, seed, icon_cfg);
+
+      // Deterministic rotation for variety.
+      const float angle = static_cast<float>((seed % 360u) * (kPi / 180.0));
+      const float sz = std::max(8.0f, icon_cfg.wreck_icon_size_px);
+      const ImU32 col = IM_COL32(160, 160, 160, 220);
+
+      ProcIconSpriteEngine::add_image_rotated(draw, sprite.tex_id, ImVec2(p.x + 1.0f, p.y + 1.0f), sz, angle,
+                                              IM_COL32(0, 0, 0, 140));
+      ProcIconSpriteEngine::add_image_rotated(draw, sprite.tex_id, p, sz, angle, col);
+    } else {
+      const float r = 5.0f;
+      const ImU32 c = IM_COL32(160, 160, 160, 200);
+      draw->AddLine(ImVec2(p.x - r, p.y - r), ImVec2(p.x + r, p.y + r), c, 2.0f);
+      draw->AddLine(ImVec2(p.x - r, p.y + r), ImVec2(p.x + r, p.y - r), c, 2.0f);
+    }
   }
 
   // Anomaly markers (unresolved points of interest)
@@ -1674,11 +2265,79 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
     }
 
     const ImVec2 p = to_screen(a.position_mkm, center, scale, zoom, pan);
-    const ImU32 col = IM_COL32(255, 220, 120, 220);
 
-    // Subtle shadow + question-mark glyph (simple + recognizable).
-    draw->AddCircleFilled(ImVec2(p.x + 1.0f, p.y + 1.0f), 7.0f, IM_COL32(0, 0, 0, 140));
-    draw->AddText(ImVec2(p.x - 3.5f, p.y - 8.0f), col, "?");
+    // Procedural color: anomalies get a stable tint derived from their kind, with
+    // hazard/reward slightly influencing saturation/value.
+    const std::uint64_t kind_h = nebula4x::procgen_obscure::fnv1a_64(a.kind);
+    const float kind_hue = static_cast<float>(kind_h % 360ull) / 360.0f;
+    const float hz = (a.hazard_chance > 1e-9 && a.hazard_damage > 1e-9)
+                         ? std::clamp(static_cast<float>(a.hazard_chance * std::clamp(a.hazard_damage / 20.0, 0.0, 1.0)),
+                                      0.0f,
+                                      1.0f)
+                         : 0.0f;
+    double tot_mins = 0.0;
+    for (const auto& [_, t] : a.mineral_reward) tot_mins += std::max(0.0, t);
+    const float rw = std::clamp(static_cast<float>((a.research_reward / 200.0) + (tot_mins / 20000.0) +
+                                                   (!a.unlock_component_id.empty() ? 0.25 : 0.0)),
+                                0.0f,
+                                1.0f);
+
+    const float sat = std::clamp(0.55f + 0.25f * hz, 0.25f, 1.0f);
+    const float val = std::clamp(0.95f + 0.10f * rw - 0.08f * hz, 0.25f, 1.0f);
+
+    const ImU32 col = modulate_alpha(ImColor::HSV(kind_hue, sat, val), 0.92f);
+
+    const std::uint32_t seed = hash_u32(static_cast<std::uint32_t>(aid) ^ body_sprite_seed_base ^ 0xA1100A1Du);
+
+    // Optional: procedural phenomena halo + filaments.
+    if (use_anomaly_fx) {
+      const auto sprite = anomaly_fx->get_anomaly_sprite(a, seed, anomaly_cfg);
+
+      const float base_sz = std::max(8.0f, icon_cfg.anomaly_icon_size_px);
+      const float fx_sz = std::max(10.0f, base_sz) * anomaly_cfg.size_mult;
+
+      const double t_anim_days = t_now_days + (ImGui::GetTime() / 86400.0);
+      const float base_rot = static_cast<float>((seed % 360u) * (kPi / 180.0));
+      const float angle = anomaly_cfg.animate
+                              ? (base_rot + static_cast<float>(t_anim_days * anomaly_cfg.animate_speed_cycles_per_day * kTwoPi))
+                              : base_rot;
+
+      float pulse_mul = 1.0f;
+      if (anomaly_cfg.pulse && anomaly_cfg.pulse_speed_cycles_per_day > 1e-6f) {
+        const double cyc = t_anim_days * static_cast<double>(anomaly_cfg.pulse_speed_cycles_per_day);
+        pulse_mul = 0.72f + 0.28f * static_cast<float>(0.5 + 0.5 * std::sin(cyc * kTwoPi + static_cast<double>(seed & 1023u)));
+      }
+
+      const ImU32 fx_tint = modulate_alpha(col, anomaly_cfg.opacity * pulse_mul);
+
+      // Soft shadow first.
+      ProcAnomalyPhenomenaSpriteEngine::draw_sprite_rotated(draw, sprite, ImVec2(p.x + 1.0f, p.y + 1.0f), fx_sz, angle,
+                                                           IM_COL32(0, 0, 0, 110));
+      // Then the sprite + filament overlays.
+      ProcAnomalyPhenomenaSpriteEngine::draw_sprite_rotated(draw, sprite, p, fx_sz, angle, fx_tint);
+      ProcAnomalyPhenomenaSpriteEngine::draw_filaments(draw, p, fx_sz * 0.95f, a, seed, t_anim_days, fx_tint, anomaly_cfg);
+    }
+
+    // Center marker (contact icon or fallback glyph).
+    if (use_contact_icons) {
+      const auto icon_sprite = icon_sprites->get_anomaly_icon(a, seed, icon_cfg);
+
+      // Deterministic rotation for variety (icons are symmetric so this is subtle).
+      const float angle = static_cast<float>((seed % 360u) * (kPi / 180.0));
+      const float sz = std::max(8.0f, icon_cfg.anomaly_icon_size_px);
+
+      ProcIconSpriteEngine::add_image_rotated(draw, icon_sprite.tex_id, ImVec2(p.x + 1.0f, p.y + 1.0f), sz, angle,
+                                              IM_COL32(0, 0, 0, 140));
+      ProcIconSpriteEngine::add_image_rotated(draw, icon_sprite.tex_id, p, sz, angle, col);
+
+      if (icon_cfg.anomaly_pulse && !use_anomaly_fx) {
+        icon_sprites->draw_anomaly_pulse(draw, p, sz, static_cast<float>(ImGui::GetTime()), col, icon_cfg);
+      }
+    } else {
+      // Subtle shadow + question-mark glyph (simple + recognizable).
+      draw->AddCircleFilled(ImVec2(p.x + 1.0f, p.y + 1.0f), 7.0f, IM_COL32(0, 0, 0, 140));
+      draw->AddText(ImVec2(p.x - 3.5f, p.y - 8.0f), col, "?");
+    }
   }
 
   // Fleet formation preview: when enabled, visualize the *per-ship* target points
@@ -2438,6 +3097,49 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
             ImGui::TextDisabled("Hazard: %.0f%% / %.1f dmg", a->hazard_chance * 100.0, a->hazard_damage);
           }
 
+          // Procedural signature (stable per anomaly). Helpful for e.g. comparing repeated reports.
+          {
+            const std::string sig = nebula4x::procgen_obscure::anomaly_signature_code(*a);
+            const std::string glyph = nebula4x::procgen_obscure::anomaly_signature_glyph(*a);
+            ImGui::Separator();
+            ImGui::TextDisabled("Signature: %s", sig.c_str());
+            ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(200, 200, 200, 230));
+            ImGui::TextUnformatted(glyph.c_str());
+            ImGui::PopStyleColor();
+
+            // If the anomaly phenomena engine is enabled, embed a small preview
+            // (matches the System Map halo so users can visually correlate).
+            if (use_anomaly_fx) {
+              const std::uint32_t seed = hash_u32(static_cast<std::uint32_t>(a->id) ^ body_sprite_seed_base ^ 0xA1100A1Du);
+
+              // Same tint logic as the on-map render.
+              const std::uint64_t kind_h = nebula4x::procgen_obscure::fnv1a_64(a->kind);
+              const float kind_hue = static_cast<float>(kind_h % 360ull) / 360.0f;
+              const float hz = (a->hazard_chance > 1e-9 && a->hazard_damage > 1e-9)
+                                   ? std::clamp(static_cast<float>(a->hazard_chance *
+                                                                  std::clamp(a->hazard_damage / 20.0, 0.0, 1.0)),
+                                                0.0f,
+                                                1.0f)
+                                   : 0.0f;
+              double tot_mins = 0.0;
+              for (const auto& [_, t] : a->mineral_reward) tot_mins += std::max(0.0, t);
+              const float rw = std::clamp(static_cast<float>((a->research_reward / 200.0) + (tot_mins / 20000.0) +
+                                                             (!a->unlock_component_id.empty() ? 0.25 : 0.0)),
+                                          0.0f,
+                                          1.0f);
+              const float sat = std::clamp(0.55f + 0.25f * hz, 0.25f, 1.0f);
+              const float val = std::clamp(0.95f + 0.10f * rw - 0.08f * hz, 0.25f, 1.0f);
+
+              const ImU32 col = modulate_alpha(ImColor::HSV(kind_hue, sat, val), 0.92f);
+
+              const auto sprite = anomaly_fx->get_anomaly_sprite(*a, seed, anomaly_cfg);
+              ImGui::Spacing();
+              ImGui::TextDisabled("Procedural preview");
+              const ImVec4 tint = ImGui::ColorConvertU32ToFloat4(col);
+              ImGui::Image(sprite.tex_id, ImVec2(72.0f, 72.0f), ImVec2(0, 0), ImVec2(1, 1), tint);
+            }
+          }
+
           if (!a->unlock_component_id.empty()) {
             const auto itc = sim.content().components.find(a->unlock_component_id);
             const std::string cname = (itc != sim.content().components.end() && !itc->second.name.empty())
@@ -2534,7 +3236,8 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
           ImGui::Text("%s", jp->name.c_str());
 
           const bool surveyed = (!ui.fog_of_war) ||
-                                sim.is_jump_point_surveyed_by_faction(viewer_faction_id, jp->id);
+                                (viewer_faction_id != kInvalidId &&
+                                 sim.is_jump_point_surveyed_by_faction(viewer_faction_id, jp->id));
           ImGui::TextDisabled("Surveyed: %s", surveyed ? "Yes" : "No");
 
           // If we're running time-based surveys, show current progress.
@@ -2555,7 +3258,8 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
             ImGui::TextDisabled("To: (unknown)");
           } else if (const auto* other = find_ptr(s.jump_points, jp->linked_jump_id)) {
             if (const auto* dest = find_ptr(s.systems, other->system_id)) {
-              if (!ui.fog_of_war || sim.is_system_discovered_by_faction(viewer_faction_id, dest->id)) {
+              if (!ui.fog_of_war || viewer_faction_id == kInvalidId ||
+                  sim.is_system_discovered_by_faction(viewer_faction_id, dest->id)) {
                 ImGui::TextDisabled("To: %s", dest->name.c_str());
               } else {
                 ImGui::TextDisabled("To: (undiscovered system)");
@@ -2572,6 +3276,26 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
           if (sim.cfg().enable_jump_point_phenomena) {
             if (show_phenomena) {
               const auto ph = nebula4x::procgen_jump_phenomena::generate(*jp);
+
+              // Optional: show a small live preview of the procedural phenomena sprite.
+              if (jump_fx && jump_fx->ready()) {
+                const std::uint32_t seed = hash_u32(static_cast<std::uint32_t>(jp->id) ^
+                                                    static_cast<std::uint32_t>(jp->system_id) ^
+                                                    0x4A504658u);
+                const auto spr = jump_fx->get_jump_sprite(*jp, seed, jump_cfg);
+                if (spr.tex_id) {
+                  float rr = 0.0f, gg = 0.0f, bb = 0.0f;
+                  const float stability = std::clamp(static_cast<float>(ph.stability01), 0.0f, 1.0f);
+                  const float turb = std::clamp(static_cast<float>(ph.turbulence01), 0.0f, 1.0f);
+                  const float shear = std::clamp(static_cast<float>(ph.shear01), 0.0f, 1.0f);
+                  const float hue = std::clamp(0.85f + (0.52f - 0.85f) * stability, 0.0f, 1.0f);
+                  const float sat = std::clamp(0.52f + 0.38f * turb + 0.18f * shear, 0.25f, 1.0f);
+                  const float val = std::clamp(0.70f + 0.25f * (1.0f - stability) + 0.12f * turb, 0.25f, 1.0f);
+                  ImGui::ColorConvertHSVtoRGB(hue, sat, val, rr, gg, bb);
+                  ImGui::TextDisabled("Phenomena preview");
+                  ImGui::Image(spr.tex_id, ImVec2(72.0f, 72.0f), ImVec2(0, 0), ImVec2(1, 1), ImVec4(rr, gg, bb, 1.0f));
+                }
+              }
 
               if (ImGui::TreeNode("Phenomena")) {
                 if (!ph.signature_code.empty()) {
@@ -2896,7 +3620,10 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
   ImGui::BulletText("T: time preview, [ / ]: adjust days (Shift = 10d)");
   ImGui::BulletText("H: threat heatmap, Shift+H: sensor heatmap");
   ImGui::BulletText("N: nebula overlay (microfields)");
+  ImGui::BulletText("G: gravity contours overlay");
   ImGui::BulletText("S: storm cells overlay");
+  ImGui::BulletText("W: flow field overlay");
+  ImGui::BulletText("B: dust particles");
   ImGui::BulletText("Left click: issue order to ship (Shift queues)");
   ImGui::BulletText("Right click: select ship/body (no orders)");
   ImGui::BulletText("Alt+Left click body: colonize (colony ship required)");
@@ -2911,7 +3638,356 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
   ImGui::SameLine();
   ImGui::Checkbox("Grid", &ui.system_map_grid);
   ImGui::SameLine();
+  ImGui::Checkbox("Dust (B)", &ui.system_map_particle_field);
+
+  ImGui::SameLine();
   ImGui::Checkbox("Nebula (N)", &ui.system_map_nebula_microfield_overlay);
+
+  ImGui::SameLine();
+  ImGui::Checkbox("Gravity (G)", &ui.system_map_gravity_contours_overlay);
+
+  // Custom tile-based procedural background engine (stars + optional haze).
+  ImGui::Checkbox("Procedural background (tiles)", &ui.map_proc_render_engine);
+  if (ui.map_proc_render_engine) {
+    ImGui::Indent();
+    ui.map_proc_render_tile_px = std::clamp(ui.map_proc_render_tile_px, 64, 512);
+    ui.map_proc_render_cache_tiles = std::clamp(ui.map_proc_render_cache_tiles, 16, 512);
+    ui.map_proc_render_nebula_strength = std::clamp(ui.map_proc_render_nebula_strength, 0.0f, 1.0f);
+    ui.map_proc_render_nebula_scale = std::clamp(ui.map_proc_render_nebula_scale, 0.25f, 4.0f);
+    ui.map_proc_render_nebula_warp = std::clamp(ui.map_proc_render_nebula_warp, 0.0f, 2.0f);
+
+    ImGui::SliderInt("Tile size (px)##proc_bg", &ui.map_proc_render_tile_px, 64, 512);
+    ImGui::SliderInt("Cache limit (tiles)##proc_bg", &ui.map_proc_render_cache_tiles, 16, 512);
+    ImGui::Checkbox("Nebula haze##proc_bg", &ui.map_proc_render_nebula_enable);
+    if (ui.map_proc_render_nebula_enable) {
+      ImGui::SliderFloat("Strength##proc_bg", &ui.map_proc_render_nebula_strength, 0.0f, 1.0f, "%.2f");
+      ImGui::SliderFloat("Scale##proc_bg", &ui.map_proc_render_nebula_scale, 0.25f, 4.0f, "%.2f");
+      ImGui::SliderFloat("Warp##proc_bg", &ui.map_proc_render_nebula_warp, 0.0f, 2.0f, "%.2f");
+    }
+    ImGui::Checkbox("Debug tile bounds##proc_bg", &ui.map_proc_render_debug_tiles);
+
+    const ProcRenderStats* pst = nullptr;
+    ProcRenderStats st_local;
+    if (proc_engine && proc_engine->ready()) {
+      st_local = proc_engine->stats();
+      pst = &st_local;
+    }
+
+    if (ImGui::SmallButton("Clear cache##proc_bg")) {
+      if (proc_engine && proc_engine->ready()) {
+        proc_engine->clear();
+      } else {
+        ui.map_proc_render_clear_cache_requested = true;
+      }
+    }
+    ImGui::SameLine();
+    const int cached = pst ? pst->cache_tiles : ui.map_proc_render_stats_cache_tiles;
+    const int gen = pst ? pst->generated_this_frame : ui.map_proc_render_stats_generated_this_frame;
+    const float gen_ms = pst ? static_cast<float>(pst->gen_ms_this_frame) : ui.map_proc_render_stats_gen_ms_this_frame;
+    const float up_ms = pst ? static_cast<float>(pst->upload_ms_this_frame) : ui.map_proc_render_stats_upload_ms_this_frame;
+    ImGui::TextDisabled("Cached %d | +%d | Gen %.2fms | Upload %.2fms", cached, gen, gen_ms, up_ms);
+    ImGui::Unindent();
+  }
+
+  ImGui::Separator();
+  ImGui::TextDisabled("Procedural particle field (dust)");
+  ImGui::Checkbox("System map##particle_field_sys", &ui.system_map_particle_field);
+  ImGui::SameLine();
+  ImGui::Checkbox("Galaxy map##particle_field_gal", &ui.galaxy_map_particle_field);
+
+  const bool pf_enabled = ui.system_map_particle_field || ui.galaxy_map_particle_field;
+  if (pf_enabled) {
+    // Clamp to reasonable ranges.
+    ui.map_particle_tile_px = std::clamp(ui.map_particle_tile_px, 64, 512);
+    ui.map_particle_particles_per_tile = std::clamp(ui.map_particle_particles_per_tile, 8, 512);
+    ui.map_particle_layers = std::clamp(ui.map_particle_layers, 1, 3);
+    ui.map_particle_opacity = std::clamp(ui.map_particle_opacity, 0.0f, 1.0f);
+    ui.map_particle_base_radius_px = std::clamp(ui.map_particle_base_radius_px, 0.5f, 3.0f);
+    ui.map_particle_radius_jitter_px = std::clamp(ui.map_particle_radius_jitter_px, 0.0f, 4.0f);
+    ui.map_particle_twinkle_strength = std::clamp(ui.map_particle_twinkle_strength, 0.0f, 1.0f);
+    ui.map_particle_twinkle_speed = std::clamp(ui.map_particle_twinkle_speed, 0.0f, 4.0f);
+    ui.map_particle_drift_px_per_day = std::clamp(ui.map_particle_drift_px_per_day, 0.0f, 100.0f);
+    ui.map_particle_layer0_parallax = std::clamp(ui.map_particle_layer0_parallax, 0.0f, 1.0f);
+    ui.map_particle_layer1_parallax = std::clamp(ui.map_particle_layer1_parallax, 0.0f, 1.0f);
+    ui.map_particle_layer2_parallax = std::clamp(ui.map_particle_layer2_parallax, 0.0f, 1.0f);
+    ui.map_particle_sparkle_chance = std::clamp(ui.map_particle_sparkle_chance, 0.0f, 0.5f);
+    ui.map_particle_sparkle_length_px = std::clamp(ui.map_particle_sparkle_length_px, 1.0f, 24.0f);
+
+    ImGui::Indent();
+    ImGui::SliderFloat("Opacity##particle_field", &ui.map_particle_opacity, 0.0f, 1.0f, "%.2f");
+    ImGui::SliderInt("Tile size (px)##particle_field", &ui.map_particle_tile_px, 64, 512);
+    ImGui::SliderInt("Particles per tile##particle_field", &ui.map_particle_particles_per_tile, 8, 512);
+    ImGui::SliderInt("Layers##particle_field", &ui.map_particle_layers, 1, 3);
+
+    ImGui::SliderFloat("Base radius (px)##particle_field", &ui.map_particle_base_radius_px, 0.5f, 3.0f, "%.2f");
+    ImGui::SliderFloat("Radius jitter (px)##particle_field", &ui.map_particle_radius_jitter_px, 0.0f, 4.0f, "%.2f");
+
+    ImGui::SliderFloat("Twinkle strength##particle_field", &ui.map_particle_twinkle_strength, 0.0f, 1.0f, "%.2f");
+    ImGui::SliderFloat("Twinkle speed##particle_field", &ui.map_particle_twinkle_speed, 0.0f, 4.0f, "%.2f");
+
+    ImGui::Checkbox("Drift (simulation-time)##particle_field", &ui.map_particle_drift);
+    if (ui.map_particle_drift) {
+      ImGui::SliderFloat("Drift speed (px/day)##particle_field", &ui.map_particle_drift_px_per_day, 0.0f, 100.0f, "%.1f");
+    }
+
+    if (ui.map_particle_layers >= 1) {
+      ImGui::SliderFloat("Layer 0 parallax##particle_field", &ui.map_particle_layer0_parallax, 0.0f, 1.0f, "%.2f");
+    }
+    if (ui.map_particle_layers >= 2) {
+      ImGui::SliderFloat("Layer 1 parallax##particle_field", &ui.map_particle_layer1_parallax, 0.0f, 1.0f, "%.2f");
+    }
+    if (ui.map_particle_layers >= 3) {
+      ImGui::SliderFloat("Layer 2 parallax##particle_field", &ui.map_particle_layer2_parallax, 0.0f, 1.0f, "%.2f");
+    }
+
+    ImGui::Checkbox("Sparkles##particle_field", &ui.map_particle_sparkles);
+    if (ui.map_particle_sparkles) {
+      ImGui::SliderFloat("Chance##particle_field", &ui.map_particle_sparkle_chance, 0.0f, 0.5f, "%.3f");
+      ImGui::SliderFloat("Length (px)##particle_field", &ui.map_particle_sparkle_length_px, 1.0f, 24.0f, "%.1f");
+    }
+
+    ImGui::Checkbox("Debug tile bounds##particle_field", &ui.map_particle_debug_tiles);
+
+    ImGui::TextDisabled("Last frame: L%d | Tiles %d | Particles %d",
+                        ui.map_particle_last_frame_layers_drawn,
+                        ui.map_particle_last_frame_tiles_drawn,
+                        ui.map_particle_last_frame_particles_drawn);
+    ImGui::Unindent();
+  }
+
+  ImGui::Separator();
+  ImGui::TextDisabled("Procedural body sprites (system map)");
+  if (!body_sprites) {
+    ImGui::TextDisabled("(Engine unavailable in this build)");
+  } else {
+    ImGui::Checkbox("Enable##body_sprites", &ui.system_map_body_sprites);
+    if (ui.system_map_body_sprites) {
+      ui.system_map_body_sprite_px = std::clamp(ui.system_map_body_sprite_px, 32, 256);
+      ui.system_map_body_sprite_cache = std::clamp(ui.system_map_body_sprite_cache, 64, 2048);
+      ui.system_map_body_sprite_light_steps = std::clamp(ui.system_map_body_sprite_light_steps, 4, 128);
+      ui.system_map_body_sprite_ring_chance = std::clamp(ui.system_map_body_sprite_ring_chance, 0.0f, 1.0f);
+      ui.system_map_body_sprite_ambient = std::clamp(ui.system_map_body_sprite_ambient, 0.0f, 1.0f);
+      ui.system_map_body_sprite_diffuse = std::clamp(ui.system_map_body_sprite_diffuse, 0.0f, 2.0f);
+      ui.system_map_body_sprite_specular = std::clamp(ui.system_map_body_sprite_specular, 0.0f, 2.0f);
+      ui.system_map_body_sprite_specular_power = std::clamp(ui.system_map_body_sprite_specular_power, 1.0f, 128.0f);
+
+      ImGui::Indent();
+      ImGui::SliderInt("Sprite resolution##body_sprites", &ui.system_map_body_sprite_px, 32, 256);
+      ImGui::SliderInt("Cache limit##body_sprites", &ui.system_map_body_sprite_cache, 64, 2048);
+      ImGui::SliderInt("Light steps##body_sprites", &ui.system_map_body_sprite_light_steps, 4, 128);
+      ImGui::Checkbox("Rings on gas giants##body_sprites", &ui.system_map_body_sprite_rings);
+      if (ui.system_map_body_sprite_rings) {
+        ImGui::SliderFloat("Ring chance##body_sprites", &ui.system_map_body_sprite_ring_chance, 0.0f, 1.0f, "%.2f");
+      }
+      ImGui::SliderFloat("Ambient##body_sprites", &ui.system_map_body_sprite_ambient, 0.0f, 1.0f, "%.2f");
+      ImGui::SliderFloat("Diffuse##body_sprites", &ui.system_map_body_sprite_diffuse, 0.0f, 2.0f, "%.2f");
+      ImGui::SliderFloat("Specular##body_sprites", &ui.system_map_body_sprite_specular, 0.0f, 2.0f, "%.2f");
+      ImGui::SliderFloat("Specular power##body_sprites", &ui.system_map_body_sprite_specular_power, 1.0f, 128.0f, "%.1f");
+      if (ImGui::Button("Clear sprite cache##body_sprites")) {
+        ui.system_map_body_sprite_clear_cache_requested = true;
+      }
+      const auto& st = body_sprites->stats();
+      ImGui::TextDisabled("Cached %d | +%d | Gen %.2fms | Upload %.2fms",
+                          st.cache_sprites,
+                          st.generated_this_frame,
+                          st.gen_ms_this_frame,
+                          st.upload_ms_this_frame);
+      ImGui::Unindent();
+    }
+  }
+
+  ImGui::Separator();
+  ImGui::TextDisabled("Procedural contact icons (system map)");
+  if (!icon_sprites) {
+    ImGui::TextDisabled("(Engine unavailable in this build)");
+  } else {
+    ImGui::Checkbox("Enable##contact_icons", &ui.system_map_contact_icons);
+    if (ui.system_map_contact_icons) {
+      ui.system_map_contact_icon_px = std::clamp(ui.system_map_contact_icon_px, 16, 256);
+      ui.system_map_contact_icon_cache = std::clamp(ui.system_map_contact_icon_cache, 64, 4096);
+      ui.system_map_ship_icon_size_px = std::clamp(ui.system_map_ship_icon_size_px, 8.0f, 64.0f);
+      ui.system_map_missile_icon_size_px = std::clamp(ui.system_map_missile_icon_size_px, 6.0f, 48.0f);
+      ui.system_map_wreck_icon_size_px = std::clamp(ui.system_map_wreck_icon_size_px, 8.0f, 64.0f);
+      ui.system_map_anomaly_icon_size_px = std::clamp(ui.system_map_anomaly_icon_size_px, 8.0f, 64.0f);
+      ui.system_map_ship_icon_thruster_opacity = std::clamp(ui.system_map_ship_icon_thruster_opacity, 0.0f, 1.0f);
+      ui.system_map_ship_icon_thruster_length_px = std::clamp(ui.system_map_ship_icon_thruster_length_px, 0.0f, 64.0f);
+      ui.system_map_ship_icon_thruster_width_px = std::clamp(ui.system_map_ship_icon_thruster_width_px, 0.0f, 32.0f);
+
+      ImGui::Indent();
+      ImGui::SliderInt("Sprite resolution##contact_icons", &ui.system_map_contact_icon_px, 16, 256);
+      ImGui::SliderInt("Cache limit##contact_icons", &ui.system_map_contact_icon_cache, 64, 4096);
+      ImGui::SliderFloat("Ship size (px)##contact_icons", &ui.system_map_ship_icon_size_px, 8.0f, 64.0f, "%.0f");
+      ImGui::SliderFloat("Missile size (px)##contact_icons", &ui.system_map_missile_icon_size_px, 6.0f, 48.0f, "%.0f");
+      ImGui::SliderFloat("Wreck size (px)##contact_icons", &ui.system_map_wreck_icon_size_px, 8.0f, 64.0f, "%.0f");
+      ImGui::SliderFloat("Anomaly size (px)##contact_icons", &ui.system_map_anomaly_icon_size_px, 8.0f, 64.0f, "%.0f");
+      ImGui::Checkbox("Thrusters##contact_icons", &ui.system_map_ship_icon_thrusters);
+      if (ui.system_map_ship_icon_thrusters) {
+        ImGui::SliderFloat("Thruster opacity##contact_icons", &ui.system_map_ship_icon_thruster_opacity, 0.0f, 1.0f, "%.2f");
+        ImGui::SliderFloat("Thruster length##contact_icons", &ui.system_map_ship_icon_thruster_length_px, 0.0f, 64.0f, "%.0fpx");
+        ImGui::SliderFloat("Thruster width##contact_icons", &ui.system_map_ship_icon_thruster_width_px, 0.0f, 32.0f, "%.0fpx");
+      }
+      ImGui::Checkbox("Anomaly pulse##contact_icons", &ui.system_map_anomaly_icon_pulse);
+      ImGui::Checkbox("Debug bounds##contact_icons", &ui.system_map_contact_icon_debug_bounds);
+      if (ImGui::Button("Clear icon cache##contact_icons")) {
+        ui.system_map_contact_icon_clear_cache_requested = true;
+      }
+      ImGui::TextDisabled("Cached %d | +%d | Gen %.2fms | Upload %.2fms",
+                          ui.system_map_contact_icon_stats_cache_sprites,
+                          ui.system_map_contact_icon_stats_generated_this_frame,
+                          ui.system_map_contact_icon_stats_gen_ms_this_frame,
+                          ui.system_map_contact_icon_stats_upload_ms_this_frame);
+      if (!icon_sprites->ready()) {
+        ImGui::TextDisabled("(Renderer backend does not support icon textures)");
+      }
+      ImGui::Unindent();
+    }
+  }
+
+  ImGui::Separator();
+  ImGui::TextDisabled("Jump phenomena (procedural, system map) (J)");
+  if (!jump_fx) {
+    ImGui::TextDisabled("(Engine unavailable in this build)");
+  } else {
+    ImGui::Checkbox("Enable##jump_phenomena", &ui.system_map_jump_phenomena);
+    if (ui.system_map_jump_phenomena) {
+      ui.system_map_jump_phenomena_sprite_px = std::clamp(ui.system_map_jump_phenomena_sprite_px, 16, 256);
+      ui.system_map_jump_phenomena_cache = std::clamp(ui.system_map_jump_phenomena_cache, 8, 2048);
+      ui.system_map_jump_phenomena_size_mult = std::clamp(ui.system_map_jump_phenomena_size_mult, 1.0f, 16.0f);
+      ui.system_map_jump_phenomena_opacity = std::clamp(ui.system_map_jump_phenomena_opacity, 0.0f, 1.0f);
+      ui.system_map_jump_phenomena_anim_speed_cycles_per_day =
+          std::clamp(ui.system_map_jump_phenomena_anim_speed_cycles_per_day, 0.0f, 4.0f);
+      ui.system_map_jump_phenomena_pulse_cycles_per_day =
+          std::clamp(ui.system_map_jump_phenomena_pulse_cycles_per_day, 0.0f, 4.0f);
+      ui.system_map_jump_phenomena_filament_strength = std::clamp(ui.system_map_jump_phenomena_filament_strength, 0.0f, 4.0f);
+      ui.system_map_jump_phenomena_filaments_max = std::clamp(ui.system_map_jump_phenomena_filaments_max, 0, 48);
+
+      ImGui::Indent();
+      ImGui::SliderInt("Sprite resolution##jump_phenomena", &ui.system_map_jump_phenomena_sprite_px, 16, 256);
+      ImGui::SliderInt("Cache limit##jump_phenomena", &ui.system_map_jump_phenomena_cache, 8, 2048);
+      ImGui::SliderFloat("Size (× glyph)##jump_phenomena", &ui.system_map_jump_phenomena_size_mult, 1.0f, 16.0f, "%.2f");
+      ImGui::SliderFloat("Opacity##jump_phenomena", &ui.system_map_jump_phenomena_opacity, 0.0f, 1.0f, "%.2f");
+      ImGui::Checkbox("Reveal unsurveyed (spoilers)##jump_phenomena", &ui.system_map_jump_phenomena_reveal_unsurveyed);
+      ImGui::Checkbox("Animate rotation##jump_phenomena", &ui.system_map_jump_phenomena_animate);
+      if (ui.system_map_jump_phenomena_animate) {
+        ImGui::SliderFloat("Rotation speed (cycles/day)##jump_phenomena", &ui.system_map_jump_phenomena_anim_speed_cycles_per_day, 0.0f, 2.0f, "%.2f");
+      }
+      ImGui::Checkbox("Pulse##jump_phenomena", &ui.system_map_jump_phenomena_pulse);
+      if (ui.system_map_jump_phenomena_pulse) {
+        ImGui::SliderFloat("Pulse speed (cycles/day)##jump_phenomena", &ui.system_map_jump_phenomena_pulse_cycles_per_day, 0.0f, 2.0f, "%.2f");
+      }
+      ImGui::Checkbox("Filaments##jump_phenomena", &ui.system_map_jump_phenomena_filaments);
+      if (ui.system_map_jump_phenomena_filaments) {
+        ImGui::SliderFloat("Filament strength##jump_phenomena", &ui.system_map_jump_phenomena_filament_strength, 0.0f, 4.0f, "%.2f");
+        ImGui::SliderInt("Filaments (max)##jump_phenomena", &ui.system_map_jump_phenomena_filaments_max, 0, 48);
+      }
+      ImGui::Checkbox("Debug bounds##jump_phenomena", &ui.system_map_jump_phenomena_debug_bounds);
+      if (ImGui::Button("Clear jump cache##jump_phenomena")) {
+        ui.system_map_jump_phenomena_clear_cache_requested = true;
+      }
+      ImGui::TextDisabled("Cached %d | +%d | Gen %.2fms | Upload %.2fms",
+                          ui.system_map_jump_phenomena_stats_cache_sprites,
+                          ui.system_map_jump_phenomena_stats_generated_this_frame,
+                          ui.system_map_jump_phenomena_stats_gen_ms_this_frame,
+                          ui.system_map_jump_phenomena_stats_upload_ms_this_frame);
+      if (!jump_fx->ready()) {
+        ImGui::TextDisabled("(Renderer backend does not support jump textures)");
+      }
+      ImGui::Unindent();
+    }
+  }
+
+  ImGui::Separator();
+  ImGui::TextDisabled("Anomaly phenomena (procedural, system map) (A)");
+  if (!anomaly_fx) {
+    ImGui::TextDisabled("(Engine unavailable in this build)");
+  } else {
+    ImGui::Checkbox("Enable##anomaly_phenomena", &ui.system_map_anomaly_phenomena);
+    if (ui.system_map_anomaly_phenomena) {
+      ui.system_map_anomaly_phenomena_sprite_px = std::clamp(ui.system_map_anomaly_phenomena_sprite_px, 16, 256);
+      ui.system_map_anomaly_phenomena_cache = std::clamp(ui.system_map_anomaly_phenomena_cache, 8, 2048);
+      ui.system_map_anomaly_phenomena_size_mult = std::clamp(ui.system_map_anomaly_phenomena_size_mult, 1.0f, 16.0f);
+      ui.system_map_anomaly_phenomena_opacity = std::clamp(ui.system_map_anomaly_phenomena_opacity, 0.0f, 1.0f);
+      ui.system_map_anomaly_phenomena_anim_speed_cycles_per_day =
+          std::clamp(ui.system_map_anomaly_phenomena_anim_speed_cycles_per_day, 0.0f, 4.0f);
+      ui.system_map_anomaly_phenomena_pulse_cycles_per_day =
+          std::clamp(ui.system_map_anomaly_phenomena_pulse_cycles_per_day, 0.0f, 4.0f);
+      ui.system_map_anomaly_phenomena_filament_strength = std::clamp(ui.system_map_anomaly_phenomena_filament_strength, 0.0f, 4.0f);
+      ui.system_map_anomaly_phenomena_filaments_max = std::clamp(ui.system_map_anomaly_phenomena_filaments_max, 0, 48);
+      ui.system_map_anomaly_phenomena_glyph_strength = std::clamp(ui.system_map_anomaly_phenomena_glyph_strength, 0.0f, 2.0f);
+
+      ImGui::Indent();
+      ImGui::SliderInt("Sprite resolution##anomaly_phenomena", &ui.system_map_anomaly_phenomena_sprite_px, 16, 256);
+      ImGui::SliderInt("Cache limit##anomaly_phenomena", &ui.system_map_anomaly_phenomena_cache, 8, 2048);
+      ImGui::SliderFloat("Size (× glyph)##anomaly_phenomena", &ui.system_map_anomaly_phenomena_size_mult, 1.0f, 16.0f, "%.2f");
+      ImGui::SliderFloat("Opacity##anomaly_phenomena", &ui.system_map_anomaly_phenomena_opacity, 0.0f, 1.0f, "%.2f");
+      ImGui::Checkbox("Animate rotation##anomaly_phenomena", &ui.system_map_anomaly_phenomena_animate);
+      if (ui.system_map_anomaly_phenomena_animate) {
+        ImGui::SliderFloat("Rotation speed (cycles/day)##anomaly_phenomena", &ui.system_map_anomaly_phenomena_anim_speed_cycles_per_day, 0.0f, 2.0f, "%.2f");
+      }
+      ImGui::Checkbox("Pulse##anomaly_phenomena", &ui.system_map_anomaly_phenomena_pulse);
+      if (ui.system_map_anomaly_phenomena_pulse) {
+        ImGui::SliderFloat("Pulse speed (cycles/day)##anomaly_phenomena", &ui.system_map_anomaly_phenomena_pulse_cycles_per_day, 0.0f, 2.0f, "%.2f");
+      }
+      ImGui::Checkbox("Filaments##anomaly_phenomena", &ui.system_map_anomaly_phenomena_filaments);
+      if (ui.system_map_anomaly_phenomena_filaments) {
+        ImGui::SliderFloat("Filament strength##anomaly_phenomena", &ui.system_map_anomaly_phenomena_filament_strength, 0.0f, 4.0f, "%.2f");
+        ImGui::SliderInt("Filaments (max)##anomaly_phenomena", &ui.system_map_anomaly_phenomena_filaments_max, 0, 48);
+      }
+      ImGui::Checkbox("Glyph overlay##anomaly_phenomena", &ui.system_map_anomaly_phenomena_glyph_overlay);
+      if (ui.system_map_anomaly_phenomena_glyph_overlay) {
+        ImGui::SliderFloat("Glyph strength##anomaly_phenomena", &ui.system_map_anomaly_phenomena_glyph_strength, 0.0f, 1.5f, "%.2f");
+      }
+      ImGui::Checkbox("Debug bounds##anomaly_phenomena", &ui.system_map_anomaly_phenomena_debug_bounds);
+      if (ImGui::Button("Clear anomaly cache##anomaly_phenomena")) {
+        ui.system_map_anomaly_phenomena_clear_cache_requested = true;
+      }
+      ImGui::TextDisabled("Cached %d | +%d | Gen %.2fms | Upload %.2fms",
+                          ui.system_map_anomaly_phenomena_stats_cache_sprites,
+                          ui.system_map_anomaly_phenomena_stats_generated_this_frame,
+                          ui.system_map_anomaly_phenomena_stats_gen_ms_this_frame,
+                          ui.system_map_anomaly_phenomena_stats_upload_ms_this_frame);
+      if (!anomaly_fx->ready()) {
+        ImGui::TextDisabled("(Renderer backend does not support anomaly textures)");
+      }
+      ImGui::Unindent();
+    }
+  }
+
+  ImGui::Separator();
+  ImGui::TextDisabled("Motion trails (procedural, system map)");
+  if (!trail_engine) {
+    ImGui::TextDisabled("(Engine unavailable in this build)");
+  } else {
+    ImGui::Checkbox("Enable##motion_trails", &ui.system_map_motion_trails);
+    if (ui.system_map_motion_trails) {
+      ui.system_map_motion_trails_max_age_days = std::clamp(ui.system_map_motion_trails_max_age_days, 0.25f, 60.0f);
+      ui.system_map_motion_trails_sample_hours = std::clamp(ui.system_map_motion_trails_sample_hours, 0.05f, 72.0f);
+      ui.system_map_motion_trails_min_seg_px = std::clamp(ui.system_map_motion_trails_min_seg_px, 0.5f, 64.0f);
+      ui.system_map_motion_trails_thickness_px = std::clamp(ui.system_map_motion_trails_thickness_px, 0.5f, 12.0f);
+      ui.system_map_motion_trails_alpha = std::clamp(ui.system_map_motion_trails_alpha, 0.0f, 1.0f);
+
+      ImGui::Indent();
+      ImGui::Checkbox("All visible ships##motion_trails", &ui.system_map_motion_trails_all_ships);
+      ImGui::SameLine();
+      ImGui::Checkbox("Missile trails##motion_trails", &ui.system_map_motion_trails_missiles);
+      ImGui::Checkbox("Speed brightening##motion_trails", &ui.system_map_motion_trails_speed_brighten);
+      ImGui::SliderFloat("Retention (days)##motion_trails", &ui.system_map_motion_trails_max_age_days, 0.25f, 60.0f, "%.2f");
+      ImGui::SliderFloat("Sample interval (hours)##motion_trails", &ui.system_map_motion_trails_sample_hours, 0.05f, 24.0f, "%.2f");
+      ImGui::SliderFloat("Min segment (px)##motion_trails", &ui.system_map_motion_trails_min_seg_px, 0.5f, 24.0f, "%.1f");
+      ImGui::SliderFloat("Thickness (px)##motion_trails", &ui.system_map_motion_trails_thickness_px, 0.5f, 8.0f, "%.1f");
+      ImGui::SliderFloat("Opacity##motion_trails", &ui.system_map_motion_trails_alpha, 0.0f, 1.0f, "%.2f");
+      if (ImGui::Button("Clear trails##motion_trails")) {
+        ui.system_map_motion_trails_clear_requested = true;
+      }
+      ImGui::TextDisabled("Systems %d | Tracks %d | Points %d | Pruned %d pts / %d tracks",
+                          ui.system_map_motion_trails_stats_systems,
+                          ui.system_map_motion_trails_stats_tracks,
+                          ui.system_map_motion_trails_stats_points,
+                          ui.system_map_motion_trails_stats_pruned_points_this_frame,
+                          ui.system_map_motion_trails_stats_pruned_tracks_this_frame);
+      ImGui::Unindent();
+    }
+  }
   if (ui.system_map_nebula_microfield_overlay) {
     ui.system_map_nebula_overlay_opacity = std::clamp(ui.system_map_nebula_overlay_opacity, 0.0f, 1.0f);
     ui.system_map_nebula_overlay_resolution = std::clamp(ui.system_map_nebula_overlay_resolution, 16, 260);
@@ -2925,6 +4001,35 @@ void draw_system_map(Simulation& sim, UIState& ui, Id& selected_ship, Id& select
     ImGui::SliderFloat("Opacity##storm_overlay", &ui.system_map_storm_overlay_opacity, 0.0f, 1.0f, "%.2f");
     ImGui::SliderInt("Resolution##storm_overlay", &ui.system_map_storm_overlay_resolution, 16, 260);
   }
+  ImGui::Checkbox("Flow field (W)", &ui.system_map_flow_field_overlay);
+  if (ui.system_map_flow_field_overlay) {
+    ui.system_map_flow_field_opacity = std::clamp(ui.system_map_flow_field_opacity, 0.0f, 1.0f);
+    ui.system_map_flow_field_thickness_px = std::clamp(ui.system_map_flow_field_thickness_px, 0.5f, 6.0f);
+    ui.system_map_flow_field_step_px = std::clamp(ui.system_map_flow_field_step_px, 1.0f, 24.0f);
+    ui.system_map_flow_field_highlight_wavelength_px = std::clamp(ui.system_map_flow_field_highlight_wavelength_px, 32.0f, 800.0f);
+    ui.system_map_flow_field_animate_speed_cycles_per_day = std::clamp(ui.system_map_flow_field_animate_speed_cycles_per_day, 0.0f, 2.0f);
+
+    ImGui::Indent();
+    ImGui::Checkbox("Animate##flowfield", &ui.system_map_flow_field_animate);
+    ImGui::SameLine();
+    ImGui::Checkbox("Mask nebula##flowfield", &ui.system_map_flow_field_mask_nebula);
+    ImGui::SameLine();
+    ImGui::Checkbox("Mask storms##flowfield", &ui.system_map_flow_field_mask_storms);
+    ImGui::SliderFloat("Opacity##flowfield", &ui.system_map_flow_field_opacity, 0.0f, 1.0f, "%.2f");
+    ImGui::SliderFloat("Thickness (px)##flowfield", &ui.system_map_flow_field_thickness_px, 0.5f, 6.0f, "%.2f");
+    ImGui::SliderFloat("Step (px)##flowfield", &ui.system_map_flow_field_step_px, 1.0f, 24.0f, "%.1f");
+    ImGui::SliderFloat("Speed (cycles/day)##flowfield", &ui.system_map_flow_field_animate_speed_cycles_per_day, 0.0f, 2.0f, "%.2f");
+    if (ImGui::Button("Clear cache##flowfield")) {
+      ui.system_map_flow_field_clear_requested = true;
+    }
+    ImGui::TextDisabled("Tiles %d | Used %d | +%d | Seg %d",
+                        ui.system_map_flow_field_stats_cache_tiles,
+                        ui.system_map_flow_field_stats_tiles_used,
+                        ui.system_map_flow_field_stats_tiles_generated,
+                        ui.system_map_flow_field_stats_segments_drawn);
+    ImGui::Unindent();
+  }
+
   ImGui::Checkbox("Minimap (M)", &ui.system_map_show_minimap);
   ImGui::Checkbox("Order paths", &ui.system_map_order_paths);
   ImGui::SameLine();

@@ -8,6 +8,10 @@
 #include "ui/raymarch_nebula.h"
 #include "ui/ruler.h"
 
+#include "ui/proc_render_engine.h"
+#include "ui/proc_particle_field_engine.h"
+#include "ui/proc_territory_field_engine.h"
+
 #include "ui/imgui_includes.h"
 
 #include <array>
@@ -786,7 +790,14 @@ void draw_procgen_lens_vectors(ImDrawList* draw,
 
 } // namespace
 
-void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zoom, Vec2& pan) {
+void draw_galaxy_map(Simulation& sim,
+                     UIState& ui,
+                     Id& selected_ship,
+                     double& zoom,
+                     Vec2& pan,
+                     ProcRenderEngine* proc_engine,
+                     ProcParticleFieldEngine* particle_engine,
+                     ProcTerritoryFieldEngine* territory_engine) {
   auto& s = sim.state();
 
   const ImGuiIO& io = ImGui::GetIO();
@@ -1031,6 +1042,12 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
     if (ImGui::IsKeyPressed(ImGuiKey_F)) {
       ui.galaxy_map_fuel_range = !ui.galaxy_map_fuel_range;
     }
+    if (ImGui::IsKeyPressed(ImGuiKey_B)) {
+      ui.galaxy_map_particle_field = !ui.galaxy_map_particle_field;
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_Y)) {
+      ui.galaxy_map_territory_overlay = !ui.galaxy_map_territory_overlay;
+    }
   }
 
   const ImVec2 mm_hit_p0(std::max(mm_p0.x, view_p0.x), std::max(mm_p0.y, view_p0.y));
@@ -1123,12 +1140,77 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
                              rs.debug_overlay ? &stats : nullptr);
     }
 
-    StarfieldStyle sf;
-    sf.enabled = ui.galaxy_map_starfield;
-    sf.density = ui.map_starfield_density;
-    sf.parallax = ui.map_starfield_parallax;
-    sf.alpha = 1.0f;
-    draw_starfield(draw, origin, avail, bg, pan_px_x, pan_px_y, chrome_seed, sf);
+    // Starfield / procedural background.
+    //
+    // The legacy path draws stars directly into the ImDrawList every frame.
+    // The procedural engine path rasterizes tiles on-demand, uploads textures,
+    // then just draws textured quads while panning.
+    if (ui.map_proc_render_engine && proc_engine && proc_engine->ready()) {
+      if (ui.map_proc_render_clear_cache_requested) {
+        proc_engine->clear();
+        ui.map_proc_render_clear_cache_requested = false;
+      }
+
+      ProcRenderConfig pcfg;
+      pcfg.tile_px = ui.map_proc_render_tile_px;
+      pcfg.max_cached_tiles = ui.map_proc_render_cache_tiles;
+      pcfg.star_density = ui.galaxy_map_starfield ? ui.map_starfield_density : 0.0f;
+      pcfg.parallax = ui.map_starfield_parallax;
+      pcfg.nebula_enable = ui.map_proc_render_nebula_enable;
+      pcfg.nebula_strength = ui.map_proc_render_nebula_strength;
+      pcfg.nebula_scale = ui.map_proc_render_nebula_scale;
+      pcfg.nebula_warp = ui.map_proc_render_nebula_warp;
+      pcfg.debug_show_tile_bounds = ui.map_proc_render_debug_tiles;
+
+      // Subtle tinting so the procedural textures respect user theme colors.
+      const ImVec4 bg4 = ImGui::ColorConvertU32ToFloat4(bg);
+      const ImVec4 tint4(0.75f + 0.25f * bg4.x, 0.75f + 0.25f * bg4.y, 0.75f + 0.25f * bg4.z, 1.0f);
+      const ImU32 tint_u32 = ImGui::ColorConvertFloat4ToU32(tint4);
+
+      proc_engine->draw_background(draw, origin, avail, tint_u32, pan_px_x, pan_px_y, chrome_seed, pcfg);
+    } else {
+      StarfieldStyle sf;
+      sf.enabled = ui.galaxy_map_starfield;
+      sf.density = ui.map_starfield_density;
+      sf.parallax = ui.map_starfield_parallax;
+      sf.alpha = 1.0f;
+      draw_starfield(draw, origin, avail, bg, pan_px_x, pan_px_y, chrome_seed, sf);
+    }
+
+    // Procedural particle field (dust): deterministic screen-space points with parallax.
+    if (ui.galaxy_map_particle_field && particle_engine && ui.map_particle_opacity > 0.0f) {
+      ProcParticleFieldConfig pcfg;
+      pcfg.enabled = true;
+      pcfg.tile_px = ui.map_particle_tile_px;
+      pcfg.particles_per_tile = ui.map_particle_particles_per_tile;
+      pcfg.layers = ui.map_particle_layers;
+      pcfg.layer0_parallax = ui.map_particle_layer0_parallax;
+      pcfg.layer1_parallax = ui.map_particle_layer1_parallax;
+      pcfg.layer2_parallax = ui.map_particle_layer2_parallax;
+      pcfg.opacity = ui.map_particle_opacity;
+      pcfg.base_radius_px = ui.map_particle_base_radius_px;
+      pcfg.radius_jitter_px = ui.map_particle_radius_jitter_px;
+      pcfg.twinkle_strength = ui.map_particle_twinkle_strength;
+      pcfg.twinkle_speed = ui.map_particle_twinkle_speed;
+      pcfg.animate_drift = ui.map_particle_drift;
+      pcfg.drift_px_per_day = ui.map_particle_drift_px_per_day;
+      pcfg.sparkles = ui.map_particle_sparkles;
+      pcfg.sparkle_chance = ui.map_particle_sparkle_chance;
+      pcfg.sparkle_length_px = ui.map_particle_sparkle_length_px;
+      pcfg.debug_tile_bounds = ui.map_particle_debug_tiles;
+
+      const ImVec4 bg4 = ImGui::ColorConvertU32ToFloat4(bg);
+      const ImVec4 tint4(0.85f + 0.15f * bg4.x, 0.85f + 0.15f * bg4.y, 0.90f + 0.10f * bg4.z, 1.0f);
+      const ImU32 tint_u32 = ImGui::ColorConvertFloat4ToU32(tint4);
+
+      particle_engine->draw_particles(draw, origin, avail, tint_u32, pan_px_x, pan_px_y,
+                                    chrome_seed ^ 0x51A7EEDu, pcfg);
+
+      const auto st = particle_engine->stats();
+      ui.map_particle_last_frame_layers_drawn = st.layers_drawn;
+      ui.map_particle_last_frame_tiles_drawn = st.tiles_drawn;
+      ui.map_particle_last_frame_particles_drawn = st.particles_drawn;
+    }
 
     // Procedural lens *field* overlay (optional).
     // Draw behind the grid/region boundaries so the map stays readable.
@@ -1140,6 +1222,57 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
                               lens_typical_spacing);
     }
 
+
+
+    // Procedural territory overlay (political map).
+    // Draw above the procgen lens (if any) but behind the grid/regions/nodes.
+    if (ui.galaxy_map_territory_overlay && territory_engine) {
+      std::vector<ProcTerritorySource> terr;
+      terr.reserve(s.colonies.size());
+
+      for (const auto& kv : s.colonies) {
+        const Colony& c = kv.second;
+        if (c.faction_id == kInvalidId) continue;
+        if (c.population_millions <= 0.0f) continue;
+        const Body* b = find_ptr(s.bodies, c.body_id);
+        if (!b) continue;
+        auto it = visible_sys_by_id.find(b->system_id);
+        if (it == visible_sys_by_id.end()) continue;
+        const StarSystem* sys = it->second;
+
+        ProcTerritorySource src;
+        src.pos = sys->galaxy_pos - world_center;
+        src.faction_id = c.faction_id;
+        src.population_millions = c.population_millions;
+        terr.push_back(src);
+      }
+
+      if (!terr.empty()) {
+        ProcTerritoryFieldConfig tcfg;
+        tcfg.enabled = true;
+        tcfg.tile_px = ui.galaxy_map_territory_tile_px;
+        tcfg.max_cached_tiles = ui.galaxy_map_territory_cache_tiles;
+        tcfg.samples_per_tile = ui.galaxy_map_territory_samples_per_tile;
+        tcfg.draw_fill = ui.galaxy_map_territory_fill;
+        tcfg.draw_boundaries = ui.galaxy_map_territory_boundaries;
+        tcfg.fill_opacity = ui.galaxy_map_territory_fill_opacity;
+        tcfg.boundary_opacity = ui.galaxy_map_territory_boundary_opacity;
+        tcfg.boundary_thickness_px = ui.galaxy_map_territory_boundary_thickness_px;
+        tcfg.influence_base_spacing_mult = ui.galaxy_map_territory_influence_base_spacing_mult;
+        tcfg.influence_pop_spacing_mult = ui.galaxy_map_territory_influence_pop_spacing_mult;
+        tcfg.influence_pop_log_bias = ui.galaxy_map_territory_influence_pop_log_bias;
+        tcfg.presence_falloff_spacing = ui.galaxy_map_territory_presence_falloff_spacing;
+        tcfg.dominance_softness_spacing = ui.galaxy_map_territory_dominance_softness_spacing;
+        tcfg.contested_dither = ui.galaxy_map_territory_contested_dither;
+        tcfg.contested_threshold = ui.galaxy_map_territory_contested_threshold;
+        tcfg.contested_dither_strength = ui.galaxy_map_territory_contested_dither_strength;
+        tcfg.debug_tile_bounds = ui.galaxy_map_territory_debug_tiles;
+
+        const double spacing = (lens_typical_spacing > 0.0) ? lens_typical_spacing : 1.0;
+        territory_engine->draw_territories(draw, origin, avail, center_px, scale, zoom, pan,
+                                          terr, spacing, chrome_seed ^ 0xA31C9B7u, tcfg);
+      }
+    }
     GridStyle gs;
     gs.enabled = ui.galaxy_map_grid;
     gs.desired_minor_px = 95.0f;
@@ -3605,6 +3738,7 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   ImGui::BulletText("Hold D + click: route ruler (plan A->B)");
   ImGui::BulletText("Hold T + click: pin trade lane (T+right click clears)");
   ImGui::BulletText("R: reset view");
+  ImGui::BulletText("B: dust particles");
   ImGui::BulletText("Left click: select system");
   ImGui::BulletText("Right click: route selected ship (Shift queues)");
   ImGui::BulletText("Alt+Right click: smart-route selected ship (adds refuel stops; Shift queues)");
@@ -3612,6 +3746,14 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   ImGui::BulletText("Ctrl+Shift+Alt+Right click: smart-route selected fleet (adds refuel stops)");
   ImGui::BulletText("Ctrl+Alt+Right click: edit selected fleet patrol circuit waypoints");
   ImGui::BulletText("Hover: route preview (Shift=queued, Ctrl=fleet, Alt=smart)");
+
+  ImGui::SeparatorText("Visuals");
+  ImGui::Checkbox("Starfield", &ui.galaxy_map_starfield);
+  ImGui::SameLine();
+  ImGui::Checkbox("Dust particles (B)", &ui.galaxy_map_particle_field);
+  if (ui.galaxy_map_particle_field) {
+    ImGui::TextDisabled("Particles: L%d | Tiles %d | Points %d", ui.map_particle_last_frame_layers_drawn, ui.map_particle_last_frame_tiles_drawn, ui.map_particle_last_frame_particles_drawn);
+  }
 
   // --- System finder, pins & notes ---
   // Keeps everything within the *visible* system set to avoid leaking information under FoW.
@@ -4090,6 +4232,47 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   ImGui::Checkbox("Starfield", &ui.galaxy_map_starfield);
   ImGui::SameLine();
   ImGui::Checkbox("Grid", &ui.galaxy_map_grid);
+
+  // Custom tile-based procedural background engine (stars + optional haze).
+  ImGui::Checkbox("Procedural background (tiles)", &ui.map_proc_render_engine);
+  if (ui.map_proc_render_engine) {
+    ImGui::Indent();
+    ui.map_proc_render_tile_px = std::clamp(ui.map_proc_render_tile_px, 64, 512);
+    ui.map_proc_render_cache_tiles = std::clamp(ui.map_proc_render_cache_tiles, 16, 512);
+
+    ImGui::SliderInt("Tile px", &ui.map_proc_render_tile_px, 64, 512);
+    ImGui::SliderInt("Cache tiles", &ui.map_proc_render_cache_tiles, 16, 512);
+    ImGui::Checkbox("Nebula haze", &ui.map_proc_render_nebula_enable);
+    if (ui.map_proc_render_nebula_enable) {
+      ImGui::SliderFloat("Nebula strength", &ui.map_proc_render_nebula_strength, 0.0f, 1.0f, "%.2f");
+      ImGui::SliderFloat("Nebula scale", &ui.map_proc_render_nebula_scale, 0.25f, 4.0f, "%.2f");
+      ImGui::SliderFloat("Nebula warp", &ui.map_proc_render_nebula_warp, 0.0f, 2.0f, "%.2f");
+    }
+    ImGui::Checkbox("Debug tile bounds", &ui.map_proc_render_debug_tiles);
+
+    const ProcRenderStats* pst = nullptr;
+    ProcRenderStats st_local;
+    if (proc_engine && proc_engine->ready()) {
+      st_local = proc_engine->stats();
+      pst = &st_local;
+    }
+
+    if (ImGui::SmallButton("Clear cache##proc_bg")) {
+      if (proc_engine && proc_engine->ready()) {
+        proc_engine->clear();
+      } else {
+        ui.map_proc_render_clear_cache_requested = true;
+      }
+    }
+    ImGui::SameLine();
+    const int cached = pst ? pst->cache_tiles : ui.map_proc_render_stats_cache_tiles;
+    const int gen = pst ? pst->generated_this_frame : ui.map_proc_render_stats_generated_this_frame;
+    const float gen_ms = pst ? static_cast<float>(pst->gen_ms_this_frame) : ui.map_proc_render_stats_gen_ms_this_frame;
+    const float up_ms = pst ? static_cast<float>(pst->upload_ms_this_frame) : ui.map_proc_render_stats_upload_ms_this_frame;
+    ImGui::TextDisabled("Cached %d | +%d | Gen %.2fms | Upload %.2fms", cached, gen, gen_ms, up_ms);
+
+    ImGui::Unindent();
+  }
   ImGui::Checkbox("Minimap (M)", &ui.galaxy_map_show_minimap);
   ImGui::Checkbox("Selected travel route", &ui.galaxy_map_selected_route);
   {
@@ -4106,6 +4289,60 @@ void draw_galaxy_map(Simulation& sim, UIState& ui, Id& selected_ship, double& zo
   ImGui::Checkbox("Pins", &ui.show_galaxy_pins);
   ImGui::Checkbox("Jump links", &ui.show_galaxy_jump_lines);
   ImGui::Checkbox("Chokepoints (articulation)", &ui.show_galaxy_chokepoints);
+
+
+  ImGui::Checkbox("Territory overlay (Y)", &ui.galaxy_map_territory_overlay);
+  if (ui.galaxy_map_territory_overlay) {
+    ImGui::Indent();
+    ImGui::Checkbox("Fill", &ui.galaxy_map_territory_fill);
+    ImGui::SameLine();
+    ImGui::Checkbox("Boundaries", &ui.galaxy_map_territory_boundaries);
+    ImGui::SliderFloat("Fill opacity", &ui.galaxy_map_territory_fill_opacity, 0.0f, 0.55f, "%.2f");
+    ImGui::SliderFloat("Boundary opacity", &ui.galaxy_map_territory_boundary_opacity, 0.0f, 0.85f, "%.2f");
+    ImGui::SliderFloat("Boundary thickness px", &ui.galaxy_map_territory_boundary_thickness_px, 0.25f, 8.0f, "%.2f");
+
+    ui.galaxy_map_territory_tile_px = std::clamp(ui.galaxy_map_territory_tile_px, 96, 1024);
+    ui.galaxy_map_territory_cache_tiles = std::clamp(ui.galaxy_map_territory_cache_tiles, 8, 20000);
+    ui.galaxy_map_territory_samples_per_tile = std::clamp(ui.galaxy_map_territory_samples_per_tile, 8, 128);
+
+    ImGui::SliderInt("Tile px", &ui.galaxy_map_territory_tile_px, 96, 1024);
+    ImGui::SliderInt("Cache tiles", &ui.galaxy_map_territory_cache_tiles, 8, 2000);
+    ImGui::SliderInt("Samples / tile", &ui.galaxy_map_territory_samples_per_tile, 8, 128);
+
+    ImGui::SeparatorText("Influence model");
+    ImGui::SliderFloat("Base radius (x spacing)", &ui.galaxy_map_territory_influence_base_spacing_mult, 0.0f, 6.0f, "%.2f");
+    ImGui::SliderFloat("Pop radius (x spacing)", &ui.galaxy_map_territory_influence_pop_spacing_mult, 0.0f, 4.0f, "%.2f");
+    ImGui::SliderFloat("Pop log bias", &ui.galaxy_map_territory_influence_pop_log_bias, 0.5f, 64.0f, "%.2f");
+    ImGui::SliderFloat("Presence falloff (x spacing)", &ui.galaxy_map_territory_presence_falloff_spacing, 0.25f, 10.0f, "%.2f");
+    ImGui::SliderFloat("Edge softness (x spacing)", &ui.galaxy_map_territory_dominance_softness_spacing, 0.05f, 8.0f, "%.2f");
+
+    ImGui::SeparatorText("Contested zones");
+    ImGui::Checkbox("Stipple contested frontiers", &ui.galaxy_map_territory_contested_dither);
+    if (ui.galaxy_map_territory_contested_dither) {
+      ImGui::SliderFloat("Contested threshold", &ui.galaxy_map_territory_contested_threshold, 0.0f, 0.75f, "%.2f");
+      ImGui::SliderFloat("Stipple strength", &ui.galaxy_map_territory_contested_dither_strength, 0.0f, 1.0f, "%.2f");
+    }
+
+    ImGui::Checkbox("Debug tile bounds", &ui.galaxy_map_territory_debug_tiles);
+
+    if (ImGui::SmallButton("Clear cache##territory")) {
+      if (territory_engine) {
+        territory_engine->clear();
+      } else {
+        ui.galaxy_map_territory_clear_cache_requested = true;
+      }
+    }
+
+    const int cached = ui.galaxy_map_territory_stats_cache_tiles;
+    const int used = ui.galaxy_map_territory_stats_tiles_used_this_frame;
+    const int gen = ui.galaxy_map_territory_stats_tiles_generated_this_frame;
+    const int cells = ui.galaxy_map_territory_stats_cells_drawn;
+    const float ms = ui.galaxy_map_territory_stats_gen_ms_this_frame;
+    ImGui::SameLine();
+    ImGui::TextDisabled("Cached %d | Used %d | +%d | Cells %d | Gen %.2fms", cached, used, gen, cells, ms);
+
+    ImGui::Unindent();
+  }
   {
     ImGui::Checkbox("Star Atlas constellations", &ui.galaxy_star_atlas_constellations);
     ImGui::SameLine();

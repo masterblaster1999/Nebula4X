@@ -34,6 +34,27 @@ enum class MapTab {
   Galaxy,
 };
 
+// UI renderer backend (runtime).
+// In OpenGL builds, Nebula4X will prefer OpenGL2 but can fall back to SDL_Renderer2
+// when OpenGL context creation fails.
+enum class UIRendererBackend : std::uint8_t {
+  SDLRenderer2 = 0,
+  OpenGL2 = 1,
+  Unknown = 255,
+};
+
+inline const char* ui_renderer_backend_name(UIRendererBackend b) {
+  switch (b) {
+    case UIRendererBackend::SDLRenderer2:
+      return "SDL_Renderer2";
+    case UIRendererBackend::OpenGL2:
+      return "OpenGL2";
+    default:
+      return "Unknown";
+  }
+}
+
+
 // Help window tabs (Help / Codex).
 // UI-only; used for programmatic tab selection (e.g., guided tours).
 enum class HelpTab {
@@ -975,12 +996,25 @@ struct UIState {
   bool docking_always_tab_bar{false};
   bool docking_transparent_payload{true};
 
-// Multi-Viewport (detachable OS windows).
-// Note: Requires a renderer backend with platform-window support (e.g. SDL2+OpenGL2).
-bool viewports_enable{true};
-bool viewports_no_taskbar_icon{true};
-bool viewports_no_auto_merge{false};
-bool viewports_no_decoration{false};
+  // Multi-Viewport (detachable OS windows).
+  // Note: Requires a renderer backend with platform-window support (e.g. SDL2+OpenGL2).
+  bool viewports_enable{true};
+  bool viewports_no_taskbar_icon{true};
+  bool viewports_no_auto_merge{false};
+  bool viewports_no_decoration{false};
+
+  // Runtime renderer info (not persisted).
+  // Filled by src/main.cpp after the UI backend has been created.
+  UIRendererBackend runtime_renderer_backend{UIRendererBackend::SDLRenderer2};
+  bool runtime_renderer_supports_viewports{false};
+  bool runtime_renderer_used_fallback{false};
+  std::string runtime_renderer_fallback_reason{};
+  std::string runtime_opengl_vendor{};
+  std::string runtime_opengl_renderer{};
+  std::string runtime_opengl_version{};
+  std::string runtime_opengl_glsl_version{};
+  bool show_graphics_safe_mode_popup{false};
+  bool graphics_safe_mode_popup_opened{false};
 
   // Popup window management.
   // When enabled, newly opened windows appear as floating popups instead of docking into the workspace.
@@ -1171,6 +1205,37 @@ bool viewports_no_decoration{false};
   float map_grid_opacity{1.0f};
   float map_route_opacity{1.0f};
 
+  // --- Procedural particle field (map dust) ---
+  // Deterministic screen-space points with parallax, using
+  // correlated multi-jittered sampling (CMJ) for a blue-noise-like distribution.
+  // Pure map chrome: no simulation impact.
+  bool galaxy_map_particle_field{true};
+  bool system_map_particle_field{true};
+
+  // Shared particle field tuning knobs.
+  int map_particle_tile_px{256};
+  int map_particle_particles_per_tile{64};
+  int map_particle_layers{2};
+  float map_particle_opacity{0.22f};
+  float map_particle_base_radius_px{1.0f};
+  float map_particle_radius_jitter_px{1.6f};
+  float map_particle_twinkle_strength{0.55f};
+  float map_particle_twinkle_speed{1.0f};
+  bool map_particle_drift{true};
+  float map_particle_drift_px_per_day{4.0f};
+  float map_particle_layer0_parallax{0.10f};
+  float map_particle_layer1_parallax{0.28f};
+  float map_particle_layer2_parallax{0.45f};
+  bool map_particle_sparkles{true};
+  float map_particle_sparkle_chance{0.06f};
+  float map_particle_sparkle_length_px{6.0f};
+  bool map_particle_debug_tiles{false};
+
+  // Runtime stats (not persisted).
+  int map_particle_last_frame_layers_drawn{0};
+  int map_particle_last_frame_tiles_drawn{0};
+  int map_particle_last_frame_particles_drawn{0};
+
   // --- Map ray-marched nebula (experimental) ---
   // A signed-distance-field (SDF) raymarch renderer used as subtle background
   // chrome. It uses adaptive subdivision and deterministic stochastic sampling
@@ -1185,6 +1250,252 @@ bool viewports_no_decoration{false};
   bool map_raymarch_nebula_animate{true};
   float map_raymarch_nebula_time_scale{0.20f};
   bool map_raymarch_nebula_debug{false};
+
+  // --- Map procedural background engine (tile raster) ---
+  //
+  // A custom deterministic renderer that procedurally generates background
+  // tiles (stars + optional nebula haze) on the CPU, uploads them as textures
+  // to the active UI renderer backend, and then draws them as cached quads.
+  //
+  // This dramatically reduces per-frame CPU work when panning/zooming vs.
+  // drawing thousands of primitives each frame.
+  bool map_proc_render_engine{false};
+  int map_proc_render_tile_px{256};
+  int map_proc_render_cache_tiles{96};
+  bool map_proc_render_nebula_enable{true};
+  float map_proc_render_nebula_strength{0.35f};
+  float map_proc_render_nebula_scale{1.0f};
+  float map_proc_render_nebula_warp{0.70f};
+  bool map_proc_render_debug_tiles{false};
+  bool map_proc_render_clear_cache_requested{false};
+
+  // Runtime stats (not persisted).
+  int map_proc_render_stats_cache_tiles{0};
+  int map_proc_render_stats_generated_this_frame{0};
+  float map_proc_render_stats_gen_ms_this_frame{0.0f};
+  float map_proc_render_stats_upload_ms_this_frame{0.0f};
+
+
+
+  // --- Galaxy map procedural territory overlay ---
+  //
+  // UI-only: approximates faction influence using colonies and renders a
+  // translucent "political map" overlay (a weighted Voronoi / power diagram)
+  // on the galaxy map.
+  bool galaxy_map_territory_overlay{false};
+  bool galaxy_map_territory_fill{true};
+  bool galaxy_map_territory_boundaries{true};
+  float galaxy_map_territory_fill_opacity{0.16f};
+  float galaxy_map_territory_boundary_opacity{0.42f};
+  float galaxy_map_territory_boundary_thickness_px{1.6f};
+  int galaxy_map_territory_tile_px{420};
+  int galaxy_map_territory_cache_tiles{220};
+  int galaxy_map_territory_samples_per_tile{28};
+  float galaxy_map_territory_influence_base_spacing_mult{1.10f};
+  float galaxy_map_territory_influence_pop_spacing_mult{0.28f};
+  float galaxy_map_territory_influence_pop_log_bias{5.0f};
+  float galaxy_map_territory_presence_falloff_spacing{2.0f};
+  float galaxy_map_territory_dominance_softness_spacing{0.65f};
+  bool galaxy_map_territory_contested_dither{true};
+  float galaxy_map_territory_contested_threshold{0.22f};
+  float galaxy_map_territory_contested_dither_strength{0.55f};
+  bool galaxy_map_territory_debug_tiles{false};
+  bool galaxy_map_territory_clear_cache_requested{false};
+
+  // Runtime stats (not persisted).
+  int galaxy_map_territory_stats_cache_tiles{0};
+  int galaxy_map_territory_stats_tiles_used_this_frame{0};
+  int galaxy_map_territory_stats_tiles_generated_this_frame{0};
+  int galaxy_map_territory_stats_cells_drawn{0};
+  float galaxy_map_territory_stats_gen_ms_this_frame{0.0f};
+  // --- Procedural body sprites (system map) ---
+  // CPU-rastered planet/gas giant/moon/star sprites cached as backend textures.
+  // This gives the system map richer visuals without relying on external assets.
+  bool system_map_body_sprites{true};
+  int system_map_body_sprite_px{96};
+  int system_map_body_sprite_cache{384};
+  int system_map_body_sprite_light_steps{32};
+  bool system_map_body_sprite_rings{true};
+  float system_map_body_sprite_ring_chance{0.25f};
+  float system_map_body_sprite_ambient{0.22f};
+  float system_map_body_sprite_diffuse{1.0f};
+  float system_map_body_sprite_specular{0.35f};
+  float system_map_body_sprite_specular_power{24.0f};
+  bool system_map_body_sprite_clear_cache_requested{false};
+
+  // Runtime stats (not persisted).
+  int system_map_body_sprite_stats_cache_sprites{0};
+  int system_map_body_sprite_stats_generated_this_frame{0};
+  float system_map_body_sprite_stats_gen_ms_this_frame{0.0f};
+  float system_map_body_sprite_stats_upload_ms_this_frame{0.0f};
+
+  // --- Procedural contact icons (system map) ---
+  // CPU-rastered, cached sprite icons for ships, missiles, wrecks and anomalies.
+  //
+  // This is distinct from "procedural body sprites" (planets/stars). Contact icons
+  // are drawn at a constant pixel size (for readability at any zoom) and rotated
+  // to indicate motion.
+  bool system_map_contact_icons{true};
+  int system_map_contact_icon_px{64};
+  int system_map_contact_icon_cache{768};
+  float system_map_ship_icon_size_px{18.0f};
+  bool system_map_ship_icon_thrusters{true};
+  float system_map_ship_icon_thruster_opacity{0.60f};
+  float system_map_ship_icon_thruster_length_px{14.0f};
+  float system_map_ship_icon_thruster_width_px{7.0f};
+  float system_map_missile_icon_size_px{10.0f};
+  float system_map_wreck_icon_size_px{14.0f};
+  float system_map_anomaly_icon_size_px{16.0f};
+  bool system_map_anomaly_icon_pulse{true};
+  bool system_map_contact_icon_debug_bounds{false};
+  bool system_map_contact_icon_clear_cache_requested{false};
+
+  // Runtime stats (not persisted).
+  int system_map_contact_icon_stats_cache_sprites{0};
+  int system_map_contact_icon_stats_generated_this_frame{0};
+  float system_map_contact_icon_stats_gen_ms_this_frame{0.0f};
+  float system_map_contact_icon_stats_upload_ms_this_frame{0.0f};
+
+  // --- Procedural jump-point phenomena (system map) ---
+  //
+  // Visual layer for jump points that encodes their procedurally generated
+  // phenomena (stability / turbulence / shear) into a cached sprite + optional
+  // vector filaments.
+  bool system_map_jump_phenomena{true};
+  bool system_map_jump_phenomena_reveal_unsurveyed{false};
+  int system_map_jump_phenomena_sprite_px{96};
+  int system_map_jump_phenomena_cache{256};
+  float system_map_jump_phenomena_size_mult{5.6f};
+  float system_map_jump_phenomena_opacity{0.55f};
+  bool system_map_jump_phenomena_animate{true};
+  float system_map_jump_phenomena_anim_speed_cycles_per_day{0.14f};
+  bool system_map_jump_phenomena_pulse{true};
+  float system_map_jump_phenomena_pulse_cycles_per_day{0.08f};
+  bool system_map_jump_phenomena_filaments{true};
+  int system_map_jump_phenomena_filaments_max{6};
+  float system_map_jump_phenomena_filament_strength{1.0f};
+  bool system_map_jump_phenomena_debug_bounds{false};
+  bool system_map_jump_phenomena_clear_cache_requested{false};
+
+  // Procedural anomaly phenomena overlays (system map). This is a purely visual layer
+  // that decorates discovered, unresolved anomalies with a deterministic procedural sprite
+  // + optional filament arcs.
+  bool system_map_anomaly_phenomena{true};
+  int system_map_anomaly_phenomena_sprite_px{96};
+  int system_map_anomaly_phenomena_cache{256};
+  float system_map_anomaly_phenomena_size_mult{6.0f};
+  float system_map_anomaly_phenomena_opacity{0.55f};
+  bool system_map_anomaly_phenomena_animate{true};
+  float system_map_anomaly_phenomena_anim_speed_cycles_per_day{0.12f};
+  bool system_map_anomaly_phenomena_pulse{true};
+  float system_map_anomaly_phenomena_pulse_cycles_per_day{0.07f};
+  bool system_map_anomaly_phenomena_filaments{true};
+  int system_map_anomaly_phenomena_filaments_max{7};
+  float system_map_anomaly_phenomena_filament_strength{1.0f};
+  bool system_map_anomaly_phenomena_glyph_overlay{true};
+  float system_map_anomaly_phenomena_glyph_strength{0.65f};
+  bool system_map_anomaly_phenomena_debug_bounds{false};
+  bool system_map_anomaly_phenomena_clear_cache_requested{false};
+
+  // Runtime stats (not persisted).
+  int system_map_jump_phenomena_stats_cache_sprites{0};
+  int system_map_jump_phenomena_stats_generated_this_frame{0};
+  float system_map_jump_phenomena_stats_gen_ms_this_frame{0.0f};
+  float system_map_jump_phenomena_stats_upload_ms_this_frame{0.0f};
+
+  int system_map_anomaly_phenomena_stats_cache_sprites{0};
+  int system_map_anomaly_phenomena_stats_generated_this_frame{0};
+  float system_map_anomaly_phenomena_stats_gen_ms_this_frame{0.0f};
+  float system_map_anomaly_phenomena_stats_upload_ms_this_frame{0.0f};
+
+  // --- Procedural motion trails (system map) ---
+  //
+  // A UI-only vector FX layer that records recent positions of moving entities
+  // and draws a fading trail behind them.
+  //
+  // Note: the engine itself is runtime-only (not serialized). These values are
+  // persisted UI prefs.
+  bool system_map_motion_trails{false};
+  bool system_map_motion_trails_all_ships{false};
+  bool system_map_motion_trails_missiles{false};
+  float system_map_motion_trails_max_age_days{7.0f};
+  float system_map_motion_trails_sample_hours{2.0f};
+  float system_map_motion_trails_min_seg_px{4.0f};
+  float system_map_motion_trails_thickness_px{2.0f};
+  float system_map_motion_trails_alpha{0.55f};
+  bool system_map_motion_trails_speed_brighten{true};
+  bool system_map_motion_trails_clear_requested{false};
+
+  // Runtime stats (not persisted).
+  int system_map_motion_trails_stats_systems{0};
+  int system_map_motion_trails_stats_tracks{0};
+  int system_map_motion_trails_stats_points{0};
+  int system_map_motion_trails_stats_pruned_points_this_frame{0};
+  int system_map_motion_trails_stats_pruned_tracks_this_frame{0};
+
+  // --- Procedural space-weather flow field (system map) ---
+  //
+  // A deterministic curl-noise streamline overlay used to visualize "space weather"
+  // (nebula microfields / storm flow) with a lightweight cached renderer.
+  //
+  // Note: the engine cache is runtime-only. These values are persisted UI prefs.
+  bool system_map_flow_field_overlay{true};
+  bool system_map_flow_field_animate{true};
+  bool system_map_flow_field_mask_nebula{true};
+  bool system_map_flow_field_mask_storms{false};
+  bool system_map_flow_field_debug_tiles{false};
+
+  float system_map_flow_field_opacity{0.35f};
+  float system_map_flow_field_thickness_px{1.25f};
+  float system_map_flow_field_step_px{10.0f};
+  float system_map_flow_field_highlight_wavelength_px{220.0f};
+  float system_map_flow_field_animate_speed_cycles_per_day{0.08f};
+  float system_map_flow_field_nebula_threshold{0.02f};
+  float system_map_flow_field_storm_threshold{0.05f};
+  float system_map_flow_field_scale_mkm{12000.0f};
+
+  int system_map_flow_field_tile_px{420};
+  int system_map_flow_field_cache_tiles{180};
+  int system_map_flow_field_lines_per_tile{10};
+  int system_map_flow_field_steps_per_line{48};
+
+  bool system_map_flow_field_clear_requested{false};
+
+  // Runtime stats (not persisted).
+  int system_map_flow_field_stats_cache_tiles{0};
+  int system_map_flow_field_stats_tiles_used{0};
+  int system_map_flow_field_stats_tiles_generated{0};
+  int system_map_flow_field_stats_lines_drawn{0};
+  int system_map_flow_field_stats_segments_drawn{0};
+
+  // --- Procedural gravity contours (system map) ---
+  //
+  // A cached iso-line overlay (marching squares) over a simplified
+  // gravitational potential field derived from system body masses.
+  //
+  // Note: the engine cache is runtime-only. These values are persisted UI prefs.
+  bool system_map_gravity_contours_overlay{false};
+  bool system_map_gravity_contours_debug_tiles{false};
+
+  float system_map_gravity_contours_opacity{0.22f};
+  float system_map_gravity_contours_thickness_px{1.25f};
+
+  int system_map_gravity_contours_tile_px{420};
+  int system_map_gravity_contours_cache_tiles{180};
+  int system_map_gravity_contours_samples_per_tile{32};
+  int system_map_gravity_contours_levels{10};
+  float system_map_gravity_contours_level_spacing_decades{0.35f};
+  float system_map_gravity_contours_level_offset_decades{0.0f};
+  float system_map_gravity_contours_softening_min_mkm{0.05f};
+  float system_map_gravity_contours_softening_radius_mult{2.0f};
+
+  bool system_map_gravity_contours_clear_requested{false};
+
+  // Runtime stats (not persisted).
+  int system_map_gravity_contours_stats_cache_tiles{0};
+  int system_map_gravity_contours_stats_tiles_used{0};
+  int system_map_gravity_contours_stats_tiles_generated{0};
+  int system_map_gravity_contours_stats_segments_drawn{0};
 
   // Optional: override ImGui window background (ImGuiCol_WindowBg/ChildBg).
   bool override_window_bg{false};
