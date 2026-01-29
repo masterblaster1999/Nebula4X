@@ -45,8 +45,11 @@ target_sources(nebula4x_core
     src/core/order_planner.cpp
     src/core/freight_planner.cpp
     src/core/fuel_planner.cpp
+    src/core/maintenance_planner.cpp
+    src/core/repair_planner.cpp
     src/core/trade_network.cpp
     src/core/security_planner.cpp
+    src/core/invasion_planner.cpp
     src/core/salvage_planner.cpp
     src/core/mine_planner.cpp
     src/core/contract_planner.cpp
@@ -56,9 +59,11 @@ target_sources(nebula4x_core
     src/core/terraforming_schedule.cpp
     src/core/colony_schedule.cpp
     src/core/colony_profiles.cpp
-  src/core/ship_profiles.cpp
+    src/core/region_planner.cpp
+    src/core/ship_profiles.cpp
     src/core/planner_events.cpp
     src/core/ground_battle_forecast.cpp
+    src/core/fleet_battle_forecast.cpp
     src/core/advisor.cpp
     src/core/research_planner.cpp
     src/core/scenario.cpp
@@ -250,6 +255,7 @@ FetchContent_Declare(
     src/ui/map_label_placer.cpp
     src/ui/panels.cpp
     src/ui/economy_window.cpp
+    src/ui/research_roadmap_window.cpp
     src/ui/planner_window.cpp
     src/ui/regions_window.cpp
     src/ui/security_planner_window.cpp
@@ -259,6 +265,8 @@ FetchContent_Declare(
     src/ui/salvage_window.cpp
     src/ui/contracts_window.cpp
     src/ui/sustainment_window.cpp
+    src/ui/repair_planner_window.cpp
+    src/ui/maintenance_planner_window.cpp
     src/ui/fleet_manager_window.cpp
     src/ui/troop_window.cpp
     src/ui/colonist_window.cpp
@@ -313,6 +321,7 @@ FetchContent_Declare(
     src/ui/timeline_window.cpp
     src/ui/design_studio_window.cpp
     src/ui/balance_lab_window.cpp
+    src/ui/battle_forecast_window.cpp
     src/ui/intel_window.cpp
     src/ui/intel_notebook_window.cpp
     src/ui/diplomacy_window.cpp
@@ -357,6 +366,7 @@ if(NEBULA4X_BUILD_TESTS)
     tests/test_simulation.cpp
     tests/test_ground_ops.cpp
     tests/test_ground_battle_forecast.cpp
+        tests/test_fleet_battle_forecast.cpp
     tests/test_boarding.cpp
     tests/test_colonization.cpp
     tests/test_serialization.cpp
@@ -384,6 +394,9 @@ if(NEBULA4X_BUILD_TESTS)
     tests/test_freight_planner.cpp
     tests/test_trade_network.cpp
     tests/test_security_planner.cpp
+    tests/test_invasion_planner.cpp
+    tests/test_repair_planner.cpp
+    tests/test_maintenance_planner.cpp
     tests/test_fuel_planner.cpp
     tests/test_mineral_deposits.cpp
     tests/test_mobile_mining.cpp

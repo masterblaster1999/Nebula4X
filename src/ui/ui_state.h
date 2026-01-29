@@ -614,6 +614,7 @@ struct UIState {
   bool show_directory_window{true};
   bool show_production_window{false};
   bool show_economy_window{false};
+  bool show_research_roadmap_window{false};
   bool show_planner_window{false};
   bool show_regions_window{false};
   bool show_security_planner_window{false};
@@ -623,6 +624,8 @@ struct UIState {
   bool show_salvage_window{false};
   bool show_contracts_window{false};
   bool show_sustainment_window{false};
+  bool show_repair_planner_window{false};
+  bool show_maintenance_planner_window{false};
   // Fleet Manager: global fleet list + route planner + quick mission controls.
   bool show_fleet_manager_window{false};
   bool show_troop_window{false};
@@ -634,6 +637,7 @@ struct UIState {
   bool show_notifications_window{false};
   bool show_design_studio_window{false};
   bool show_balance_lab_window{false};
+  bool show_battle_forecast_window{false};
   bool show_intel_window{false};
   bool show_intel_notebook_window{false};
   bool show_diplomacy_window{false};

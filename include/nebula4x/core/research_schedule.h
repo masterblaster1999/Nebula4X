@@ -9,6 +9,8 @@ namespace nebula4x {
 
 class Simulation;
 
+struct Faction;
+
 // Options controlling how the research forecast is computed.
 //
 // Notes:
@@ -75,5 +77,13 @@ struct ResearchSchedule {
 // - Multiple techs may complete in the same day if enough RP is banked.
 ResearchSchedule estimate_research_schedule(const Simulation& sim, Id faction_id,
                                            const ResearchScheduleOptions& opt = {});
+
+// Variant that forecasts using an explicit faction snapshot.
+//
+// This is useful for UI previews: callers can clone a faction, tweak its
+// active project / queue, and request a forecast without mutating the live
+// simulation state.
+ResearchSchedule estimate_research_schedule_for_faction(const Simulation& sim, const Faction& faction_snapshot,
+                                                       const ResearchScheduleOptions& opt = {});
 
 } // namespace nebula4x

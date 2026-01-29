@@ -56,20 +56,17 @@ std::string describe_missing_prereqs(const ContentDB& content, const std::unorde
 
 } // namespace
 
-ResearchSchedule estimate_research_schedule(const Simulation& sim, Id faction_id, const ResearchScheduleOptions& opt) {
+ResearchSchedule estimate_research_schedule_for_faction(const Simulation& sim, const Faction& faction_snapshot,
+                                                       const ResearchScheduleOptions& opt) {
   ResearchSchedule out;
   out.ok = false;
   out.items.clear();
 
-  const auto* fac0 = find_ptr(sim.state().factions, faction_id);
-  if (!fac0) {
-    out.stalled = true;
-    out.stall_reason = "unknown faction";
-    return out;
-  }
-
   // Working copy so we can evolve known techs during the forecast.
-  Faction fac = *fac0;
+  Faction fac = faction_snapshot;
+  const Id faction_id = fac.id;
+  const double active_progress_at_start = std::max(0.0, faction_snapshot.active_research_progress);
+
 
   std::unordered_set<std::string> known;
   known.reserve(fac.known_techs.size() * 2 + 32);
@@ -268,7 +265,7 @@ ResearchSchedule estimate_research_schedule(const Simulation& sim, Id faction_id
         item.start_day = active_start_day;
         item.end_day = day;
         item.cost = cost;
-        item.progress_at_start = active_was_active_at_start ? std::min(cost, fac0->active_research_progress) : 0.0;
+        item.progress_at_start = active_was_active_at_start ? std::min(cost, active_progress_at_start) : 0.0;
         item.was_active_at_start = active_was_active_at_start;
         out.items.push_back(std::move(item));
         complete_tech(tech);
@@ -308,7 +305,7 @@ ResearchSchedule estimate_research_schedule(const Simulation& sim, Id faction_id
         item.start_day = active_start_day;
         item.end_day = day;
         item.cost = cost;
-        item.progress_at_start = active_was_active_at_start ? std::min(cost, fac0->active_research_progress) : 0.0;
+        item.progress_at_start = active_was_active_at_start ? std::min(cost, active_progress_at_start) : 0.0;
         item.was_active_at_start = active_was_active_at_start;
         out.items.push_back(std::move(item));
 
@@ -344,6 +341,22 @@ ResearchSchedule estimate_research_schedule(const Simulation& sim, Id faction_id
   out.truncated = true;
   out.truncated_reason = "max_days reached";
   return out;
+}
+
+
+ResearchSchedule estimate_research_schedule(const Simulation& sim, Id faction_id, const ResearchScheduleOptions& opt) {
+  ResearchSchedule out;
+  out.ok = false;
+  out.items.clear();
+
+  const auto* fac0 = find_ptr(sim.state().factions, faction_id);
+  if (!fac0) {
+    out.stalled = true;
+    out.stall_reason = "unknown faction";
+    return out;
+  }
+
+  return estimate_research_schedule_for_faction(sim, *fac0, opt);
 }
 
 } // namespace nebula4x

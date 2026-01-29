@@ -6,11 +6,15 @@
 #include <cstdint>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
+#include <cstdio>
+#include <cstring>
 #include <vector>
 
 #include <imgui.h>
 
 #include "nebula4x/util/strings.h"
+#include "nebula4x/core/region_planner.h"
 
 namespace nebula4x::ui {
 
@@ -58,6 +62,91 @@ struct RegionRow {
   Vec2 centroid{0.0, 0.0};
   double half_span{0.0};
 };
+
+struct RegionsEditorState {
+  Id last_region_id{kInvalidId};
+
+  // Editable fields (copied from the selected region on selection change).
+  char name[128]{0};
+  char theme[128]{0};
+  double mineral_mult{1.0};
+  double volatile_mult{1.0};
+  double salvage_mult{1.0};
+  double nebula_bias{0.0};
+  double pirate_risk{0.0};
+  double pirate_suppression{0.0};
+  double ruins_density{0.0};
+
+  bool confirm_delete{false};
+
+  // System assignment UI.
+  char system_filter[128]{0};
+  bool show_only_unassigned{false};
+  bool show_only_discovered{false};
+  std::unordered_set<Id> selected_systems;
+
+  // Auto-partition UI.
+  RegionPlannerOptions plan_opt{};
+  RegionPlannerApplyOptions apply_opt{};
+  RegionPlannerResult plan{};
+  bool have_plan{false};
+  std::string last_error;
+};
+
+RegionsEditorState& editor_state() {
+  static RegionsEditorState st;
+  return st;
+}
+
+double sane_nonneg(double v, double fallback) {
+  if (!std::isfinite(v)) return fallback;
+  if (v < 0.0) return 0.0;
+  return v;
+}
+
+double clamp01(double v) {
+  if (!std::isfinite(v)) return 0.0;
+  if (v < 0.0) return 0.0;
+  if (v > 1.0) return 1.0;
+  return v;
+}
+
+void sync_editor_from_region(RegionsEditorState& es, const Region& r) {
+  if (es.last_region_id == r.id) return;
+  es.last_region_id = r.id;
+
+  std::snprintf(es.name, sizeof(es.name), "%s", r.name.c_str());
+  std::snprintf(es.theme, sizeof(es.theme), "%s", r.theme.c_str());
+
+  es.mineral_mult = sane_nonneg(r.mineral_richness_mult, 1.0);
+  es.volatile_mult = sane_nonneg(r.volatile_richness_mult, 1.0);
+  es.salvage_mult = sane_nonneg(r.salvage_richness_mult, 1.0);
+  es.nebula_bias = std::isfinite(r.nebula_bias) ? std::clamp(r.nebula_bias, -1.0, 1.0) : 0.0;
+  es.pirate_risk = clamp01(r.pirate_risk);
+  es.pirate_suppression = clamp01(r.pirate_suppression);
+  es.ruins_density = clamp01(r.ruins_density);
+
+  es.confirm_delete = false;
+  es.selected_systems.clear();
+
+  if (!es.have_plan) {
+    es.plan_opt = RegionPlannerOptions{};
+    es.apply_opt = RegionPlannerApplyOptions{};
+  }
+}
+
+void apply_editor_to_region(const RegionsEditorState& es, Region& r) {
+  r.name = std::string(es.name);
+  r.theme = std::string(es.theme);
+
+  r.mineral_richness_mult = sane_nonneg(es.mineral_mult, 1.0);
+  r.volatile_richness_mult = sane_nonneg(es.volatile_mult, 1.0);
+  r.salvage_richness_mult = sane_nonneg(es.salvage_mult, 1.0);
+  r.nebula_bias = std::clamp(std::isfinite(es.nebula_bias) ? es.nebula_bias : 0.0, -1.0, 1.0);
+  r.pirate_risk = clamp01(es.pirate_risk);
+  r.pirate_suppression = clamp01(es.pirate_suppression);
+  r.ruins_density = clamp01(es.ruins_density);
+}
 
 RegionRow build_row(Id rid, const Region& r, const RegionAgg& a) {
   RegionRow row;
@@ -441,7 +530,7 @@ void draw_regions_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& se
     return;
   }
 
-  const Region* r = find_ptr(s.regions, ui.selected_region_id);
+  Region* r = find_ptr(s.regions, ui.selected_region_id);
   if (!r) {
     ui.selected_region_id = kInvalidId;
     ImGui::TextDisabled("(selected region is missing)");
@@ -497,7 +586,352 @@ void draw_regions_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& se
       "Nebula bias: %+.2f   Pirate risk: %.2f (base %.2f, supp %.2f)   Known hideouts: %d   Ruins density: %.2f",
       r->nebula_bias, eff_risk, base_risk, supp, row.a.known_hideouts, r->ruins_density);
 
+  RegionsEditorState& es = editor_state();
+  sync_editor_from_region(es, *r);
+
+  // --- Region editing ---
+  ImGui::SeparatorText("Editor");
+  if (ImGui::CollapsingHeader("Edit region properties", ImGuiTreeNodeFlags_DefaultOpen)) {
+    ImGui::InputText("Name##region_name", es.name, IM_ARRAYSIZE(es.name));
+    ImGui::InputText("Theme##region_theme", es.theme, IM_ARRAYSIZE(es.theme));
+
+    ImGui::Spacing();
+    ImGui::TextDisabled("Modifiers (affect piracy risk, procgen bias, and some contract risk estimates):");
+
+    ImGui::SetNextItemWidth(140.0f);
+    ImGui::InputDouble("Mineral x", &es.mineral_mult, 0.05, 0.25, "%.2f");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(140.0f);
+    ImGui::InputDouble("Volatile x", &es.volatile_mult, 0.05, 0.25, "%.2f");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(140.0f);
+    ImGui::InputDouble("Salvage x", &es.salvage_mult, 0.05, 0.25, "%.2f");
+
+    ImGui::SetNextItemWidth(140.0f);
+    ImGui::InputDouble("Nebula bias", &es.nebula_bias, 0.05, 0.25, "%+.2f");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(140.0f);
+    ImGui::InputDouble("Pirate risk", &es.pirate_risk, 0.02, 0.10, "%.2f");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(140.0f);
+    ImGui::InputDouble("Ruins density", &es.ruins_density, 0.02, 0.10, "%.2f");
+
+    ImGui::SetNextItemWidth(140.0f);
+    ImGui::InputDouble("Pirate suppression", &es.pirate_suppression, 0.02, 0.10, "%.2f");
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Reset suppression")) {
+      es.pirate_suppression = 0.0;
+    }
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip("Suppression is normally updated by patrol missions.\nManual edits are allowed for scenario authoring.");
+    }
+
+    // Clamp to sane ranges in the UI before applying.
+    es.mineral_mult = sane_nonneg(es.mineral_mult, 1.0);
+    es.volatile_mult = sane_nonneg(es.volatile_mult, 1.0);
+    es.salvage_mult = sane_nonneg(es.salvage_mult, 1.0);
+    es.nebula_bias = std::clamp(std::isfinite(es.nebula_bias) ? es.nebula_bias : 0.0, -1.0, 1.0);
+    es.pirate_risk = clamp01(es.pirate_risk);
+    es.pirate_suppression = clamp01(es.pirate_suppression);
+    es.ruins_density = clamp01(es.ruins_density);
+
+    if (ImGui::Button("Apply edits")) {
+      apply_editor_to_region(es, *r);
+      es.last_error.clear();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Center = centroid")) {
+      r->center = row.centroid;
+      es.last_error.clear();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Duplicate")) {
+      Region copy = *r;
+      copy.id = allocate_id(s);
+      if (copy.name.empty()) copy.name = "Region " + std::to_string((unsigned long long)copy.id);
+      copy.name += " (copy)";
+      s.regions[copy.id] = copy;
+      ui.selected_region_id = copy.id;
+      es.last_error.clear();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("New region")) {
+      Region nr;
+      nr.id = allocate_id(s);
+      nr.name = "Region " + std::to_string((unsigned long long)nr.id);
+      nr.center = row.centroid;
+      s.regions[nr.id] = nr;
+      ui.selected_region_id = nr.id;
+      es.last_error.clear();
+    }
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::TextDisabled("Danger zone:");
+    ImGui::Checkbox("Confirm delete", &es.confirm_delete);
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!es.confirm_delete);
+    if (ImGui::Button("Delete region")) {
+      // Unassign member systems then delete.
+      for (auto& [sid, sys] : s.systems) {
+        (void)sid;
+        if (sys.region_id == r->id) sys.region_id = kInvalidId;
+      }
+      s.regions.erase(r->id);
+      ui.selected_region_id = kInvalidId;
+      es.last_region_id = kInvalidId;
+      es.confirm_delete = false;
+      es.last_error.clear();
+      ImGui::EndDisabled();
+      ImGui::End();
+      return;
+    }
+    ImGui::EndDisabled();
+
+    if (!es.last_error.empty()) {
+      ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "%s", es.last_error.c_str());
+    }
+  }
+
+  // --- System assignment ---
+  if (ImGui::CollapsingHeader("Assign systems", ImGuiTreeNodeFlags_DefaultOpen)) {
+    ImGui::InputTextWithHint("Filter##assign_sys_filter", "system name / id", es.system_filter, IM_ARRAYSIZE(es.system_filter));
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Clear##assign_sys_filter")) es.system_filter[0] = '\0';
+    ImGui::SameLine();
+    ImGui::Checkbox("Only unassigned", &es.show_only_unassigned);
+    if (ui.fog_of_war && viewer_faction_id != kInvalidId) {
+      ImGui::SameLine();
+      ImGui::Checkbox("Only discovered", &es.show_only_discovered);
+    } else {
+      es.show_only_discovered = false;
+    }
+
+    auto name_matches = [&](const StarSystem& sys) -> bool {
+      if (es.system_filter[0] == '\0') return true;
+      const std::string id_str = std::to_string((unsigned long long)sys.id);
+      if (case_insensitive_contains(id_str, es.system_filter)) return true;
+      return case_insensitive_contains(sys.name, es.system_filter);
+    };
+
+    // Bulk actions.
+    if (ImGui::SmallButton("Select all filtered")) {
+      es.selected_systems.clear();
+      for (const auto& [sid, sys] : s.systems) {
+        (void)sid;
+        if (!name_matches(sys)) continue;
+        if (es.show_only_unassigned && sys.region_id != kInvalidId) continue;
+        if (es.show_only_discovered && !sim.is_system_discovered_by_faction(viewer_faction_id, sys.id)) continue;
+        es.selected_systems.insert(sys.id);
+      }
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Clear selection")) {
+      es.selected_systems.clear();
+    }
+    ImGui::SameLine();
+    const bool any_sel = !es.selected_systems.empty();
+    ImGui::BeginDisabled(!any_sel);
+    if (ImGui::SmallButton("Assign selected -> this region")) {
+      for (Id sid : es.selected_systems) {
+        auto it = s.systems.find(sid);
+        if (it != s.systems.end()) it->second.region_id = r->id;
+      }
+      es.selected_systems.clear();
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Unassign selected")) {
+      for (Id sid : es.selected_systems) {
+        auto it = s.systems.find(sid);
+        if (it != s.systems.end() && it->second.region_id == r->id) it->second.region_id = kInvalidId;
+      }
+      es.selected_systems.clear();
+    }
+    ImGui::EndDisabled();
+
+    ImGuiTableFlags tf = ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable |
+                         ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp;
+    const float th = std::min(240.0f, ImGui::GetContentRegionAvail().y * 0.40f);
+    if (ImGui::BeginTable("assign_systems_table", 4, tf, ImVec2(0.0f, th))) {
+      ImGui::TableSetupScrollFreeze(0, 1);
+      ImGui::TableSetupColumn("Sel", ImGuiTableColumnFlags_WidthFixed, 40.0f);
+      ImGui::TableSetupColumn("System");
+      ImGui::TableSetupColumn("Current region");
+      ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthFixed, 90.0f);
+      ImGui::TableHeadersRow();
+
+      // Sorted by name for UX.
+      std::vector<const StarSystem*> all;
+      all.reserve(s.systems.size());
+      for (const auto& [sid, sys] : s.systems) {
+        (void)sid;
+        all.push_back(&sys);
+      }
+      std::sort(all.begin(), all.end(), [](const StarSystem* a, const StarSystem* b) {
+        if (!a || !b) return false;
+        if (a->name != b->name) return a->name < b->name;
+        return a->id < b->id;
+      });
+
+      for (const StarSystem* sys : all) {
+        if (!sys) continue;
+        if (!name_matches(*sys)) continue;
+        if (es.show_only_unassigned && sys->region_id != kInvalidId) continue;
+        if (es.show_only_discovered && !sim.is_system_discovered_by_faction(viewer_faction_id, sys->id)) continue;
+
+        ImGui::TableNextRow();
+        ImGui::TableSetColumnIndex(0);
+        bool sel = es.selected_systems.find(sys->id) != es.selected_systems.end();
+        if (ImGui::Checkbox(("##sel_" + std::to_string((unsigned long long)sys->id)).c_str(), &sel)) {
+          if (sel) es.selected_systems.insert(sys->id);
+          else es.selected_systems.erase(sys->id);
+        }
+
+        ImGui::TableSetColumnIndex(1);
+        // Under FoW, avoid leaking undiscovered system names.
+        bool visible = true;
+        if (ui.fog_of_war && viewer_faction_id != kInvalidId) {
+          visible = sim.is_system_discovered_by_faction(viewer_faction_id, sys->id);
+        }
+        if (visible) {
+          ImGui::TextUnformatted(sys->name.c_str());
+        } else {
+          ImGui::TextDisabled("(undiscovered)");
+        }
+
+        ImGui::TableSetColumnIndex(2);
+        if (sys->region_id == kInvalidId) {
+          ImGui::TextDisabled("(none)");
+        } else if (const Region* cr = find_ptr(s.regions, sys->region_id)) {
+          ImGui::TextUnformatted(cr->name.c_str());
+        } else {
+          ImGui::TextDisabled("(missing)");
+        }
+
+        ImGui::TableSetColumnIndex(3);
+        if (sys->region_id == r->id) {
+          if (ImGui::SmallButton(("Unassign##u_" + std::to_string((unsigned long long)sys->id)).c_str())) {
+            s.systems.at(sys->id).region_id = kInvalidId;
+          }
+        } else {
+          if (ImGui::SmallButton(("Assign##a_" + std::to_string((unsigned long long)sys->id)).c_str())) {
+            s.systems.at(sys->id).region_id = r->id;
+          }
+        }
+      }
+
+      ImGui::EndTable();
+    }
+  }
+
+  // --- Auto partitioning ---
+  if (ImGui::CollapsingHeader("Auto-partition regions (k-means)", ImGuiTreeNodeFlags_DefaultOpen)) {
+    es.plan_opt.viewer_faction_id = viewer_faction_id;
+    ImGui::SetNextItemWidth(120.0f);
+    ImGui::InputInt("Regions (k)", &es.plan_opt.k);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(120.0f);
+    int seed_i = (int)es.plan_opt.seed;
+    if (ImGui::InputInt("Seed", &seed_i)) es.plan_opt.seed = (std::uint32_t)std::max(0, seed_i);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(120.0f);
+    ImGui::InputInt("Max iters", &es.plan_opt.max_iters);
+
+    ImGui::Checkbox("Only unassigned systems", &es.plan_opt.only_unassigned_systems);
+    if (ui.fog_of_war && viewer_faction_id != kInvalidId) {
+      ImGui::SameLine();
+      ImGui::Checkbox("Restrict to discovered", &es.plan_opt.restrict_to_discovered);
+    } else {
+      es.plan_opt.restrict_to_discovered = false;
+    }
+
+    if (ImGui::Button("Compute plan")) {
+      es.plan = nebula4x::compute_region_partition_plan(sim, es.plan_opt);
+      es.have_plan = es.plan.ok;
+      es.last_error = es.plan.ok ? std::string{} : es.plan.message;
+      if (es.plan.ok) {
+        es.apply_opt = RegionPlannerApplyOptions{};
+        es.apply_opt.name_prefix = "Region";
+      }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Clear plan")) {
+      es.have_plan = false;
+      es.plan = RegionPlannerResult{};
+      es.last_error.clear();
+    }
+
+    if (!es.last_error.empty()) {
+      ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "%s", es.last_error.c_str());
+    }
+
+    if (es.have_plan) {
+      ImGui::TextDisabled("%s  (inertia %.2f)", es.plan.message.c_str(), es.plan.total_inertia);
+
+      ImGuiTableFlags pf = ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable |
+                           ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp;
+      const float ph = std::min(210.0f, ImGui::GetContentRegionAvail().y * 0.35f);
+      if (ImGui::BeginTable("region_plan_table", 6, pf, ImVec2(0.0f, ph))) {
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, 32.0f);
+        ImGui::TableSetupColumn("Name");
+        ImGui::TableSetupColumn("Theme");
+        ImGui::TableSetupColumn("Systems", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+        ImGui::TableSetupColumn("Pirate risk", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+        ImGui::TableSetupColumn("Nebula bias", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+        ImGui::TableHeadersRow();
+
+        for (int i = 0; i < (int)es.plan.clusters.size(); ++i) {
+          const auto& cl = es.plan.clusters[(size_t)i];
+          ImGui::TableNextRow();
+          ImGui::TableSetColumnIndex(0);
+          ImGui::Text("%d", i + 1);
+          ImGui::TableSetColumnIndex(1);
+          ImGui::TextUnformatted(cl.region.name.c_str());
+          ImGui::TableSetColumnIndex(2);
+          ImGui::TextUnformatted(cl.region.theme.c_str());
+          ImGui::TableSetColumnIndex(3);
+          ImGui::Text("%d", (int)cl.system_ids.size());
+          ImGui::TableSetColumnIndex(4);
+          ImGui::Text("%.2f", std::clamp(cl.region.pirate_risk, 0.0, 1.0));
+          ImGui::TableSetColumnIndex(5);
+          ImGui::Text("%+.2f", std::clamp(cl.region.nebula_bias, -1.0, 1.0));
+        }
+
+        ImGui::EndTable();
+      }
+
+      ImGui::Spacing();
+      ImGui::TextDisabled("Apply options:");
+      ImGui::Checkbox("Wipe existing regions", &es.apply_opt.wipe_existing_regions);
+      ImGui::SameLine();
+      ImGui::Checkbox("Clear unplanned assignments", &es.apply_opt.clear_unplanned_system_assignments);
+      ImGui::SetNextItemWidth(200.0f);
+      static char prefix_buf[64] = "Region";
+      if (ImGui::InputText("Name prefix", prefix_buf, IM_ARRAYSIZE(prefix_buf))) {
+        es.apply_opt.name_prefix = prefix_buf;
+      } else {
+        es.apply_opt.name_prefix = prefix_buf;
+      }
+
+      if (ImGui::Button("Apply plan")) {
+        std::string err;
+        if (!nebula4x::apply_region_partition_plan(s, es.plan, es.apply_opt, &err)) {
+          es.last_error = err.empty() ? "Apply failed." : err;
+        } else {
+          es.last_error.clear();
+          ui.show_galaxy_regions = true;
+          ui.show_galaxy_region_boundaries = true;
+          ui.selected_region_id = kInvalidId;
+          es.last_region_id = kInvalidId;
+          es.have_plan = false;
+        }
+      }
+    }
+  }
+
   // Systems list.
+
   ImGui::SeparatorText("Systems in region");
 
   std::vector<const StarSystem*> systems;

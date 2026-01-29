@@ -24,6 +24,7 @@
 #include "ui/screen_reader.h"
 #include "ui/guided_tour.h"
 #include "ui/economy_window.h"
+#include "ui/research_roadmap_window.h"
 #include "ui/planner_window.h"
 #include "ui/regions_window.h"
 #include "ui/security_planner_window.h"
@@ -33,6 +34,8 @@
 #include "ui/salvage_window.h"
 #include "ui/contracts_window.h"
 #include "ui/sustainment_window.h"
+#include "ui/repair_planner_window.h"
+#include "ui/maintenance_planner_window.h"
 #include "ui/fleet_manager_window.h"
 #include "ui/advisor_window.h"
 #include "ui/colony_profiles_window.h"
@@ -50,6 +53,7 @@
 #include "ui/timeline_window.h"
 #include "ui/design_studio_window.h"
 #include "ui/balance_lab_window.h"
+#include "ui/battle_forecast_window.h"
 #include "ui/procgen_atlas_window.h"
 #include "ui/star_atlas_window.h"
 #include "ui/intel_window.h"
@@ -660,6 +664,8 @@ void App::frame() {
   if (ui_.show_economy_window) {
     prepare_window_for_draw(ui_, "economy");
     draw_economy_window(sim_, ui_, selected_colony_, selected_body_);
+  if (ui_.show_research_roadmap_window)
+    draw_research_roadmap_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   }
   if (ui_.show_planner_window) {
     prepare_window_for_draw(ui_, "planner");
@@ -697,9 +703,22 @@ void App::frame() {
     prepare_window_for_draw(ui_, "sustainment");
     draw_sustainment_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   }
+
+  if (ui_.show_repair_planner_window) {
+    prepare_window_for_draw(ui_, "repair_planner");
+    draw_repair_planner_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  }
+  if (ui_.show_maintenance_planner_window) {
+    prepare_window_for_draw(ui_, "maintenance_planner");
+    draw_maintenance_planner_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  }
   if (ui_.show_fleet_manager_window) {
     prepare_window_for_draw(ui_, "fleet_manager");
     draw_fleet_manager_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  }
+  if (ui_.show_battle_forecast_window) {
+    prepare_window_for_draw(ui_, "battle_forecast");
+    draw_battle_forecast_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   }
   if (ui_.show_troop_window) {
     prepare_window_for_draw(ui_, "troops");
@@ -2742,6 +2761,12 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       if (auto it = obj->find("show_sustainment_window"); it != obj->end()) {
         ui_.show_sustainment_window = it->second.bool_value(ui_.show_sustainment_window);
       }
+      if (auto it = obj->find("show_repair_planner_window"); it != obj->end()) {
+        ui_.show_repair_planner_window = it->second.bool_value(ui_.show_repair_planner_window);
+      }
+      if (auto it = obj->find("show_maintenance_planner_window"); it != obj->end()) {
+        ui_.show_maintenance_planner_window = it->second.bool_value(ui_.show_maintenance_planner_window);
+      }
       if (auto it = obj->find("show_fleet_manager_window"); it != obj->end()) {
         ui_.show_fleet_manager_window = it->second.bool_value(ui_.show_fleet_manager_window);
       }
@@ -2768,6 +2793,9 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       }
       if (auto it = obj->find("show_balance_lab_window"); it != obj->end()) {
         ui_.show_balance_lab_window = it->second.bool_value(ui_.show_balance_lab_window);
+      }
+      if (auto it = obj->find("show_battle_forecast_window"); it != obj->end()) {
+        ui_.show_battle_forecast_window = it->second.bool_value(ui_.show_battle_forecast_window);
       }
       if (auto it = obj->find("show_procgen_atlas_window"); it != obj->end()) {
         ui_.show_procgen_atlas_window = it->second.bool_value(ui_.show_procgen_atlas_window);
@@ -4062,6 +4090,8 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     o["show_mine_window"] = ui_.show_mine_window;
     o["show_fuel_window"] = ui_.show_fuel_window;
     o["show_sustainment_window"] = ui_.show_sustainment_window;
+    o["show_repair_planner_window"] = ui_.show_repair_planner_window;
+    o["show_maintenance_planner_window"] = ui_.show_maintenance_planner_window;
     o["show_fleet_manager_window"] = ui_.show_fleet_manager_window;
     o["show_troop_window"] = ui_.show_troop_window;
     o["show_colonist_window"] = ui_.show_colonist_window;
@@ -4071,6 +4101,7 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     o["show_notifications_window"] = ui_.show_notifications_window;
     o["show_design_studio_window"] = ui_.show_design_studio_window;
     o["show_balance_lab_window"] = ui_.show_balance_lab_window;
+    o["show_battle_forecast_window"] = ui_.show_battle_forecast_window;
     o["show_procgen_atlas_window"] = ui_.show_procgen_atlas_window;
     o["show_star_atlas_window"] = ui_.show_star_atlas_window;
     o["show_intel_window"] = ui_.show_intel_window;
@@ -4623,6 +4654,8 @@ void App::reset_window_layout_defaults() {
   ui_.show_mine_window = false;
   ui_.show_fuel_window = false;
   ui_.show_sustainment_window = false;
+  ui_.show_repair_planner_window = false;
+  ui_.show_maintenance_planner_window = false;
   ui_.show_fleet_manager_window = false;
   ui_.show_troop_window = false;
   ui_.show_colonist_window = false;
@@ -4631,6 +4664,7 @@ void App::reset_window_layout_defaults() {
   ui_.show_timeline_window = false;
   ui_.show_design_studio_window = false;
   ui_.show_balance_lab_window = false;
+  ui_.show_battle_forecast_window = false;
   ui_.show_intel_window = false;
   ui_.show_intel_notebook_window = false;
   ui_.show_diplomacy_window = false;

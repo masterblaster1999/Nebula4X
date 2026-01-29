@@ -222,5 +222,47 @@ int test_research_schedule() {
     N4X_ASSERT(sched.items[0].end_day == 1);
   }
 
+
+  // --- Case 6: snapshot forecasts allow UI previews without mutating live state ---
+  {
+    ContentDB content;
+    content.installations["lab"] = mk_lab(10.0);
+    content.techs["a"] = mk_tech("a", "A", 10, {});
+    content.techs["b"] = mk_tech("b", "B", 20, {"a"});
+
+    auto sim = make_sim(content);
+
+    Faction f;
+    f.id = 1;
+    f.name = "F";
+    f.research_points = 0.0;
+    // Live queue intentionally empty.
+    sim.state().factions[f.id] = f;
+
+    Colony c;
+    c.id = 10;
+    c.faction_id = f.id;
+    c.installations["lab"] = 1;
+    sim.state().colonies[c.id] = c;
+
+    ResearchScheduleOptions opt;
+    opt.max_days = 32;
+
+    const auto live = estimate_research_schedule(sim, f.id, opt);
+    N4X_ASSERT(live.ok);
+    N4X_ASSERT(live.stalled);
+    N4X_ASSERT(live.items.empty());
+
+    // Forecast a hypothetical queue without touching sim.state().factions[f.id].
+    Faction snap = sim.state().factions[f.id];
+    snap.research_queue = {"a", "b"};
+    const auto sched = estimate_research_schedule_for_faction(sim, snap, opt);
+    N4X_ASSERT(sched.ok);
+    N4X_ASSERT(!sched.stalled);
+    N4X_ASSERT(sched.items.size() == 2);
+    N4X_ASSERT(sched.items[0].tech_id == "a");
+    N4X_ASSERT(sched.items[1].tech_id == "b");
+  }
+
   return failed;
 }

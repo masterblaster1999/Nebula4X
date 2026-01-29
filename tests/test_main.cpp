@@ -14,13 +14,16 @@ int test_date();
 int test_simulation();
 int test_ground_ops();
 int test_ground_battle_forecast();
+int test_fleet_battle_forecast();
 int test_boarding();
 int test_serialization();
 int test_auto_freight();
 int test_freight_planner();
 int test_fuel_planner();
+int test_repair_planner();
 int test_trade_network();
 int test_security_planner();
+int test_invasion_planner();
 int test_industry();
 int test_refit();
 int test_diplomacy();
@@ -262,13 +265,16 @@ int main(int argc, char** argv) {
       {"simulation", test_simulation},
       {"ground_ops", test_ground_ops},
       {"ground_battle_forecast", test_ground_battle_forecast},
+      {"fleet_battle_forecast", test_fleet_battle_forecast},
       {"boarding", test_boarding},
       {"serialization", test_serialization},
       {"auto_freight", test_auto_freight},
       {"freight_planner", test_freight_planner},
       {"trade_network", test_trade_network},
       {"security_planner", test_security_planner},
+      {"invasion_planner", test_invasion_planner},
       {"fuel_planner", test_fuel_planner},
+      {"repair_planner", test_repair_planner},
       {"industry", test_industry},
       {"refit", test_refit},
       {"diplomacy", test_diplomacy},

@@ -26,6 +26,7 @@
 #include "nebula4x/core/order_planner.h"
 #include "nebula4x/core/colony_schedule.h"
 #include "nebula4x/core/ground_battle_forecast.h"
+#include "nebula4x/core/invasion_planner.h"
 #include "nebula4x/core/date.h"
 #include "nebula4x/core/terraforming_schedule.h"
 #include "nebula4x/util/autosave.h"
@@ -523,6 +524,7 @@ void draw_main_menu(Simulation& sim, UIState& ui, char* save_path, char* load_pa
       ImGui::MenuItem("Population Logistics (Auto-colonist Preview)", nullptr, &ui.show_colonist_window);
       ImGui::MenuItem("Terraforming Planner", nullptr, &ui.show_terraforming_window);
       ImGui::MenuItem("Fleet Manager", "Ctrl+Shift+F", &ui.show_fleet_manager_window);
+      ImGui::MenuItem("Battle Forecast (Fleet vs Fleet)", nullptr, &ui.show_battle_forecast_window);
       ImGui::MenuItem("Advisor (Issues)", "Ctrl+Shift+A", &ui.show_advisor_window);
       ImGui::MenuItem("Colony Profiles (Automation Presets)", "Ctrl+Shift+B", &ui.show_colony_profiles_window);
       ImGui::MenuItem("Ship Profiles (Automation Presets)", "Ctrl+Shift+M", &ui.show_ship_profiles_window);
@@ -4858,6 +4860,204 @@ const bool can_up = (i > 0);
                                     std::max(0.0, tgt->ground_forces), std::max(0.0, tgt->garrison_target_strength));
               }
 
+
+              if (tgt != nullptr) {
+                ImGui::SeparatorText("Assault Advisor");
+
+                // Use the fleet leader for ETA estimates (fallback to first ship).
+                const Ship* leader = nullptr;
+                if (selected_fleet != nullptr) {
+                  leader = find_ptr(s.ships, selected_fleet->leader_ship_id);
+                  if (leader == nullptr && !selected_fleet->ship_ids.empty()) {
+                    leader = find_ptr(s.ships, selected_fleet->ship_ids.front());
+                  }
+                }
+
+                Id start_system_id = kInvalidId;
+                Vec2 start_pos_mkm{0.0, 0.0};
+                double planning_speed_km_s = 0.0;
+                if (leader != nullptr) {
+                  start_system_id = leader->system_id;
+                  start_pos_mkm = leader->position_mkm;
+                  if (const ShipDesign* d = sim.find_design(leader->design_id)) {
+                    planning_speed_km_s = d->speed_km_s;
+                  } else {
+                    planning_speed_km_s = leader->speed_km_s;
+                  }
+                }
+
+                // Fleet bombard readiness (informational).
+                int bombard_ship_count = 0;
+                double fleet_bombard_weapon_damage_per_day = 0.0;
+                int troop_ship_count = 0;
+                if (selected_fleet != nullptr) {
+                  for (const Id sid : selected_fleet->ship_ids) {
+                    const Ship* ship = find_ptr(s.ships, sid);
+                    if (ship == nullptr) {
+                      continue;
+                    }
+                    const ShipDesign* design = sim.find_design(ship->design_id);
+                    if (design == nullptr) {
+                      continue;
+                    }
+                    if (design->troop_capacity > 0.0) {
+                      troop_ship_count += 1;
+                    }
+                    if (design->weapon_damage > 0.0 && design->weapon_range_mkm > 0.0) {
+                      bombard_ship_count += 1;
+                      fleet_bombard_weapon_damage_per_day += design->weapon_damage;
+                    }
+                  }
+                }
+
+                InvasionPlannerOptions opt;
+                opt.attacker_faction_id = fleet_mut->faction_id;
+                opt.restrict_to_discovered = true;
+                opt.start_system_id = start_system_id;
+                opt.start_pos_mkm = start_pos_mkm;
+                opt.planning_speed_km_s = planning_speed_km_s;
+                opt.max_staging_options = 6;
+
+                const auto analysis = analyze_invasion_target(
+                    sim, tgt->id, opt, fleet_mut->mission.assault_troop_margin_factor, embarked);
+
+                if (!analysis.ok) {
+                  ImGui::TextDisabled("Advisor: %s", analysis.message.c_str());
+                } else {
+                  const auto winner_label = [](GroundBattleWinner w) -> const char* {
+                    switch (w) {
+                      case GroundBattleWinner::Attacker:
+                        return "Attacker";
+                      case GroundBattleWinner::Defender:
+                        return "Defender";
+                      case GroundBattleWinner::Tie:
+                        return "Tie";
+                    }
+                    return "?";
+                  };
+
+                  const auto draw_forecast = [&](const char* label, const GroundBattleForecast& fc) {
+                    if (!fc.ok) {
+                      ImGui::Text("%s: (invalid forecast)", label);
+                      return;
+                    }
+
+                    ImGui::Text("%s: %s wins in %.1f d", label, winner_label(fc.winner), fc.time_to_resolution_days);
+                    ImGui::TextDisabled(
+                        "A: %.0f -> %.0f (loss %.0f) | D: %.0f -> %.0f (loss %.0f)",
+                        fc.attacker_strength_start,
+                        fc.attacker_strength_end,
+                        fc.attacker_strength_start - fc.attacker_strength_end,
+                        fc.defender_strength_start,
+                        fc.defender_strength_end,
+                        fc.defender_strength_start - fc.defender_strength_end);
+
+                    if (std::isfinite(fc.time_to_fort_depletion_days)) {
+                      ImGui::TextDisabled("Forts depleted in %.1f d", fc.time_to_fort_depletion_days);
+                    }
+                  };
+
+                  ImGui::Text(
+                      "Defenders: %.0f | Forts: %.0f (eff %.0f) | Artillery: %.1f dmg/day",
+                      analysis.target.defender_strength,
+                      analysis.target.forts_total,
+                      analysis.target.forts_effective,
+                      analysis.target.defender_artillery_weapon_damage_per_day);
+
+                  if (analysis.target.forts_total > 0.0 && analysis.target.fort_damage_points > 0.0) {
+                    const float frac = (float)std::clamp(
+                        analysis.target.fort_damage_points / analysis.target.forts_total, 0.0, 1.0);
+                    ImGui::ProgressBar(frac, ImVec2(0.0f, 0.0f), "Fort damage");
+                  }
+
+                  ImGui::Text(
+                      "Recommended attackers (margin %.2f): %.0f",
+                      fleet_mut->mission.assault_troop_margin_factor,
+                      analysis.target.required_attacker_strength);
+                  ImGui::TextDisabled(
+                      "Breached (0 forts/artillery): %.0f",
+                      analysis.target.required_attacker_strength_no_forts);
+
+                  const double need_more = std::max(0.0, analysis.target.required_attacker_strength - embarked);
+                  const double free_cap = std::max(0.0, cap - embarked);
+                  ImGui::Text("Fleet troops: embarked %.0f / cap %.0f (need +%.0f)", embarked, cap, need_more);
+
+                  if (cap <= 0.0 || troop_ship_count <= 0) {
+                    ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "No troop-capable ships in this fleet.");
+                  } else if (analysis.target.required_attacker_strength > cap) {
+                    ImGui::TextColored(
+                        ImVec4(1.0f, 0.65f, 0.25f, 1.0f),
+                        "Warning: required troops exceed fleet capacity (short by %.0f).",
+                        analysis.target.required_attacker_strength - cap);
+                  } else if (need_more > free_cap + 0.01) {
+                    ImGui::TextColored(
+                        ImVec4(1.0f, 0.65f, 0.25f, 1.0f),
+                        "Warning: insufficient free troop capacity to reach recommended strength.");
+                  }
+
+                  ImGui::Text(
+                      "Bombard-capable ships: %d (%.1f dmg/day)",
+                      bombard_ship_count,
+                      fleet_bombard_weapon_damage_per_day);
+                  if (fleet_mut->mission.assault_use_bombardment && bombard_ship_count == 0) {
+                    ImGui::TextColored(
+                        ImVec4(1.0f, 0.65f, 0.25f, 1.0f),
+                        "Bombardment enabled, but this fleet has no bombard-capable ships.");
+                  }
+
+                  // Forecasts.
+                  if (analysis.target.has_attacker_strength_forecast) {
+                    draw_forecast("Forecast (embarked)", analysis.target.forecast_at_attacker_strength);
+                  }
+
+                  draw_forecast("Forecast (recommended)", analysis.target.forecast_at_required);
+
+                  if (cap > 0.0) {
+                    const GroundBattleForecast at_cap = forecast_ground_battle(
+                        sim.cfg(),
+                        cap,
+                        analysis.target.defender_strength,
+                        analysis.target.forts_effective,
+                        analysis.target.defender_artillery_weapon_damage_per_day);
+                    draw_forecast("Forecast (at capacity)", at_cap);
+                  }
+
+                  draw_forecast("Forecast (breached)", analysis.target.forecast_at_required_no_forts);
+
+                  // Staging recommendations.
+                  if (!analysis.staging_options.empty()) {
+                    ImGui::SeparatorText("Suggested staging colonies");
+
+                    if (ImGui::SmallButton("Use best staging")) {
+                      fleet_mut->mission.assault_staging_colony_id = analysis.staging_options.front().colony_id;
+                    }
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(based on surplus vs ETA)");
+
+                    for (const auto& opt : analysis.staging_options) {
+                      const Colony* c = find_ptr(s.colonies, opt.colony_id);
+                      if (c == nullptr) {
+                        continue;
+                      }
+
+                      ImGui::BulletText(
+                          "%s: avail %.0f (surplus %.0f) | ETA %.1f d (to stage %.1f, stage->tgt %.1f)",
+                          c->name.c_str(),
+                          opt.take_cap_strength,
+                          opt.surplus_strength,
+                          opt.eta_total_days,
+                          opt.eta_start_to_stage_days,
+                          opt.eta_stage_to_target_days);
+
+                      ImGui::SameLine();
+                      const std::string btn = "Use##assault_stage_" + std::to_string(opt.colony_id);
+                      if (ImGui::SmallButton(btn.c_str())) {
+                        fleet_mut->mission.assault_staging_colony_id = opt.colony_id;
+                      }
+                    }
+                  }
+                }
+              }
               ImGui::TextDisabled("Stages troops (optional), bombards once (optional), then invades with troop ships.\nTip: Use 'Start mission' to clear any existing orders before running.");
             }
 

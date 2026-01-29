@@ -2,6 +2,7 @@
 
 #include <iostream>
 #include <string>
+#include <vector>
 
 #include "nebula4x/core/game_state.h"
 #include "nebula4x/core/research_planner.h"
@@ -88,6 +89,60 @@ int test_research_planner() {
     const auto plan = compute_research_plan(cyc, f, "a");
     N4X_ASSERT(!plan.ok());
     N4X_ASSERT(!plan.errors.empty());
+  }
+
+
+  {
+    // Multi-target union (dedup) and stable prerequisite ordering.
+    Faction f;
+    f.known_techs = {"a"};
+    const auto plan = compute_research_plan(content, f, std::vector<std::string>{"c", "b", "c"});
+    N4X_ASSERT(plan.ok());
+    N4X_ASSERT(plan.plan.tech_ids.size() == 2);
+    N4X_ASSERT(plan.plan.tech_ids[0] == "b");
+    N4X_ASSERT(plan.plan.tech_ids[1] == "c");
+    N4X_ASSERT(plan.plan.total_cost == 50);
+  }
+
+  {
+    // Apply helper: append + set active to first planned tech (prereqs first).
+    Faction f;
+    f.known_techs = {"a"};
+    f.research_queue = {"x"};
+    const auto plan = compute_research_plan(content, f, "c");
+    ResearchQueueApplyOptions opt;
+    opt.mode = ResearchQueueApplyMode::Append;
+    opt.set_active = true;
+    opt.override_active = true;
+    std::string err;
+    N4X_ASSERT(apply_research_plan(f, plan.plan, opt, &err));
+    N4X_ASSERT(err.empty());
+    N4X_ASSERT(f.active_research_id == "b");
+    N4X_ASSERT(f.active_research_progress == 0.0);
+    N4X_ASSERT(f.research_queue.size() == 2);
+    N4X_ASSERT(f.research_queue[0] == "x");
+    N4X_ASSERT(f.research_queue[1] == "c");
+  }
+
+  {
+    // Apply helper: replace queue while leaving active project alone.
+    Faction f;
+    f.known_techs = {"a"};
+    f.active_research_id = "something";
+    f.active_research_progress = 12.0;
+    f.research_queue = {"x", "y"};
+    const auto plan = compute_research_plan(content, f, "c");
+    ResearchQueueApplyOptions opt;
+    opt.mode = ResearchQueueApplyMode::Replace;
+    opt.set_active = false;
+    std::string err;
+    N4X_ASSERT(apply_research_plan(f, plan.plan, opt, &err));
+    N4X_ASSERT(err.empty());
+    N4X_ASSERT(f.active_research_id == "something");
+    N4X_ASSERT(f.active_research_progress == 12.0);
+    N4X_ASSERT(f.research_queue.size() == 2);
+    N4X_ASSERT(f.research_queue[0] == "b");
+    N4X_ASSERT(f.research_queue[1] == "c");
   }
 
   return failed;
