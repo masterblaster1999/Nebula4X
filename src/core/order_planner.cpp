@@ -150,7 +150,9 @@ std::pair<double, Vec2> intercept_body_dt(const GameState& st,
 
 } // namespace
 
-OrderPlan compute_order_plan(const Simulation& sim, Id ship_id, const OrderPlannerOptions& opts) {
+OrderPlan compute_order_plan_for_queue(const Simulation& sim, Id ship_id,
+                                     const std::vector<Order>& queue,
+                                     const OrderPlannerOptions& opts) {
   OrderPlan plan;
 
   const GameState& st = sim.state();
@@ -255,17 +257,7 @@ OrderPlan compute_order_plan(const Simulation& sim, Id ship_id, const OrderPlann
     note_out = oss.str();
   };
 
-  // Fetch current queue.
-  const auto it_orders = st.ship_orders.find(ship_id);
-  if (it_orders == st.ship_orders.end()) {
-    plan.ok = true;
-    plan.end_fuel_tons = fuel;
-    plan.total_eta_days = 0.0;
-    return plan;
-  }
-
-  const ShipOrders& so = it_orders->second;
-  const auto& q = so.queue;
+  const auto& q = queue;
   if (q.empty()) {
     plan.ok = true;
     plan.end_fuel_tons = fuel;
@@ -700,18 +692,40 @@ OrderPlan compute_order_plan(const Simulation& sim, Id ship_id, const OrderPlann
     } else if (std::holds_alternative<AttackShip>(ord)) {
       const auto& o = std::get<AttackShip>(ord);
       const Ship* tgt = find_ptr(st.ships, o.target_ship_id);
-      if (tgt && tgt->system_id == sys) {
+
+      // Fog-of-war safety:
+      // - When viewer_faction_id is set, only use the true target position when the
+      //   viewer can currently detect the ship.
+      // - Otherwise fall back to last-known track state when available.
+      bool can_use_true_pos = (opts.viewer_faction_id == kInvalidId);
+
+      if (!can_use_true_pos && tgt) {
+        // is_ship_detected_by_faction returns true for the viewer's own ships.
+        can_use_true_pos = sim.is_ship_detected_by_faction(opts.viewer_faction_id, o.target_ship_id);
+      }
+
+      if (tgt && tgt->system_id == sys && can_use_true_pos) {
         const double w_range = sd ? std::max(0.0, sd->weapon_range_mkm) : 0.0;
         const double desired = (w_range > 0.0) ? (w_range * 0.9) : 0.1;
         ok = travel_to_point(tgt->position_mkm, desired);
       } else if (o.has_last_known) {
-        ok = travel_to_point(o.last_known_position_mkm, arrive_eps);
+        // Only use last-known in the current system; cross-system pursuit requires
+        // jump routing that the planner does not currently model.
+        if (o.last_known_system_id != kInvalidId && o.last_known_system_id != sys) {
+          truncate("AttackShip last-known track is in a different system", true);
+          ok = true;
+          indefinite = true;
+        } else {
+          const Vec2 wp =
+              o.last_known_position_mkm + (o.has_search_offset ? o.search_offset_mkm : Vec2{0.0, 0.0});
+          ok = travel_to_point(wp, arrive_eps);
+        }
       } else {
         truncate("AttackShip has no target contact / last-known position", false);
         ok = false;
       }
 
-      if (ok) {
+      if (ok && !indefinite) {
         indefinite = true;
         truncate("AttackShip outcome depends on combat/contact", true);
       }
@@ -775,5 +789,15 @@ OrderPlan compute_order_plan(const Simulation& sim, Id ship_id, const OrderPlann
 
   return plan;
 }
+
+OrderPlan compute_order_plan(const Simulation& sim, Id ship_id, const OrderPlannerOptions& opts) {
+  const auto* so = find_ptr(sim.state().ship_orders, ship_id);
+  if (!so) {
+    static const std::vector<Order> empty;
+    return compute_order_plan_for_queue(sim, ship_id, empty, opts);
+  }
+  return compute_order_plan_for_queue(sim, ship_id, so->queue, opts);
+}
+
 
 } // namespace nebula4x

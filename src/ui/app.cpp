@@ -26,6 +26,7 @@
 #include "ui/economy_window.h"
 #include "ui/planner_window.h"
 #include "ui/regions_window.h"
+#include "ui/security_planner_window.h"
 #include "ui/freight_window.h"
 #include "ui/mine_window.h"
 #include "ui/fuel_window.h"
@@ -667,6 +668,10 @@ void App::frame() {
   if (ui_.show_regions_window) {
     prepare_window_for_draw(ui_, "regions");
     draw_regions_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+  }
+  if (ui_.show_security_planner_window) {
+    prepare_window_for_draw(ui_, "security_planner");
+    draw_security_planner_window(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
   }
   if (ui_.show_freight_window) {
     prepare_window_for_draw(ui_, "freight");

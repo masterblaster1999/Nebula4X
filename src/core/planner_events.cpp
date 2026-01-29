@@ -287,6 +287,8 @@ PlannerEventsResult compute_planner_events(const Simulation& sim, Id faction_id,
 
     OrderPlannerOptions po;
     po.max_orders = std::max(0, opt.max_orders_per_ship);
+    // Fog-of-war safety: do not leak target ship positions in previews.
+    po.viewer_faction_id = faction_id;
 
     for (Id sid : ship_ids) {
       const auto* ship = find_ptr(sim.state().ships, sid);

@@ -33,6 +33,16 @@ struct OrderPlannerOptions {
   // forecasts for logistics planning.
   bool simulate_refuel{true};
 
+  // When set to a valid faction id, the planner will respect fog-of-war from
+  // this faction's perspective.
+  //
+  // In particular, ship-targeting orders like AttackShip will avoid using the
+  // true target position unless the viewer faction currently detects the ship.
+  // This prevents UI previews from leaking hidden information.
+  //
+  // When kInvalidId, the planner behaves omnisciently (legacy behaviour).
+  Id viewer_faction_id{kInvalidId};
+
   // Maximum number of orders to simulate (safety guard for repeat loops).
   int max_orders{512};
 };
@@ -87,5 +97,12 @@ struct OrderPlan {
 //
 // If the ship has no queued orders, returns ok=true with steps empty.
 OrderPlan compute_order_plan(const Simulation& sim, Id ship_id, const OrderPlannerOptions& opts = {});
+
+// Compute a best-effort plan for a specific order queue.
+//
+// This is useful for UI previews of draft queues or repeat templates.
+OrderPlan compute_order_plan_for_queue(const Simulation& sim, Id ship_id,
+                                      const std::vector<Order>& queue,
+                                      const OrderPlannerOptions& opts = {});
 
 } // namespace nebula4x

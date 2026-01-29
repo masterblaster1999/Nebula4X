@@ -103,6 +103,8 @@ static const std::vector<WindowSpec>& build_specs() {
       // Fleet / operations.
       {"fleet_manager", "Fleet Manager", "Fleet Manager", "Operations", ImVec2(1100, 720),
        &UIState::show_fleet_manager_window, false, true, WindowLaunchMode::Docked},
+      {"security_planner", "Security Planner", "Security Planner", "Operations", ImVec2(1100, 720),
+       &UIState::show_security_planner_window, false, true, WindowLaunchMode::Docked},
       {"survey_network", "Survey Network", "Survey Network", "Operations", ImVec2(980, 680),
        &UIState::show_survey_network_window, false, true, WindowLaunchMode::Docked},
       {"time_warp", "Time Warp", "Time Warp", "Operations", ImVec2(720, 420), &UIState::show_time_warp_window, false,

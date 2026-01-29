@@ -46,6 +46,7 @@ target_sources(nebula4x_core
     src/core/freight_planner.cpp
     src/core/fuel_planner.cpp
     src/core/trade_network.cpp
+    src/core/security_planner.cpp
     src/core/salvage_planner.cpp
     src/core/mine_planner.cpp
     src/core/contract_planner.cpp
@@ -251,6 +252,7 @@ FetchContent_Declare(
     src/ui/economy_window.cpp
     src/ui/planner_window.cpp
     src/ui/regions_window.cpp
+    src/ui/security_planner_window.cpp
     src/ui/freight_window.cpp
 	    src/ui/mine_window.cpp
     src/ui/fuel_window.cpp
@@ -381,6 +383,7 @@ if(NEBULA4X_BUILD_TESTS)
     tests/test_swept_contacts.cpp
     tests/test_freight_planner.cpp
     tests/test_trade_network.cpp
+    tests/test_security_planner.cpp
     tests/test_fuel_planner.cpp
     tests/test_mineral_deposits.cpp
     tests/test_mobile_mining.cpp

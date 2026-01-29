@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cstdint>
-#include <type_traits>
 
 #include <imgui.h>
 
@@ -22,41 +21,28 @@ struct SDL_Texture;
 namespace nebula4x::ui {
 
 // Returns the canonical "null" texture id.
-constexpr ImTextureID imgui_null_texture_id() {
-  if constexpr (std::is_pointer_v<ImTextureID>) {
-    return nullptr;
-  } else {
-    return static_cast<ImTextureID>(0);
-  }
-}
+//
+// We intentionally avoid comparing against nullptr directly because modern Dear
+// ImGui defaults ImTextureID to an opaque 64-bit integer type (ImU64). In that
+// configuration, comparing ImTextureID to nullptr is ill-formed on MSVC.
+//
+// Value-initialization works for both pointer and integer ImTextureID.
+constexpr ImTextureID imgui_null_texture_id() { return ImTextureID{}; }
 
 // Returns true if id is non-null.
-constexpr bool imgui_texture_id_is_valid(ImTextureID id) {
-  if constexpr (std::is_pointer_v<ImTextureID>) {
-    return id != nullptr;
-  } else {
-    return id != static_cast<ImTextureID>(0);
-  }
-}
+constexpr bool imgui_texture_id_is_valid(ImTextureID id) { return id != ImTextureID{}; }
 
 // --- SDL_Renderer2 backend -------------------------------------------------
 
 inline ImTextureID imgui_texture_id_from_sdl_texture(SDL_Texture* tex) {
-  if (!tex) return imgui_null_texture_id();
-  if constexpr (std::is_pointer_v<ImTextureID>) {
-    return reinterpret_cast<ImTextureID>(tex);
-  } else {
-    return static_cast<ImTextureID>(reinterpret_cast<std::uintptr_t>(tex));
-  }
+  // Cast through an integer that can hold a pointer.
+  // This is compatible with both pointer-based and integer-based ImTextureID.
+  return tex ? (ImTextureID)(std::uintptr_t)tex : imgui_null_texture_id();
 }
 
 inline SDL_Texture* sdl_texture_from_imgui_texture_id(ImTextureID id) {
   if (!imgui_texture_id_is_valid(id)) return nullptr;
-  if constexpr (std::is_pointer_v<ImTextureID>) {
-    return reinterpret_cast<SDL_Texture*>(id);
-  } else {
-    return reinterpret_cast<SDL_Texture*>(static_cast<std::uintptr_t>(id));
-  }
+  return (SDL_Texture*)(std::uintptr_t)id;
 }
 
 // --- OpenGL2 backend -------------------------------------------------------
@@ -66,21 +52,13 @@ inline SDL_Texture* sdl_texture_from_imgui_texture_id(ImTextureID id) {
 template <typename GLuintLike>
 inline ImTextureID imgui_texture_id_from_gl_texture(GLuintLike tex) {
   if (tex == static_cast<GLuintLike>(0)) return imgui_null_texture_id();
-  if constexpr (std::is_pointer_v<ImTextureID>) {
-    return reinterpret_cast<ImTextureID>(static_cast<std::uintptr_t>(tex));
-  } else {
-    return static_cast<ImTextureID>(tex);
-  }
+  return (ImTextureID)(std::uintptr_t)tex;
 }
 
 template <typename GLuintLike>
 inline GLuintLike gl_texture_from_imgui_texture_id(ImTextureID id) {
   if (!imgui_texture_id_is_valid(id)) return static_cast<GLuintLike>(0);
-  if constexpr (std::is_pointer_v<ImTextureID>) {
-    return static_cast<GLuintLike>(reinterpret_cast<std::uintptr_t>(id));
-  } else {
-    return static_cast<GLuintLike>(id);
-  }
+  return (GLuintLike)(std::uintptr_t)id;
 }
 
 } // namespace nebula4x::ui

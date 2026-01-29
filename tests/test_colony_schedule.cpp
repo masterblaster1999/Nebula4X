@@ -312,5 +312,101 @@ int test_colony_schedule() {
     N4X_ASSERT(std::abs(t_end) < 1e-6);
   }
 
+
+  // Colony conditions should affect schedule multipliers (and therefore completion times).
+  {
+    ContentDB content3;
+
+    // Shipyard consumes two minerals per ton.
+    {
+      InstallationDef shipyard;
+      shipyard.id = "shipyard";
+      shipyard.name = "Shipyard";
+      shipyard.build_rate_tons_per_day = 100.0;
+      shipyard.build_costs_per_ton = {{"Duranium", 1.0}, {"Tritanium", 1.0}};
+      content3.installations[shipyard.id] = shipyard;
+    }
+
+    // Generic mine: no fixed produces_per_day; output is derived from deposits via mining_tons_per_day.
+    {
+      InstallationDef mine;
+      mine.id = "automated_mine";
+      mine.name = "Generic Mine";
+      mine.mining = true;
+      mine.mining_tons_per_day = 100.0;
+      content3.installations[mine.id] = mine;
+    }
+
+    SimConfig cfg3;
+    cfg3.seconds_per_day = 60.0;
+    cfg3.enable_colony_conditions = true;
+
+    Simulation sim3(content3, cfg3);
+    GameState& st3 = sim3.state();
+
+    Faction f3;
+    f3.id = 301;
+    f3.name = "F3";
+    st3.factions[f3.id] = f3;
+
+    Body b3;
+    b3.id = 302;
+    b3.name = "B3";
+    b3.mineral_deposits = {{"Duranium", 1000.0}, {"Tritanium", 1000.0}};
+    st3.bodies[b3.id] = b3;
+
+    Colony c3;
+    c3.id = 303;
+    c3.name = "ColCond";
+    c3.body_id = b3.id;
+    c3.faction_id = f3.id;
+    c3.installations["shipyard"] = 1;
+    c3.installations["automated_mine"] = 1;
+
+    BuildOrder ord;
+    ord.design_id = "test_ship";
+    ord.tons_remaining = 100.0;
+    ord.auto_queued = false;
+    c3.shipyard_queue.push_back(ord);
+
+    st3.colonies[c3.id] = c3;
+
+    ColonyScheduleOptions opt;
+    opt.max_days = 10;
+    opt.max_events = 8;
+    opt.include_shipyard = true;
+    opt.include_construction = false;
+
+    // Baseline: should match the earlier shipyard+mine test case (complete on day 2 due to mineral throttling).
+    const ColonySchedule sched_base = estimate_colony_schedule(sim3, c3.id, opt);
+    N4X_ASSERT(sched_base.ok);
+    N4X_ASSERT(!sched_base.stalled);
+    N4X_ASSERT(sched_base.events.size() == 1);
+    N4X_ASSERT(sched_base.events[0].kind == ColonyScheduleEventKind::ShipyardComplete);
+    N4X_ASSERT(sched_base.events[0].day == 2);
+
+    // Apply a strike (shipyard multiplier 0.25, mining multiplier 0.75).
+    Colony* c3p = find_ptr(st3.colonies, c3.id);
+    N4X_ASSERT(c3p != nullptr);
+    ColonyCondition strike;
+    strike.id = "strike";
+    strike.remaining_days = 30.0;
+    strike.severity = 1.0;
+    c3p->conditions.push_back(strike);
+
+    const ColonySchedule sched_strike = estimate_colony_schedule(sim3, c3.id, opt);
+    N4X_ASSERT(sched_strike.ok);
+    N4X_ASSERT(!sched_strike.stalled);
+    N4X_ASSERT(sched_strike.events.size() == 1);
+    N4X_ASSERT(sched_strike.events[0].kind == ColonyScheduleEventKind::ShipyardComplete);
+
+    // With the strike, the shipyard can only build 25t/day (and we mine 75t/day total), so completion should be day 4.
+    N4X_ASSERT(sched_strike.events[0].day == 4);
+
+    // Sanity: multipliers should reflect the condition.
+    N4X_ASSERT(std::abs(sched_strike.shipyard_multiplier - sched_base.shipyard_multiplier * 0.25) < 1e-6);
+    N4X_ASSERT(std::abs(sched_strike.mining_multiplier - sched_base.mining_multiplier * 0.75) < 1e-6);
+  }
+
   return 0;
 }

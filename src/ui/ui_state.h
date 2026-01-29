@@ -616,6 +616,7 @@ struct UIState {
   bool show_economy_window{false};
   bool show_planner_window{false};
   bool show_regions_window{false};
+  bool show_security_planner_window{false};
   bool show_freight_window{false};
   bool show_mine_window{false};
   bool show_fuel_window{false};
@@ -1137,6 +1138,21 @@ struct UIState {
   bool system_map_starfield{true};
   bool system_map_grid{false};
   bool system_map_order_paths{true};
+  // When enabled, order paths are drawn using the core order planner so the
+  // route preview can show ETAs, fuel usage, and planner warnings.
+  //
+  // When false, the map draws a simpler geometric path between raw order
+  // targets (legacy behaviour).
+  bool system_map_order_paths_use_planner{false};
+  // Safety guard and performance knob for the planner-based overlay.
+  int system_map_order_paths_max_steps{64};
+  // Tooltip/label details.
+  bool system_map_order_paths_show_eta{true};
+  bool system_map_order_paths_show_fuel{false};
+  bool system_map_order_paths_show_notes{true};
+  // Planner knobs.
+  bool system_map_order_paths_predict_orbits{true};
+  bool system_map_order_paths_simulate_refuel{true};
   bool system_map_fleet_formation_preview{true};
   bool system_map_missile_salvos{false};
   bool system_map_follow_selected{false};

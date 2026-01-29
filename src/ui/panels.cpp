@@ -511,6 +511,7 @@ void draw_main_menu(Simulation& sim, UIState& ui, char* save_path, char* load_pa
       ImGui::MenuItem("Economy (Industry/Mining/Tech Tree)", nullptr, &ui.show_economy_window);
       ImGui::MenuItem("Planner (Forecast Dashboard)", nullptr, &ui.show_planner_window);
       ImGui::MenuItem("Regions (Sectors Overview)", "Ctrl+Shift+R", &ui.show_regions_window);
+      ImGui::MenuItem("Security Planner (Trade/Piracy)", nullptr, &ui.show_security_planner_window);
       ImGui::MenuItem("Star Atlas (Constellations)", nullptr, &ui.show_star_atlas_window);
       ImGui::MenuItem("Freight Planner (Auto-freight Preview)", nullptr, &ui.show_freight_window);
       ImGui::MenuItem("Mine Planner (Auto-mine Preview)", nullptr, &ui.show_mine_window);
@@ -2575,7 +2576,9 @@ if (sim.cfg().enable_ship_maintenance) {
           
 auto& q = ship_orders->queue;
 
-const auto plan = nebula4x::compute_order_plan(sim, selected_ship);
+nebula4x::OrderPlannerOptions plan_opts;
+plan_opts.viewer_faction_id = ui.viewer_faction_id;
+const auto plan = nebula4x::compute_order_plan(sim, selected_ship, plan_opts);
 const auto* plan_ship = find_ptr(s.ships, selected_ship);
 const auto* plan_design = plan_ship ? sim.find_design(plan_ship->design_id) : nullptr;
 const double plan_fuel_cap = plan_design ? std::max(0.0, plan_design->fuel_capacity_tons) : 0.0;
@@ -9996,6 +9999,38 @@ void draw_settings_window(UIState& ui, char* ui_prefs_path, UIPrefActions& actio
     ImGui::SameLine();
     ImGui::Checkbox("Galaxy: selected route", &ui.galaxy_map_selected_route);
     ImGui::Checkbox("System: follow selected ship", &ui.system_map_follow_selected);
+    if (ui.system_map_order_paths) {
+      ImGui::Indent();
+      ImGui::Checkbox("Order paths: use planner (ETA/fuel)", &ui.system_map_order_paths_use_planner);
+      if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip(
+            "Uses the core order planner to draw order paths.\\n"
+            "This enables per-waypoint ETAs, fuel usage, and planner warnings.\\n"
+            "It also respects fog-of-war for ship targets (no intel leaks).");
+      }
+
+      if (ui.system_map_order_paths_use_planner) {
+        ImGui::Indent();
+        ui.system_map_order_paths_max_steps = std::clamp(ui.system_map_order_paths_max_steps, 1, 2048);
+        ImGui::SliderInt("Order paths: max steps", &ui.system_map_order_paths_max_steps, 1, 512);
+
+        ImGui::Checkbox("Order paths: show ETA", &ui.system_map_order_paths_show_eta);
+        ImGui::SameLine();
+        ImGui::Checkbox("Fuel", &ui.system_map_order_paths_show_fuel);
+        ImGui::SameLine();
+        ImGui::Checkbox("Notes", &ui.system_map_order_paths_show_notes);
+
+        ImGui::Checkbox("Order paths: predict orbits", &ui.system_map_order_paths_predict_orbits);
+        ImGui::SameLine();
+        ImGui::Checkbox("Simulate refuel", &ui.system_map_order_paths_simulate_refuel);
+
+        ImGui::TextDisabled(
+            "Tip: hover a waypoint on the system map to see the full planner tooltip.");
+        ImGui::Unindent();
+      }
+      ImGui::Unindent();
+    }
+
 
     ImGui::Checkbox("System: nebula microfield overlay", &ui.system_map_nebula_microfield_overlay);
     if (ui.system_map_nebula_microfield_overlay) {

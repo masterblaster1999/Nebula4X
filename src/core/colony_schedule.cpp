@@ -256,10 +256,11 @@ bool simulate_mining_day(const Simulation& sim,
   std::unordered_map<std::string, double> total_req;
   std::unordered_map<std::string, double> target_req;
 
-  auto mining_mult_for = [&](Id fid) -> double {
-    auto it = fac_mult.find(fid);
-    if (it == fac_mult.end()) return 1.0;
-    return std::max(0.0, it->second.mining);
+  auto mining_mult_for_colony = [&](const Colony& c) -> double {
+    auto it = fac_mult.find(c.faction_id);
+    const double base = (it == fac_mult.end()) ? 1.0 : std::max(0.0, it->second.mining);
+    const double cond = std::max(0.0, sim.colony_condition_multipliers(c).mining);
+    return base * cond;
   };
 
   auto add_requests_from = [&](const Colony& c, double mining_mult, bool is_target) {
@@ -309,9 +310,9 @@ bool simulate_mining_day(const Simulation& sim,
     }
   };
 
-  add_requests_from(target_colony, mining_mult_for(target_colony.faction_id), true);
+  add_requests_from(target_colony, mining_mult_for_colony(target_colony), true);
   for (const Colony* c : colonies_on_body) {
-    add_requests_from(*c, mining_mult_for(c->faction_id), false);
+    add_requests_from(*c, mining_mult_for_colony(*c), false);
   }
 
   bool changed = false;
@@ -677,15 +678,19 @@ ColonySchedule estimate_colony_schedule(const Simulation& sim, Id colony_id, con
 
   const FactionEconomyMultipliers my_mult = mult_for(colony.faction_id);
 
+  // Colony conditions are colony-local modifiers applied on top of faction/tech multipliers.
+  // Match Simulation::tick_colonies so schedule projections stay accurate when conditions are active.
+  const ColonyConditionMultipliers cond_mult = sim.colony_condition_multipliers(colony);
+
   // Trade prosperity bonus mirrors Simulation tick for output projections.
   const double prosperity = sim.trade_prosperity_output_multiplier_for_colony(colony.id);
   FactionEconomyMultipliers eff_mult = my_mult;
-  eff_mult.industry *= prosperity;
-  eff_mult.research *= prosperity;
-  eff_mult.construction *= prosperity;
-  eff_mult.shipyard *= prosperity;
+  eff_mult.industry *= prosperity * std::max(0.0, cond_mult.industry);
+  eff_mult.research *= prosperity * std::max(0.0, cond_mult.research);
+  eff_mult.construction *= prosperity * std::max(0.0, cond_mult.construction);
+  eff_mult.shipyard *= prosperity * std::max(0.0, cond_mult.shipyard);
 
-  out.mining_multiplier = my_mult.mining;
+  out.mining_multiplier = my_mult.mining * std::max(0.0, cond_mult.mining);
   out.industry_multiplier = eff_mult.industry;
   out.construction_multiplier = eff_mult.construction;
   out.shipyard_multiplier = eff_mult.shipyard;

@@ -6,6 +6,8 @@
 #include <functional>
 #include <cctype>
 #include <cmath>
+#include <iomanip>
+#include <sstream>
 #include <limits>
 #include <string>
 #include <unordered_map>
@@ -49,6 +51,31 @@ bool vec_contains(const std::vector<std::string>& v, const std::string& x) {
 void push_unique(std::vector<std::string>& v, const std::string& x) {
   if (!vec_contains(v, x)) v.push_back(x);
 }
+
+std::string format_mineral_cost_short(const std::unordered_map<std::string, double>& cost) {
+  if (cost.empty()) return "-";
+
+  std::vector<std::pair<std::string, double>> parts;
+  parts.reserve(cost.size());
+  for (const auto& [mineral, amt] : cost) {
+    if (amt <= 1e-6) continue;
+    parts.push_back({mineral, amt});
+  }
+  if (parts.empty()) return "-";
+
+  std::sort(parts.begin(), parts.end(),
+            [](const auto& a, const auto& b) { return a.first < b.first; });
+
+  std::ostringstream oss;
+  oss.setf(std::ios::fixed);
+  oss << std::setprecision(0);
+  for (std::size_t i = 0; i < parts.size(); ++i) {
+    if (i) oss << ", ";
+    oss << parts[i].first << " " << parts[i].second;
+  }
+  return oss.str();
+}
+
 
 double colony_research_points_per_day(const Simulation& sim, const Colony& c) {
   double rp = 0.0;
@@ -1782,6 +1809,490 @@ void draw_economy_window(Simulation& sim, UIState& ui, Id& selected_colony, Id& 
           ImGui::EndTable();
         }
       }
+
+      ImGui::EndTabItem();
+    }
+
+
+    // --- Stability ---
+    if (ImGui::BeginTabItem("Stability")) {
+      const bool conditions_enabled = sim.cfg().enable_colony_conditions;
+
+      ImGui::SeparatorText("Colony Stability");
+      ImGui::TextDisabled(
+          "Stability is an estimated index derived from habitability, habitation, trade, security, shipping losses,\n"
+          "blockades, and temporary colony conditions. Low stability increases the chance of disruptive events.");
+
+      if (!conditions_enabled) {
+        ImGui::TextDisabled("Note: Colony conditions are disabled in simulation config.");
+      }
+
+      static char stab_filter[128] = "";
+      static float stab_show_max = 1.01f;
+      static bool stab_only_with_conditions = false;
+      static bool stab_only_negative = false;
+      static bool stab_sort_low_to_high = true;
+
+      ImGui::InputText("Filter##stability", stab_filter, IM_ARRAYSIZE(stab_filter));
+      ImGui::SameLine();
+      if (ImGui::SmallButton("Clear##stability")) stab_filter[0] = '\0';
+
+      ImGui::SliderFloat("Show stability <=##stability", &stab_show_max, 0.0f, 1.0f, "%.2f");
+      ImGui::SameLine();
+      ImGui::Checkbox("Only with conditions##stability", &stab_only_with_conditions);
+      ImGui::SameLine();
+      ImGui::Checkbox("Only negative##stability", &stab_only_negative);
+      ImGui::SameLine();
+      ImGui::Checkbox("Sort low->high##stability", &stab_sort_low_to_high);
+
+      struct StabRow {
+        Id colony_id{kInvalidId};
+        Id body_id{kInvalidId};
+        std::string colony_name;
+        std::string system_name;
+        ColonyStabilityStatus st;
+        int pos_conditions{0};
+        int neg_conditions{0};
+      };
+
+      std::vector<StabRow> rows;
+      rows.reserve(s.colonies.size());
+
+      for (const auto& [cid, col] : s.colonies) {
+        if (col.faction_id != view_faction_id) continue;
+
+        std::string sys_name = "?";
+        if (const Body* b = find_ptr(s.bodies, col.body_id)) {
+          if (const System* sys = find_ptr(s.systems, b->system_id)) sys_name = sys->name;
+        }
+
+        ColonyStabilityStatus st = sim.colony_stability_status_for_colony(cid);
+
+        int pos = 0;
+        int neg = 0;
+        for (const auto& cond : col.conditions) {
+          if (cond.remaining_days <= 1e-9) continue;
+          if (sim.colony_condition_is_positive(cond.id)) {
+            ++pos;
+          } else {
+            ++neg;
+          }
+        }
+
+        if (stab_show_max <= 1.0f && st.stability > stab_show_max + 1e-9) continue;
+        if (stab_only_with_conditions && (pos + neg) == 0) continue;
+        if (stab_only_negative && neg == 0) continue;
+
+        if (stab_filter[0] != '\0') {
+          std::string hay = col.name;
+          hay.push_back(' ');
+          hay += sys_name;
+          if (!case_insensitive_contains(hay, stab_filter)) continue;
+        }
+
+        StabRow r;
+        r.colony_id = cid;
+        r.body_id = col.body_id;
+        r.colony_name = col.name;
+        r.system_name = sys_name;
+        r.st = st;
+        r.pos_conditions = pos;
+        r.neg_conditions = neg;
+        rows.push_back(std::move(r));
+      }
+
+      std::sort(rows.begin(), rows.end(), [&](const StabRow& a, const StabRow& b) {
+        if (stab_sort_low_to_high) return a.st.stability < b.st.stability;
+        return a.st.stability > b.st.stability;
+      });
+
+      // Bulk resolve negative conditions (affordable, per-colony budget).
+      struct BulkPlan {
+        std::vector<std::pair<Id, std::string>> targets;
+        std::unordered_map<std::string, double> total_cost;
+        int colonies_affected{0};
+        int conditions{0};
+      };
+      static BulkPlan bulk_plan;
+      static std::string bulk_status;
+      static double bulk_status_time = 0.0;
+
+      auto build_bulk_plan = [&]() -> BulkPlan {
+        BulkPlan plan;
+        std::unordered_set<Id> colonies_seen;
+
+        for (const auto& [cid, col] : s.colonies) {
+          if (col.faction_id != view_faction_id) continue;
+
+          // Copy available minerals for feasibility across multiple resolves on the same colony.
+          std::unordered_map<std::string, double> avail = col.minerals;
+
+          // Gather candidate condition indices with a rough "impact score" so we resolve the worst first.
+          struct Cand {
+            std::size_t idx{0};
+            double score{0.0};
+          };
+          std::vector<Cand> cands;
+          cands.reserve(col.conditions.size());
+
+          for (std::size_t i = 0; i < col.conditions.size(); ++i) {
+            const ColonyCondition& cond = col.conditions[i];
+            if (cond.remaining_days <= 1e-9) continue;
+            if (sim.colony_condition_is_positive(cond.id)) continue;
+            const auto cost = sim.colony_condition_resolve_cost(cid, cond);
+            if (cost.empty()) continue;
+
+            const ColonyConditionMultipliers m = sim.colony_condition_multipliers_for_condition(cond);
+            double score = 0.0;
+            score += std::max(0.0, 1.0 - m.mining);
+            score += std::max(0.0, 1.0 - m.industry);
+            score += std::max(0.0, 1.0 - m.research);
+            score += std::max(0.0, 1.0 - m.construction);
+            score += std::max(0.0, 1.0 - m.shipyard);
+            score += std::max(0.0, 1.0 - m.terraforming);
+            score += std::max(0.0, 1.0 - m.troop_training);
+            score += std::max(0.0, 1.0 - m.pop_growth);
+
+            cands.push_back({i, score});
+          }
+
+          std::sort(cands.begin(), cands.end(),
+                    [](const Cand& a, const Cand& b) { return a.score > b.score; });
+
+          for (const Cand& cand : cands) {
+            const ColonyCondition& cond = col.conditions[cand.idx];
+            const auto cost = sim.colony_condition_resolve_cost(cid, cond);
+            if (cost.empty()) continue;
+
+            bool ok = true;
+            for (const auto& [mineral, amt] : cost) {
+              if (amt <= 1e-9) continue;
+              const double have = std::max(0.0, avail[mineral]);
+              if (have + 1e-9 < amt) {
+                ok = false;
+                break;
+              }
+            }
+            if (!ok) continue;
+
+            // Reserve funds.
+            for (const auto& [mineral, amt] : cost) {
+              if (amt <= 1e-9) continue;
+              avail[mineral] = std::max(0.0, avail[mineral] - amt);
+              plan.total_cost[mineral] += amt;
+            }
+
+            plan.targets.push_back({cid, cond.id});
+            colonies_seen.insert(cid);
+          }
+        }
+
+        plan.conditions = static_cast<int>(plan.targets.size());
+        plan.colonies_affected = static_cast<int>(colonies_seen.size());
+        return plan;
+      };
+
+      if (conditions_enabled) {
+        if (ImGui::Button("Bulk resolve affordable negative conditions...##stability")) {
+          bulk_plan = build_bulk_plan();
+          ImGui::OpenPopup("BulkResolveNegConditions");
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("Uses each colony's minerals (worst conditions first).");
+
+        if (!bulk_status.empty() && (ImGui::GetTime() - bulk_status_time) < 8.0) {
+          ImGui::TextDisabled("%s", bulk_status.c_str());
+        } else if ((ImGui::GetTime() - bulk_status_time) >= 8.0) {
+          bulk_status.clear();
+        }
+
+        if (ImGui::BeginPopupModal("BulkResolveNegConditions", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+          ImGui::Text("This will attempt to resolve negative conditions that are currently affordable.");
+          ImGui::Separator();
+
+          ImGui::Text("Colonies affected: %d", bulk_plan.colonies_affected);
+          ImGui::Text("Conditions to resolve: %d", bulk_plan.conditions);
+          ImGui::Separator();
+
+          ImGui::Text("Estimated total cost (sum of selected resolves):");
+          for (const auto& mineral : sorted_keys(bulk_plan.total_cost)) {
+            const double amt = bulk_plan.total_cost.at(mineral);
+            if (amt <= 1e-6) continue;
+            ImGui::BulletText("%s: %.0f", mineral.c_str(), amt);
+          }
+
+          ImGui::Separator();
+          if (ImGui::Button("Resolve now")) {
+            int ok = 0;
+            int fail = 0;
+            std::string first_error;
+
+            for (const auto& [cid, cond_id] : bulk_plan.targets) {
+              std::string err;
+              if (sim.resolve_colony_condition(cid, cond_id, &err)) {
+                ++ok;
+              } else {
+                ++fail;
+                if (first_error.empty() && !err.empty()) first_error = err;
+              }
+            }
+
+            std::ostringstream oss;
+            oss << "Bulk resolve finished. Resolved " << ok << " / " << (ok + fail) << ".";
+            if (fail > 0 && !first_error.empty()) oss << " Example failure: " << first_error;
+            bulk_status = oss.str();
+            bulk_status_time = ImGui::GetTime();
+
+            ImGui::CloseCurrentPopup();
+          }
+          ImGui::SameLine();
+          if (ImGui::Button("Cancel")) {
+            ImGui::CloseCurrentPopup();
+          }
+
+          ImGui::EndPopup();
+        }
+      } else {
+        ImGui::TextDisabled("Bulk resolve unavailable (colony conditions disabled).");
+      }
+
+      ImGui::Separator();
+
+      const float left_w = ImGui::GetContentRegionAvail().x * 0.58f;
+      ImGui::BeginChild("StabilityLeft", ImVec2(left_w, 0), true);
+      if (ImGui::BeginTable("StabilityTable", 9,
+                            ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY)) {
+        ImGui::TableSetupColumn("Colony", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("System", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("Stab", ImGuiTableColumnFlags_WidthFixed, 55.0f);
+        ImGui::TableSetupColumn("CondΔ", ImGuiTableColumnFlags_WidthFixed, 55.0f);
+        ImGui::TableSetupColumn("Trade", ImGuiTableColumnFlags_WidthFixed, 55.0f);
+        ImGui::TableSetupColumn("Piracy", ImGuiTableColumnFlags_WidthFixed, 55.0f);
+        ImGui::TableSetupColumn("Ship", ImGuiTableColumnFlags_WidthFixed, 55.0f);
+        ImGui::TableSetupColumn("Block", ImGuiTableColumnFlags_WidthFixed, 55.0f);
+        ImGui::TableSetupColumn("Conds", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+        ImGui::TableHeadersRow();
+
+        for (const StabRow& r : rows) {
+          ImGui::TableNextRow();
+
+          ImGui::TableNextColumn();
+          const bool is_selected = (selected_colony == r.colony_id);
+          if (ImGui::Selectable(r.colony_name.c_str(), is_selected, ImGuiSelectableFlags_SpanAllColumns)) {
+            selected_colony = r.colony_id;
+            selected_body = r.body_id;
+          }
+
+          ImGui::TableNextColumn();
+          ImGui::TextUnformatted(r.system_name.c_str());
+
+          ImGui::TableNextColumn();
+          ImGui::Text("%.0f%%", r.st.stability * 100.0);
+
+          ImGui::TableNextColumn();
+          ImGui::Text("%+.0f%%", r.st.condition_delta * 100.0);
+
+          ImGui::TableNextColumn();
+          ImGui::Text("+%.0f%%", r.st.trade_bonus * 100.0);
+
+          ImGui::TableNextColumn();
+          ImGui::Text("%.0f%%", r.st.piracy_risk * 100.0);
+
+          ImGui::TableNextColumn();
+          ImGui::Text("%.0f%%", r.st.shipping_loss_pressure * 100.0);
+
+          ImGui::TableNextColumn();
+          ImGui::Text("%.0f%%", r.st.blockade_pressure * 100.0);
+
+          ImGui::TableNextColumn();
+          ImGui::Text("%d/%d", r.neg_conditions, r.pos_conditions);
+        }
+
+        ImGui::EndTable();
+      }
+      ImGui::EndChild();
+
+      ImGui::SameLine();
+
+      ImGui::BeginChild("StabilityRight", ImVec2(0, 0), true);
+      if (selected_colony == kInvalidId) {
+        ImGui::TextDisabled("Select a colony to view stability details.");
+      } else if (const Colony* col = find_ptr(s.colonies, selected_colony)) {
+        const ColonyStabilityStatus st = sim.colony_stability_status_for_colony(selected_colony);
+
+        std::string sys_name = "?";
+        if (const Body* b = find_ptr(s.bodies, col->body_id)) {
+          if (const System* sys = find_ptr(s.systems, b->system_id)) sys_name = sys->name;
+        }
+
+        ImGui::Text("%s", col->name.c_str());
+        ImGui::SameLine();
+        ImGui::TextDisabled("(%s)", sys_name.c_str());
+
+        ImGui::Separator();
+        ImGui::Text("Stability: %.0f%%", st.stability * 100.0);
+        ImGui::ProgressBar(static_cast<float>(st.stability), ImVec2(-1.0f, 0.0f));
+
+        ImGui::SeparatorText("Breakdown");
+        ImGui::BulletText("Habitability: %.0f%%", st.habitability * 100.0);
+        ImGui::BulletText("Habitation shortfall: %.0f%%", st.habitation_shortfall_frac * 100.0);
+        ImGui::BulletText("Trade bonus: +%.0f%%", st.trade_bonus * 100.0);
+        ImGui::BulletText("Piracy risk: %.0f%%", st.piracy_risk * 100.0);
+        ImGui::BulletText("Shipping loss pressure: %.0f%%", st.shipping_loss_pressure * 100.0);
+        ImGui::BulletText("Blockade pressure: %.0f%%", st.blockade_pressure * 100.0);
+        ImGui::BulletText("Conditions delta: %+.0f%%", st.condition_delta * 100.0);
+
+        ImGui::SeparatorText("Active Conditions");
+        if (!conditions_enabled) {
+          ImGui::TextDisabled("Colony conditions are disabled in simulation config.");
+        } else {
+          static std::string resolve_status;
+          static double resolve_status_time = 0.0;
+
+          // Resolve all affordable negative conditions on this colony.
+          if (ImGui::Button("Resolve affordable negative conditions (this colony)")) {
+            // Build per-colony plan (worst first).
+            std::unordered_map<std::string, double> avail = col->minerals;
+
+            struct Cand {
+              std::string id;
+              double score{0.0};
+              std::unordered_map<std::string, double> cost;
+            };
+            std::vector<Cand> cands;
+            for (const auto& cond : col->conditions) {
+              if (cond.remaining_days <= 1e-9) continue;
+              if (sim.colony_condition_is_positive(cond.id)) continue;
+              auto cost = sim.colony_condition_resolve_cost(col->id, cond);
+              if (cost.empty()) continue;
+
+              const ColonyConditionMultipliers m = sim.colony_condition_multipliers_for_condition(cond);
+              double score = 0.0;
+              score += std::max(0.0, 1.0 - m.mining);
+              score += std::max(0.0, 1.0 - m.industry);
+              score += std::max(0.0, 1.0 - m.research);
+              score += std::max(0.0, 1.0 - m.construction);
+              score += std::max(0.0, 1.0 - m.shipyard);
+              score += std::max(0.0, 1.0 - m.terraforming);
+              score += std::max(0.0, 1.0 - m.troop_training);
+              score += std::max(0.0, 1.0 - m.pop_growth);
+              cands.push_back({cond.id, score, std::move(cost)});
+            }
+            std::sort(cands.begin(), cands.end(),
+                      [](const Cand& a, const Cand& b) { return a.score > b.score; });
+
+            int ok = 0;
+            int fail = 0;
+            std::string first_fail;
+
+            for (const Cand& cnd : cands) {
+              bool affordable = true;
+              for (const auto& [mineral, amt] : cnd.cost) {
+                if (amt <= 1e-9) continue;
+                const double have = std::max(0.0, avail[mineral]);
+                if (have + 1e-9 < amt) {
+                  affordable = false;
+                  break;
+                }
+              }
+              if (!affordable) continue;
+
+              // Spend from our local budget (so we don't call resolve if it will fail due to prior spending).
+              for (const auto& [mineral, amt] : cnd.cost) {
+                if (amt <= 1e-9) continue;
+                avail[mineral] = std::max(0.0, avail[mineral] - amt);
+              }
+
+              std::string err;
+              if (sim.resolve_colony_condition(col->id, cnd.id, &err)) {
+                ++ok;
+              } else {
+                ++fail;
+                if (first_fail.empty() && !err.empty()) first_fail = err;
+              }
+            }
+
+            std::ostringstream oss;
+            oss << "Resolved " << ok << " condition(s).";
+            if (fail > 0) {
+              oss << " Failed: " << fail;
+              if (!first_fail.empty()) oss << " (e.g. " << first_fail << ")";
+            }
+            resolve_status = oss.str();
+            resolve_status_time = ImGui::GetTime();
+          }
+
+          if (!resolve_status.empty() && (ImGui::GetTime() - resolve_status_time) < 8.0) {
+            ImGui::TextDisabled("%s", resolve_status.c_str());
+          } else if ((ImGui::GetTime() - resolve_status_time) >= 8.0) {
+            resolve_status.clear();
+          }
+
+          ImGui::Separator();
+
+          bool modified = false;
+          if (col->conditions.empty()) {
+            ImGui::TextDisabled("No active conditions.");
+          } else {
+            for (std::size_t i = 0; i < col->conditions.size(); ++i) {
+              const ColonyCondition& cond = col->conditions[i];
+              if (cond.remaining_days <= 1e-9) continue;
+
+              const std::string disp = sim.colony_condition_display_name(cond.id);
+              const std::string desc = sim.colony_condition_description(cond.id);
+              const bool positive = sim.colony_condition_is_positive(cond.id);
+              const auto cost = sim.colony_condition_resolve_cost(col->id, cond);
+
+              ImGui::Separator();
+              ImGui::Text("%s%s", positive ? "+" : "-", disp.c_str());
+              if (!desc.empty() && ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("%s", desc.c_str());
+              }
+
+              ImGui::TextDisabled("Days remaining: %.0f   Severity: %.2f", cond.remaining_days, cond.severity);
+
+              const ColonyConditionMultipliers m = sim.colony_condition_multipliers_for_condition(cond);
+              // Only show multipliers that matter (not ~1.0).
+              auto show_mult = [&](const char* label, double v) {
+                if (std::abs(v - 1.0) < 0.01) return;
+                ImGui::BulletText("%s x%.2f", label, v);
+              };
+              show_mult("Mining", m.mining);
+              show_mult("Industry", m.industry);
+              show_mult("Research", m.research);
+              show_mult("Construction", m.construction);
+              show_mult("Shipyard", m.shipyard);
+              show_mult("Terraforming", m.terraforming);
+              show_mult("Troop Training", m.troop_training);
+              show_mult("Pop Growth", m.pop_growth);
+
+              if (cost.empty()) {
+                ImGui::TextDisabled("Resolve: (not manually resolvable)");
+              } else {
+                ImGui::Text("Resolve cost: %s", format_mineral_cost_short(cost).c_str());
+
+                const std::string btn = "Resolve##cond_" + std::to_string(i);
+                if (ImGui::Button(btn.c_str())) {
+                  std::string err;
+                  const std::string cond_id = cond.id;
+                  if (sim.resolve_colony_condition(col->id, cond_id, &err)) {
+                    resolve_status = "Resolved: " + disp;
+                  } else {
+                    resolve_status = err.empty() ? "Failed to resolve condition." : err;
+                  }
+                  resolve_status_time = ImGui::GetTime();
+                  modified = true;
+                }
+              }
+
+              if (modified) break;
+            }
+          }
+        }
+      } else {
+        ImGui::TextDisabled("Selected colony is invalid.");
+      }
+      ImGui::EndChild();
 
       ImGui::EndTabItem();
     }

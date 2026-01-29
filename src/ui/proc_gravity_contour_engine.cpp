@@ -118,7 +118,7 @@ static std::vector<MassBody> gather_mass_bodies(const Simulation& sim,
     }
 
     MassBody mb;
-    mb.pos_mkm = b->pos;
+    mb.pos_mkm = b->position_mkm;
     mb.mass_earths = m;
     mb.soft_mkm = soft;
     out.push_back(mb);

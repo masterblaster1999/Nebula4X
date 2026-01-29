@@ -22,6 +22,7 @@
 #include "core/simulation_sensors.h"
 
 #include "nebula4x/core/contact_prediction.h"
+#include "nebula4x/core/order_planner.h"
 #include "nebula4x/core/fleet_formation.h"
 #include "nebula4x/core/enum_strings.h"
 #include "nebula4x/core/procgen_jump_phenomena.h"
@@ -1731,9 +1732,10 @@ void draw_system_map(Simulation& sim,
                 return jp->position_mkm;
               } else if constexpr (std::is_same_v<T, nebula4x::AttackShip>) {
                 // Fog-of-war safety: only reveal the true target position when
-                // the attacking faction currently detects the ship.
+                // the viewer faction currently detects the ship.
+                const Id fow_id = (ui.fog_of_war ? viewer_faction_id : kInvalidId);
                 if (const auto* tgt = find_ptr(s.ships, o.target_ship_id); tgt && tgt->system_id == sys->id) {
-                  if (sim.is_ship_detected_by_faction(sh->faction_id, o.target_ship_id)) {
+                  if (fow_id == kInvalidId || sim.is_ship_detected_by_faction(fow_id, o.target_ship_id)) {
                     return tgt->position_mkm;
                   }
                 }
@@ -1741,6 +1743,7 @@ void draw_system_map(Simulation& sim,
                 // Otherwise show last-known / search waypoint so the player can
                 // understand what their ship is doing without leaking intel.
                 if (o.has_last_known) {
+                  if (o.last_known_system_id != kInvalidId && o.last_known_system_id != sys->id) return std::nullopt;
                   return o.last_known_position_mkm + (o.has_search_offset ? o.search_offset_mkm : Vec2{0.0, 0.0});
                 }
                 return std::nullopt;
@@ -1779,27 +1782,115 @@ void draw_system_map(Simulation& sim,
         const ImU32 base = templ ? IM_COL32(160, 160, 160, 255) : IM_COL32(255, 220, 80, 255);
         const ImU32 col = modulate_alpha(base, templ ? (0.55f * alpha) : alpha);
         const ImU32 col_pt = modulate_alpha(IM_COL32(10, 10, 10, 255), templ ? (0.55f * alpha) : alpha);
+        const ImU32 col_warn = modulate_alpha(IM_COL32(255, 80, 80, 255), templ ? (0.55f * alpha) : alpha);
 
         Vec2 prev_w = sh->position_mkm;
         ImVec2 prev = to_screen(prev_w, center, scale, zoom, pan);
         int idx = 1;
 
-        for (const auto& ord : q) {
-          const auto tgt = resolve_target(ord);
-          if (!tgt) continue;
+        if (ui.system_map_order_paths_use_planner) {
+          OrderPlannerOptions po;
+          po.max_orders = std::clamp(ui.system_map_order_paths_max_steps, 1, 2048);
+          po.predict_orbits = ui.system_map_order_paths_predict_orbits;
+          po.simulate_refuel = ui.system_map_order_paths_simulate_refuel;
+          po.viewer_faction_id = (ui.fog_of_war ? viewer_faction_id : kInvalidId);
 
-          const ImVec2 next = to_screen(*tgt, center, scale, zoom, pan);
-          draw->AddLine(prev, next, col, 2.0f);
-          add_arrowhead(draw, prev, next, col, 8.0f);
+          const OrderPlan plan = compute_order_plan_for_queue(sim, route_ship_id, q, po);
 
-          // Waypoint marker.
-          draw->AddCircleFilled(next, 6.0f, col_pt, 0);
-          draw->AddCircle(next, 6.0f, col, 0, 2.0f);
-          char buf[8];
-          std::snprintf(buf, sizeof(buf), "%d", idx++);
-          draw->AddText(ImVec2(next.x - 3.0f, next.y - 6.0f), col, buf);
+          const ShipDesign* pd = sim.find_design(sh->design_id);
+          const double fuel_cap = pd ? std::max(0.0, pd->fuel_capacity_tons) : 0.0;
 
-          prev = next;
+          const ImVec2 mouse = ImGui::GetMousePos();
+          const float hover_r2 = 11.0f * 11.0f;
+          int hovered = -1;
+          float hovered_d2 = 1e30f;
+
+          for (std::size_t i = 0; i < plan.steps.size() && i < q.size(); ++i) {
+            const PlannedOrderStep& stp = plan.steps[i];
+            const ImVec2 next = to_screen(stp.position_mkm, center, scale, zoom, pan);
+
+            const float dx = next.x - prev.x;
+            const float dy = next.y - prev.y;
+            const float d2 = dx * dx + dy * dy;
+            if (d2 > 1e-2f) {
+              draw->AddLine(prev, next, col, 2.0f);
+              add_arrowhead(draw, prev, next, col, 8.0f);
+            }
+
+            // Waypoint marker.
+            draw->AddCircleFilled(next, 6.0f, col_pt, 0);
+            draw->AddCircle(next, 6.0f, col, 0, 2.0f);
+            char buf[8];
+            std::snprintf(buf, sizeof(buf), "%d", idx++);
+            draw->AddText(ImVec2(next.x - 3.0f, next.y - 6.0f), col, buf);
+
+            if (plan.truncated && (i + 1 == plan.steps.size())) {
+              draw->AddCircle(next, 9.0f, col_warn, 0, 2.0f);
+            }
+
+            const float mx = mouse.x - next.x;
+            const float my = mouse.y - next.y;
+            const float md2 = mx * mx + my * my;
+            if (md2 <= hover_r2 && md2 < hovered_d2) {
+              hovered = static_cast<int>(i);
+              hovered_d2 = md2;
+            }
+
+            prev = next;
+          }
+
+          if (hovered >= 0) {
+            const PlannedOrderStep& stp = plan.steps[static_cast<std::size_t>(hovered)];
+            const std::string ord_str = order_to_string(q[static_cast<std::size_t>(hovered)]);
+
+            ImGui::BeginTooltip();
+            ImGui::Text("Order %d: %s", hovered + 1, ord_str.c_str());
+
+            if (!stp.feasible) {
+              ImGui::TextDisabled("Status: infeasible");
+            }
+
+            if (ui.system_map_order_paths_show_eta) {
+              ImGui::Text("ETA: +%.2f d  (Δ %.2f d)", stp.eta_days, stp.delta_days);
+            }
+            if (ui.system_map_order_paths_show_fuel) {
+              if (fuel_cap > 1e-9) {
+                ImGui::Text("Fuel: %.0f -> %.0f / %.0f t", stp.fuel_before_tons, stp.fuel_after_tons, fuel_cap);
+              } else {
+                ImGui::Text("Fuel: %.0f -> %.0f t", stp.fuel_before_tons, stp.fuel_after_tons);
+              }
+            }
+
+            if (ui.system_map_order_paths_show_notes && !stp.note.empty()) {
+              ImGui::Separator();
+              ImGui::TextUnformatted(stp.note.c_str());
+            }
+
+            if (plan.truncated) {
+              ImGui::Separator();
+              ImGui::TextDisabled("Truncated: %s", plan.truncated_reason.c_str());
+            }
+
+            ImGui::EndTooltip();
+          }
+        } else {
+          for (const auto& ord : q) {
+            const auto tgt = resolve_target(ord);
+            if (!tgt) continue;
+
+            const ImVec2 next = to_screen(*tgt, center, scale, zoom, pan);
+            draw->AddLine(prev, next, col, 2.0f);
+            add_arrowhead(draw, prev, next, col, 8.0f);
+
+            // Waypoint marker.
+            draw->AddCircleFilled(next, 6.0f, col_pt, 0);
+            draw->AddCircle(next, 6.0f, col, 0, 2.0f);
+            char buf[8];
+            std::snprintf(buf, sizeof(buf), "%d", idx++);
+            draw->AddText(ImVec2(next.x - 3.0f, next.y - 6.0f), col, buf);
+
+            prev = next;
+          }
         }
       }
     }

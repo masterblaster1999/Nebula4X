@@ -18,6 +18,7 @@
 #include <filesystem>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <vector>
 
 #if NEBULA4X_UI_RENDERER_OPENGL2
@@ -45,6 +46,20 @@ static bool iequals(std::string_view a, std::string_view b) {
   return true;
 }
 
+
+// Dear ImGui SDL_Renderer2 backend signature changed in newer versions to take an
+// explicit SDL_Renderer* parameter. Keep a tiny compatibility shim so we can build
+// against both old and new backend headers.
+static void imgui_sdlrenderer2_render_draw_data(ImDrawData* draw_data, SDL_Renderer* renderer) {
+  // Newer backends: void ImGui_ImplSDLRenderer2_RenderDrawData(ImDrawData*, SDL_Renderer*)
+  if constexpr (std::is_invocable_v<decltype(&ImGui_ImplSDLRenderer2_RenderDrawData), ImDrawData*, SDL_Renderer*>) {
+    ImGui_ImplSDLRenderer2_RenderDrawData(draw_data, renderer);
+  } else {
+    // Older backends: void ImGui_ImplSDLRenderer2_RenderDrawData(ImDrawData*)
+    (void)renderer;
+    ImGui_ImplSDLRenderer2_RenderDrawData(draw_data);
+  }
+}
 static void apply_renderer_request(RendererRequest& request, std::string_view value) {
   if (iequals(value, "auto")) {
     request = RendererRequest::Auto;
@@ -445,7 +460,7 @@ int main(int argc, char** argv) {
       SDL_SetRenderDrawColor(renderer.sdl_renderer, to_u8(cc[0]), to_u8(cc[1]), to_u8(cc[2]),
                              to_u8(cc[3]));
       SDL_RenderClear(renderer.sdl_renderer);
-      ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData());
+      imgui_sdlrenderer2_render_draw_data(ImGui::GetDrawData(), renderer.sdl_renderer);
       SDL_RenderPresent(renderer.sdl_renderer);
     }
   }
