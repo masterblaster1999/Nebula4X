@@ -8,6 +8,7 @@
 #include <limits>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -39,6 +40,66 @@ static int rand_int(std::uint64_t& s, int n) {
   if (n <= 1) return 0;
   return static_cast<int>(::nebula4x::util::bounded_u64(s, static_cast<std::uint64_t>(n)));
 }
+
+
+static const char* diplomacy_status_label(DiplomacyStatus s) {
+  switch (s) {
+    case DiplomacyStatus::Friendly: return "Friendly";
+    case DiplomacyStatus::Neutral: return "Neutral";
+    case DiplomacyStatus::Hostile: return "Hostile";
+  }
+  return "(Unknown)";
+}
+
+static std::string faction_label(const GameState& st, Id fid) {
+  if (fid == kInvalidId) return "(None)";
+  if (const auto* f = find_ptr(st.factions, fid)) {
+    if (!f->name.empty()) return f->name;
+  }
+  return "Faction " + std::to_string(static_cast<unsigned long long>(fid));
+}
+
+// Applies a small directed diplomacy adjustment between a contract issuer and
+// assignee on success/failure.
+// - Success: Hostile→Neutral→Friendly (issuer toward assignee)
+// - Failure/abandon (only if accepted): Friendly→Neutral
+//
+// Returns a short, user-facing note if a change was applied.
+static std::string maybe_apply_contract_diplomacy_delta(Simulation& sim, Contract& c, bool success, bool was_accepted) {
+  if (!success && !was_accepted) return {};
+  if (c.issuer_faction_id == kInvalidId || c.assignee_faction_id == kInvalidId) return {};
+  if (c.issuer_faction_id == c.assignee_faction_id) return {};
+
+  auto& st = sim.state();
+  const auto* issuer = find_ptr(st.factions, c.issuer_faction_id);
+  const auto* assignee = find_ptr(st.factions, c.assignee_faction_id);
+  if (!issuer || !assignee) return {};
+  if (issuer->control == FactionControl::AI_Pirate) return {};
+
+  const DiplomacyStatus base = sim.diplomatic_status_base(c.issuer_faction_id, c.assignee_faction_id);
+  DiplomacyStatus next = base;
+
+  if (success) {
+    if (base == DiplomacyStatus::Hostile) next = DiplomacyStatus::Neutral;
+    else if (base == DiplomacyStatus::Neutral) next = DiplomacyStatus::Friendly;
+    else return {};
+  } else {
+    if (base == DiplomacyStatus::Friendly) next = DiplomacyStatus::Neutral;
+    else return {};
+  }
+
+  if (next == base) return {};
+
+  sim.set_diplomatic_status(c.issuer_faction_id, c.assignee_faction_id, next,
+                            /*reciprocal=*/false, /*push_event_on_change=*/false);
+
+  std::string note = "Diplomacy: " + faction_label(st, c.issuer_faction_id) + " is now ";
+  note += diplomacy_status_label(next);
+  note += " toward ";
+  note += faction_label(st, c.assignee_faction_id);
+  return note;
+}
+
 
 struct ContractCandidate {
   ContractKind kind{ContractKind::InvestigateAnomaly};
@@ -131,7 +192,11 @@ bool Simulation::accept_contract(Id contract_id, bool push_event, std::string* e
     EventContext ctx;
     ctx.faction_id = c.assignee_faction_id;
     ctx.system_id = c.system_id;
-    this->push_event(EventLevel::Info, EventCategory::Exploration, "Contract accepted: " + c.name, ctx);
+    std::string msg = "Contract accepted: " + c.name;
+    if (c.issuer_faction_id != kInvalidId && c.issuer_faction_id != c.assignee_faction_id) {
+      msg += " (Issuer: " + faction_label(state_, c.issuer_faction_id) + ")";
+    }
+    this->push_event(EventLevel::Info, EventCategory::Exploration, msg, ctx);
   }
 
   return true;
@@ -150,17 +215,27 @@ bool Simulation::abandon_contract(Id contract_id, bool push_event, std::string* 
     return fail("Only Offered/Accepted contracts can be abandoned");
   }
 
+  const bool was_accepted = (c.status == ContractStatus::Accepted);
   const std::int64_t now = state_.date.days_since_epoch();
   c.status = ContractStatus::Failed;
   c.resolved_day = now;
   c.assigned_ship_id = kInvalidId;
   c.assigned_fleet_id = kInvalidId;
 
+  const std::string dip_note = maybe_apply_contract_diplomacy_delta(*this, c, /*success=*/false, was_accepted);
+
   if (push_event && is_player_faction(state_, c.assignee_faction_id)) {
     EventContext ctx;
     ctx.faction_id = c.assignee_faction_id;
     ctx.system_id = c.system_id;
-    this->push_event(EventLevel::Warn, EventCategory::Exploration, "Contract abandoned: " + c.name, ctx);
+    std::string msg = "Contract abandoned: " + c.name;
+    if (c.issuer_faction_id != kInvalidId && c.issuer_faction_id != c.assignee_faction_id) {
+      msg += " (Issuer: " + faction_label(state_, c.issuer_faction_id) + ")";
+    }
+    if (!dip_note.empty()) {
+      msg += " [" + dip_note + "]";
+    }
+    this->push_event(EventLevel::Warn, EventCategory::Exploration, msg, ctx);
   }
 
   return true;
@@ -428,6 +503,9 @@ void Simulation::tick_contracts() {
 
         std::string msg = "Contract expired: " + c.name;
         if (!reason.empty()) msg += " (" + reason + ")";
+        if (c.issuer_faction_id != kInvalidId && c.issuer_faction_id != c.assignee_faction_id) {
+          msg += " (Issuer: " + faction_label(state_, c.issuer_faction_id) + ")";
+        }
 
         push_event(EventLevel::Warn, EventCategory::Exploration, msg, ctx);
 
@@ -443,10 +521,13 @@ void Simulation::tick_contracts() {
     };
 
     auto mark_failed = [&](std::string reason) {
+      const bool was_accepted = (c.status == ContractStatus::Accepted);
       c.status = ContractStatus::Failed;
       c.resolved_day = now;
       c.assigned_ship_id = kInvalidId;
       c.assigned_fleet_id = kInvalidId;
+
+      const std::string dip_note = maybe_apply_contract_diplomacy_delta(*this, c, /*success=*/false, was_accepted);
 
       if (is_player_faction(state_, c.assignee_faction_id)) {
         EventContext ctx;
@@ -455,6 +536,12 @@ void Simulation::tick_contracts() {
 
         std::string msg = "Contract failed: " + c.name;
         if (!reason.empty()) msg += " (" + reason + ")";
+        if (c.issuer_faction_id != kInvalidId && c.issuer_faction_id != c.assignee_faction_id) {
+          msg += " (Issuer: " + faction_label(state_, c.issuer_faction_id) + ")";
+        }
+        if (!dip_note.empty()) {
+          msg += " [" + dip_note + "]";
+        }
 
         push_event(EventLevel::Warn, EventCategory::Exploration, msg, ctx);
 
@@ -740,6 +827,7 @@ void Simulation::tick_contracts() {
     }
 
     // Clear assignment to avoid dangling UI pointers.
+    const std::string dip_note = maybe_apply_contract_diplomacy_delta(*this, c, /*success=*/true, /*was_accepted=*/true);
     c.assigned_ship_id = kInvalidId;
     c.assigned_fleet_id = kInvalidId;
 
@@ -747,16 +835,22 @@ void Simulation::tick_contracts() {
       EventContext ctx;
       ctx.faction_id = c.assignee_faction_id;
       ctx.system_id = c.system_id;
-      push_event(EventLevel::Info, EventCategory::Exploration,
-                 "Contract completed: " + c.name + " (+" + std::to_string(static_cast<int>(std::round(c.reward_research_points))) + " RP)",
-                 ctx);
+            std::string msg = "Contract completed: " + c.name + " (+" +
+                         std::to_string(static_cast<int>(std::round(c.reward_research_points))) + " RP)";
+      if (c.issuer_faction_id != kInvalidId && c.issuer_faction_id != c.assignee_faction_id) {
+        msg += " (Issuer: " + faction_label(state_, c.issuer_faction_id) + ")";
+      }
+      if (!dip_note.empty()) {
+        msg += " [" + dip_note + "]";
+      }
+      push_event(EventLevel::Info, EventCategory::Exploration, msg, ctx);
 
       JournalEntry je;
       je.day = now;
       je.hour = state_.hour_of_day;
       je.category = EventCategory::Exploration;
       je.title = "Contract Completed";
-      je.text = c.name;
+      je.text = msg;
       je.system_id = c.system_id;
       push_journal_entry(c.assignee_faction_id, std::move(je));
     }
@@ -769,6 +863,85 @@ void Simulation::tick_contracts() {
 
   // Sorted for determinism.
   const std::vector<Id> faction_ids = sorted_keys(state_.factions);
+  // Precompute local faction presence per system for choosing external contract
+  // issuers. Population (colonies) dominates; if a system has no colonies, we
+  // fall back to ship presence. This is best-effort and purely for flavor/UI:
+  // contract availability should never depend on this.
+  std::unordered_map<Id, std::unordered_map<Id, double>> pop_by_sys;
+  std::unordered_map<Id, std::unordered_map<Id, double>> ships_by_sys;
+  pop_by_sys.reserve(state_.systems.size() * 2 + 4);
+  ships_by_sys.reserve(state_.systems.size() * 2 + 4);
+
+  for (const auto& [cid, col] : state_.colonies) {
+    (void)cid;
+    if (col.faction_id == kInvalidId) continue;
+    const auto* b = find_ptr(state_.bodies, col.body_id);
+    if (!b) continue;
+    if (b->system_id == kInvalidId) continue;
+    pop_by_sys[b->system_id][col.faction_id] += std::max(0.0, col.population_millions);
+  }
+
+  for (const auto& [sid, sh] : state_.ships) {
+    (void)sid;
+    if (sh.faction_id == kInvalidId) continue;
+    if (sh.system_id == kInvalidId) continue;
+    if (sh.hp <= 0.0) continue;
+    ships_by_sys[sh.system_id][sh.faction_id] += 1.0;
+  }
+
+  std::unordered_map<Id, std::vector<std::pair<Id, double>>> ranked_presence_cache;
+  ranked_presence_cache.reserve(state_.systems.size() * 2 + 4);
+
+  auto ranked_presence = [&](Id sys_id) -> const std::vector<std::pair<Id, double>>& {
+    auto itc = ranked_presence_cache.find(sys_id);
+    if (itc != ranked_presence_cache.end()) return itc->second;
+
+    std::vector<std::pair<Id, double>> out;
+    const auto itp = pop_by_sys.find(sys_id);
+    const bool use_pop = (itp != pop_by_sys.end() && !itp->second.empty());
+    if (use_pop) {
+      out.reserve(itp->second.size());
+      for (const auto& [fid, score] : itp->second) out.push_back({fid, score});
+    } else {
+      const auto its = ships_by_sys.find(sys_id);
+      if (its != ships_by_sys.end()) {
+        out.reserve(its->second.size());
+        for (const auto& [fid, score] : its->second) out.push_back({fid, score});
+      }
+    }
+
+    std::sort(out.begin(), out.end(), [](const auto& a, const auto& b) {
+      if (a.second != b.second) return a.second > b.second;
+      return a.first < b.first;
+    });
+
+    auto [it_ins, _] = ranked_presence_cache.emplace(sys_id, std::move(out));
+    return it_ins->second;
+  };
+
+  auto pick_contract_issuer_for_system = [&](Id sys_id, Id assignee_fid) -> Id {
+    if (sys_id == kInvalidId || assignee_fid == kInvalidId) return assignee_fid;
+
+    // Prefer an external issuer, but fall back to "self-issued" contracts.
+    const auto& ranked = ranked_presence(sys_id);
+    for (const auto& [cand_fid, _score] : ranked) {
+      if (cand_fid == kInvalidId) continue;
+      if (cand_fid == assignee_fid) continue;
+
+      const auto* f = find_ptr(state_.factions, cand_fid);
+      if (!f) continue;
+      if (f->control == FactionControl::AI_Pirate) continue;
+
+      // Require mutual non-hostility to avoid nonsensical issuers.
+      if (diplomatic_status(cand_fid, assignee_fid) == DiplomacyStatus::Hostile) continue;
+      if (diplomatic_status(assignee_fid, cand_fid) == DiplomacyStatus::Hostile) continue;
+
+      return cand_fid;
+    }
+
+    return assignee_fid;
+  };
+
 
   for (Id fid : faction_ids) {
     const auto* fac = find_ptr(state_.factions, fid);
@@ -1138,8 +1311,27 @@ void Simulation::tick_contracts() {
       c.id = allocate_id(state_);
       c.kind = cand->kind;
       c.status = ContractStatus::Offered;
-      c.issuer_faction_id = fid;
       c.assignee_faction_id = fid;
+      c.issuer_faction_id = fid;
+      // Select an issuer faction (may differ from assignee for external contracts).
+      {
+        Id issuer = fid;
+        if (c.kind == ContractKind::EscortConvoy) {
+          if (const auto* convoy = find_ptr(state_.ships, c.target_id)) issuer = convoy->faction_id;
+        } else {
+          issuer = pick_contract_issuer_for_system(c.system_id, fid);
+        }
+
+        if (issuer != kInvalidId && issuer != fid) {
+          if (const auto* ifac = find_ptr(state_.factions, issuer)) {
+            if (ifac->control != FactionControl::AI_Pirate &&
+                diplomatic_status(issuer, fid) != DiplomacyStatus::Hostile &&
+                diplomatic_status(fid, issuer) != DiplomacyStatus::Hostile) {
+              c.issuer_faction_id = issuer;
+            }
+          }
+        }
+      }
       c.system_id = cand->system_id;
       c.target_id = cand->target_id;
       c.target_id2 = cand->target_id2;

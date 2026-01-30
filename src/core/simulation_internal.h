@@ -57,6 +57,98 @@ inline double mkm_per_day_from_speed(double speed_km_s, double seconds_per_day) 
   return km_per_day / 1.0e6; // million km
 }
 
+// --- Geometric line-of-sight helpers ---
+//
+// Some systems (sensors, beam weapons) can optionally require a clear
+// line-of-sight that is not blocked by the physical radii of celestial bodies.
+//
+// NOTE: We keep these helpers here (internal header) so multiple simulation
+// translation units can share a single implementation without inflating the
+// public API surface.
+
+inline bool segment_intersects_circle(const Vec2& a, const Vec2& b, const Vec2& center, double radius_mkm) {
+  if (!(radius_mkm > 0.0) || !std::isfinite(radius_mkm)) return false;
+
+  const Vec2 ab = b - a;
+  const double ab2 = ab.x * ab.x + ab.y * ab.y;
+
+  // Degenerate segment: treat as a point test.
+  if (ab2 <= 1e-18) {
+    const Vec2 d = a - center;
+    const double d2 = d.x * d.x + d.y * d.y;
+    return d2 <= radius_mkm * radius_mkm + 1e-12;
+  }
+
+  // Project center onto segment.
+  const Vec2 ac = center - a;
+  double t = (ac.x * ab.x + ac.y * ab.y) / ab2;
+  if (!std::isfinite(t)) t = 0.0;
+  t = std::clamp(t, 0.0, 1.0);
+
+  const Vec2 p = a + ab * t;
+  const Vec2 d = p - center;
+  const double d2 = d.x * d.x + d.y * d.y;
+  return d2 <= radius_mkm * radius_mkm + 1e-12;
+}
+
+// Returns true if the segment from `from_mkm` to `to_mkm` is blocked by any
+// non-stellar body in the given system.
+//
+// We intentionally ignore BodyType::Star because the simulation is 2D; treating
+// the star as a hard occluder would create unrealistic artifacts where ships on
+// opposite sides of a system are always occluded by the star.
+inline bool system_line_of_sight_blocked_by_bodies(const GameState& s, Id system_id,
+                                                  const Vec2& from_mkm, const Vec2& to_mkm,
+                                                  double padding_mkm = 0.0) {
+  auto it_sys = s.systems.find(system_id);
+  if (it_sys == s.systems.end()) return false;
+
+  const auto& sys = it_sys->second;
+  if (sys.bodies.empty()) return false;
+
+  const double pad = (std::isfinite(padding_mkm) && padding_mkm > 0.0) ? padding_mkm : 0.0;
+
+  // Ignore bodies that contain the endpoints. Ships/colonies in orbit are
+  // represented at the body's position for simplicity; without this guard,
+  // a planet would always "occlude" LOS to/from anything orbiting it.
+  constexpr double kEndpointEpsMkm = 1e-6;
+
+  for (Id bid : sys.bodies) {
+    auto it_b = s.bodies.find(bid);
+    if (it_b == s.bodies.end()) continue;
+
+    const Body& body = it_b->second;
+    if (body.system_id != system_id) continue;
+    if (body.type == BodyType::Star) continue;
+
+    double r_km = body.radius_km;
+    if (!std::isfinite(r_km) || r_km <= 0.0) continue;
+
+    double r_mkm = r_km * 1.0e-6 + pad;
+    if (!std::isfinite(r_mkm) || r_mkm <= 0.0) continue;
+
+    const Vec2 c = body.position_mkm;
+    const double r_eff = r_mkm + kEndpointEpsMkm;
+    const double r_eff2 = r_eff * r_eff;
+
+    const Vec2 da = from_mkm - c;
+    const Vec2 db = to_mkm - c;
+    const double da2 = da.x * da.x + da.y * da.y;
+    const double db2 = db.x * db.x + db.y * db.y;
+    if (da2 <= r_eff2 || db2 <= r_eff2) continue;
+
+    if (segment_intersects_circle(from_mkm, to_mkm, c, r_mkm)) return true;
+  }
+
+  return false;
+}
+
+inline bool system_line_of_sight_clear_by_bodies(const GameState& s, Id system_id,
+                                                const Vec2& from_mkm, const Vec2& to_mkm,
+                                                double padding_mkm = 0.0) {
+  return !system_line_of_sight_blocked_by_bodies(s, system_id, from_mkm, to_mkm, padding_mkm);
+}
+
 // Many core containers are stored as std::unordered_map for convenience.
 // Iteration order of unordered_map is not specified, so relying on it can
 // introduce cross-platform nondeterminism.

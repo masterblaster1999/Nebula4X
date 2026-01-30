@@ -143,7 +143,10 @@ struct GameState {
   // v53: score history snapshots (victory analytics / projection).
   // v54: convoy escort contracts + escort neutral flag.
   // v55: colony conditions + colony stability/events.
-  int save_version{55};
+  // Latest on-disk save version produced by this build.
+  //
+  // Serialization will still load older versions and backfill fields.
+  int save_version{57};
   Date date;
 
   // Hour-of-day within the current Date (0..23).

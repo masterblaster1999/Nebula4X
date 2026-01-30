@@ -18,7 +18,7 @@ using json::Array;
 using json::Object;
 using json::Value;
 
-constexpr int kCurrentSaveVersion = 56;
+constexpr int kCurrentSaveVersion = 57;
 
 
 std::string contract_kind_to_string(ContractKind k) {
@@ -1337,6 +1337,10 @@ json::Value serialize_game_to_json_value(const GameState& s) {
     if (sys.storm_start_day != 0) o["storm_start_day"] = static_cast<double>(sys.storm_start_day);
     if (sys.storm_end_day != 0) o["storm_end_day"] = static_cast<double>(sys.storm_end_day);
 
+    if (std::isfinite(sys.civilian_trade_activity_score) && sys.civilian_trade_activity_score > 1e-9) {
+      o["civilian_trade_activity_score"] = std::max(0.0, sys.civilian_trade_activity_score);
+    }
+
     Array bodies;
     {
       auto ids = sys.bodies;
@@ -2375,6 +2379,11 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     }
     if (auto it = o.find("storm_end_day"); it != o.end()) {
       sys.storm_end_day = std::max<std::int64_t>(0, static_cast<std::int64_t>(it->second.number_value(0.0)));
+    }
+
+    if (auto it = o.find("civilian_trade_activity_score"); it != o.end()) {
+      const double v = it->second.number_value(0.0);
+      sys.civilian_trade_activity_score = (std::isfinite(v) && v > 0.0) ? v : 0.0;
     }
     // Sanity: if malformed, clear.
     if (!(sys.storm_peak_intensity > 0.0) || sys.storm_end_day <= sys.storm_start_day) {

@@ -664,10 +664,67 @@ static std::optional<CodexEchoOutcome> maybe_trigger_codex_echo(Simulation& sim,
 void Simulation::tick_ships(double dt_days) {
   dt_days = std::clamp(dt_days, 0.0, 10.0);
   NEBULA4X_TRACE_SCOPE("tick_ships", "sim.ships");
-  auto cargo_used_tons = [](const Ship& s) {
+
+  // Missile ships can carry Munitions for reloading without it consuming their
+  // generic cargo capacity. Treat Munitions as magazine stock for finite-ammo
+  // missile designs.
+  constexpr const char* kMunitionsKey = "Munitions";
+
+  auto cargo_used_tons = [&](const Ship& s) {
     double used = 0.0;
-    for (const auto& [_, tons] : s.cargo) used += std::max(0.0, tons);
+    bool ignore_munitions = false;
+    if (const ShipDesign* d = find_design(s.design_id)) {
+      ignore_munitions = d->missile_ammo_capacity > 0;
+    }
+    for (const auto& [k, tons] : s.cargo) {
+      if (ignore_munitions && k == kMunitionsKey) continue;
+      used += std::max(0.0, tons);
+    }
     return used;
+  };
+
+  auto munitions_magazine_free_tons = [&](const Ship& s) -> double {
+    const ShipDesign* d = find_design(s.design_id);
+    if (!d) return 0.0;
+    const int cap = std::max(0, d->missile_ammo_capacity);
+    if (cap <= 0) return 0.0;
+    int ammo = s.missile_ammo;
+    if (ammo < 0) ammo = cap;
+    ammo = std::clamp(ammo, 0, cap);
+
+    double stored = 0.0;
+    if (auto it = s.cargo.find(kMunitionsKey); it != s.cargo.end()) {
+      stored = std::max(0.0, it->second);
+    }
+
+    double free = static_cast<double>(cap) - static_cast<double>(ammo) - stored;
+    if (!std::isfinite(free)) return 0.0;
+    return std::max(0.0, free);
+  };
+
+  auto reload_missile_ammo_from_munitions = [&](Ship& s) {
+    const ShipDesign* d = find_design(s.design_id);
+    if (!d) return;
+    const int cap = std::max(0, d->missile_ammo_capacity);
+    if (cap <= 0) return;
+
+    if (s.missile_ammo < 0) s.missile_ammo = cap;
+    s.missile_ammo = std::clamp(s.missile_ammo, 0, cap);
+    int need = cap - s.missile_ammo;
+    if (need <= 0) return;
+
+    auto it = s.cargo.find(kMunitionsKey);
+    if (it == s.cargo.end()) return;
+    const double avail_d = std::max(0.0, it->second);
+    const int avail = static_cast<int>(std::floor(avail_d + 1e-9));
+    const int take = std::min(need, avail);
+    if (take <= 0) return;
+
+    s.missile_ammo += take;
+    s.missile_ammo = std::clamp(s.missile_ammo, 0, cap);
+
+    it->second = avail_d - static_cast<double>(take);
+    if (it->second <= 1e-9) s.cargo.erase(it);
   };
 
   const double arrive_eps = std::max(0.0, cfg_.arrival_epsilon_mkm);
@@ -2699,6 +2756,10 @@ void Simulation::tick_ships(double dt_days) {
       std::unordered_map<std::string, double>* dest_minerals = nullptr;
       double dest_capacity_free = 1e300;
 
+      // If the destination is a ship, we may apply special handling (e.g.
+      // munitions -> missile magazine reload).
+      Ship* dest_ship = nullptr;
+
       Colony* cargo_colony = nullptr;
 
       if (cargo_mode == 0) { // Load from colony
@@ -2706,10 +2767,17 @@ void Simulation::tick_ships(double dt_days) {
         if (!cargo_colony) return 0.0;
         source_minerals = &cargo_colony->minerals;
         dest_minerals = &ship.cargo;
+        dest_ship = &ship;
         
         const auto* d = find_design(ship.design_id);
         const double cap = d ? d->cargo_tons : 0.0;
         dest_capacity_free = std::max(0.0, cap - cargo_used_tons(ship));
+
+        // Munitions can be loaded into missile magazines even when the design
+        // has no generic cargo capacity.
+        if (cargo_mineral == kMunitionsKey && d && d->missile_ammo_capacity > 0) {
+          dest_capacity_free = munitions_magazine_free_tons(ship);
+        }
       } else if (cargo_mode == 1) { // Unload to colony
         cargo_colony = find_ptr(state_.colonies, cargo_colony_id);
         if (!cargo_colony) return 0.0;
@@ -2721,10 +2789,17 @@ void Simulation::tick_ships(double dt_days) {
         if (!tgt) return 0.0;
         source_minerals = &ship.cargo;
         dest_minerals = &tgt->cargo;
+        dest_ship = tgt;
         
         const auto* d = find_design(tgt->design_id);
         const double cap = d ? d->cargo_tons : 0.0;
         dest_capacity_free = std::max(0.0, cap - cargo_used_tons(*tgt));
+
+        // Allow transferring Munitions into missile magazines even if the
+        // target ship has zero generic cargo capacity.
+        if (cargo_mineral == kMunitionsKey && d && d->missile_ammo_capacity > 0) {
+          dest_capacity_free = munitions_magazine_free_tons(*tgt);
+        }
       }
 
       if (!source_minerals || !dest_minerals) return 0.0;
@@ -2798,12 +2873,37 @@ void Simulation::tick_ships(double dt_days) {
             if (it_src->second <= 1e-9) source_minerals->erase(it_src);
           }
           moved_total += take;
+
+          // If we just transferred Munitions into a finite-ammo missile ship,
+          // immediately reload missile ammo from the received munitions.
+          if (dest_ship && min_type == kMunitionsKey) {
+            reload_missile_ammo_from_munitions(*dest_ship);
+          }
         }
         return take;
       };
 
+      auto record_trade_activity = [&]() {
+        // Record only real colony transfers performed by Merchant Guild civilian convoys.
+        if (!(moved_total > 1e-9)) return;
+        if (!(cargo_mode == 0 || cargo_mode == 1)) return;
+        if (!allow_civilian_trade_cargo_ops) return;
+        if (merchant_faction_id == kInvalidId || ship.faction_id != merchant_faction_id) return;
+        auto it_sys = state_.systems.find(ship.system_id);
+        if (it_sys == state_.systems.end()) return;
+        if (!std::isfinite(it_sys->second.civilian_trade_activity_score) || it_sys->second.civilian_trade_activity_score < 0.0) {
+          it_sys->second.civilian_trade_activity_score = 0.0;
+        }
+        it_sys->second.civilian_trade_activity_score += moved_total;
+
+        // The prosperity cache is day-scoped; invalidate so this within-day
+        // update becomes visible without waiting for midnight.
+        invalidate_trade_prosperity_cache();
+      };
+
       if (!cargo_mineral.empty()) {
         transfer_one(cargo_mineral, remaining_request);
+        record_trade_activity();
         return moved_total;
       }
 
@@ -2819,6 +2919,7 @@ void Simulation::tick_ships(double dt_days) {
         const double moved = transfer_one(k, remaining_request);
         remaining_request -= moved;
       }
+      record_trade_activity();
       return moved_total;
     };
 

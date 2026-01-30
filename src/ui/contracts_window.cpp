@@ -63,6 +63,31 @@ std::string fleet_label(const GameState& st, Id fleet_id) {
   return "Fleet " + std::to_string((unsigned long long)fleet_id);
 }
 
+
+std::string faction_label(const GameState& st, Id fid) {
+  if (fid == kInvalidId) return "(None)";
+  if (const auto* f = find_ptr(st.factions, fid)) {
+    if (!f->name.empty()) return f->name;
+  }
+  return "Faction " + std::to_string((unsigned long long)fid);
+}
+
+const char* diplomacy_status_label(DiplomacyStatus s) {
+  switch (s) {
+    case DiplomacyStatus::Friendly: return "Friendly";
+    case DiplomacyStatus::Neutral: return "Neutral";
+    case DiplomacyStatus::Hostile: return "Hostile";
+  }
+  return "(Unknown)";
+}
+
+std::string contract_issuer_label(const GameState& st, Id viewer_faction_id, const Contract& c) {
+  if (c.issuer_faction_id == kInvalidId) return "(None)";
+  if (viewer_faction_id != kInvalidId && c.issuer_faction_id == viewer_faction_id) return "(Self)";
+  return faction_label(st, c.issuer_faction_id);
+}
+
+
 std::string contract_target_label(const Simulation& sim, Id viewer_faction_id, const GameState& st, const Contract& c) {
   if (c.target_id == kInvalidId) return "(None)";
   switch (c.kind) {
@@ -328,6 +353,9 @@ struct ContractsWindowState {
   bool show_expired{false};
   bool show_failed{false};
 
+  bool show_internal{true};
+  bool show_external{true};
+
   bool clear_orders_on_assign{true};
   bool restrict_to_discovered{true};
   Id assign_ship{kInvalidId};
@@ -440,10 +468,20 @@ void draw_contracts_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& 
   ImGui::SameLine();
   ImGui::Checkbox("Failed", &ws.show_failed);
 
+  ImGui::Checkbox("Internal", &ws.show_internal);
+  ImGui::SameLine();
+  ImGui::Checkbox("External", &ws.show_external);
+
   // Ensure at least one filter is enabled.
   if (!ws.show_offered && !ws.show_accepted && !ws.show_completed && !ws.show_expired && !ws.show_failed) {
     ws.show_offered = true;
     ws.show_accepted = true;
+  }
+
+  // Ensure at least one issuer filter is enabled.
+  if (!ws.show_internal && !ws.show_external) {
+    ws.show_internal = true;
+    ws.show_external = true;
   }
 
   std::vector<Id> contract_ids;
@@ -451,6 +489,11 @@ void draw_contracts_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& 
   for (const auto& [cid, c] : st.contracts) {
     if (c.assignee_faction_id != fid) continue;
     if (!status_enabled(ws, c.status)) continue;
+
+    const bool internal = (c.issuer_faction_id == kInvalidId || c.issuer_faction_id == c.assignee_faction_id);
+    if (internal && !ws.show_internal) continue;
+    if (!internal && !ws.show_external) continue;
+
     contract_ids.push_back(cid);
   }
 
@@ -467,8 +510,9 @@ void draw_contracts_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& 
 
   ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable |
                           ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp;
-  if (ImGui::BeginTable("contracts_table", 7, flags, ImVec2(0.0f, 320.0f))) {
+  if (ImGui::BeginTable("contracts_table", 8, flags, ImVec2(0.0f, 320.0f))) {
     ImGui::TableSetupColumn("Name");
+    ImGui::TableSetupColumn("Issuer");
     ImGui::TableSetupColumn("Kind");
     ImGui::TableSetupColumn("Status");
     ImGui::TableSetupColumn("Reward (RP)", ImGuiTableColumnFlags_WidthFixed, 90.0f);
@@ -491,6 +535,10 @@ void draw_contracts_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& 
         ws.selected_contract = cid;
         ws.last_error.clear();
       }
+
+      ImGui::TableNextColumn();
+      const std::string issuer = contract_issuer_label(st, fid, *c);
+      ImGui::TextUnformatted(issuer.c_str());
 
       ImGui::TableNextColumn();
       ImGui::TextUnformatted(contract_kind_label(c->kind));
@@ -540,6 +588,11 @@ void draw_contracts_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& 
   ImGui::TextDisabled("ID: %llu", (unsigned long long)c->id);
   ImGui::Text("Kind: %s", contract_kind_label(c->kind));
   ImGui::Text("Status: %s", contract_status_label(c->status));
+  ImGui::Text("Issuer: %s", contract_issuer_label(st, fid, *c).c_str());
+  if (c->issuer_faction_id != kInvalidId && c->issuer_faction_id != fid) {
+    const DiplomacyStatus ds = sim.diplomatic_status(c->issuer_faction_id, fid);
+    ImGui::Text("Issuer stance: %s", diplomacy_status_label(ds));
+  }
   ImGui::Text("Target: %s", contract_target_label(sim, fid, st, *c).c_str());
   ImGui::Text("System: %s", system_label(st, c->system_id).c_str());
   ImGui::Text("Reward: %.0f RP", std::max(0.0, c->reward_research_points));

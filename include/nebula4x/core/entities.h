@@ -1961,6 +1961,19 @@ struct StarSystem {
   std::int64_t storm_start_day{0}; // days_since_epoch
   std::int64_t storm_end_day{0};   // exclusive (storm active when now in [start, end))
 
+  // Civilian trade activity score (decayed).
+  //
+  // This is a lightweight macro signal derived from actual civilian freight
+  // transfers (Merchant Guild convoys). It is decayed daily and used to
+  // optionally boost the system's trade prosperity hub score and market size.
+  //
+  // Units: abstract "tons moved" aggregated over time with exponential decay.
+  //
+  // Notes:
+  // - Stored on the system for persistence across saves.
+  // - Does not attempt to model prices/money; it is purely a volume signal.
+  double civilian_trade_activity_score{0.0};
+
   std::vector<Id> bodies;
   std::vector<Id> ships;
   std::vector<Id> jump_points;

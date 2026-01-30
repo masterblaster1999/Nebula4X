@@ -642,6 +642,30 @@ double ship_maintenance_breakdown_subsystem_damage_max{0.20};
   double sensor_los_min_multiplier{0.25};
   double sensor_los_max_multiplier{1.00};
 
+  // --- Celestial body occlusion (experimental) ---
+  //
+  // When enabled, sensor detection and (optionally) direct-fire weapons
+  // require a clear geometric line-of-sight that is not blocked by the
+  // physical radii of non-stellar bodies (planets/moons/gas giants/etc.).
+  //
+  // Design notes:
+  //  - This adds tactics: ships can hide behind planets, and beam weapons
+  //    cannot shoot "through" a planet even if another sensor source
+  //    provides target coordinates.
+  //  - We intentionally ignore BodyType::Star for now because the simulation
+  //    is 2D; treating the star as a hard occluder would create unrealistic
+  //    "everything is blocked by the sun" artifacts.
+  //
+  // These flags default to false to preserve legacy behavior and existing
+  // scenarios/tests.
+  bool enable_body_occlusion_sensors{false};
+  bool enable_body_occlusion_weapons{false};
+
+  // Optional padding applied to body radii when testing occlusion (million-km).
+  // This can be used to approximate atmospheres / "sensor horizon" fuzz.
+  double body_occlusion_padding_mkm{0.0};
+
+
   // --- Terrain-aware navigation (experimental) ---
   //
   // When enabled, ships steering toward a target can optionally perform a small
@@ -1601,6 +1625,37 @@ int colony_condition_max_active{4};
   double civilian_trade_convoy_shipping_loss_risk_weight{0.90};
 
 
+  // --- Civilian trade activity feedback (prosperity) ---
+  //
+  // When enabled, the simulation records a decayed per-system "trade activity"
+  // score derived from real civilian cargo transfers (Merchant Guild convoys).
+  //
+  // This score can then boost Trade Prosperity in that system, providing an
+  // emergent positive feedback loop:
+  //   more safe traffic -> more prosperity -> more production -> more trade.
+  //
+  // This is intentionally macro/approximate; it does not model prices.
+  bool enable_civilian_trade_activity_prosperity{true};
+
+  // Memory window (days) for the trade activity score decay.
+  // <= 0 disables the decay and clears the score.
+  int civilian_trade_activity_memory_days{90};
+
+  // Trade activity score is mapped into a 0..1 factor via:
+  //   factor = 1 - exp(-score / civilian_trade_activity_score_scale_tons)
+  // Larger scale => more volume required to reach the same factor.
+  double civilian_trade_activity_score_scale_tons{20000.0};
+
+  // Caps for the derived prosperity bonuses.
+  //
+  // - hub_score_bonus_cap is added to TradeNetwork hub_score (clamped to 1).
+  // - market_size_bonus_cap is a multiplicative boost to TradeNetwork market_size.
+  //
+  // The actual applied bonus is cap * factor.
+  double civilian_trade_activity_hub_score_bonus_cap{0.18};
+  double civilian_trade_activity_market_size_bonus_cap{0.22};
+
+
   // --- Trade network diplomacy modifiers ---
   //
   // When enabled, TradeNetwork lane volumes are scaled based on the diplomatic
@@ -1920,6 +1975,19 @@ struct CivilianShippingLossStatus {
   int recent_wrecks{0};
 };
 
+// A lightweight summary of recent civilian trade activity in a star system.
+//
+// The score is a decayed sum of real cargo transfers performed by Merchant
+// Guild convoys. It can be used as a macro signal for "how busy" a system is.
+//
+// factor is normalized to [0,1] via a configurable scale.
+struct CivilianTradeActivityStatus {
+  Id system_id{kInvalidId};
+
+  double score{0.0};
+  double factor{0.0};
+};
+
 // Colony trade prosperity status.
 //
 // Trade prosperity is a lightweight economy modifier derived from the procedural
@@ -2105,6 +2173,16 @@ class Simulation {
 
   double sensor_los_strength() const { return cfg_.sensor_los_strength; }
   void set_sensor_los_strength(double strength) { cfg_.sensor_los_strength = strength; }
+
+
+  bool body_occlusion_sensors_enabled() const { return cfg_.enable_body_occlusion_sensors; }
+  void set_body_occlusion_sensors_enabled(bool enabled) { cfg_.enable_body_occlusion_sensors = enabled; }
+
+  bool body_occlusion_weapons_enabled() const { return cfg_.enable_body_occlusion_weapons; }
+  void set_body_occlusion_weapons_enabled(bool enabled) { cfg_.enable_body_occlusion_weapons = enabled; }
+
+  double body_occlusion_padding_mkm() const { return cfg_.body_occlusion_padding_mkm; }
+  void set_body_occlusion_padding_mkm(double v) { cfg_.body_occlusion_padding_mkm = v; }
 
 
   bool beam_los_attenuation_enabled() const { return cfg_.enable_beam_los_attenuation; }
@@ -2610,6 +2688,12 @@ class Simulation {
   // repeated scans.
   CivilianShippingLossStatus civilian_shipping_loss_status_for_system(Id system_id) const;
   double civilian_shipping_loss_pressure_for_system(Id system_id) const;
+
+  // Civilian trade activity query helpers.
+  //
+  // These are pure queries derived from the per-system activity score.
+  CivilianTradeActivityStatus civilian_trade_activity_status_for_system(Id system_id) const;
+  double civilian_trade_activity_factor_for_system(Id system_id) const;
 
   // Trade prosperity query helpers.
   //

@@ -73,7 +73,13 @@ struct FreightCandidate {
 
   bool restrict_to_discovered{true};
 
-  std::vector<FreightPlanItem> items;
+  // Minerals loaded at the source colony (may be empty).
+  std::vector<FreightPlanItem> load_items;
+  // Minerals unloaded at the destination colony (includes cargo already on the ship).
+  std::vector<FreightPlanItem> unload_items;
+
+  // How many tons of the unloaded cargo come from the ship's existing holds.
+  double deliver_from_cargo_tons{0.0};
 
   double eta1{0.0};
   double eta2{0.0};
@@ -386,8 +392,8 @@ FreightPlannerResult compute_freight_plan(const Simulation& sim, Id faction_id,
     auto it_dest_pos = colony_pos.find(dest_cid);
     if (it_dest_sys == colony_system.end() || it_dest_pos == colony_pos.end()) return std::nullopt;
 
-    std::vector<FreightPlanItem> items;
-    items.reserve(bundle_multi ? sd.cargo_minerals.size() : 1);
+    std::vector<FreightPlanItem> unload_items;
+    unload_items.reserve(bundle_multi ? sd.cargo_minerals.size() : 1);
 
     double total = 0.0;
 
@@ -408,7 +414,7 @@ FreightPlannerResult compute_freight_plan(const Simulation& sim, Id faction_id,
       pi.tons = amount;
       pi.reason = first_reason(dest_cid, mineral);
 
-      items.push_back(std::move(pi));
+      unload_items.push_back(std::move(pi));
       total += amount;
 
       if (!bundle_multi) break;
@@ -426,7 +432,9 @@ FreightPlannerResult compute_freight_plan(const Simulation& sim, Id faction_id,
     c.source = kInvalidId;
     c.dest = dest_cid;
     c.restrict_to_discovered = opt.restrict_to_discovered;
-    c.items = std::move(items);
+    c.load_items.clear();
+    c.unload_items = std::move(unload_items);
+    c.deliver_from_cargo_tons = total;
     c.eta1 = 0.0;
     c.eta2 = eta;
     c.eta_total = eta;
@@ -437,7 +445,6 @@ FreightPlannerResult compute_freight_plan(const Simulation& sim, Id faction_id,
 
   auto make_pickup_candidate = [&](const ShipPlanData& sd, Id src_cid, Id dest_cid) -> std::optional<FreightCandidate> {
     if (!sd.sh) return std::nullopt;
-    if (sd.used >= min_tons) return std::nullopt;  // keep pickup logic for "empty" ships only
     if (sd.free < min_tons) return std::nullopt;
 
     if (src_cid == dest_cid) return std::nullopt;
@@ -455,46 +462,122 @@ FreightPlannerResult compute_freight_plan(const Simulation& sim, Id faction_id,
     if (it_src_sys == colony_system.end() || it_src_pos == colony_pos.end()) return std::nullopt;
     if (it_dest_sys == colony_system.end() || it_dest_pos == colony_pos.end()) return std::nullopt;
 
-    std::vector<FreightPlanItem> items;
-    items.reserve(bundle_multi ? it_need_list->second.size() : 1);
+    // We build separate load/unload item lists so we can support "top up then deliver"
+    // plans for partially-loaded ships.
+    std::vector<FreightPlanItem> load_items;
+    std::vector<FreightPlanItem> unload_items;
+    load_items.reserve(bundle_multi ? it_need_list->second.size() : 1);
+    unload_items.reserve(bundle_multi ? it_need_list->second.size() : 1);
 
     double remaining = sd.free;
-    double total = 0.0;
+    double loaded_total = 0.0;
+    double deliver_from_cargo_total = 0.0;
 
-    for (const std::string& mineral : it_need_list->second) {
-      if (remaining < min_tons) break;
+    const auto missing_for = [&](const std::string& mineral) -> double {
+      auto itc = missing_by_colony.find(dest_cid);
+      if (itc == missing_by_colony.end()) return 0.0;
+      auto itm = itc->second.find(mineral);
+      if (itm == itc->second.end()) return 0.0;
+      return std::max(0.0, itm->second);
+    };
 
-      const double miss = [&]() {
-        auto itc = missing_by_colony.find(dest_cid);
-        if (itc == missing_by_colony.end()) return 0.0;
-        auto itm = itc->second.find(mineral);
-        if (itm == itc->second.end()) return 0.0;
-        return std::max(0.0, itm->second);
-      }();
-      if (miss < min_tons) continue;
-
-      auto it_exp = it_exp_c->second.find(mineral);
-      if (it_exp == it_exp_c->second.end()) continue;
-      const double avail = std::max(0.0, it_exp->second);
-      if (avail < min_tons) continue;
-
-      const double take_cap = avail * take_frac;
-      const double amount = std::min({remaining, miss, take_cap});
-      if (amount < min_tons) continue;
-
-      FreightPlanItem pi;
-      pi.mineral = mineral;
-      pi.tons = amount;
-      pi.reason = first_reason(dest_cid, mineral);
-
-      items.push_back(std::move(pi));
-      total += amount;
-      remaining -= amount;
-
-      if (!bundle_multi) break;
+    // When bundling is disabled, we intentionally pick a single mineral to move.
+    std::string focus_mineral;
+    if (!bundle_multi) {
+      // Prefer delivering an on-board mineral that is missing at the destination.
+      for (const std::string& mineral : it_need_list->second) {
+        const double have = map_get(sd.sh->cargo, mineral);
+        if (have < min_tons) continue;
+        const double miss = missing_for(mineral);
+        if (miss < min_tons) continue;
+        focus_mineral = mineral;
+        break;
+      }
+      // Otherwise, pick the first mineral the source can provide.
+      if (focus_mineral.empty()) {
+        for (const std::string& mineral : it_need_list->second) {
+          if (missing_for(mineral) < min_tons) continue;
+          auto it_exp = it_exp_c->second.find(mineral);
+          if (it_exp == it_exp_c->second.end()) continue;
+          if (std::max(0.0, it_exp->second) < min_tons) continue;
+          focus_mineral = mineral;
+          break;
+        }
+      }
+      if (focus_mineral.empty()) return std::nullopt;
     }
 
-    if (total < min_tons) return std::nullopt;
+    auto consider = [&](const std::string& mineral) {
+      if (remaining < min_tons) return;
+
+      const double miss = missing_for(mineral);
+      if (miss < min_tons) return;
+
+      // Portion that can be satisfied from cargo already on the ship.
+      double deliver_from_cargo = 0.0;
+      const double have = map_get(sd.sh->cargo, mineral);
+      if (have >= min_tons) {
+        deliver_from_cargo = std::min(have, miss);
+        if (deliver_from_cargo < min_tons) deliver_from_cargo = 0.0;
+      }
+
+      const double miss_after_cargo = std::max(0.0, miss - deliver_from_cargo);
+
+      // Portion to pick up from the source colony.
+      double load_amount = 0.0;
+      if (miss_after_cargo >= min_tons) {
+        auto it_exp = it_exp_c->second.find(mineral);
+        if (it_exp != it_exp_c->second.end()) {
+          const double avail = std::max(0.0, it_exp->second);
+          if (avail >= min_tons) {
+            const double take_cap = avail * take_frac;
+            load_amount = std::min({remaining, miss_after_cargo, take_cap});
+            if (load_amount < min_tons) load_amount = 0.0;
+          }
+        }
+      }
+
+      if (deliver_from_cargo <= 0.0 && load_amount <= 0.0) return;
+
+      if (load_amount > 0.0) {
+        FreightPlanItem li;
+        li.mineral = mineral;
+        li.tons = load_amount;
+        // li.reason intentionally empty (the reason is destination-side).
+        load_items.push_back(std::move(li));
+        loaded_total += load_amount;
+        remaining -= load_amount;
+      }
+
+      const double unload_amount = deliver_from_cargo + load_amount;
+      if (unload_amount >= min_tons) {
+        FreightPlanItem ui;
+        ui.mineral = mineral;
+        ui.tons = unload_amount;
+        ui.reason = first_reason(dest_cid, mineral);
+        unload_items.push_back(std::move(ui));
+        deliver_from_cargo_total += deliver_from_cargo;
+      }
+    };
+
+    if (bundle_multi) {
+      for (const std::string& mineral : it_need_list->second) {
+        consider(mineral);
+        if (remaining < min_tons) break;
+      }
+    } else {
+      consider(focus_mineral);
+    }
+
+    // This is a pickup candidate: it must load something meaningful at the source.
+    if (loaded_total < min_tons) return std::nullopt;
+
+    const double total_unload = [&]() {
+      double s = 0.0;
+      for (const auto& it : unload_items) s += std::max(0.0, it.tons);
+      return s;
+    }();
+    if (total_unload < min_tons) return std::nullopt;
 
     const double eta1 = estimate_eta_days_to_pos(sd.sh->system_id, sd.sh->position_mkm, sd.sh->speed_km_s,
                                                  it_src_sys->second, it_src_pos->second);
@@ -512,12 +595,14 @@ FreightPlannerResult compute_freight_plan(const Simulation& sim, Id faction_id,
     c.source = src_cid;
     c.dest = dest_cid;
     c.restrict_to_discovered = opt.restrict_to_discovered;
-    c.items = std::move(items);
+    c.load_items = std::move(load_items);
+    c.unload_items = std::move(unload_items);
+    c.deliver_from_cargo_tons = deliver_from_cargo_total;
     c.eta1 = eta1;
     c.eta2 = eta2;
     c.eta_total = eta_total;
-    c.total_tons = total;
-    c.eff = eta_total / std::max(1e-9, total);
+    c.total_tons = total_unload;
+    c.eff = eta_total / std::max(1e-9, total_unload);
     return c;
   };
 
@@ -538,12 +623,23 @@ FreightPlannerResult compute_freight_plan(const Simulation& sim, Id faction_id,
       if (!best || better(*cand, *best)) {
         best = std::move(cand);
       }
+
+      // Also consider topping up from a source colony on the way to the same destination.
+      // This is only valid in the delivery phase if we actually deliver meaningful on-board cargo.
+      for (Id src_cid : colony_ids) {
+        if (exportable_by_colony.find(src_cid) == exportable_by_colony.end()) continue;
+        auto topup = make_pickup_candidate(sd, src_cid, dest_cid);
+        if (!topup) continue;
+        if (topup->deliver_from_cargo_tons < min_tons) continue;
+        if (!best || better(*topup, *best)) {
+          best = std::move(topup);
+        }
+      }
     }
     return best;
   };
 
   auto best_pickup_for_ship = [&](const ShipPlanData& sd) -> std::optional<FreightCandidate> {
-    if (sd.used >= min_tons) return std::nullopt;
     if (sd.free < min_tons) return std::nullopt;
     if (dests_with_needs.empty()) return std::nullopt;
     if (exportable_by_colony.empty()) return std::nullopt;
@@ -614,19 +710,56 @@ FreightPlannerResult compute_freight_plan(const Simulation& sim, Id faction_id,
 
       // Commit.
       FreightAssignment asg;
-      asg.kind = FreightAssignmentKind::DeliverCargo;
+      asg.kind = best_now->kind;
       asg.ship_id = best_now->ship_id;
-      asg.source_colony_id = kInvalidId;
+      asg.source_colony_id = best_now->source;
       asg.dest_colony_id = best_now->dest;
       asg.restrict_to_discovered = best_now->restrict_to_discovered;
-      asg.items = std::move(best_now->items);
-      asg.eta_to_source_days = 0.0;
-      asg.eta_to_dest_days = best_now->eta_total;
+      asg.items = std::move(best_now->unload_items);
+
+      // Construct explicit route stops so we can support load/unload quantities
+      // that differ (partially-loaded ships).
+      asg.stops.clear();
+      if (!best_now->load_items.empty() && asg.source_colony_id != kInvalidId) {
+        FreightStop s;
+        s.colony_id = asg.source_colony_id;
+        s.actions.reserve(best_now->load_items.size());
+        for (const auto& li : best_now->load_items) {
+          if (li.tons < min_tons) continue;
+          FreightStopAction a;
+          a.kind = FreightStopActionKind::Load;
+          a.mineral = li.mineral;
+          a.tons = li.tons;
+          s.actions.push_back(std::move(a));
+        }
+        if (!s.actions.empty()) asg.stops.push_back(std::move(s));
+      }
+      {
+        FreightStop d;
+        d.colony_id = asg.dest_colony_id;
+        d.actions.reserve(asg.items.size());
+        for (const auto& ui : asg.items) {
+          if (ui.tons < min_tons) continue;
+          FreightStopAction a;
+          a.kind = FreightStopActionKind::Unload;
+          a.mineral = ui.mineral;
+          a.tons = ui.tons;
+          a.reason = ui.reason;
+          d.actions.push_back(std::move(a));
+        }
+        if (!d.actions.empty()) asg.stops.push_back(std::move(d));
+      }
+
+      asg.eta_to_source_days = best_now->eta1;
+      asg.eta_to_dest_days = best_now->eta2;
       asg.eta_total_days = best_now->eta_total;
-      asg.note = "Deliver existing cargo";
+      asg.note = (asg.kind == FreightAssignmentKind::DeliverCargo) ? "Deliver existing cargo" : "Top up + deliver";
 
       for (const auto& it_item : asg.items) {
         dec_missing(asg.dest_colony_id, it_item.mineral, it_item.tons);
+      }
+      for (const auto& it_item : best_now->load_items) {
+        dec_exportable(asg.source_colony_id, it_item.mineral, it_item.tons);
       }
 
       assigned.insert(asg.ship_id);
@@ -634,13 +767,13 @@ FreightPlannerResult compute_freight_plan(const Simulation& sim, Id faction_id,
     }
   }
 
-  // Phase 2: pickup + deliver with empty ships.
+  // Phase 2: pickup + deliver (ships must have free capacity; they may already
+  // carry cargo, which will be delivered opportunistically when useful).
   {
     std::priority_queue<FreightCandidate, std::vector<FreightCandidate>, FreightCandidateWorse> pq;
 
     for (auto& sd : ships) {
       if (assigned.find(sd.ship_id) != assigned.end()) continue;
-      if (sd.used >= min_tons) continue;
       if (sd.free < min_tons) continue;
 
       auto best_cand = best_pickup_for_ship(sd);
@@ -672,20 +805,55 @@ FreightPlannerResult compute_freight_plan(const Simulation& sim, Id faction_id,
 
       // Commit.
       FreightAssignment asg;
-      asg.kind = FreightAssignmentKind::PickupAndDeliver;
+      asg.kind = best_now->kind;
       asg.ship_id = best_now->ship_id;
       asg.source_colony_id = best_now->source;
       asg.dest_colony_id = best_now->dest;
       asg.restrict_to_discovered = best_now->restrict_to_discovered;
-      asg.items = std::move(best_now->items);
+      asg.items = std::move(best_now->unload_items);
+
+      // Explicit stop-by-stop route (supports mixed-cargo top-ups).
+      asg.stops.clear();
+      if (!best_now->load_items.empty() && asg.source_colony_id != kInvalidId) {
+        FreightStop s;
+        s.colony_id = asg.source_colony_id;
+        s.actions.reserve(best_now->load_items.size());
+        for (const auto& li : best_now->load_items) {
+          if (li.tons < min_tons) continue;
+          FreightStopAction a;
+          a.kind = FreightStopActionKind::Load;
+          a.mineral = li.mineral;
+          a.tons = li.tons;
+          s.actions.push_back(std::move(a));
+        }
+        if (!s.actions.empty()) asg.stops.push_back(std::move(s));
+      }
+      {
+        FreightStop d;
+        d.colony_id = asg.dest_colony_id;
+        d.actions.reserve(asg.items.size());
+        for (const auto& ui : asg.items) {
+          if (ui.tons < min_tons) continue;
+          FreightStopAction a;
+          a.kind = FreightStopActionKind::Unload;
+          a.mineral = ui.mineral;
+          a.tons = ui.tons;
+          a.reason = ui.reason;
+          d.actions.push_back(std::move(a));
+        }
+        if (!d.actions.empty()) asg.stops.push_back(std::move(d));
+      }
+
       asg.eta_to_source_days = best_now->eta1;
       asg.eta_to_dest_days = best_now->eta2;
       asg.eta_total_days = best_now->eta_total;
-      asg.note = "Pickup + deliver";
+      asg.note = (best_now->deliver_from_cargo_tons >= min_tons) ? "Pickup + deliver (mixed cargo)" : "Pickup + deliver";
 
       for (const auto& it_item : asg.items) {
-        dec_exportable(asg.source_colony_id, it_item.mineral, it_item.tons);
         dec_missing(asg.dest_colony_id, it_item.mineral, it_item.tons);
+      }
+      for (const auto& it_item : best_now->load_items) {
+        dec_exportable(asg.source_colony_id, it_item.mineral, it_item.tons);
       }
 
       assigned.insert(asg.ship_id);
@@ -711,8 +879,25 @@ FreightPlannerResult compute_freight_plan(const Simulation& sim, Id faction_id,
 }
 
 bool apply_freight_assignment(Simulation& sim, const FreightAssignment& asg, bool clear_existing_orders) {
-  if (asg.ship_id == kInvalidId || asg.dest_colony_id == kInvalidId) return false;
-  if (asg.items.empty()) return false;
+  if (asg.ship_id == kInvalidId) return false;
+
+  const bool use_stops = !asg.stops.empty();
+  if (!use_stops) {
+    if (asg.dest_colony_id == kInvalidId) return false;
+    if (asg.items.empty()) return false;
+  } else {
+    bool has_any_action = false;
+    for (const auto& stop : asg.stops) {
+      if (stop.colony_id == kInvalidId) return false;
+      for (const auto& act : stop.actions) {
+        if (act.tons > 0.0 && !act.mineral.empty()) {
+          has_any_action = true;
+          break;
+        }
+      }
+    }
+    if (!has_any_action) return false;
+  }
 
   bool ok = true;
 
@@ -720,16 +905,31 @@ bool apply_freight_assignment(Simulation& sim, const FreightAssignment& asg, boo
     ok = ok && sim.clear_orders(asg.ship_id);
   }
 
-  if (asg.kind == FreightAssignmentKind::PickupAndDeliver && asg.source_colony_id != kInvalidId) {
-    for (const auto& it : asg.items) {
-      ok = ok && sim.issue_load_mineral(asg.ship_id, asg.source_colony_id, it.mineral, it.tons,
-                                        asg.restrict_to_discovered);
+  if (use_stops) {
+    for (const auto& stop : asg.stops) {
+      for (const auto& act : stop.actions) {
+        if (act.tons <= 0.0 || act.mineral.empty()) continue;
+        if (act.kind == FreightStopActionKind::Load) {
+          ok = ok && sim.issue_load_mineral(asg.ship_id, stop.colony_id, act.mineral, act.tons,
+                                            asg.restrict_to_discovered);
+        } else {
+          ok = ok && sim.issue_unload_mineral(asg.ship_id, stop.colony_id, act.mineral, act.tons,
+                                              asg.restrict_to_discovered);
+        }
+      }
     }
-  }
+  } else {
+    if (asg.kind == FreightAssignmentKind::PickupAndDeliver && asg.source_colony_id != kInvalidId) {
+      for (const auto& it : asg.items) {
+        ok = ok && sim.issue_load_mineral(asg.ship_id, asg.source_colony_id, it.mineral, it.tons,
+                                          asg.restrict_to_discovered);
+      }
+    }
 
-  for (const auto& it : asg.items) {
-    ok = ok && sim.issue_unload_mineral(asg.ship_id, asg.dest_colony_id, it.mineral, it.tons,
-                                        asg.restrict_to_discovered);
+    for (const auto& it : asg.items) {
+      ok = ok && sim.issue_unload_mineral(asg.ship_id, asg.dest_colony_id, it.mineral, it.tons,
+                                          asg.restrict_to_discovered);
+    }
   }
 
   if (!ok) {

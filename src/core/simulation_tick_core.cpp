@@ -208,6 +208,32 @@ void Simulation::tick_one_tick_hours(int hours) {
   // Daily environmental updates (midnight boundary).
   if (day_advanced) tick_nebula_storms();
 
+  // Civilian trade activity decay (midnight boundary).
+  //
+  // Trade activity is a decayed volume signal derived from Merchant Guild
+  // freight transfers. We decay it daily so it behaves like a short-memory
+  // "busyness" metric that can feed into trade prosperity.
+  if (day_advanced) {
+    const int mem_days = cfg_.civilian_trade_activity_memory_days;
+    if (mem_days <= 0) {
+      for (auto& [sid, sys] : state_.systems) {
+        (void)sid;
+        sys.civilian_trade_activity_score = 0.0;
+      }
+    } else {
+      const double decay = std::exp(-1.0 / std::max(1.0, static_cast<double>(mem_days)));
+      for (auto& [sid, sys] : state_.systems) {
+        (void)sid;
+        if (!std::isfinite(sys.civilian_trade_activity_score) || sys.civilian_trade_activity_score < 0.0) {
+          sys.civilian_trade_activity_score = 0.0;
+          continue;
+        }
+        sys.civilian_trade_activity_score *= decay;
+        if (sys.civilian_trade_activity_score <= 1e-6) sys.civilian_trade_activity_score = 0.0;
+      }
+    }
+  }
+
   if (cfg_.enable_subday_economy) {
     // Economy ticks every step (scaled by dt_days).
     //
@@ -1021,6 +1047,8 @@ void Simulation::tick_contacts(double dt_days, bool emit_contact_lost_events) {
                           (cfg_.enable_nebula_storms && cfg_.enable_nebula_storm_cells && system_has_storm(sys_id) &&
                            cfg_.nebula_storm_cell_strength > 1e-9 && cfg_.nebula_storm_sensor_penalty > 1e-9));
 
+    const bool use_body = cfg_.enable_body_occlusion_sensors && !sys->bodies.empty();
+
     for (Id fid : faction_ids) {
       const auto& sources = sources_for(fid, sys_id);
       if (sources.empty()) continue;
@@ -1108,6 +1136,12 @@ void Simulation::tick_contacts(double dt_days, bool emit_contact_lost_events) {
             eff_used = eff * los;
             if (eff_used <= 1e-9) continue;
             if (d2_seen > eff_used * eff_used + 1e-9) continue;
+          }
+
+          if (use_body) {
+            if (sim_internal::system_line_of_sight_blocked_by_bodies(state_, sys_id, srcp, tgtp, cfg_.body_occlusion_padding_mkm)) {
+              continue;
+            }
           }
 
           // --- Seed contact uncertainty estimate ---

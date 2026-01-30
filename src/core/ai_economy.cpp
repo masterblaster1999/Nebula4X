@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cctype>
 #include <limits>
 #include <string>
 #include <unordered_map>
@@ -302,40 +303,463 @@ void prune_research_queue(const ContentDB& content, Faction& f) {
   f.research_queue = std::move(cleaned);
 }
 
+
 void ensure_research_plan(const Simulation& sim, Faction& f) {
   prune_research_queue(sim.content(), f);
 
-  // Don't interfere with a valid in-progress research item.
+  // Validate any in-progress research item. We don't want AI factions to get
+  // stuck on an invalid tech id after mods/content changes.
   if (!f.active_research_id.empty()) {
     const bool exists = sim.content().techs.find(f.active_research_id) != sim.content().techs.end();
-    if (exists && !tech_known(f, f.active_research_id)) return;
+    if (!exists || tech_known(f, f.active_research_id)) {
+      f.active_research_id.clear();
+      f.active_research_progress = 0.0;
+    }
   }
 
-  std::vector<std::string> recommended;
-  if (f.control == FactionControl::AI_Explorer) {
-    recommended = {"chemistry_1",    "nuclear_1",   "propulsion_1", "colonization_1",
-                   "sensors_1",      "armor_1",     "weapons_1",    "reactors_2",
-                   "propulsion_2"};
-  } else if (f.control == FactionControl::AI_Pirate) {
-    // Pirates need chemistry -> nuclear -> propulsion to start upgrading hulls.
-    recommended = {"chemistry_1", "nuclear_1", "propulsion_1", "weapons_1", "sensors_1",
-                   "armor_1",     "reactors_2", "propulsion_2"};
+  // --- AI research planning ---
+  //
+  // The original prototype used a small, fixed list of recommended tech ids.
+  // That works for the early game, but it prevents AIs from exploiting the
+  // broader tech tree (efficiencies, automation, etc) and does not adapt to
+  // emergent strategic conditions.
+  //
+  // This planner is deterministic and content-driven:
+  // - It scores techs based on a (small) set of control-type preferences
+  //   *and* on the actual effects encoded in the tech DB (unlocks + bonuses).
+  // - It plans prerequisite closures so the queue can't deadlock.
+  // - It caps queue growth to keep planning cheap and predictable.
+
+  struct AIResearchNeeds {
+    int colony_count = 0;
+    bool has_shipyard = false;
+    bool has_research_lab = false;
+    bool has_mines = false;
+    bool has_refinery = false;
+    bool has_colonization_target = false;
+    bool under_threat = false;
+  };
+
+  auto tech_domain_from_id = [&](const std::string& tech_id) -> std::string {
+    if (tech_id.empty()) return {};
+    const std::size_t us = tech_id.rfind('_');
+    if (us == std::string::npos || us + 1 >= tech_id.size()) return tech_id;
+
+    bool digits = true;
+    for (std::size_t i = us + 1; i < tech_id.size(); ++i) {
+      if (!std::isdigit(static_cast<unsigned char>(tech_id[i]))) {
+        digits = false;
+        break;
+      }
+    }
+    if (!digits) return tech_id;
+    return tech_id.substr(0, us);
+  };
+
+  auto compute_needs = [&](Id faction_id) -> AIResearchNeeds {
+    AIResearchNeeds n;
+
+    std::unordered_set<Id> colony_systems;
+    colony_systems.reserve(sim.state().colonies.size() + 4);
+
+    for (const auto& [cid, c] : sim.state().colonies) {
+      (void)cid;
+      if (c.faction_id != faction_id) continue;
+
+      n.colony_count += 1;
+      if (auto it = c.installations.find("shipyard"); it != c.installations.end() && it->second > 0) n.has_shipyard = true;
+      if (auto it = c.installations.find("research_lab"); it != c.installations.end() && it->second > 0) n.has_research_lab = true;
+      if (auto it = c.installations.find("fuel_refinery"); it != c.installations.end() && it->second > 0) n.has_refinery = true;
+
+      for (const auto& [inst_id, qty] : c.installations) {
+        if (qty <= 0) continue;
+        auto it_def = sim.content().installations.find(inst_id);
+        if (it_def == sim.content().installations.end()) continue;
+        if (sim_internal::is_mining_installation(it_def->second)) {
+          n.has_mines = true;
+          break;
+        }
+      }
+
+      if (const Body* b = find_ptr(sim.state().bodies, c.body_id)) {
+        if (b->system_id != kInvalidId) colony_systems.insert(b->system_id);
+      }
+    }
+
+    n.has_colonization_target = faction_has_colonization_target(sim, faction_id);
+
+    // Threat heuristic: any hostile ship present in a colony system.
+    for (Id sys_id : colony_systems) {
+      const StarSystem* sys = find_ptr(sim.state().systems, sys_id);
+      if (!sys) continue;
+      for (Id sid : sys->ships) {
+        const Ship* sh = find_ptr(sim.state().ships, sid);
+        if (!sh) continue;
+        if (sh->faction_id == faction_id) continue;
+        if (sim.are_factions_hostile(faction_id, sh->faction_id) || sim.are_factions_hostile(sh->faction_id, faction_id)) {
+          n.under_threat = true;
+          break;
+        }
+      }
+      if (n.under_threat) break;
+    }
+
+    return n;
+  };
+
+  auto base_domain_weight = [&](FactionControl ctl, const std::string& domain) -> double {
+    const std::string d = sim_internal::ascii_to_lower(domain);
+
+    // Default for unknown/novel mod tech domains: we still consider them,
+    // but we rely mostly on their encoded TechEffect payloads.
+    if (d.empty()) return 0.0;
+
+    if (ctl == FactionControl::AI_Pirate) {
+      if (d == "chemistry") return 120.0;
+      if (d == "nuclear") return 110.0;
+      if (d == "propulsion") return 100.0;
+      if (d == "weapons") return 95.0;
+      if (d == "sensors") return 80.0;
+      if (d == "stealth") return 75.0;
+      if (d == "armor") return 70.0;
+      if (d == "shields") return 65.0;
+      if (d == "reactors") return 55.0;
+      if (d == "ground_forces") return 45.0;
+      if (d == "training_doctrine") return 40.0;
+      if (d == "shipyard_optimization") return 25.0;
+      if (d == "construction_methods") return 25.0;
+      if (d == "research_methods") return 20.0;
+      if (d == "mining") return 20.0;
+      if (d == "mining_efficiency") return 18.0;
+      if (d == "industrial_efficiency") return 18.0;
+      if (d == "automation") return 22.0;
+      if (d == "colonization") return 5.0;
+      if (d == "terraforming" || d == "terraforming_efficiency") return 0.0;
+      return 15.0;
+    }
+
+    // Default to Explorer-style priorities for other non-player AI types.
+    if (d == "chemistry") return 120.0;
+    if (d == "construction_methods") return 105.0;   // unlocks shipyards + boosts construction
+    if (d == "research_methods") return 95.0;        // unlocks labs + boosts research
+    if (d == "nuclear") return 90.0;
+    if (d == "propulsion") return 85.0;
+    if (d == "materials_processing") return 80.0;
+    if (d == "sensors") return 80.0;
+    if (d == "colonization") return 75.0;
+    if (d == "mining") return 70.0;
+    if (d == "mining_efficiency") return 65.0;
+    if (d == "industrial_efficiency") return 60.0;
+    if (d == "shipyard_optimization") return 60.0;
+    if (d == "automation") return 58.0;
+    if (d == "terraforming") return 50.0;
+    if (d == "terraforming_efficiency") return 40.0;
+    if (d == "weapons") return 35.0;
+    if (d == "armor") return 35.0;
+    if (d == "shields") return 30.0;
+    if (d == "stealth") return 20.0;
+    if (d == "ground_forces") return 25.0;
+    if (d == "training_doctrine") return 25.0;
+    if (d == "reactors") return 30.0;
+    return 25.0;
+  };
+
+  auto adjusted_domain_weight = [&](FactionControl ctl, const std::string& domain, const AIResearchNeeds& n) -> double {
+    const std::string d = sim_internal::ascii_to_lower(domain);
+    double w = base_domain_weight(ctl, d);
+
+    if (!n.has_shipyard && d == "construction_methods") w *= 2.5;
+    if (!n.has_research_lab && d == "research_methods") w *= 2.0;
+    if (n.has_colonization_target && d == "colonization") w *= 2.0;
+
+    if (n.under_threat) {
+      const bool combatish = (d == "weapons" || d == "armor" || d == "shields" || d == "reactors" || d == "propulsion" ||
+                             d == "sensors" || d == "stealth" || d == "ground_forces" || d == "training_doctrine");
+      if (combatish) w *= 1.6;
+      if (d == "terraforming" || d == "terraforming_efficiency") w *= 0.7;
+      if (d == "mining_efficiency" || d == "industrial_efficiency" || d == "automation") w *= 0.85;
+    }
+
+    if (n.colony_count >= 2) {
+      if (d == "shipyard_optimization") w *= 1.15;
+      if (d == "industrial_efficiency") w *= 1.10;
+      if (d == "research_methods") w *= 1.05;
+    }
+
+    return w;
+  };
+
+  auto effect_value = [&](FactionControl ctl, const AIResearchNeeds& n, const TechEffect& eff) -> double {
+    const std::string type = sim_internal::ascii_to_lower(eff.type);
+    const std::string val = sim_internal::ascii_to_lower(eff.value);
+
+    if (type == "unlock_component") {
+      if (val.rfind("engine_", 0) == 0) return 70.0;   // movement is a universal force multiplier
+      if (val.rfind("reactor_", 0) == 0) return 55.0;  // power/heat budget unlocks larger hulls
+      if (val.rfind("sensor_", 0) == 0) return 45.0;
+      if (val.rfind("laser_", 0) == 0 || val.rfind("missile_", 0) == 0 || val.rfind("pd_", 0) == 0) {
+        return (ctl == FactionControl::AI_Pirate) ? 70.0 : 50.0;
+      }
+      if (val.rfind("shield_", 0) == 0) return 45.0;
+      if (val.rfind("armor_", 0) == 0) return 40.0;
+      if (val.rfind("stealth_", 0) == 0) return (ctl == FactionControl::AI_Pirate) ? 55.0 : 35.0;
+      if (val.rfind("colony_", 0) == 0) return n.has_colonization_target ? 70.0 : 45.0;
+      if (val.rfind("mining_", 0) == 0) return 40.0;
+      if (val.rfind("cargo_", 0) == 0) return 25.0;
+      return 15.0;
+    }
+
+    if (type == "unlock_installation") {
+      if (val == "shipyard") return n.has_shipyard ? 20.0 : 90.0;
+      if (val == "research_lab") return n.has_research_lab ? 10.0 : 85.0;
+      if (val == "automated_mine") return n.has_mines ? 15.0 : 80.0;
+      if (val == "fuel_refinery") return n.has_refinery ? 15.0 : 65.0;
+      if (val == "terraforming_plant") return 40.0;
+      if (val == "sensor_station") return 30.0;
+      if (val == "geological_survey") return 20.0;
+      return 15.0;
+    }
+
+    if (type == "faction_output_bonus" || type == "faction_economy_bonus" || type == "faction_output_multiplier" ||
+        type == "faction_economy_multiplier") {
+      double mag = eff.amount;
+      if (type == "faction_output_multiplier" || type == "faction_economy_multiplier") {
+        mag = eff.amount - 1.0;
+      }
+      if (!std::isfinite(mag) || mag <= 0.0) return 0.0;
+
+      // Convert a fractional bonus into a rough "strategic value" score. This is
+      // intentionally nonlinear: a small global bonus (automation) is worth
+      // planning for even if expensive.
+      double k = 0.0;
+      if (val == "all") {
+        k = 650.0;
+      } else if (val == "mining") {
+        k = 520.0;
+      } else if (val == "industry") {
+        k = 500.0;
+      } else if (val == "construction") {
+        k = 520.0;
+      } else if (val == "shipyard") {
+        k = 480.0;
+      } else if (val == "research") {
+        k = 520.0;
+      } else if (val == "terraforming") {
+        k = 320.0;
+      } else if (val == "troop_training" || val == "training") {
+        k = 280.0;
+      } else {
+        k = 240.0;
+      }
+
+      if (ctl == FactionControl::AI_Pirate) {
+        // Pirates devalue long-term economic upgrades slightly, but still
+        // respect key combat-related ones (construction/shipyard for churn).
+        if (val == "terraforming" || val == "research") k *= 0.75;
+        if (val == "mining" || val == "industry") k *= 0.85;
+      }
+
+      // Cap extreme values from weird content; we just need relative ranking.
+      mag = std::clamp(mag, 0.0, 0.50);
+      return k * mag;
+    }
+
+    return 0.0;
+  };
+
+  struct PrereqExtraCost {
+    double cost = 0.0;  // total additional research points required (including the tech itself)
+    int steps = 0;      // number of techs to add (including the tech itself)
+    bool reachable = true;
+  };
+
+  auto compute_extra_cost = [&](const std::unordered_set<std::string>& planned, const std::string& tech_id) -> PrereqExtraCost {
+    PrereqExtraCost out;
+    std::unordered_set<std::string> visiting;
+    std::unordered_set<std::string> counted;
+
+    auto dfs = [&](auto&& self, const std::string& id) -> void {
+      if (id.empty()) return;
+      if (!out.reachable) return;
+      if (tech_known(f, id)) return;
+
+      const bool already_planned = (planned.find(id) != planned.end());
+      auto it = sim.content().techs.find(id);
+      if (it == sim.content().techs.end()) {
+        out.reachable = false;
+        return;
+      }
+      if (visiting.count(id)) {
+        out.reachable = false;  // cycle or malformed tree
+        return;
+      }
+
+      visiting.insert(id);
+
+      std::vector<std::string> prereqs = it->second.prereqs;
+      std::sort(prereqs.begin(), prereqs.end());
+      for (const auto& pre : prereqs) self(self, pre);
+
+      visiting.erase(id);
+
+      if (already_planned) return;
+      if (!counted.insert(id).second) return;
+
+      const double c = std::max(0.0, it->second.cost);
+      out.cost += c;
+      out.steps += 1;
+    };
+
+    dfs(dfs, tech_id);
+    return out;
+  };
+
+  auto append_with_prereqs = [&](const std::string& tech_id) {
+    if (tech_id.empty()) return;
+    if (sim.content().techs.find(tech_id) == sim.content().techs.end()) return;
+
+    std::unordered_set<std::string> visiting;
+
+    auto dfs = [&](auto&& self, const std::string& id) -> void {
+      if (id.empty()) return;
+      if (tech_known(f, id)) return;
+
+      auto it = sim.content().techs.find(id);
+      if (it == sim.content().techs.end()) return;
+      if (visiting.count(id)) return;
+      visiting.insert(id);
+
+      std::vector<std::string> prereqs = it->second.prereqs;
+      std::sort(prereqs.begin(), prereqs.end());
+      for (const auto& pre : prereqs) self(self, pre);
+
+      visiting.erase(id);
+
+      if (tech_known(f, id)) return;
+      if (id == f.active_research_id) return;
+      if (!vec_contains(f.research_queue, id)) f.research_queue.push_back(id);
+    };
+
+    dfs(dfs, tech_id);
+  };
+
+  auto normalize_queue = [&]() {
+    prune_research_queue(sim.content(), f);
+    std::vector<std::string> orig = f.research_queue;
+    f.research_queue.clear();
+
+    std::unordered_set<std::string> visiting;
+    std::unordered_set<std::string> added;
+
+    auto dfs = [&](auto&& self, const std::string& id) -> void {
+      if (id.empty()) return;
+      if (tech_known(f, id)) return;
+
+      auto it = sim.content().techs.find(id);
+      if (it == sim.content().techs.end()) return;
+      if (visiting.count(id)) return;
+      visiting.insert(id);
+
+      std::vector<std::string> prereqs = it->second.prereqs;
+      std::sort(prereqs.begin(), prereqs.end());
+      for (const auto& pre : prereqs) self(self, pre);
+
+      visiting.erase(id);
+
+      if (tech_known(f, id)) return;
+      if (id == f.active_research_id) return;
+      if (!added.insert(id).second) return;
+      f.research_queue.push_back(id);
+    };
+
+    for (const auto& id : orig) dfs(dfs, id);
+  };
+
+  const AIResearchNeeds needs = compute_needs(f.id);
+
+  // Bootstrap: guarantee a minimal "tech ladder" so AI factions are never
+  // blocked from producing meaningful hulls / infrastructure.
+  //
+  // These are intentionally short; the rest of the plan is dynamic.
+  std::vector<std::string> bootstrap;
+  if (f.control == FactionControl::AI_Pirate) {
+    bootstrap = {"chemistry_1", "nuclear_1", "propulsion_1", "weapons_1", "sensors_1"};
+  } else if (f.control == FactionControl::AI_Explorer) {
+    bootstrap = {"chemistry_1", "construction_methods_1", "nuclear_1", "propulsion_1", "sensors_1",
+                 "materials_processing_1"};
+    if (needs.has_colonization_target) bootstrap.push_back("colonization_1");
   }
 
-  for (const auto& tid : recommended) {
-    if (sim.content().techs.find(tid) == sim.content().techs.end()) continue;
-    if (tech_known(f, tid)) continue;
-    if (tid == f.active_research_id) continue;
-    push_unique(f.research_queue, tid);
+  for (const auto& tid : bootstrap) append_with_prereqs(tid);
+  normalize_queue();
+
+  const std::size_t target_queue = (f.control == FactionControl::AI_Pirate) ? 8 : 10;
+  const std::size_t max_queue = std::max<std::size_t>(target_queue, 14);
+
+  // Fill the queue up to the target size using a deterministic, effect-aware scoring pass.
+  for (int iter = 0; iter < 64 && f.research_queue.size() < target_queue; ++iter) {
+    std::unordered_set<std::string> planned;
+    planned.reserve(f.known_techs.size() + f.research_queue.size() + 4);
+    for (const auto& tid : f.known_techs) planned.insert(tid);
+    for (const auto& tid : f.research_queue) planned.insert(tid);
+    if (!f.active_research_id.empty()) planned.insert(f.active_research_id);
+
+    std::string best;
+    double best_score = -1.0;
+    double best_cost = 0.0;
+
+    for (const auto& tid : sorted_keys(sim.content().techs)) {
+      if (tid.empty()) continue;
+      if (planned.find(tid) != planned.end()) continue;
+      if (tech_known(f, tid)) continue;
+
+      const TechDef& t = sim.content().techs.at(tid);
+
+      const std::string domain = tech_domain_from_id(tid);
+      double value = adjusted_domain_weight(f.control, domain, needs);
+      for (const auto& eff : t.effects) value += effect_value(f.control, needs, eff);
+
+      // If the tech has no recognizable value, keep it in the pool but de-prioritize heavily.
+      value = std::max(1.0, value);
+
+      const PrereqExtraCost c = compute_extra_cost(planned, tid);
+      if (!c.reachable) continue;
+      if (c.cost <= 1e-9) continue;
+
+      // Penalize far-off goals that require many missing prerequisites.
+      const int missing_prereqs = std::max(0, c.steps - 1);
+      const double prereq_penalty = 1.0 + 0.35 * static_cast<double>(missing_prereqs);
+
+      const double score = value / (c.cost * prereq_penalty);
+
+      if (best.empty() || score > best_score + 1e-9 ||
+          (std::abs(score - best_score) <= 1e-9 && (c.cost < best_cost - 1e-9 ||
+                                                   (std::abs(c.cost - best_cost) <= 1e-9 && tid < best)))) {
+        best = tid;
+        best_score = score;
+        best_cost = c.cost;
+      }
+    }
+
+    if (best.empty()) break;
+
+    append_with_prereqs(best);
+    normalize_queue();
+
+    if (f.research_queue.size() >= max_queue) {
+      if (f.research_queue.size() > max_queue) f.research_queue.resize(max_queue);
+      break;
+    }
   }
 
-  // If still nothing queued, pick a cheapest currently-researchable tech.
-  if (f.research_queue.empty()) {
+  // Failsafe: if we still have nothing planned and no active research, queue the cheapest currently-researchable tech.
+  if (f.research_queue.empty() && f.active_research_id.empty()) {
     std::string best;
     double best_cost = 0.0;
     for (const auto& tid : sorted_keys(sim.content().techs)) {
       const auto& t = sim.content().techs.at(tid);
       if (tech_known(f, tid)) continue;
+
       bool prereqs_met = true;
       for (const auto& pre : t.prereqs) {
         if (!tech_known(f, pre)) {
@@ -353,6 +777,7 @@ void ensure_research_plan(const Simulation& sim, Faction& f) {
     if (!best.empty()) f.research_queue.push_back(best);
   }
 }
+
 
 Id primary_shipyard_colony(const Simulation& sim, Id faction_id) {
   Id best = kInvalidId;

@@ -1627,6 +1627,16 @@ void Simulation::tick_combat(double dt_days) {
     if (chosen != kInvalidId) {
       const auto* tgt = find_ptr(state_.ships, chosen);
       const ShipDesign* td = tgt ? find_design(tgt->design_id) : nullptr;
+
+      // Direct-fire weapons cannot shoot through planets/moons... even if the target
+      // is detected by another sensor source.
+      if (cfg_.enable_body_occlusion_weapons && tgt) {
+        if (sim_internal::system_line_of_sight_blocked_by_bodies(state_, attacker.system_id, attacker.position_mkm,
+                                                                tgt->position_mkm, cfg_.body_occlusion_padding_mkm)) {
+          continue;
+        }
+      }
+
       const double sensor_mkm_raw = sim_sensors::sensor_range_mkm_with_mode(*this, attacker, *ad);
       double hit = tgt ? beam_hit_chance(attacker.system_id, attacker.position_mkm, attacker.velocity_mkm_per_day,
                                          sensor_mkm_raw, std::max(0.0, ad ? ad->eccm_strength : 0.0),
@@ -1780,6 +1790,14 @@ void Simulation::tick_combat(double dt_days) {
     if (chosen != kInvalidId) {
       const auto* tgt = find_ptr(state_.ships, chosen);
       const ShipDesign* td = tgt ? find_design(tgt->design_id) : nullptr;
+
+      if (cfg_.enable_body_occlusion_weapons && tgt) {
+        if (sim_internal::system_line_of_sight_blocked_by_bodies(state_, bat.system_id, bat.position_mkm,
+                                                                tgt->position_mkm, cfg_.body_occlusion_padding_mkm)) {
+          continue;
+        }
+      }
+
       const double hit = tgt ? beam_hit_chance(bat.system_id, bat.position_mkm, Vec2{0.0, 0.0},
                                                bat.sensor_range_mkm, 0.0,
                                                cfg_.colony_beam_tracking_ref_ang_per_day, bat.weapon_range_mkm,

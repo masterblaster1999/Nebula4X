@@ -18,10 +18,32 @@ struct FreightPlanItem {
   std::string reason;
 };
 
+// A single action taken at a colony during a freight route.
+//
+// This enables mixed-cargo routing where the amount unloaded at the destination
+// can exceed the amount loaded at the source (because the ship may already have
+// some of the mineral in its holds).
+enum class FreightStopActionKind {
+  Load,
+  Unload,
+};
+
+struct FreightStopAction {
+  FreightStopActionKind kind{FreightStopActionKind::Load};
+  std::string mineral;
+  double tons{0.0};
+  std::string reason;
+};
+
+struct FreightStop {
+  Id colony_id{kInvalidId};
+  std::vector<FreightStopAction> actions;
+};
+
 enum class FreightAssignmentKind {
   // The ship already has cargo; plan only an unload leg.
   DeliverCargo,
-  // The ship is empty; plan a pickup leg at a source colony and delivery to a destination.
+  // Plan a pickup leg at a source colony and delivery to a destination.
   PickupAndDeliver,
 };
 
@@ -37,6 +59,15 @@ struct FreightAssignment {
   bool restrict_to_discovered{true};
 
   std::vector<FreightPlanItem> items;
+
+  // Optional explicit stop-by-stop route.
+  //
+  // When populated, apply_freight_assignment will execute these stops in order.
+  // This supports plans where the load and unload amounts differ (e.g. topping
+  // up a partially-loaded ship before delivering to a needy colony).
+  //
+  // When empty, apply_freight_assignment falls back to the legacy fields.
+  std::vector<FreightStop> stops;
 
   // ETA breakdowns are best-effort travel-only estimates based on jump route planning.
   // They ignore docking/loading/unloading durations.

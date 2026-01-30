@@ -5470,6 +5470,16 @@ const bool can_up = (i > 0);
                 if (loss.recent_wrecks > 0) {
                   ImGui::Text("Recent merchant wrecks: %d (score %.2f)", loss.recent_wrecks, loss.score);
                 }
+
+                if (sim.cfg().enable_civilian_trade_activity_prosperity) {
+                  const auto act = sim.civilian_trade_activity_status_for_system(sys_id);
+                  if (act.score > 1e-6 || act.factor > 1e-6) {
+                    ImGui::Text("Civilian trade activity: score %.0f (factor %.2f)", act.score, act.factor);
+                    ImGui::Text("Activity bonus caps: hub +%.2f, market +%.0f%%",
+                                sim.cfg().civilian_trade_activity_hub_score_bonus_cap,
+                                sim.cfg().civilian_trade_activity_market_size_bonus_cap * 100.0);
+                  }
+                }
               }
             }
             ImGui::Text("Max bonus: +%.0f%%", sim.cfg().trade_prosperity_max_output_bonus * 100.0);

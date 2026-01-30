@@ -9,7 +9,7 @@ option(NEBULA4X_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
 
 # FetchContent is convenient for first-time builds, but it makes offline/headless
 # builds brittle (CMake will fail at configure time if it cannot reach GitHub).
-option(NEBULA4X_FETCH_DEPS "Allow FetchContent to download third-party dependencies (SDL2/ImGui)" ON)
+option(NEBULA4X_FETCH_DEPS "Allow FetchContent to download third-party dependencies (SDL2/ImGui)" OFF)
 
 option(NEBULA4X_ENABLE_ASAN "Enable AddressSanitizer (bug hunting)" OFF)
 option(NEBULA4X_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer (bug hunting)" OFF)
@@ -373,6 +373,7 @@ if(NEBULA4X_BUILD_TESTS)
     tests/test_auto_freight.cpp
     tests/test_industry.cpp
     tests/test_ai_economy.cpp
+    tests/test_ai_research_plan.cpp
     tests/test_ai_empire_fleet_missions.cpp
     tests/test_victory.cpp
     tests/test_research_planner.cpp
@@ -392,7 +393,9 @@ if(NEBULA4X_BUILD_TESTS)
     tests/test_sensor_coverage.cpp
     tests/test_swept_contacts.cpp
     tests/test_freight_planner.cpp
+	    tests/test_freight_planner_partial_cargo.cpp
     tests/test_trade_network.cpp
+    tests/test_civilian_trade_activity_prosperity.cpp
     tests/test_security_planner.cpp
     tests/test_invasion_planner.cpp
     tests/test_repair_planner.cpp
@@ -408,6 +411,7 @@ if(NEBULA4X_BUILD_TESTS)
     tests/test_diplomacy.cpp
     tests/test_piracy_suppression.cpp
     tests/test_auto_routing.cpp
+    tests/test_jump_route_env_cost.cpp
     tests/test_auto_explore.cpp
     tests/test_order_repeat.cpp
     tests/test_order_planner.cpp

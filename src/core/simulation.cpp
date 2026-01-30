@@ -212,8 +212,10 @@ std::optional<JumpRoutePlan> compute_jump_route_plan(const Simulation& sim, Id s
       plan.goal_pos_mkm = *goal_pos_mkm;
       plan.final_leg_mkm = (plan.goal_pos_mkm - plan.arrival_pos_mkm).length();
 
-      const double env = std::clamp(sim.system_movement_speed_multiplier(start_system_id), 0.05, 1.0);
-      plan.effective_final_leg_mkm = plan.final_leg_mkm / env;
+      // Use the same LOS-integrated environment cost model as real ship movement so
+      // ETAs reflect nebula microfields / storm cells (not just system-average density).
+      plan.effective_final_leg_mkm = sim.system_movement_environment_cost_los(
+          start_system_id, plan.arrival_pos_mkm, plan.goal_pos_mkm, 0ULL);
     }
     update_jump_route_eta(plan, speed_km_s, sim.cfg().seconds_per_day);
     return plan;
@@ -237,6 +239,56 @@ std::optional<JumpRoutePlan> compute_jump_route_plan(const Simulation& sim, Id s
     auto [ins, _] = outgoing_cache.emplace(system_id, std::move(out));
     return ins->second;
   };
+
+  // Cache expensive in-system environment LOS costs while routing.
+  //
+  // Jump route planning can touch many (system, from, to) segments during Dijkstra,
+  // and each LOS cost integrates through nebula microfields / storm cells. A small
+  // per-solve cache keeps planning responsive without affecting determinism.
+  struct SegmentCostKey {
+    Id system_id{kInvalidId};
+    std::uint64_t ax{0};
+    std::uint64_t ay{0};
+    std::uint64_t bx{0};
+    std::uint64_t by{0};
+
+    bool operator==(const SegmentCostKey& o) const {
+      return system_id == o.system_id && ax == o.ax && ay == o.ay && bx == o.bx && by == o.by;
+    }
+  };
+
+  struct SegmentCostKeyHash {
+    std::size_t operator()(const SegmentCostKey& k) const noexcept {
+      std::size_t h = static_cast<std::size_t>(k.system_id);
+      auto mix = [&](std::uint64_t v) {
+        h ^= static_cast<std::size_t>(v + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2));
+      };
+      mix(k.ax);
+      mix(k.ay);
+      mix(k.bx);
+      mix(k.by);
+      return h;
+    }
+  };
+
+  std::unordered_map<SegmentCostKey, double, SegmentCostKeyHash> seg_cost_cache;
+  seg_cost_cache.reserve(256);
+
+  auto seg_cost = [&](Id system_id, const Vec2& from_mkm, const Vec2& to_mkm) -> double {
+    SegmentCostKey key;
+    key.system_id = system_id;
+    key.ax = canonical_double_bits(from_mkm.x);
+    key.ay = canonical_double_bits(from_mkm.y);
+    key.bx = canonical_double_bits(to_mkm.x);
+    key.by = canonical_double_bits(to_mkm.y);
+
+    if (auto it = seg_cost_cache.find(key); it != seg_cost_cache.end()) return it->second;
+
+    const double c = sim.system_movement_environment_cost_los(system_id, from_mkm, to_mkm, 0ULL);
+    seg_cost_cache.emplace(key, c);
+    return c;
+  };
+
 
   std::priority_queue<JumpRoutePQItem, std::vector<JumpRoutePQItem>, JumpRoutePQComp> pq;
   std::unordered_map<JumpRouteNode, JumpRouteDist, JumpRouteNodeHash> dist;
@@ -298,11 +350,7 @@ std::optional<JumpRoutePlan> compute_jump_route_plan(const Simulation& sim, Id s
     }
 
     if (cur.node.system_id == target_system_id) {
-      double terminal = has_goal ? (cur_pos - *goal_pos_mkm).length() : 0.0;
-      if (terminal > 0.0) {
-        const double env = std::clamp(sim.system_movement_speed_multiplier(target_system_id), 0.05, 1.0);
-        terminal /= env;
-      }
+      double terminal = has_goal ? seg_cost(target_system_id, cur_pos, *goal_pos_mkm) : 0.0;
       const double total_cost = cur.d.cost_mkm + terminal;
 
       if (best_goal.system_id == kInvalidId || goal_better(total_cost, cur.d, cur.node)) {
@@ -337,10 +385,9 @@ std::optional<JumpRoutePlan> compute_jump_route_plan(const Simulation& sim, Id s
       const Vec2 jp_pos = jp->position_mkm;
       const double leg = (jp_pos - cur_pos).length();
 
-      // Approximate environmental speed penalties (nebula + storms) at the
-      // system level so routing & ETA estimates are consistent with real movement.
-      const double env = std::clamp(sim.system_movement_speed_multiplier(cur.node.system_id), 0.05, 1.0);
-      const double eff_leg = leg / env;
+      // Environment-adjusted distance for the in-system leg to this jump point.
+      // Uses LOS integration so microfields / storm cells affect routing choices and ETA.
+      const double eff_leg = seg_cost(cur.node.system_id, cur_pos, jp_pos);
 
       const JumpRouteNode nxt{next_sys, dest_jp->id};
       const JumpRouteDist cand{cur.d.cost_mkm + eff_leg, cur.d.distance_mkm + leg, cur.d.hops + 1};
@@ -411,8 +458,7 @@ std::optional<JumpRoutePlan> compute_jump_route_plan(const Simulation& sim, Id s
   }
 
   // Environment adjustment for the final in-system leg (0 when has_goal == false).
-  const double env_dest = std::clamp(sim.system_movement_speed_multiplier(target_system_id), 0.05, 1.0);
-  plan.effective_final_leg_mkm = plan.final_leg_mkm / env_dest;
+  plan.effective_final_leg_mkm = has_goal ? seg_cost(target_system_id, plan.arrival_pos_mkm, plan.goal_pos_mkm) : 0.0;
 
   update_jump_route_eta(plan, speed_km_s, sim.cfg().seconds_per_day);
   return plan;
@@ -1890,6 +1936,26 @@ double Simulation::civilian_shipping_loss_pressure_for_system(Id system_id) cons
   return std::clamp(civilian_shipping_loss_status_for_system(system_id).pressure, 0.0, 1.0);
 }
 
+CivilianTradeActivityStatus Simulation::civilian_trade_activity_status_for_system(Id system_id) const {
+  CivilianTradeActivityStatus st;
+  st.system_id = system_id;
+  if (system_id == kInvalidId) return st;
+
+  const auto* sys = find_ptr(state_.systems, system_id);
+  if (!sys) return st;
+
+  st.score = std::max(0.0, sys->civilian_trade_activity_score);
+
+  const double scale = std::max(1e-6, cfg_.civilian_trade_activity_score_scale_tons);
+  st.factor = 1.0 - std::exp(-st.score / scale);
+  st.factor = std::clamp(st.factor, 0.0, 1.0);
+  return st;
+}
+
+double Simulation::civilian_trade_activity_factor_for_system(Id system_id) const {
+  return std::clamp(civilian_trade_activity_status_for_system(system_id).factor, 0.0, 1.0);
+}
+
 double Simulation::ambient_piracy_risk_for_system(Id system_id) const {
   const auto* sys = find_ptr(state_.systems, system_id);
   if (!sys) return 0.0;
@@ -1980,6 +2046,20 @@ void Simulation::ensure_trade_prosperity_cache_current() const {
     TradeProsperitySystemInfo info;
     info.market_size = std::max(0.0, node.market_size);
     info.hub_score = std::clamp(node.hub_score, 0.0, 1.0);
+
+    // Optional feedback from real civilian trade volume.
+    // This makes Trade Prosperity respond to actual Merchant Guild freight
+    // transfers, not just the static "theoretical" network.
+    if (cfg_.enable_civilian_trade_activity_prosperity) {
+      const CivilianTradeActivityStatus act = civilian_trade_activity_status_for_system(node.system_id);
+      const double f = std::clamp(act.factor, 0.0, 1.0);
+      if (f > 1e-9) {
+        const double hub_cap = std::max(0.0, cfg_.civilian_trade_activity_hub_score_bonus_cap);
+        const double market_cap = std::max(0.0, cfg_.civilian_trade_activity_market_size_bonus_cap);
+        info.hub_score = std::clamp(info.hub_score + hub_cap * f, 0.0, 1.0);
+        info.market_size = std::max(0.0, info.market_size * (1.0 + market_cap * f));
+      }
+    }
     trade_prosperity_system_cache_[node.system_id] = info;
   }
 
@@ -3493,27 +3573,37 @@ bool Simulation::is_ship_detected_by_faction(Id viewer_faction_id, Id target_shi
 
   // Fast path: legacy behavior.
   bool use_los = cfg_.enable_sensor_los_attenuation;
-  if (use_los) {
-    const auto* sys = find_ptr(state_.systems, tgt->system_id);
-    if (!sys) {
-      use_los = false;
-    } else {
-      const bool micro = (cfg_.enable_nebula_microfields && sys->nebula_density > 1e-6 && cfg_.nebula_microfield_strength > 1e-9);
-      const bool storm_cells = (cfg_.enable_nebula_storms && cfg_.enable_nebula_storm_cells && system_has_storm(tgt->system_id) &&
-                                cfg_.nebula_storm_cell_strength > 1e-9 && cfg_.nebula_storm_sensor_penalty > 1e-9);
-      if (!micro && !storm_cells) use_los = false;
-    }
+  bool use_body = cfg_.enable_body_occlusion_sensors;
+
+  const auto* sys = (use_los || use_body) ? find_ptr(state_.systems, tgt->system_id) : nullptr;
+  if ((use_los || use_body) && !sys) {
+    use_los = false;
+    use_body = false;
   }
 
-  if (!use_los) {
+  if (use_los) {
+    const bool micro = (cfg_.enable_nebula_microfields && sys->nebula_density > 1e-6 && cfg_.nebula_microfield_strength > 1e-9);
+    const bool storm_cells = (cfg_.enable_nebula_storms && cfg_.enable_nebula_storm_cells && system_has_storm(tgt->system_id) &&
+                              cfg_.nebula_storm_cell_strength > 1e-9 && cfg_.nebula_storm_sensor_penalty > 1e-9);
+    if (!micro && !storm_cells) use_los = false;
+  }
+
+  if (use_body) {
+    if (!sys || sys->bodies.empty()) use_body = false;
+  }
+
+  if (!use_los && !use_body) {
     return any_source_detects(sources, tgt->position_mkm, sig, ecm);
   }
 
-  // LOS path: same base sensor math, but with an extra relative LOS multiplier.
+  // LOS/body path: same base sensor math, but with optional relative LOS multiplier
+  // and optional geometric occlusion by planetary bodies.
   double sig01 = std::isfinite(sig) ? sig : 1.0;
   if (sig01 < 0.0) sig01 = 0.0;
   double ecm01 = std::isfinite(ecm) ? ecm : 0.0;
   if (ecm01 < 0.0) ecm01 = 0.0;
+
+  const double pad_mkm = std::max(0.0, cfg_.body_occlusion_padding_mkm);
 
   for (const auto& src : sources) {
     if (src.range_mkm <= 0.0) continue;
@@ -3532,13 +3622,23 @@ bool Simulation::is_ship_detected_by_faction(Id viewer_faction_id, Id target_shi
     const double d2 = dp.x * dp.x + dp.y * dp.y;
     if (d2 > r_base * r_base + 1e-9) continue;
 
-    const std::uint64_t extra_seed = procgen_obscure::splitmix64(static_cast<std::uint64_t>(src.ship_id) * 0x9E3779B97F4A7C15ULL ^
-                                                            static_cast<std::uint64_t>(target_ship_id) * 0xBF58476D1CE4E5B9ULL);
-    const double los = this->system_sensor_environment_multiplier_los(tgt->system_id, src.pos_mkm, tgt->position_mkm, extra_seed);
-    const double r = r_base * los;
-    if (r <= 1e-9) continue;
+    if (use_body) {
+      if (sim_internal::system_line_of_sight_blocked_by_bodies(state_, tgt->system_id, src.pos_mkm, tgt->position_mkm, pad_mkm)) {
+        continue;
+      }
+    }
 
-    if (d2 <= r * r + 1e-9) return true;
+    double r = r_base;
+    if (use_los) {
+      const std::uint64_t extra_seed = procgen_obscure::splitmix64(static_cast<std::uint64_t>(src.ship_id) * 0x9E3779B97F4A7C15ULL ^
+                                                            static_cast<std::uint64_t>(target_ship_id) * 0xBF58476D1CE4E5B9ULL);
+      const double los = this->system_sensor_environment_multiplier_los(tgt->system_id, src.pos_mkm, tgt->position_mkm, extra_seed);
+      r = r_base * los;
+      if (r <= 1e-9) continue;
+      if (d2 > r * r + 1e-9) continue;
+    }
+
+    return true;
   }
 
   return false;
@@ -3559,6 +3659,11 @@ std::vector<Id> Simulation::detected_hostile_ships_in_system(Id viewer_faction_i
                               cfg_.nebula_storm_cell_strength > 1e-9 && cfg_.nebula_storm_sensor_penalty > 1e-9);
     if (!micro && !storm_cells) use_los = false;
   }
+
+  const bool use_body = cfg_.enable_body_occlusion_sensors && !sys->bodies.empty();
+  const double pad_mkm = (use_body && std::isfinite(cfg_.body_occlusion_padding_mkm) && cfg_.body_occlusion_padding_mkm > 0.0)
+                             ? cfg_.body_occlusion_padding_mkm
+                             : 0.0;
 
   // Use a spatial index to avoid scanning every ship for every query.
   SpatialIndex2D idx;
@@ -3607,6 +3712,13 @@ std::vector<Id> Simulation::detected_hostile_ships_in_system(Id viewer_faction_i
       const double dy = sh->position_mkm.y - src.pos_mkm.y;
       const double d2 = dx * dx + dy * dy;
       if (d2 > eff * eff + 1e-9) continue;
+
+      // Hard geometric occlusion by bodies (planets/moons/etc.).
+      if (use_body) {
+        if (sim_internal::system_line_of_sight_blocked_by_bodies(state_, system_id, src.pos_mkm, sh->position_mkm, pad_mkm)) {
+          continue;
+        }
+      }
 
       if (use_los) {
         const std::uint64_t extra_seed = procgen_obscure::splitmix64(static_cast<std::uint64_t>(src.ship_id) * 0xD6E8FEB86659FD93ULL ^

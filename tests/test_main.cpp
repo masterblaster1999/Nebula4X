@@ -19,9 +19,11 @@ int test_boarding();
 int test_serialization();
 int test_auto_freight();
 int test_freight_planner();
+int test_freight_planner_partial_cargo();
 int test_fuel_planner();
 int test_repair_planner();
 int test_trade_network();
+int test_civilian_trade_activity_prosperity();
 int test_security_planner();
 int test_invasion_planner();
 int test_industry();
@@ -29,6 +31,7 @@ int test_refit();
 int test_diplomacy();
 int test_piracy_suppression();
 int test_auto_routing();
+int test_jump_route_env_cost();
 int test_auto_explore();
 int test_order_repeat();
 int test_order_planner();
@@ -81,6 +84,7 @@ int test_jump_transit_hazards();
 int test_dynamic_poi_spawns();
 int test_fleets();
 int test_ai_economy();
+int test_ai_research_plan();
 namespace nebula4x {
 int test_ai_empire_fleet_missions();
 int test_victory();
@@ -94,6 +98,7 @@ int test_time_warp();
 int test_contact_prediction();
 int test_sensor_coverage();
 int test_swept_contacts();
+int test_body_occlusion();
 int test_mineral_deposits();
 int test_mobile_mining();
 int test_auto_mine();
@@ -270,7 +275,9 @@ int main(int argc, char** argv) {
       {"serialization", test_serialization},
       {"auto_freight", test_auto_freight},
       {"freight_planner", test_freight_planner},
+      {"freight_planner_partial_cargo", test_freight_planner_partial_cargo},
       {"trade_network", test_trade_network},
+      {"civilian_trade_activity_prosperity", test_civilian_trade_activity_prosperity},
       {"security_planner", test_security_planner},
       {"invasion_planner", test_invasion_planner},
       {"fuel_planner", test_fuel_planner},
@@ -280,6 +287,7 @@ int main(int argc, char** argv) {
       {"diplomacy", test_diplomacy},
       {"piracy_suppression", test_piracy_suppression},
       {"auto_routing", test_auto_routing},
+      {"jump_route_env_cost", test_jump_route_env_cost},
       {"auto_explore", test_auto_explore},
       {"order_repeat", test_order_repeat},
       {"order_planner", test_order_planner},
@@ -293,6 +301,7 @@ int main(int argc, char** argv) {
       {"spatial_index", test_spatial_index},
       {"random_scenario", test_random_scenario},
       {"ai_economy", test_ai_economy},
+      {"ai_research_plan", test_ai_research_plan},
       {"ai_empire_fleet_missions", nebula4x::test_ai_empire_fleet_missions},
       {"victory", nebula4x::test_victory},
       {"research_planner", test_research_planner},
@@ -304,6 +313,7 @@ int main(int argc, char** argv) {
       {"contact_prediction", test_contact_prediction},
       {"sensor_coverage", test_sensor_coverage},
       {"swept_contacts", test_swept_contacts},
+      {"body_occlusion", test_body_occlusion},
       {"mineral_deposits", test_mineral_deposits},
       {"mobile_mining", test_mobile_mining},
       {"auto_mine", test_auto_mine},
