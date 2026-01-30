@@ -2782,7 +2782,7 @@ ColonyStabilityStatus colony_stability_status_for_colony(Id colony_id) const;
 
 // --- Colony production queue editing (UI convenience) ---
 // Shipyard queue (build orders)
-bool delete_shipyard_order(Id colony_id, int index);
+bool delete_shipyard_order(Id colony_id, int index, bool refund_minerals = true);
 bool move_shipyard_order(Id colony_id, int from_index, int to_index);
 
 // Construction queue (installation build orders)

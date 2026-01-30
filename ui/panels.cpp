@@ -5100,7 +5100,45 @@ if (colony->shipyard_queue.empty()) {
         delete_idx = i;
       }
       if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Delete this ship build order. No refunds (prototype).");
+        ImGui::BeginTooltip();
+        ImGui::TextUnformatted("Delete this ship build order.");
+      
+        const double refund_frac = std::clamp(sim.cfg().scrap_refund_fraction, 0.0, 1.0);
+      
+        if (refund_frac <= 1e-9 || !shipyard_def || shipyard_def->build_costs_per_ton.empty()) {
+          ImGui::TextDisabled("Refund: none");
+        } else {
+          double initial_tons = 0.0;
+          if (is_refit) {
+            initial_tons = sim.estimate_refit_tons(bo.refit_ship_id, bo.design_id);
+          } else if (d) {
+            initial_tons = std::max(1.0, d->mass_tons);
+          }
+      
+          const double remaining = std::max(0.0, bo.tons_remaining);
+          if (initial_tons <= 1e-9) initial_tons = remaining;
+          if (initial_tons < remaining) initial_tons = remaining;
+          const double built_tons = std::max(0.0, initial_tons - remaining);
+      
+          if (built_tons <= 1e-9) {
+            ImGui::TextDisabled("Refund: none (no progress)");
+          } else {
+            ImGui::TextDisabled("Refund: %.0f%% of spent minerals", refund_frac * 100.0);
+            bool any = false;
+            for (const auto& [mineral, per_ton] : shipyard_def->build_costs_per_ton) {
+              if (per_ton <= 0.0) continue;
+              const double amt = built_tons * per_ton * refund_frac;
+              if (amt <= 1e-9) continue;
+              any = true;
+              ImGui::TextDisabled("%s +%.2f", mineral.c_str(), amt);
+            }
+            if (!any) {
+              ImGui::TextDisabled("(no refundable minerals)");
+            }
+          }
+        }
+      
+        ImGui::EndTooltip();
       }
     }
 

@@ -289,6 +289,68 @@ int test_simulation() {
   N4X_ASSERT(q[0].design_id == "a");
 }
 
+
+// --- deleting a shipyard order refunds a fraction of already-paid minerals ---
+{
+  nebula4x::ContentDB content;
+
+  nebula4x::InstallationDef yard;
+  yard.id = "shipyard";
+  yard.name = "Shipyard";
+  yard.build_rate_tons_per_day = 50;
+  yard.build_costs_per_ton = {{"Duranium", 1.0}}; // 1 mineral per ton
+  content.installations[yard.id] = yard;
+
+  nebula4x::ShipDesign a;
+  a.id = "a";
+  a.name = "A";
+  a.mass_tons = 100;
+  a.speed_km_s = 0;
+  content.designs[a.id] = a;
+
+  nebula4x::SimConfig cfg;
+  cfg.scrap_refund_fraction = 0.5;
+
+  nebula4x::Simulation sim(std::move(content), cfg);
+  const auto earth_id = find_colony_id(sim.state(), "Earth");
+  N4X_ASSERT(earth_id != nebula4x::kInvalidId);
+
+  // Make the test deterministic: remove any mineral production/consumption sources
+  // other than the shipyard order itself.
+  auto& earth = sim.state().colonies.at(earth_id);
+  earth.installations.clear();
+  earth.installations["shipyard"] = 1;
+  earth.shipyard_queue.clear();
+  earth.construction_queue.clear();
+  earth.minerals.clear();
+  earth.minerals["Duranium"] = 1000.0;
+
+  N4X_ASSERT(sim.enqueue_build(earth_id, "a"));
+  sim.advance_days(1);
+
+  const auto& bo = sim.state().colonies.at(earth_id).shipyard_queue.at(0);
+  const double initial_tons = std::max(1.0, sim.find_design("a")->mass_tons);
+  const double built_tons = std::max(0.0, initial_tons - bo.tons_remaining);
+  const double expected_refund = built_tons * 1.0 * cfg.scrap_refund_fraction;
+
+  const double after_spend = sim.state().colonies.at(earth_id).minerals.at("Duranium");
+  N4X_ASSERT(sim.delete_shipyard_order(earth_id, 0, true));
+  const double after_refund = sim.state().colonies.at(earth_id).minerals.at("Duranium");
+  N4X_ASSERT(std::abs(after_refund - (after_spend + expected_refund)) < 1e-6);
+
+  // No-refund path.
+  earth.shipyard_queue.clear();
+  earth.minerals["Duranium"] = 1000.0;
+
+  N4X_ASSERT(sim.enqueue_build(earth_id, "a"));
+  sim.advance_days(1);
+
+  const double after_spend2 = sim.state().colonies.at(earth_id).minerals.at("Duranium");
+  N4X_ASSERT(sim.delete_shipyard_order(earth_id, 0, false));
+  const double after_cancel2 = sim.state().colonies.at(earth_id).minerals.at("Duranium");
+  N4X_ASSERT(std::abs(after_cancel2 - after_spend2) < 1e-6);
+}
+
 // --- cargo transfer sanity check ---
   // Load minerals from Earth onto a freighter, then unload to Mars Outpost.
   {

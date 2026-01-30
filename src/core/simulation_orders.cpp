@@ -204,11 +204,91 @@ bool Simulation::move_queued_order(Id ship_id, int from_index, int to_index) {
 
 // --- Colony production queue editing (UI convenience) ---
 
-bool Simulation::delete_shipyard_order(Id colony_id, int index) {
+bool Simulation::delete_shipyard_order(Id colony_id, int index, bool refund_minerals) {
   auto* colony = find_ptr(state_.colonies, colony_id);
   if (!colony) return false;
   auto& q = colony->shipyard_queue;
   if (index < 0 || index >= static_cast<int>(q.size())) return false;
+
+  if (refund_minerals) {
+    const BuildOrder& bo = q[static_cast<std::size_t>(index)];
+
+    // Refund a fraction of shipyard mineral costs that were already paid for progress on this order.
+    //
+    // This mirrors ship scrapping behavior: refund amounts are estimated from
+    // (work_completed_tons * build_costs_per_ton * scrap_refund_fraction).
+    const double refund_frac = std::clamp(cfg_.scrap_refund_fraction, 0.0, 1.0);
+    if (refund_frac > 1e-9) {
+      const auto it_yard = content_.installations.find("shipyard");
+      if (it_yard != content_.installations.end() && !it_yard->second.build_costs_per_ton.empty()) {
+        // Determine the original work budget for this order so we can compute "tons completed".
+        double initial_tons = 0.0;
+        if (bo.is_refit()) {
+          // Refit work is expressed as a scaled tonnage of the target design (SimConfig::ship_refit_tons_multiplier).
+          initial_tons = estimate_refit_tons(bo.refit_ship_id, bo.design_id);
+        } else if (const auto* d = find_design(bo.design_id)) {
+          initial_tons = std::max(1.0, d->mass_tons);
+        }
+
+        const double remaining = std::max(0.0, bo.tons_remaining);
+        if (initial_tons <= 1e-9) initial_tons = remaining;
+        if (initial_tons < remaining) initial_tons = remaining;
+        const double built_tons = std::max(0.0, initial_tons - remaining);
+
+        if (built_tons > 1e-9) {
+          std::unordered_map<std::string, double> refunded;
+
+          for (const auto& [mineral, per_ton] : it_yard->second.build_costs_per_ton) {
+            if (per_ton <= 0.0) continue;
+            const double amt = built_tons * per_ton * refund_frac;
+            if (amt > 1e-9) {
+              refunded[mineral] += amt;
+              colony->minerals[mineral] += amt;
+            }
+          }
+
+          if (!refunded.empty()) {
+            const auto* design = find_design(bo.design_id);
+            const std::string design_nm = design ? design->name : bo.design_id;
+
+            std::string msg = "Shipyard order cancelled at " + colony->name + ": ";
+            if (bo.is_refit()) {
+              std::string ship_nm = "Ship #" + std::to_string(static_cast<unsigned long long>(bo.refit_ship_id));
+              if (const auto* sh = find_ptr(state_.ships, bo.refit_ship_id)) {
+                if (!sh->name.empty()) ship_nm = sh->name;
+              }
+              msg += "Refit " + ship_nm + " -> " + design_nm;
+            } else {
+              msg += "Build " + design_nm;
+            }
+
+            msg += " (refund:";
+            for (const auto& k : sorted_keys(refunded)) {
+              const double v = refunded[k];
+              if (std::fabs(v - std::round(v)) < 1e-6) {
+                msg += " " + k + " " + std::to_string(static_cast<long long>(std::llround(v)));
+              } else {
+                std::ostringstream ss;
+                ss.setf(std::ios::fixed);
+                ss.precision(2);
+                ss << v;
+                msg += " " + k + " " + ss.str();
+              }
+            }
+            msg += ")";
+
+            EventContext ctx;
+            ctx.faction_id = colony->faction_id;
+            ctx.colony_id = colony->id;
+            if (const auto* body = find_ptr(state_.bodies, colony->body_id)) ctx.system_id = body->system_id;
+            if (bo.is_refit()) ctx.ship_id = bo.refit_ship_id;
+            push_event(EventLevel::Info, EventCategory::Shipyard, msg, ctx);
+          }
+        }
+      }
+    }
+  }
+
   q.erase(q.begin() + index);
   return true;
 }
