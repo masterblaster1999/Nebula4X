@@ -1,4 +1,5 @@
 #include <iostream>
+#include <variant>
 
 #include "nebula4x/core/date.h"
 #include "nebula4x/core/simulation.h"
@@ -103,6 +104,20 @@ int test_auto_mine() {
   ship.auto_mine_mineral = "Duranium";
   st.ships[200] = ship;
 
+
+  // A second auto-mine ship with active repeating orders. The auto-mine planner must not override it.
+  Ship ship_repeat = ship;
+  ship_repeat.id = 201;
+  ship_repeat.name = "Miner-Repeat";
+  st.ships[201] = ship_repeat;
+
+  ShipOrders so_repeat;
+  so_repeat.repeat = true;
+  so_repeat.repeat_count_remaining = -1;
+  so_repeat.repeat_template.push_back(WaitDays{10});
+  so_repeat.queue.clear();
+  st.ship_orders[201] = so_repeat;
+
   sim.load_game(st);
 
   // Day 1: auto-mine should mine Duranium into the ship's cargo.
@@ -114,6 +129,16 @@ int test_auto_mine() {
     const Ship& sh = it_ship->second;
     N4X_ASSERT(sh.cargo.count("Duranium") != 0);
     N4X_ASSERT(sh.cargo.at("Duranium") > 1.0);
+
+
+    // The repeating ship should *not* be assigned auto-mine orders. Its empty queue should have refilled
+    // from the repeat template during tick_ships().
+    const ShipOrders* so = find_ptr(s.ship_orders, 201);
+    N4X_ASSERT(so != nullptr);
+    N4X_ASSERT(!so->queue.empty());
+    N4X_ASSERT(std::holds_alternative<WaitDays>(so->queue.front()));
+    const WaitDays wd = std::get<WaitDays>(so->queue.front());
+    N4X_ASSERT(wd.days_remaining == 9);
   }
 
   // Day 2: auto-mine should unload minerals to the configured home colony.

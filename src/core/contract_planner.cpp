@@ -21,12 +21,9 @@ constexpr double kEps = 1e-9;
 bool is_ship_idle(const GameState& st, Id ship_id) {
   const auto it = st.ship_orders.find(ship_id);
   if (it == st.ship_orders.end()) return true;
-  const ShipOrders& so = it->second;
-  if (so.suspended) return false;
-  if (!so.queue.empty()) return false;
-  if (so.repeat && !so.repeat_template.empty() && so.repeat_count_remaining != 0) return false;
-  return true;
+  return ship_orders_is_idle_for_automation(it->second);
 }
+
 
 bool contract_target_pos(const Simulation& sim, Id viewer_faction_id, const Contract& c, Id* out_sys, Vec2* out_pos) {
   if (out_sys) *out_sys = kInvalidId;

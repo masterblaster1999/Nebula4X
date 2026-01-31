@@ -260,7 +260,8 @@ bool simulate_mining_day(const Simulation& sim,
     auto it = fac_mult.find(c.faction_id);
     const double base = (it == fac_mult.end()) ? 1.0 : std::max(0.0, it->second.mining);
     const double cond = std::max(0.0, sim.colony_condition_multipliers(c).mining);
-    return base * cond;
+    const double stab = sim.colony_stability_output_multiplier_for_colony(c);
+    return base * cond * stab;
   };
 
   auto add_requests_from = [&](const Colony& c, double mining_mult, bool is_target) {
@@ -681,16 +682,18 @@ ColonySchedule estimate_colony_schedule(const Simulation& sim, Id colony_id, con
   // Colony conditions are colony-local modifiers applied on top of faction/tech multipliers.
   // Match Simulation::tick_colonies so schedule projections stay accurate when conditions are active.
   const ColonyConditionMultipliers cond_mult = sim.colony_condition_multipliers(colony);
+  const double stability_mult = sim.colony_stability_output_multiplier_for_colony(colony);
+
 
   // Trade prosperity bonus mirrors Simulation tick for output projections.
   const double prosperity = sim.trade_prosperity_output_multiplier_for_colony(colony.id);
   FactionEconomyMultipliers eff_mult = my_mult;
-  eff_mult.industry *= prosperity * std::max(0.0, cond_mult.industry);
-  eff_mult.research *= prosperity * std::max(0.0, cond_mult.research);
-  eff_mult.construction *= prosperity * std::max(0.0, cond_mult.construction);
-  eff_mult.shipyard *= prosperity * std::max(0.0, cond_mult.shipyard);
+  eff_mult.industry *= prosperity * std::max(0.0, cond_mult.industry) * stability_mult;
+  eff_mult.research *= prosperity * std::max(0.0, cond_mult.research) * stability_mult;
+  eff_mult.construction *= prosperity * std::max(0.0, cond_mult.construction) * stability_mult;
+  eff_mult.shipyard *= prosperity * std::max(0.0, cond_mult.shipyard) * stability_mult;
 
-  out.mining_multiplier = my_mult.mining * std::max(0.0, cond_mult.mining);
+  out.mining_multiplier = my_mult.mining * std::max(0.0, cond_mult.mining) * stability_mult;
   out.industry_multiplier = eff_mult.industry;
   out.construction_multiplier = eff_mult.construction;
   out.shipyard_multiplier = eff_mult.shipyard;

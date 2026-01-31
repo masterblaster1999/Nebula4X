@@ -84,13 +84,7 @@ void Simulation::tick_ai() {
   auto orders_empty = [&](Id ship_id) -> bool {
     auto it = state_.ship_orders.find(ship_id);
     if (it == state_.ship_orders.end()) return true;
-    const ShipOrders& so = it->second;
-    if (so.suspended) return false;
-    if (!so.queue.empty()) return false;
-    // A ship with repeat enabled and remaining refills is not considered idle:
-    // its queue will be refilled during tick_ships().
-    if (so.repeat && !so.repeat_template.empty() && so.repeat_count_remaining != 0) return false;
-    return true;
+    return ship_orders_is_idle_for_automation(it->second);
   };
 
   auto role_priority = [&](ShipRole r) -> int {

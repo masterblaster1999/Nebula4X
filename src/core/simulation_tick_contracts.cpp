@@ -290,6 +290,17 @@ bool Simulation::assign_contract_to_ship(Id contract_id, Id ship_id, bool clear_
     (void)clear_orders(ship_id);
   }
 
+  // Hard capability gate: anomaly investigations require some sensor range.
+  if (c.kind == ContractKind::InvestigateAnomaly) {
+    const auto* d = find_design(ship->design_id);
+    const double sensor = d ? std::max(0.0, d->sensor_range_mkm) : 0.0;
+    if (sensor <= 1e-9) {
+      // Roll back the UI assignment.
+      c.assigned_ship_id = kInvalidId;
+      return fail("Ship lacks sensors to investigate anomalies");
+    }
+  }
+
   // Issue the corresponding order.
   bool ok = false;
   switch (c.kind) {

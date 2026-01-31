@@ -340,6 +340,76 @@ int test_digests() {
       if (p.label == "ship_orders") ship_orders_digest2 = p.digest;
     }
     N4X_ASSERT(ship_orders_digest != ship_orders_digest2);
+
+    // Coverage: mutating fields inside complex orders should affect the digest.
+    auto ship_orders_part_digest = [](const GameState& s) -> std::uint64_t {
+      const auto r = digest_game_state64_report(s);
+      for (const auto& p : r.parts) {
+        if (p.label == "ship_orders") return p.digest;
+      }
+      return 0;
+    };
+
+    // AttackShip: last_known_day (and other tracking fields) are part of persisted state.
+    {
+      GameState a = s1;
+      ShipOrders so;
+      AttackShip atk;
+      atk.target_ship_id = 101;
+      atk.has_last_known = true;
+      atk.last_known_position_mkm = Vec2{123.0, 456.0};
+      atk.last_known_system_id = 1;
+      atk.last_known_day = 5;
+      atk.pursuit_hops = 2;
+      atk.search_waypoint_index = 3;
+      atk.has_search_offset = true;
+      atk.search_offset_mkm = Vec2{7.0, 8.0};
+      so.queue.push_back(atk);
+      a.ship_orders[100] = so;
+
+      const auto d1 = ship_orders_part_digest(a);
+      GameState b = a;
+      std::get<AttackShip>(b.ship_orders[100].queue[0]).last_known_day += 1;
+      const auto d2 = ship_orders_part_digest(b);
+      N4X_ASSERT(d1 != d2);
+    }
+
+    // EscortShip: allow_neutral affects validity/behavior (contracts/escorts).
+    {
+      GameState a = s1;
+      ShipOrders so;
+      EscortShip esc;
+      esc.target_ship_id = 101;
+      esc.follow_distance_mkm = 1.25;
+      esc.restrict_to_discovered = false;
+      esc.allow_neutral = false;
+      so.queue.push_back(esc);
+      a.ship_orders[100] = so;
+
+      const auto d1 = ship_orders_part_digest(a);
+      GameState b = a;
+      std::get<EscortShip>(b.ship_orders[100].queue[0]).allow_neutral = true;
+      const auto d2 = ship_orders_part_digest(b);
+      N4X_ASSERT(d1 != d2);
+    }
+
+    // BombardColony: progress_days is part of the order and must influence the digest.
+    {
+      GameState a = s1;
+      ShipOrders so;
+      BombardColony bmb;
+      bmb.colony_id = 500;
+      bmb.duration_days = 2;
+      bmb.progress_days = 0.25;
+      so.queue.push_back(bmb);
+      a.ship_orders[100] = so;
+
+      const auto d1 = ship_orders_part_digest(a);
+      GameState b = a;
+      std::get<BombardColony>(b.ship_orders[100].queue[0]).progress_days = 0.75;
+      const auto d2 = ship_orders_part_digest(b);
+      N4X_ASSERT(d1 != d2);
+    }
   }
 
   // --- Timeline export smoke test ---

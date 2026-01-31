@@ -3035,6 +3035,49 @@ const bool can_up = (i > 0);
               }
             }
 
+            // --- Colonist Transfer (Ship-to-Ship) ---
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Text("Colonist Transfer");
+            ImGui::TextDisabled("Transfers embarked colonists from this ship to the target ship.");
+            ImGui::TextDisabled("Both ships must have colony modules. Millions <= 0 transfers as much as possible.");
+
+            static double ship_transfer_colonists_millions = 0.0;
+            if (!std::isfinite(ship_transfer_colonists_millions) || ship_transfer_colonists_millions < 0.0) {
+              ship_transfer_colonists_millions = 0.0;
+            }
+
+            if (target_ship_idx < 0) {
+              ImGui::TextDisabled("Select a target ship above to enable colonist transfer.");
+            } else {
+              const Id target_id = friendly_ships[target_ship_idx].first;
+              const auto* tgt = find_ptr(s.ships, target_id);
+
+              const auto* src_d = sim.find_design(sh->design_id);
+              const auto* tgt_d = tgt ? sim.find_design(tgt->design_id) : nullptr;
+              const double src_cap = src_d ? std::max(0.0, src_d->colony_capacity_millions) : 0.0;
+              const double tgt_cap = tgt_d ? std::max(0.0, tgt_d->colony_capacity_millions) : 0.0;
+
+              if (!tgt) {
+                ImGui::TextDisabled("Target ship no longer exists.");
+              } else if (src_cap <= 1e-9 || tgt_cap <= 1e-9) {
+                ImGui::TextDisabled("Colonist transfer unavailable: one or both ships have no colony capacity.");
+              } else {
+                ImGui::Text("Source colonists: %.2f / %.2f", sh->colonists_millions, src_cap);
+                ImGui::Text("Target colonists: %.2f / %.2f", tgt->colonists_millions, tgt_cap);
+
+                ImGui::InputDouble("Millions##ColonistTransfer (0 = max)", &ship_transfer_colonists_millions, 1.0,
+                                   10.0, "%.2f");
+
+                if (ImGui::Button("Transfer Colonists to Target")) {
+                  if (!sim.issue_transfer_colonists_to_ship(selected_ship, target_id, ship_transfer_colonists_millions,
+                                                            ui.fog_of_war)) {
+                    nebula4x::log::warn("Couldn't queue colonist transfer order.");
+                  }
+                }
+              }
+            }
+
             // --- Escort / Follow ---
             ImGui::Spacing();
             ImGui::Separator();
@@ -3429,8 +3472,12 @@ const bool can_up = (i > 0);
             "Explore systems",
             "Patrol region",
             "Assault colony",
+            "Blockade colony",
+            "Patrol route",
+            "Guard jump point",
+            "Patrol circuit (waypoints)",
           };
-          static_assert(IM_ARRAYSIZE(kMissionNames) == 1 + static_cast<int>(FleetMissionType::AssaultColony),
+          static_assert(IM_ARRAYSIZE(kMissionNames) == 1 + static_cast<int>(FleetMissionType::PatrolCircuit),
                         "Update mission names array");
           int mission_idx = static_cast<int>(fleet_mut->mission.type);
           if (mission_idx < 0 || mission_idx >= static_cast<int>(IM_ARRAYSIZE(kMissionNames))) mission_idx = 0;
@@ -3454,6 +3501,117 @@ const bool can_up = (i > 0);
             }
             if (fleet_mut->mission.type == FleetMissionType::PatrolSystem && fleet_mut->mission.patrol_system_id == kInvalidId) {
               if (s.selected_system != kInvalidId) fleet_mut->mission.patrol_system_id = s.selected_system;
+            }
+
+
+            if (fleet_mut->mission.type == FleetMissionType::PatrolRoute) {
+              auto system_visible = [&](Id sid) {
+                return sid != kInvalidId &&
+                       (!ui.fog_of_war || sim.is_system_discovered_by_faction(fleet_mut->faction_id, sid));
+              };
+
+              auto pick_any_discovered = [&]() -> Id {
+                for (Id sid : sorted_keys(s.systems)) {
+                  if (!system_visible(sid)) continue;
+                  return sid;
+                }
+                return kInvalidId;
+              };
+
+              Id a = fleet_mut->mission.patrol_route_a_system_id;
+              if (!system_visible(a)) {
+                if (system_visible(s.selected_system)) {
+                  a = s.selected_system;
+                } else if (leader && system_visible(leader->system_id)) {
+                  a = leader->system_id;
+                } else {
+                  a = pick_any_discovered();
+                }
+                fleet_mut->mission.patrol_route_a_system_id = a;
+              }
+
+              // Prefer a connected neighbor as endpoint B.
+              Id b = fleet_mut->mission.patrol_route_b_system_id;
+              auto pick_other_discovered = [&](Id not_sid) -> Id {
+                for (Id sid : sorted_keys(s.systems)) {
+                  if (sid == not_sid) continue;
+                  if (!system_visible(sid)) continue;
+                  return sid;
+                }
+                return kInvalidId;
+              };
+
+              if (!system_visible(b) || b == a) {
+                b = kInvalidId;
+                const auto* sys = (a != kInvalidId) ? find_ptr(s.systems, a) : nullptr;
+                if (sys) {
+                  auto jps = sys->jump_points;
+                  std::sort(jps.begin(), jps.end());
+                  for (Id jid : jps) {
+                    if (ui.fog_of_war && !sim.is_jump_point_surveyed_by_faction(fleet_mut->faction_id, jid)) continue;
+                    const auto* jp = find_ptr(s.jump_points, jid);
+                    if (!jp || jp->linked_jump_id == kInvalidId) continue;
+                    const auto* other = find_ptr(s.jump_points, jp->linked_jump_id);
+                    if (!other) continue;
+                    if (!system_visible(other->system_id)) continue;
+                    if (other->system_id == a) continue;
+                    b = other->system_id;
+                    break;
+                  }
+                }
+                if (b == kInvalidId) {
+                  b = pick_other_discovered(a);
+                }
+                fleet_mut->mission.patrol_route_b_system_id = b;
+              }
+
+              fleet_mut->mission.patrol_leg_index = 0;
+            }
+
+            if (fleet_mut->mission.type == FleetMissionType::PatrolCircuit &&
+                fleet_mut->mission.patrol_circuit_system_ids.empty()) {
+              if (!ui.fog_of_war ||
+                  (s.selected_system != kInvalidId &&
+                   sim.is_system_discovered_by_faction(fleet_mut->faction_id, s.selected_system))) {
+                if (s.selected_system != kInvalidId)
+                  fleet_mut->mission.patrol_circuit_system_ids.push_back(s.selected_system);
+              }
+
+              if (fleet_mut->mission.patrol_circuit_system_ids.empty() && leader &&
+                  (!ui.fog_of_war ||
+                   sim.is_system_discovered_by_faction(fleet_mut->faction_id, leader->system_id))) {
+                fleet_mut->mission.patrol_circuit_system_ids.push_back(leader->system_id);
+              }
+
+              fleet_mut->mission.patrol_leg_index = 0;
+            }
+
+            if (fleet_mut->mission.type == FleetMissionType::GuardJumpPoint &&
+                fleet_mut->mission.guard_jump_point_id == kInvalidId) {
+              // Best-effort default: use the first jump point in the selected system.
+              // If no system is selected, fall back to the fleet leader's system.
+              Id sys_id = kInvalidId;
+              if (!ui.fog_of_war ||
+                  (s.selected_system != kInvalidId &&
+                   sim.is_system_discovered_by_faction(fleet_mut->faction_id, s.selected_system))) {
+                sys_id = s.selected_system;
+              } else if (leader &&
+                         (!ui.fog_of_war ||
+                          sim.is_system_discovered_by_faction(fleet_mut->faction_id, leader->system_id))) {
+                sys_id = leader->system_id;
+              }
+
+              const auto* sys = find_ptr(s.systems, sys_id);
+              if (sys && !sys->jump_points.empty()) {
+                auto jp_ids = sys->jump_points;
+                std::sort(jp_ids.begin(), jp_ids.end());
+                fleet_mut->mission.guard_jump_point_id = jp_ids.front();
+              }
+
+              if (fleet_mut->mission.guard_jump_radius_mkm <= 0.0)
+                fleet_mut->mission.guard_jump_radius_mkm = 50.0;
+              if (fleet_mut->mission.guard_jump_dwell_days <= 0) fleet_mut->mission.guard_jump_dwell_days = 3;
+              fleet_mut->mission.guard_last_alert_day = 0;
             }
             if (fleet_mut->mission.type == FleetMissionType::PatrolRegion) {
               fleet_mut->mission.patrol_region_system_index = 0;
@@ -3497,6 +3655,34 @@ const bool can_up = (i > 0);
               fleet_mut->mission.assault_colony_id = kInvalidId;
               fleet_mut->mission.assault_staging_colony_id = kInvalidId;
               fleet_mut->mission.assault_bombard_executed = false;
+            }
+
+            if (fleet_mut->mission.type == FleetMissionType::BlockadeColony) {
+              if (fleet_mut->mission.blockade_colony_id == kInvalidId) {
+                // Best-effort default: use the currently selected colony if it is not owned by us.
+                // Otherwise pick the first discovered non-owned colony.
+                if (selected_colony != kInvalidId) {
+                  const auto* sc = find_ptr(s.colonies, selected_colony);
+                  if (sc && sc->faction_id != fleet_mut->faction_id) {
+                    fleet_mut->mission.blockade_colony_id = selected_colony;
+                  }
+                }
+
+                if (fleet_mut->mission.blockade_colony_id == kInvalidId) {
+                  for (Id cid : sorted_keys(s.colonies)) {
+                    const auto* c = find_ptr(s.colonies, cid);
+                    if (!c) continue;
+                    if (c->faction_id == fleet_mut->faction_id) continue;
+                    const auto* body = find_ptr(s.bodies, c->body_id);
+                    if (!body || body->system_id == kInvalidId) continue;
+                    if (sim.is_system_discovered_by_faction(fleet_mut->faction_id, body->system_id)) {
+                      fleet_mut->mission.blockade_colony_id = cid;
+                      break;
+                    }
+                  }
+                }
+              }
+              fleet_mut->mission.blockade_radius_mkm = std::max(0.0, fleet_mut->mission.blockade_radius_mkm);
             }
           }
 
@@ -3569,6 +3755,288 @@ const bool can_up = (i > 0);
               }
               ImGui::TextDisabled("Patrol waypoints: jump points first, then major bodies.");
             }
+
+            if (fleet_mut->mission.type == FleetMissionType::PatrolCircuit) {
+              ImGui::Spacing();
+              ImGui::Text("Patrol circuit");
+
+              auto add_wp = [&](Id sid) {
+                if (sid == kInvalidId) return;
+                if (!sim.is_system_discovered_by_faction(fleet_mut->faction_id, sid)) return;
+                auto& wps = fleet_mut->mission.patrol_circuit_system_ids;
+                // Keep the circuit simple by de-duplicating while preserving order (move to end).
+                wps.erase(std::remove(wps.begin(), wps.end(), sid), wps.end());
+                wps.push_back(sid);
+                fleet_mut->mission.patrol_leg_index = 0;
+              };
+
+              // Quick add from current UI selection.
+              ImGui::BeginDisabled(s.selected_system == kInvalidId ||
+                                  !sim.is_system_discovered_by_faction(fleet_mut->faction_id, s.selected_system));
+              if (ImGui::SmallButton("Add selected system##fleet_mission_circuit_add_selected")) {
+                add_wp(s.selected_system);
+              }
+              ImGui::EndDisabled();
+
+              ImGui::SameLine();
+              if (ImGui::SmallButton("Clear##fleet_mission_circuit_clear")) {
+                fleet_mut->mission.patrol_circuit_system_ids.clear();
+                fleet_mut->mission.patrol_leg_index = 0;
+              }
+
+              // Add from a combo list (discovered systems only).
+              const char* add_label = "(choose system)";
+              if (ImGui::BeginCombo("Add waypoint##fleet_mission_circuit_add", add_label)) {
+                for (Id sid : sorted_keys(s.systems)) {
+                  const auto* sys = find_ptr(s.systems, sid);
+                  if (!sys) continue;
+                  if (!sim.is_system_discovered_by_faction(fleet_mut->faction_id, sid)) continue;
+
+                  const std::string key = sys->name + "##circuit_add_" + std::to_string(static_cast<unsigned long long>(sid));
+                  if (ImGui::Selectable(key.c_str(), false)) {
+                    add_wp(sid);
+                  }
+                }
+                ImGui::EndCombo();
+              }
+
+              auto& wps = fleet_mut->mission.patrol_circuit_system_ids;
+              if (wps.empty()) {
+                ImGui::TextDisabled("No waypoints. Add at least one system.");
+              } else {
+                const int n = static_cast<int>(wps.size());
+                const int cur = (n > 0) ? (std::max(0, fleet_mut->mission.patrol_leg_index) % n) : 0;
+
+                if (ImGui::BeginTable("fleet_mission_patrol_circuit_wps", 3,
+                                      ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable)) {
+                  ImGui::TableSetupColumn("Waypoint", ImGuiTableColumnFlags_WidthStretch);
+                  ImGui::TableSetupColumn("Order", ImGuiTableColumnFlags_WidthFixed, 120.0f);
+                  ImGui::TableSetupColumn("Start", ImGuiTableColumnFlags_WidthFixed, 56.0f);
+                  ImGui::TableHeadersRow();
+
+                  int remove_idx = -1;
+                  int move_from = -1;
+                  int move_to = -1;
+
+                  for (int i = 0; i < n; ++i) {
+                    const Id sid = wps[i];
+                    const auto* sys = find_ptr(s.systems, sid);
+                    const std::string name = sys ? sys->name : ("(unknown #" + std::to_string(static_cast<unsigned long long>(sid)) + ")");
+
+                    ImGui::TableNextRow();
+
+                    // Waypoint label.
+                    ImGui::TableNextColumn();
+                    const bool is_cur = (i == cur);
+                    const std::string row_key = std::to_string(i + 1) + ". " + name + "##circuit_wp_" +
+                                                std::to_string(static_cast<unsigned long long>(sid));
+                    if (ImGui::Selectable(row_key.c_str(), is_cur, ImGuiSelectableFlags_SpanAllColumns)) {
+                      s.selected_system = sid;
+                    }
+
+                    // Order controls.
+                    ImGui::TableNextColumn();
+                    ImGui::BeginDisabled(i == 0);
+                    if (ImGui::SmallButton(("Up##circuit_up_" + std::to_string(i)).c_str())) {
+                      move_from = i;
+                      move_to = i - 1;
+                    }
+                    ImGui::EndDisabled();
+                    ImGui::SameLine();
+                    ImGui::BeginDisabled(i == n - 1);
+                    if (ImGui::SmallButton(("Down##circuit_dn_" + std::to_string(i)).c_str())) {
+                      move_from = i;
+                      move_to = i + 1;
+                    }
+                    ImGui::EndDisabled();
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton(("Remove##circuit_rm_" + std::to_string(i)).c_str())) {
+                      remove_idx = i;
+                    }
+
+                    // Start index control.
+                    ImGui::TableNextColumn();
+                    if (ImGui::SmallButton(("Here##circuit_here_" + std::to_string(i)).c_str())) {
+                      fleet_mut->mission.patrol_leg_index = i;
+                    }
+                  }
+
+                  if (move_from >= 0 && move_to >= 0 && move_from != move_to) {
+                    std::swap(wps[move_from], wps[move_to]);
+                    // Keep the start index stable relative to the list.
+                    if (fleet_mut->mission.patrol_leg_index == move_from) fleet_mut->mission.patrol_leg_index = move_to;
+                    if (fleet_mut->mission.patrol_leg_index == move_to) fleet_mut->mission.patrol_leg_index = move_from;
+                  }
+                  if (remove_idx >= 0 && remove_idx < static_cast<int>(wps.size())) {
+                    wps.erase(wps.begin() + remove_idx);
+                    fleet_mut->mission.patrol_leg_index = 0;
+                  }
+
+                  ImGui::EndTable();
+                }
+              }
+
+              int dwell = std::max(1, fleet_mut->mission.patrol_dwell_days);
+              if (ImGui::InputInt("Dwell days##fleet_mission_circuit_dwell", &dwell)) {
+                fleet_mut->mission.patrol_dwell_days = std::max(1, dwell);
+              }
+
+              ImGui::TextDisabled(
+                  "Visits the waypoint systems in order (loop) and engages detected hostiles in-system.\n"
+                  "Tip: On the Galaxy Map, Ctrl+Alt+Right click a system to add it to the selected fleet's circuit.");
+            }
+
+            if (fleet_mut->mission.type == FleetMissionType::PatrolRoute) {
+              ImGui::Spacing();
+              ImGui::Text("Patrol route");
+
+              // Endpoint A (discovered systems only).
+              const StarSystem* sys_a = (fleet_mut->mission.patrol_route_a_system_id != kInvalidId)
+                                          ? find_ptr(s.systems, fleet_mut->mission.patrol_route_a_system_id)
+                                          : nullptr;
+              const char* a_label = sys_a ? sys_a->name.c_str() : "(select system)";
+              if (ImGui::BeginCombo("Endpoint A##fleet_mission_patrol_route_a", a_label)) {
+                for (Id sid : sorted_keys(s.systems)) {
+                  const auto* sys = find_ptr(s.systems, sid);
+                  if (!sys) continue;
+                  if (!sim.is_system_discovered_by_faction(fleet_mut->faction_id, sid)) continue;
+                  const bool sel = (fleet_mut->mission.patrol_route_a_system_id == sid);
+                  if (ImGui::Selectable((sys->name + "##pat_route_a_" + std::to_string(static_cast<unsigned long long>(sid))).c_str(), sel)) {
+                    fleet_mut->mission.patrol_route_a_system_id = sid;
+
+                    // Keep endpoints distinct when possible.
+                    if (fleet_mut->mission.patrol_route_b_system_id == sid) {
+                      for (Id other : sorted_keys(s.systems)) {
+                        if (other == sid) continue;
+                        if (!sim.is_system_discovered_by_faction(fleet_mut->faction_id, other)) continue;
+                        fleet_mut->mission.patrol_route_b_system_id = other;
+                        break;
+                      }
+                    }
+
+                    // Restart the route direction so the next leg is deterministic.
+                    fleet_mut->mission.patrol_leg_index = 0;
+                  }
+                }
+                ImGui::EndCombo();
+              }
+
+              // Endpoint B.
+              const StarSystem* sys_b = (fleet_mut->mission.patrol_route_b_system_id != kInvalidId)
+                                          ? find_ptr(s.systems, fleet_mut->mission.patrol_route_b_system_id)
+                                          : nullptr;
+              const char* b_label = sys_b ? sys_b->name.c_str() : "(select system)";
+              if (ImGui::BeginCombo("Endpoint B##fleet_mission_patrol_route_b", b_label)) {
+                for (Id sid : sorted_keys(s.systems)) {
+                  const auto* sys = find_ptr(s.systems, sid);
+                  if (!sys) continue;
+                  if (!sim.is_system_discovered_by_faction(fleet_mut->faction_id, sid)) continue;
+                  const bool sel = (fleet_mut->mission.patrol_route_b_system_id == sid);
+                  if (ImGui::Selectable((sys->name + "##pat_route_b_" + std::to_string(static_cast<unsigned long long>(sid))).c_str(), sel)) {
+                    fleet_mut->mission.patrol_route_b_system_id = sid;
+
+                    // Keep endpoints distinct when possible.
+                    if (fleet_mut->mission.patrol_route_a_system_id == sid) {
+                      for (Id other : sorted_keys(s.systems)) {
+                        if (other == sid) continue;
+                        if (!sim.is_system_discovered_by_faction(fleet_mut->faction_id, other)) continue;
+                        fleet_mut->mission.patrol_route_a_system_id = other;
+                        break;
+                      }
+                    }
+
+                    fleet_mut->mission.patrol_leg_index = 0;
+                  }
+                }
+                ImGui::EndCombo();
+              }
+
+              if (ImGui::SmallButton("Swap endpoints##fleet_mission_patrol_route_swap")) {
+                std::swap(fleet_mut->mission.patrol_route_a_system_id, fleet_mut->mission.patrol_route_b_system_id);
+                fleet_mut->mission.patrol_leg_index = 0;
+              }
+
+              int dwell = std::max(1, fleet_mut->mission.patrol_dwell_days);
+              if (ImGui::InputInt("Dwell days##fleet_mission_patrol_route_dwell", &dwell)) {
+                fleet_mut->mission.patrol_dwell_days = std::max(1, dwell);
+              }
+
+              ImGui::TextDisabled(
+                  "Shuttles between two systems and engages detected hostiles along the way.\n"
+                  "Useful for guarding trade lanes and suppressing piracy across multiple regions.");
+            }
+
+            if (fleet_mut->mission.type == FleetMissionType::GuardJumpPoint) {
+              ImGui::Spacing();
+              ImGui::Text("Guard jump point");
+
+              const JumpPoint* seljp = (fleet_mut->mission.guard_jump_point_id != kInvalidId)
+                                         ? find_ptr(s.jump_points, fleet_mut->mission.guard_jump_point_id)
+                                         : nullptr;
+              std::string jp_label = seljp ? seljp->name : std::string("(select jump point)");
+              if (seljp) {
+                if (const auto* sys = find_ptr(s.systems, seljp->system_id)) {
+                  jp_label = sys->name + ": " + seljp->name;
+                }
+              }
+
+              if (ImGui::BeginCombo("Jump point##fleet_mission_guard_jp", jp_label.c_str())) {
+                // Show jump points in discovered systems (for this faction).
+                for (Id sys_id : sorted_keys(s.systems)) {
+                  const auto* sys = find_ptr(s.systems, sys_id);
+                  if (!sys) continue;
+                  if (ui.fog_of_war && !sim.is_system_discovered_by_faction(fleet_mut->faction_id, sys_id)) continue;
+
+                  for (Id jid : sys->jump_points) {
+                    const auto* jp = find_ptr(s.jump_points, jid);
+                    if (!jp) continue;
+                    if (jp->system_id != sys_id) continue;
+
+                    std::string label = sys->name + ": " + jp->name;
+
+                    // Try to show destination if surveyed / no fog.
+                    const bool surveyed = (!ui.fog_of_war) || sim.is_jump_point_surveyed_by_faction(fleet_mut->faction_id, jid);
+                    if (surveyed && jp->linked_jump_id != kInvalidId) {
+                      if (const auto* other = find_ptr(s.jump_points, jp->linked_jump_id)) {
+                        if (const auto* dst = find_ptr(s.systems, other->system_id)) {
+                          label += " -> " + dst->name;
+                        }
+                      }
+                    } else {
+                      label += " -> ???";
+                    }
+
+                    const bool sel = (fleet_mut->mission.guard_jump_point_id == jid);
+                    const std::string key = label + "##guard_jp_" + std::to_string(static_cast<unsigned long long>(jid));
+                    if (ImGui::Selectable(key.c_str(), sel)) {
+                      fleet_mut->mission.guard_jump_point_id = jid;
+                      fleet_mut->mission.guard_last_alert_day = 0;
+
+                      // Handy navigation hint: jump to system when selecting.
+                      s.selected_system = sys_id;
+                    }
+                  }
+                }
+
+                ImGui::EndCombo();
+              }
+
+              double rr = fleet_mut->mission.guard_jump_radius_mkm;
+              if (ImGui::InputDouble("Response radius mkm##fleet_mission_guard_r", &rr, 10.0, 100.0, "%.1f")) {
+                fleet_mut->mission.guard_jump_radius_mkm = std::max(0.0, rr);
+              }
+
+              int dwell = std::max(1, fleet_mut->mission.guard_jump_dwell_days);
+              if (ImGui::InputInt("Loiter days##fleet_mission_guard_dwell", &dwell)) {
+                fleet_mut->mission.guard_jump_dwell_days = std::max(1, dwell);
+              }
+
+              ImGui::TextDisabled(
+                  "Moves to the selected jump point and waits.\n"
+                  "When a detected hostile enters the response radius, the fleet will intercept.\n"
+                  "Tip: Guarding jump points also contributes to pirate suppression in that region.");
+            }
+
 
             if (fleet_mut->mission.type == FleetMissionType::PatrolRegion) {
               ImGui::Spacing();
@@ -3821,12 +4289,108 @@ const bool can_up = (i > 0);
               ImGui::TextDisabled("Stages troops (optional), bombards once (optional), then invades with troop ships.\nTip: Use 'Start mission' to clear any existing orders before running.");
             }
 
+            if (fleet_mut->mission.type == FleetMissionType::BlockadeColony) {
+              ImGui::Spacing();
+              ImGui::Text("Blockade colony");
+
+              // Colony picker (discovered colonies).
+              const Colony* tgt = (fleet_mut->mission.blockade_colony_id != kInvalidId)
+                                     ? find_ptr(s.colonies, fleet_mut->mission.blockade_colony_id)
+                                     : nullptr;
+              const char* col_label = tgt ? tgt->name.c_str() : "(select colony)";
+              if (ImGui::BeginCombo("Target##fleet_mission_blockade_colony", col_label)) {
+                for (Id cid : sorted_keys(s.colonies)) {
+                  const auto* c = find_ptr(s.colonies, cid);
+                  if (!c) continue;
+
+                  const auto* body = find_ptr(s.bodies, c->body_id);
+                  if (!body || body->system_id == kInvalidId) continue;
+                  if (!sim.is_system_discovered_by_faction(fleet_mut->faction_id, body->system_id)) continue;
+
+                  std::string label = c->name;
+                  if (const auto* sys = find_ptr(s.systems, body->system_id)) {
+                    label += " - " + sys->name;
+                  }
+                  if (c->faction_id == fleet_mut->faction_id) {
+                    label += " (own)";
+                  } else if (c->faction_id != kInvalidId) {
+                    if (const auto* col_fac = find_ptr(s.factions, c->faction_id)) {
+                      label += " (" + col_fac->name + ")";
+                    }
+                  }
+
+                  const bool sel = (fleet_mut->mission.blockade_colony_id == cid);
+                  const std::string key = label + "##blk_col_" + std::to_string(static_cast<unsigned long long>(cid));
+                  if (ImGui::Selectable(key.c_str(), sel)) {
+                    fleet_mut->mission.blockade_colony_id = cid;
+                    tgt = c;
+                  }
+                }
+                ImGui::EndCombo();
+              }
+
+              const double default_radius = std::max(0.0, sim.cfg().blockade_radius_mkm);
+              double r = std::max(0.0, fleet_mut->mission.blockade_radius_mkm);
+              if (ImGui::InputDouble("Radius mkm##fleet_mission_blockade_radius", &r, 0.5, 2.0, "%.2f")) {
+                fleet_mut->mission.blockade_radius_mkm = std::max(0.0, r);
+              }
+              if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("0 uses the global SimConfig blockade radius (%.2f mkm).", default_radius);
+              }
+
+              const double eff_radius = (fleet_mut->mission.blockade_radius_mkm > 0.0)
+                                          ? fleet_mut->mission.blockade_radius_mkm
+                                          : default_radius;
+              ImGui::TextDisabled("Effective radius: %.2f mkm", eff_radius);
+
+              if (tgt) {
+                if (tgt->faction_id == fleet_mut->faction_id) {
+                  ImGui::TextDisabled("Note: targeting an owned colony produces no blockade pressure.");
+                }
+
+                const auto bs = sim.blockade_status_for_colony(tgt->id);
+                ImGui::TextDisabled("Pressure: %.2f   Output: %.0f%%", bs.pressure, bs.output_multiplier * 100.0);
+                ImGui::TextDisabled("Hostiles: %d ship(s), power %.1f   Defenders: %d ship(s), power %.1f",
+                                    bs.hostile_ships, bs.hostile_power, bs.defender_ships, bs.defender_power);
+
+                const auto* body = find_ptr(s.bodies, tgt->body_id);
+                if (body) {
+                  const auto* sys = find_ptr(s.systems, body->system_id);
+                  if (sys) {
+                    ImGui::TextDisabled("System: %s", sys->name.c_str());
+                  }
+
+                  if (ImGui::SmallButton("Focus target##fleet_mission_blockade_focus")) {
+                    selected_ship = kInvalidId;
+                    selected_colony = tgt->id;
+                    selected_body = tgt->body_id;
+                    s.selected_system = body->system_id;
+                    ui.request_details_tab = DetailsTab::Colony;
+                    ui.show_map_window = true;
+                    ui.request_map_tab = MapTab::System;
+                    ui.request_focus_faction_id = fleet_mut->faction_id;
+                    ui.request_system_map_center = true;
+                    ui.request_system_map_center_system_id = body->system_id;
+                    ui.request_system_map_center_x_mkm = body->position_mkm.x;
+                    ui.request_system_map_center_y_mkm = body->position_mkm.y;
+                    ui.request_system_map_center_zoom = 0.0;
+                  }
+                }
+              }
+
+              ImGui::TextDisabled("Maintains a hostile presence near the colony and disrupts its activity.");
+              ImGui::TextDisabled("Effect: reduces repairs, troop training, and terraforming efficiency (best-effort).");
+              ImGui::TextDisabled("(See Logistics tab for blockade summaries.)");
+            }
             if (fleet_mut->mission.type == FleetMissionType::Explore) {
               ImGui::Spacing();
               ImGui::Text("Explore systems");
             
               ImGui::Checkbox("Survey exits before transiting##fleet_mission_explore_survey_first", &fleet_mut->mission.explore_survey_first);
               ImGui::Checkbox("Transit to undiscovered systems##fleet_mission_explore_allow_transit", &fleet_mut->mission.explore_allow_transit);
+              ImGui::Checkbox("Survey+transit frontier exits##fleet_mission_explore_survey_transit", &fleet_mut->mission.explore_survey_transit_when_done);
+              ImGui::Checkbox("Investigate anomalies##fleet_mission_explore_anoms", &fleet_mut->mission.explore_investigate_anomalies);
+              ImGui::Checkbox("Salvage wrecks when safe##fleet_mission_explore_wrecks", &fleet_mut->mission.explore_salvage_wrecks);
             
               ImGui::TextDisabled("Surveys unknown jump points, then transits surveyed exits into undiscovered systems\nwhen enabled. Routes to the best frontier system when idle.");
             }

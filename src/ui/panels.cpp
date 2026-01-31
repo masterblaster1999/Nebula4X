@@ -3585,6 +3585,49 @@ const bool can_up = (i > 0);
               }
             }
 
+            // --- Colonist Transfer (Ship-to-Ship) ---
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Text("Colonist Transfer");
+            ImGui::TextDisabled("Transfers embarked colonists from this ship to the target ship.");
+            ImGui::TextDisabled("Both ships must have colony modules. Millions <= 0 transfers as much as possible.");
+
+            static double ship_transfer_colonists_millions = 0.0;
+            if (!std::isfinite(ship_transfer_colonists_millions) || ship_transfer_colonists_millions < 0.0) {
+              ship_transfer_colonists_millions = 0.0;
+            }
+
+            if (target_ship_idx < 0) {
+              ImGui::TextDisabled("Select a target ship above to enable colonist transfer.");
+            } else {
+              const Id target_id = friendly_ships[target_ship_idx].first;
+              const auto* tgt = find_ptr(s.ships, target_id);
+
+              const auto* src_d = sim.find_design(sh->design_id);
+              const auto* tgt_d = tgt ? sim.find_design(tgt->design_id) : nullptr;
+              const double src_cap = src_d ? std::max(0.0, src_d->colony_capacity_millions) : 0.0;
+              const double tgt_cap = tgt_d ? std::max(0.0, tgt_d->colony_capacity_millions) : 0.0;
+
+              if (!tgt) {
+                ImGui::TextDisabled("Target ship no longer exists.");
+              } else if (src_cap <= 1e-9 || tgt_cap <= 1e-9) {
+                ImGui::TextDisabled("Colonist transfer unavailable: one or both ships have no colony capacity.");
+              } else {
+                ImGui::Text("Source colonists: %.2f / %.2f", sh->colonists_millions, src_cap);
+                ImGui::Text("Target colonists: %.2f / %.2f", tgt->colonists_millions, tgt_cap);
+
+                ImGui::InputDouble("Millions##ColonistTransfer (0 = max)", &ship_transfer_colonists_millions, 1.0,
+                                   10.0, "%.2f");
+
+                if (ImGui::Button("Transfer Colonists to Target")) {
+                  if (!sim.issue_transfer_colonists_to_ship(selected_ship, target_id, ship_transfer_colonists_millions,
+                                                            ui.fog_of_war)) {
+                    nebula4x::log::warn("Couldn't queue colonist transfer order.");
+                  }
+                }
+              }
+            }
+
             // --- Escort / Follow ---
             ImGui::Spacing();
             ImGui::Separator();
@@ -4009,6 +4052,72 @@ const bool can_up = (i > 0);
             if (fleet_mut->mission.type == FleetMissionType::PatrolSystem && fleet_mut->mission.patrol_system_id == kInvalidId) {
               if (s.selected_system != kInvalidId) fleet_mut->mission.patrol_system_id = s.selected_system;
             }
+            if (fleet_mut->mission.type == FleetMissionType::PatrolRoute) {
+              auto system_visible = [&](Id sid) {
+                return sid != kInvalidId &&
+                       (!ui.fog_of_war || sim.is_system_discovered_by_faction(fleet_mut->faction_id, sid));
+              };
+
+              auto pick_any_discovered = [&]() -> Id {
+                for (Id sid : sorted_keys(s.systems)) {
+                  if (!system_visible(sid)) continue;
+                  return sid;
+                }
+                return kInvalidId;
+              };
+
+              Id a = fleet_mut->mission.patrol_route_a_system_id;
+              if (!system_visible(a)) {
+                if (system_visible(s.selected_system)) {
+                  a = s.selected_system;
+                } else if (leader && system_visible(leader->system_id)) {
+                  a = leader->system_id;
+                } else {
+                  a = pick_any_discovered();
+                }
+                fleet_mut->mission.patrol_route_a_system_id = a;
+              }
+
+              auto pick_other_discovered = [&](Id not_sid) -> Id {
+                for (Id sid : sorted_keys(s.systems)) {
+                  if (sid == not_sid) continue;
+                  if (!system_visible(sid)) continue;
+                  return sid;
+                }
+                return kInvalidId;
+              };
+
+              // Prefer a connected neighbor as endpoint B.
+              Id b = fleet_mut->mission.patrol_route_b_system_id;
+              if (!system_visible(b) || b == a) {
+                b = kInvalidId;
+
+                const auto* sys = (a != kInvalidId) ? find_ptr(s.systems, a) : nullptr;
+                if (sys) {
+                  auto jps = sys->jump_points;
+                  std::sort(jps.begin(), jps.end());
+                  for (Id jid : jps) {
+                    if (ui.fog_of_war && !sim.is_jump_point_surveyed_by_faction(fleet_mut->faction_id, jid)) continue;
+                    const auto* jp = find_ptr(s.jump_points, jid);
+                    if (!jp || jp->linked_jump_id == kInvalidId) continue;
+                    const auto* other = find_ptr(s.jump_points, jp->linked_jump_id);
+                    if (!other) continue;
+                    if (!system_visible(other->system_id)) continue;
+                    if (other->system_id == a) continue;
+                    b = other->system_id;
+                    break;
+                  }
+                }
+
+                if (b == kInvalidId) {
+                  b = pick_other_discovered(a);
+                }
+
+                fleet_mut->mission.patrol_route_b_system_id = b;
+              }
+
+              fleet_mut->mission.patrol_leg_index = 0;
+            }
             if (fleet_mut->mission.type == FleetMissionType::PatrolCircuit && fleet_mut->mission.patrol_circuit_system_ids.empty()) {
               Id seed = kInvalidId;
               if (s.selected_system != kInvalidId && (!ui.fog_of_war || sim.is_system_discovered_by_faction(fleet_mut->faction_id, s.selected_system))) {
@@ -4040,158 +4149,6 @@ const bool can_up = (i > 0);
               if (fleet_mut->mission.guard_jump_dwell_days <= 0) fleet_mut->mission.guard_jump_dwell_days = 3;
               fleet_mut->mission.guard_last_alert_day = 0;
             }
-            if (fleet_mut->mission.type == FleetMissionType::PatrolRoute) {
-              ImGui::Spacing();
-              ImGui::Text("Patrol route");
-
-              // Endpoint A (discovered systems only).
-              const StarSystem* sys_a = (fleet_mut->mission.patrol_route_a_system_id != kInvalidId)
-                                          ? find_ptr(s.systems, fleet_mut->mission.patrol_route_a_system_id)
-                                          : nullptr;
-              const char* a_label = sys_a ? sys_a->name.c_str() : "(select system)";
-              if (ImGui::BeginCombo("Endpoint A##fleet_mission_patrol_route_a", a_label)) {
-                for (Id sid : sorted_keys(s.systems)) {
-                  const auto* sys = find_ptr(s.systems, sid);
-                  if (!sys) continue;
-                  if (!sim.is_system_discovered_by_faction(fleet_mut->faction_id, sid)) continue;
-                  const bool sel = (fleet_mut->mission.patrol_route_a_system_id == sid);
-                  if (ImGui::Selectable((sys->name + "##pat_route_a_" + std::to_string(static_cast<unsigned long long>(sid))).c_str(), sel)) {
-                    fleet_mut->mission.patrol_route_a_system_id = sid;
-
-                    // Keep endpoints distinct when possible.
-                    if (fleet_mut->mission.patrol_route_b_system_id == sid) {
-                      for (Id other : sorted_keys(s.systems)) {
-                        if (other == sid) continue;
-                        if (!sim.is_system_discovered_by_faction(fleet_mut->faction_id, other)) continue;
-                        fleet_mut->mission.patrol_route_b_system_id = other;
-                        break;
-                      }
-                    }
-
-                    // Restart the route direction so the next leg is deterministic.
-                    fleet_mut->mission.patrol_leg_index = 0;
-                  }
-                }
-                ImGui::EndCombo();
-              }
-
-              // Endpoint B.
-              const StarSystem* sys_b = (fleet_mut->mission.patrol_route_b_system_id != kInvalidId)
-                                          ? find_ptr(s.systems, fleet_mut->mission.patrol_route_b_system_id)
-                                          : nullptr;
-              const char* b_label = sys_b ? sys_b->name.c_str() : "(select system)";
-              if (ImGui::BeginCombo("Endpoint B##fleet_mission_patrol_route_b", b_label)) {
-                for (Id sid : sorted_keys(s.systems)) {
-                  const auto* sys = find_ptr(s.systems, sid);
-                  if (!sys) continue;
-                  if (!sim.is_system_discovered_by_faction(fleet_mut->faction_id, sid)) continue;
-                  const bool sel = (fleet_mut->mission.patrol_route_b_system_id == sid);
-                  if (ImGui::Selectable((sys->name + "##pat_route_b_" + std::to_string(static_cast<unsigned long long>(sid))).c_str(), sel)) {
-                    fleet_mut->mission.patrol_route_b_system_id = sid;
-
-                    // Keep endpoints distinct when possible.
-                    if (fleet_mut->mission.patrol_route_a_system_id == sid) {
-                      for (Id other : sorted_keys(s.systems)) {
-                        if (other == sid) continue;
-                        if (!sim.is_system_discovered_by_faction(fleet_mut->faction_id, other)) continue;
-                        fleet_mut->mission.patrol_route_a_system_id = other;
-                        break;
-                      }
-                    }
-
-                    fleet_mut->mission.patrol_leg_index = 0;
-                  }
-                }
-                ImGui::EndCombo();
-              }
-
-              if (ImGui::SmallButton("Swap endpoints##fleet_mission_patrol_route_swap")) {
-                std::swap(fleet_mut->mission.patrol_route_a_system_id, fleet_mut->mission.patrol_route_b_system_id);
-                fleet_mut->mission.patrol_leg_index = 0;
-              }
-
-              int dwell = std::max(1, fleet_mut->mission.patrol_dwell_days);
-              if (ImGui::InputInt("Dwell days##fleet_mission_patrol_route_dwell", &dwell)) {
-                fleet_mut->mission.patrol_dwell_days = std::max(1, dwell);
-              }
-
-              ImGui::TextDisabled(
-                  "Shuttles between two systems and engages detected hostiles along the way.\n"
-                  "Useful for guarding trade lanes and suppressing piracy across multiple regions.");
-            }
-
-            if (fleet_mut->mission.type == FleetMissionType::GuardJumpPoint) {
-              ImGui::Spacing();
-              ImGui::Text("Guard jump point");
-
-              const JumpPoint* seljp = (fleet_mut->mission.guard_jump_point_id != kInvalidId)
-                                         ? find_ptr(s.jump_points, fleet_mut->mission.guard_jump_point_id)
-                                         : nullptr;
-              std::string jp_label = seljp ? seljp->name : std::string("(select jump point)");
-              if (seljp) {
-                if (const auto* sys = find_ptr(s.systems, seljp->system_id)) {
-                  jp_label = sys->name + ": " + seljp->name;
-                }
-              }
-
-              if (ImGui::BeginCombo("Jump point##fleet_mission_guard_jp", jp_label.c_str())) {
-                // Show jump points in discovered systems (for this faction).
-                for (Id sys_id : sorted_keys(s.systems)) {
-                  const auto* sys = find_ptr(s.systems, sys_id);
-                  if (!sys) continue;
-                  if (ui.fog_of_war && !sim.is_system_discovered_by_faction(fleet_mut->faction_id, sys_id)) continue;
-
-                  for (Id jid : sys->jump_points) {
-                    const auto* jp = find_ptr(s.jump_points, jid);
-                    if (!jp) continue;
-                    if (jp->system_id != sys_id) continue;
-
-                    std::string label = sys->name + ": " + jp->name;
-
-                    // Try to show destination if surveyed / no fog.
-                    const bool surveyed = (!ui.fog_of_war) || sim.is_jump_point_surveyed_by_faction(fleet_mut->faction_id, jid);
-                    if (surveyed && jp->linked_jump_id != kInvalidId) {
-                      if (const auto* other = find_ptr(s.jump_points, jp->linked_jump_id)) {
-                        if (const auto* dst = find_ptr(s.systems, other->system_id)) {
-                          label += " -> " + dst->name;
-                        }
-                      }
-                    } else {
-                      label += " -> ???";
-                    }
-
-                    const bool sel = (fleet_mut->mission.guard_jump_point_id == jid);
-                    const std::string key = label + "##guard_jp_" + std::to_string(static_cast<unsigned long long>(jid));
-                    if (ImGui::Selectable(key.c_str(), sel)) {
-                      fleet_mut->mission.guard_jump_point_id = jid;
-                      fleet_mut->mission.guard_last_alert_day = 0;
-
-                      // Handy navigation hint: jump to system when selecting.
-                      s.selected_system = sys_id;
-                    }
-                  }
-                }
-
-                ImGui::EndCombo();
-              }
-
-              double rr = fleet_mut->mission.guard_jump_radius_mkm;
-              if (ImGui::InputDouble("Response radius mkm##fleet_mission_guard_r", &rr, 10.0, 100.0, "%.1f")) {
-                fleet_mut->mission.guard_jump_radius_mkm = std::max(0.0, rr);
-              }
-
-              int dwell = std::max(1, fleet_mut->mission.guard_jump_dwell_days);
-              if (ImGui::InputInt("Loiter days##fleet_mission_guard_dwell", &dwell)) {
-                fleet_mut->mission.guard_jump_dwell_days = std::max(1, dwell);
-              }
-
-              ImGui::TextDisabled(
-                  "Moves to the selected jump point and waits.\n"
-                  "When a detected hostile enters the response radius, the fleet will intercept.\n"
-                  "Tip: Guarding jump points also contributes to pirate suppression in that region.");
-            }
-
-
             if (fleet_mut->mission.type == FleetMissionType::PatrolRegion) {
               fleet_mut->mission.patrol_region_system_index = 0;
               fleet_mut->mission.patrol_region_waypoint_index = 0;
@@ -4239,11 +4196,15 @@ const bool can_up = (i > 0);
 
             if (fleet_mut->mission.type == FleetMissionType::BlockadeColony) {
               if (fleet_mut->mission.blockade_colony_id == kInvalidId) {
-                // Best-effort default: use the currently selected colony if any.
+                // Best-effort default: use the currently selected colony if it is not owned by us.
                 // Otherwise pick the first discovered non-owned colony.
                 if (selected_colony != kInvalidId) {
-                  fleet_mut->mission.blockade_colony_id = selected_colony;
-                } else {
+                  const auto* sc = find_ptr(s.colonies, selected_colony);
+                  if (sc && sc->faction_id != fleet_mut->faction_id) {
+                    fleet_mut->mission.blockade_colony_id = selected_colony;
+                  }
+                }
+                if (fleet_mut->mission.blockade_colony_id == kInvalidId) {
                   for (Id cid : sorted_keys(s.colonies)) {
                     const auto* c = find_ptr(s.colonies, cid);
                     if (!c) continue;
@@ -5502,6 +5463,11 @@ const bool can_up = (i > 0);
             ImGui::Text("Shipping loss pressure: %.0f%%", stab.shipping_loss_pressure * 100.0);
             ImGui::Text("Blockade pressure: %.0f%%", stab.blockade_pressure * 100.0);
             ImGui::Text("Conditions delta: %+0.2f", stab.condition_delta);
+
+            if (sim.cfg().enable_colony_stability_output_scaling) {
+              const double out_mult = sim.colony_stability_output_multiplier_for_colony(*colony);
+              ImGui::Text("Output multiplier: x%.3f", out_mult);
+            }
             ImGui::EndTooltip();
           }
 
@@ -12470,6 +12436,9 @@ void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& 
     static char search[128] = "";
     static int system_filter_idx = 0; // 0 = All
     static bool show_resolved = false;
+    static std::vector<Id> investigation_queue;
+    static bool replace_ship_orders_on_commit = false;
+    static std::string queue_status;
 
     const auto systems = sorted_systems(s);
 
@@ -12513,6 +12482,13 @@ void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& 
 
       std::string unlock;
       bool resolved{false};
+    };
+
+    struct AnomAssignment {
+      Id ship_id{kInvalidId};
+      int progress_days{0};
+      int duration_days{0};
+      bool active{false};
     };
 
     std::vector<AnomRow> rows;
@@ -12579,6 +12555,48 @@ void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& 
       rows.push_back(std::move(r));
     }
 
+    // Keep the investigation queue valid (and non-omniscient under fog-of-war).
+    investigation_queue.erase(
+        std::remove_if(
+            investigation_queue.begin(), investigation_queue.end(),
+            [&](Id aid) {
+              const auto* a = find_ptr(s.anomalies, aid);
+              if (!a) return true;
+              if (a->resolved) return true;
+              if (ui.fog_of_war && ui.viewer_faction_id != kInvalidId) {
+                if (!sim.is_system_discovered_by_faction(ui.viewer_faction_id, a->system_id)) return true;
+                if (!sim.is_anomaly_discovered_by_faction(ui.viewer_faction_id, aid)) return true;
+              }
+              return false;
+            }),
+        investigation_queue.end());
+
+    std::unordered_set<Id> queued_ids(investigation_queue.begin(), investigation_queue.end());
+
+    // Map anomaly -> ships currently assigned via InvestigateAnomaly orders.
+    std::unordered_map<Id, std::vector<AnomAssignment>> assignments;
+    if (ui.viewer_faction_id != kInvalidId) {
+      for (const auto& [sid, so] : s.ship_orders) {
+        const auto* sh = find_ptr(s.ships, sid);
+        if (!sh) continue;
+        if (sh->faction_id != ui.viewer_faction_id) continue;
+        int idx = 0;
+        for (const auto& ord : so.queue) {
+          if (const auto* inv = std::get_if<InvestigateAnomaly>(&ord)) {
+            AnomAssignment as;
+            as.ship_id = sid;
+            as.progress_days = inv->progress_days;
+            as.duration_days = inv->duration_days;
+            as.active = (idx == 0);
+            assignments[inv->anomaly_id].push_back(std::move(as));
+          }
+          ++idx;
+        }
+      }
+    }
+
+    static Id selected_anom = kInvalidId;
+
     ImGui::Separator();
     ImGui::TextDisabled("Showing %d / %d anomalies", (int)rows.size(), (int)s.anomalies.size());
 
@@ -12587,7 +12605,9 @@ void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& 
                                  ImGuiTableFlags_ScrollY;
 
     const ImVec2 avail = ImGui::GetContentRegionAvail();
-    if (ImGui::BeginTable("anomaly_directory", 10, flags, ImVec2(avail.x, avail.y))) {
+    const float footer_h = 220.0f;
+    const float table_h = std::max(160.0f, avail.y - footer_h);
+    if (ImGui::BeginTable("anomaly_directory", 10, flags, ImVec2(avail.x, table_h))) {
       ImGui::TableSetupScrollFreeze(0, 1);
       ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_DefaultSort, 0.0f, 0);
       ImGui::TableSetupColumn("Kind", 0, 0.0f, 1);
@@ -12598,7 +12618,7 @@ void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& 
       ImGui::TableSetupColumn("Hazard", ImGuiTableColumnFlags_PreferSortAscending, 0.0f, 6);
       ImGui::TableSetupColumn("Unlock", 0, 0.0f, 7);
       ImGui::TableSetupColumn("Status", 0, 0.0f, 8);
-      ImGui::TableSetupColumn("Center", ImGuiTableColumnFlags_NoSort, 0.0f, 9);
+      ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_NoSort, 0.0f, 9);
       ImGui::TableHeadersRow();
 
       if (ImGuiTableSortSpecs* sort = ImGui::TableGetSortSpecs()) {
@@ -12624,9 +12644,6 @@ void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& 
           sort->SpecsDirty = false;
         }
       }
-
-      static Id selected_anom = kInvalidId;
-
       ImGuiListClipper clip;
       clip.Begin(static_cast<int>(rows.size()));
       while (clip.Step()) {
@@ -12755,8 +12772,44 @@ void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& 
           ImGui::TableSetColumnIndex(7);
           ImGui::TextUnformatted(r.unlock.c_str());
           ImGui::TableSetColumnIndex(8);
-          if (r.resolved) ImGui::TextDisabled("Resolved");
-          else ImGui::TextUnformatted("Unresolved");
+          if (r.resolved) {
+            ImGui::TextDisabled("Resolved");
+          } else {
+            const auto itas = assignments.find(r.id);
+            if (itas != assignments.end() && !itas->second.empty()) {
+              bool any_active = false;
+              for (const auto& as : itas->second) any_active |= as.active;
+
+              if (itas->second.size() == 1) {
+                const auto& as = itas->second[0];
+                const auto* sh = find_ptr(s.ships, as.ship_id);
+                const std::string ship_name = sh ? sh->name : (std::string("Ship ") + std::to_string((int)as.ship_id));
+                const int dur = std::max(1, as.duration_days);
+                const int prog = std::clamp(as.progress_days, 0, dur);
+                const std::string st = (any_active ? "Investigating: " : "Queued: ") + ship_name +
+                                      " (" + std::to_string(prog) + "/" + std::to_string(dur) + ")";
+                ImGui::TextUnformatted(st.c_str());
+              } else {
+                ImGui::Text("%s x%d", any_active ? "Investigating" : "Queued", (int)itas->second.size());
+              }
+
+              if (ImGui::IsItemHovered()) {
+                ImGui::BeginTooltip();
+                ImGui::TextUnformatted("Assigned ships:");
+                for (const auto& as : itas->second) {
+                  const auto* sh = find_ptr(s.ships, as.ship_id);
+                  const std::string ship_name = sh ? sh->name : (std::string("Ship ") + std::to_string((int)as.ship_id));
+                  const int dur = std::max(1, as.duration_days);
+                  const int prog = std::clamp(as.progress_days, 0, dur);
+                  ImGui::BulletText("%s%s (%d/%d)", ship_name.c_str(), as.active ? " *" : "", prog, dur);
+                }
+                ImGui::TextDisabled("* = currently executing");
+                ImGui::EndTooltip();
+              }
+            } else {
+              ImGui::TextUnformatted("Unresolved");
+            }
+          }
           ImGui::TableSetColumnIndex(9);
           std::string b = "Go##anom_go_" + std::to_string((int)r.id);
           if (ImGui::SmallButton(b.c_str())) {
@@ -12770,10 +12823,197 @@ void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& 
               ui.request_system_map_center_zoom = 0.0;
             }
           }
+
+          if (!r.resolved) {
+            const bool in_queue = queued_ids.contains(r.id);
+            ImGui::SameLine();
+            std::string qlab = (in_queue ? "Unqueue" : "Queue");
+            qlab += "##anom_q_" + std::to_string((int)r.id);
+            if (ImGui::SmallButton(qlab.c_str())) {
+              if (in_queue) {
+                investigation_queue.erase(
+                    std::remove(investigation_queue.begin(), investigation_queue.end(), r.id),
+                    investigation_queue.end());
+                queued_ids.erase(r.id);
+              } else {
+                investigation_queue.push_back(r.id);
+                queued_ids.insert(r.id);
+              }
+              queue_status.clear();
+            }
+          }
         }
       }
 
       ImGui::EndTable();
+    }
+
+    // --- Investigation queue (quality-of-life for exploration) ---
+    ImGui::Separator();
+    ImGui::TextUnformatted("Investigation queue");
+    ImGui::SameLine();
+    ImGui::TextDisabled("Queue anomalies and commit as ship orders");
+
+    ImGui::Checkbox("Replace existing ship orders##anom_q_replace", &replace_ship_orders_on_commit);
+
+    // Selected ship status.
+    const Ship* sel_ship_ptr = (selected_ship != kInvalidId) ? find_ptr(s.ships, selected_ship) : nullptr;
+    const bool ship_is_valid = (sel_ship_ptr != nullptr);
+    const bool ship_is_friendly = ship_is_valid &&
+        (ui.viewer_faction_id == kInvalidId || sel_ship_ptr->faction_id == ui.viewer_faction_id);
+    const ShipDesign* sel_ship_design = (sel_ship_ptr != nullptr) ? sim.find_design(sel_ship_ptr->design_id) : nullptr;
+    const double sel_ship_sensor = sel_ship_design ? std::max(0.0, sel_ship_design->sensor_range_mkm) : 0.0;
+    const bool ship_can_investigate = ship_is_friendly && (sel_ship_sensor > 1e-9);
+
+    if (!ship_is_valid) {
+      ImGui::TextDisabled("Select a ship to assign investigation orders.");
+    } else {
+      const std::string ship_name = sel_ship_ptr->name.empty()
+          ? (std::string("Ship ") + std::to_string((int)selected_ship))
+          : sel_ship_ptr->name;
+      if (!ship_is_friendly) {
+        ImGui::TextDisabled("Selected ship: %s (not controlled)", ship_name.c_str());
+      } else {
+        ImGui::TextDisabled("Selected ship: %s", ship_name.c_str());
+        if (!ship_can_investigate) {
+          ImGui::SameLine();
+          ImGui::TextDisabled("(requires sensors)");
+        }
+      }
+    }
+
+    // If an anomaly is selected, show the currently assigned ships.
+    if (selected_anom != kInvalidId) {
+      const auto* a = find_ptr(s.anomalies, selected_anom);
+      if (a) {
+        const std::string anm = a->name.empty()
+            ? (std::string("Anomaly ") + std::to_string((int)a->id))
+            : a->name;
+        ImGui::TextDisabled("Selected anomaly: %s", anm.c_str());
+      }
+      const auto itas = assignments.find(selected_anom);
+      if (itas != assignments.end() && !itas->second.empty()) {
+        ImGui::TextDisabled("Assigned ships:");
+        for (const auto& as : itas->second) {
+          const auto* sh = find_ptr(s.ships, as.ship_id);
+          const std::string ship_name = sh ? (sh->name.empty() ? (std::string("Ship ") + std::to_string((int)as.ship_id))
+                                                               : sh->name)
+                                            : (std::string("Ship ") + std::to_string((int)as.ship_id));
+          const int dur = std::max(1, as.duration_days);
+          const int prog = std::clamp(as.progress_days, 0, dur);
+          ImGui::BulletText("%s%s (%d/%d)", ship_name.c_str(), as.active ? " *" : "", prog, dur);
+        }
+        ImGui::TextDisabled("* = currently executing");
+      }
+    }
+
+    // Queue controls.
+    const auto* sel_anom_ptr = (selected_anom != kInvalidId) ? find_ptr(s.anomalies, selected_anom) : nullptr;
+    const bool can_add_selected = sel_anom_ptr && !sel_anom_ptr->resolved && !queued_ids.contains(selected_anom);
+    if (!can_add_selected) ImGui::BeginDisabled();
+    if (ImGui::Button("Add selected anomaly##anom_q_add")) {
+      investigation_queue.push_back(selected_anom);
+      queued_ids.insert(selected_anom);
+      queue_status.clear();
+    }
+    if (!can_add_selected) ImGui::EndDisabled();
+    if (ImGui::IsItemHovered() && selected_anom == kInvalidId) {
+      ImGui::SetTooltip("Select an anomaly in the table first");
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Clear queue##anom_q_clear")) {
+      investigation_queue.clear();
+      queued_ids.clear();
+      queue_status.clear();
+    }
+
+    // Queue list.
+    const float list_h = 120.0f;
+    if (ImGui::BeginChild("anom_investigation_queue", ImVec2(0, list_h), true)) {
+      if (investigation_queue.empty()) {
+        ImGui::TextDisabled("(empty)");
+      }
+      for (int i = 0; i < (int)investigation_queue.size(); ++i) {
+        const Id aid = investigation_queue[i];
+        const auto* a = find_ptr(s.anomalies, aid);
+        const auto* sys = (a && a->system_id != kInvalidId) ? find_ptr(s.systems, a->system_id) : nullptr;
+        const std::string anm = a ? (a->name.empty() ? (std::string("Anomaly ") + std::to_string((int)aid)) : a->name)
+                                  : (std::string("Anomaly ") + std::to_string((int)aid));
+        const std::string sys_name = sys ? sys->name : "?";
+
+        ImGui::PushID(i);
+
+        const bool can_up = (i > 0);
+        if (!can_up) ImGui::BeginDisabled();
+        if (ImGui::SmallButton("\xE2\x96\xB2")) {
+          std::swap(investigation_queue[i - 1], investigation_queue[i]);
+        }
+        if (!can_up) ImGui::EndDisabled();
+
+        ImGui::SameLine();
+        const bool can_down = (i + 1 < (int)investigation_queue.size());
+        if (!can_down) ImGui::BeginDisabled();
+        if (ImGui::SmallButton("\xE2\x96\xBC")) {
+          std::swap(investigation_queue[i + 1], investigation_queue[i]);
+        }
+        if (!can_down) ImGui::EndDisabled();
+
+        ImGui::SameLine();
+        if (ImGui::SmallButton("X")) {
+          queued_ids.erase(aid);
+          investigation_queue.erase(investigation_queue.begin() + i);
+          ImGui::PopID();
+          --i;
+          continue;
+        }
+
+        ImGui::SameLine();
+        ImGui::Text("%d. %s (%s)", i + 1, anm.c_str(), sys_name.c_str());
+        ImGui::PopID();
+      }
+    }
+    ImGui::EndChild();
+
+    // Commit orders.
+    const bool can_commit = ship_can_investigate && !investigation_queue.empty();
+    if (!can_commit) ImGui::BeginDisabled();
+    if (ImGui::Button("Commit queue to selected ship##anom_q_commit")) {
+      queue_status.clear();
+      if (replace_ship_orders_on_commit) {
+        if (!sim.clear_orders(selected_ship)) {
+          queue_status = "Failed to clear ship orders";
+        }
+      }
+      if (queue_status.empty()) {
+        int issued = 0;
+        for (Id aid : investigation_queue) {
+          const auto* a = find_ptr(s.anomalies, aid);
+          const std::string anm = a ? (a->name.empty() ? (std::string("Anomaly ") + std::to_string((int)aid)) : a->name)
+                                    : (std::string("Anomaly ") + std::to_string((int)aid));
+          if (!sim.issue_investigate_anomaly(selected_ship, aid, /*restrict_to_discovered=*/ui.fog_of_war)) {
+            queue_status = "Failed to queue: " + anm;
+            break;
+          }
+          ++issued;
+        }
+        if (queue_status.empty()) {
+          queue_status = "Queued " + std::to_string(issued) + " investigation(s)";
+          investigation_queue.clear();
+          queued_ids.clear();
+          ui.request_details_tab = DetailsTab::Ship;
+        }
+      }
+    }
+    if (!can_commit) {
+      ImGui::EndDisabled();
+      if (ImGui::IsItemHovered() && ship_is_friendly && ship_is_valid && sel_ship_sensor <= 1e-9) {
+        ImGui::SetTooltip("Selected ship has no sensors");
+      }
+    }
+
+    if (!queue_status.empty()) {
+      ImGui::SameLine();
+      ImGui::TextDisabled("%s", queue_status.c_str());
     }
 
     ImGui::EndTabItem();

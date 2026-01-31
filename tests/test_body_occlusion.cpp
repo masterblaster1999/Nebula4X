@@ -118,7 +118,7 @@ int test_body_occlusion() {
   attacker.hp = attacker_d.max_hp;
   attacker.power_policy.weapons_enabled = true;
   attacker.power_policy.sensors_enabled = false;
-  attacker.combat_doctrine.fire_control = FireControl::WeaponsFree;
+  attacker.combat_doctrine.fire_control = FireControlMode::WeaponsFree;
   st.ships[attacker.id] = attacker;
 
   Ship sensor;

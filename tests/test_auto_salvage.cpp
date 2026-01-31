@@ -85,6 +85,20 @@ int test_auto_salvage() {
   ship.fuel_tons = 50.0;
   st.ships[200] = ship;
 
+
+  // A second auto-salvage ship with active repeating orders. The auto-salvage planner must not override it.
+  Ship ship_repeat = ship;
+  ship_repeat.id = 201;
+  ship_repeat.name = "Salvager-Repeat";
+  st.ships[201] = ship_repeat;
+
+  ShipOrders so_repeat;
+  so_repeat.repeat = true;
+  so_repeat.repeat_count_remaining = -1;
+  so_repeat.repeat_template.push_back(WaitDays{10});
+  so_repeat.queue.clear();
+  st.ship_orders[201] = so_repeat;
+
   // Wreck near the colony (within default docking range)
   Wreck w;
   w.id = 300;
@@ -92,6 +106,14 @@ int test_auto_salvage() {
   w.position_mkm = Vec2{1.0, 0.0};
   w.minerals["Duranium"] = 100.0;
   st.wrecks[300] = w;
+
+
+  // A second smaller wreck, so that an additional salvage ship would be assigned if it were considered idle.
+  Wreck w2 = w;
+  w2.id = 301;
+  w2.minerals.clear();
+  w2.minerals["Duranium"] = 50.0;
+  st.wrecks[301] = w2;
 
   sim.load_game(st);
 
@@ -105,6 +127,16 @@ int test_auto_salvage() {
     const Ship& sh = it_ship->second;
     N4X_ASSERT(sh.cargo.count("Duranium") != 0);
     N4X_ASSERT(sh.cargo.at("Duranium") >= 99.999);
+
+
+    // The repeating salvage ship should not be assigned salvage orders. Its empty queue should have refilled
+    // from the repeat template during tick_ships().
+    const ShipOrders* so = find_ptr(s.ship_orders, 201);
+    N4X_ASSERT(so != nullptr);
+    N4X_ASSERT(!so->queue.empty());
+    N4X_ASSERT(std::holds_alternative<WaitDays>(so->queue.front()));
+    const WaitDays wd = std::get<WaitDays>(so->queue.front());
+    N4X_ASSERT(wd.days_remaining == 9);
   }
 
   // Day 2: auto-salvage should unload minerals to the nearest friendly colony.

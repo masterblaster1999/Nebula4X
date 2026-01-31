@@ -3248,10 +3248,19 @@ void draw_system_map(Simulation& sim,
           if (selected_ship != kInvalidId && viewer_faction_id != kInvalidId) {
             const Ship* sh = find_ptr(s.ships, selected_ship);
             if (sh && sh->faction_id == viewer_faction_id && !a->resolved) {
+              const ShipDesign* d = sim.find_design(sh->design_id);
+              const double sensor = d ? std::max(0.0, d->sensor_range_mkm) : 0.0;
               ImGui::SameLine();
+              if (sensor <= 1e-9) ImGui::BeginDisabled();
               if (ImGui::SmallButton("Investigate")) {
                 (void)sim.issue_investigate_anomaly(selected_ship, a->id, /*restrict_to_discovered=*/ui.fog_of_war);
                 ui.request_details_tab = DetailsTab::Ship;
+              }
+              if (sensor <= 1e-9) {
+                ImGui::EndDisabled();
+                if (ImGui::IsItemHovered()) {
+                  ImGui::SetTooltip("Selected ship has no sensors");
+                }
               }
             }
           }

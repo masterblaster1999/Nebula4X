@@ -1063,8 +1063,9 @@ struct RefitCandidate {
 bool ship_orders_empty(const Simulation& sim, Id ship_id) {
   const auto it = sim.state().ship_orders.find(ship_id);
   if (it == sim.state().ship_orders.end()) return true;
-  return it->second.queue.empty();
+  return ship_orders_is_idle_for_automation(it->second);
 }
+
 
 bool compute_refit_candidate(const Simulation& sim,
                              Id faction_id,

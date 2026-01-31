@@ -195,8 +195,7 @@ SalvagePlannerResult compute_salvage_plan(const Simulation& sim, Id faction_id, 
 
     if (opt.require_idle) {
       const ShipOrders* so = find_ptr(st.ship_orders, sid);
-      const bool idle = (!so || so->queue.empty() || (so->repeat && so->repeat_count_remaining == 0));
-      if (!idle) continue;
+      if (so && !ship_orders_is_idle_for_automation(*so)) continue;
     }
 
     if (sh->system_id == kInvalidId) continue;

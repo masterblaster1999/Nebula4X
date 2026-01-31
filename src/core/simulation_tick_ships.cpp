@@ -1281,6 +1281,11 @@ void Simulation::tick_ships(double dt_days) {
       k.target_id = std::get<TransferTroopsToShip>(ord).target_ship_id;
       return k;
     }
+    if (std::holds_alternative<TransferColonistsToShip>(ord)) {
+      k.kind = CohortKind::Transfer;
+      k.target_id = std::get<TransferColonistsToShip>(ord).target_ship_id;
+      return k;
+    }
     if (std::holds_alternative<SalvageWreck>(ord)) {
       k.kind = CohortKind::Transfer;
       k.target_id = std::get<SalvageWreck>(ord).wreck_id;
@@ -1796,6 +1801,12 @@ void Simulation::tick_ships(double dt_days) {
     TransferTroopsToShip* troop_transfer_ord = nullptr;
     Id troop_target_ship_id = kInvalidId;
     double troop_transfer_strength = 0.0;
+
+    // Colonist transfer ops (ship-to-ship passenger movement)
+    bool is_colonist_transfer_op = false;
+    TransferColonistsToShip* colonist_transfer_ord = nullptr;
+    Id colonist_target_ship_id = kInvalidId;
+    double colonist_transfer_millions = 0.0;
 
     // Troop ops
     bool is_troop_op = false;
@@ -2634,7 +2645,7 @@ void Simulation::tick_ships(double dt_days) {
       cargo_tons = ord.tons;
       const auto* tgt = find_ptr(state_.ships, cargo_target_ship_id);
       // Valid target check: exists, same system, same faction
-      if (!tgt || tgt->system_id != ship.system_id || tgt->faction_id != ship.faction_id) {
+      if (!tgt || tgt->system_id != ship.system_id || tgt->faction_id != ship.faction_id || tgt->id == ship.id) {
         q.erase(q.begin());
         continue;
       }
@@ -2647,7 +2658,7 @@ void Simulation::tick_ships(double dt_days) {
       fuel_tons = ord.tons;
 
       const auto* tgt = find_ptr(state_.ships, fuel_target_ship_id);
-      if (!tgt || tgt->system_id != ship.system_id || tgt->faction_id != ship.faction_id) {
+      if (!tgt || tgt->system_id != ship.system_id || tgt->faction_id != ship.faction_id || tgt->id == ship.id) {
         q.erase(q.begin());
         continue;
       }
@@ -2666,13 +2677,32 @@ void Simulation::tick_ships(double dt_days) {
       troop_transfer_strength = ord.strength;
 
       const auto* tgt = find_ptr(state_.ships, troop_target_ship_id);
-      if (!tgt || tgt->system_id != ship.system_id || tgt->faction_id != ship.faction_id) {
+      if (!tgt || tgt->system_id != ship.system_id || tgt->faction_id != ship.faction_id || tgt->id == ship.id) {
         q.erase(q.begin());
         continue;
       }
       const auto* src_d = find_design(ship.design_id);
       const auto* tgt_d = find_design(tgt->design_id);
       if (!src_d || !tgt_d || src_d->troop_capacity <= 0.0 || tgt_d->troop_capacity <= 0.0) {
+        q.erase(q.begin());
+        continue;
+      }
+      target = tgt->position_mkm;
+    } else if (std::holds_alternative<TransferColonistsToShip>(q.front())) {
+      auto& ord = std::get<TransferColonistsToShip>(q.front());
+      is_colonist_transfer_op = true;
+      colonist_transfer_ord = &ord;
+      colonist_target_ship_id = ord.target_ship_id;
+      colonist_transfer_millions = ord.millions;
+
+      const auto* tgt = find_ptr(state_.ships, colonist_target_ship_id);
+      if (!tgt || tgt->system_id != ship.system_id || tgt->faction_id != ship.faction_id || tgt->id == ship.id) {
+        q.erase(q.begin());
+        continue;
+      }
+      const auto* src_d = find_design(ship.design_id);
+      const auto* tgt_d = find_design(tgt->design_id);
+      if (!src_d || !tgt_d || src_d->colony_capacity_millions <= 0.0 || tgt_d->colony_capacity_millions <= 0.0) {
         q.erase(q.begin());
         continue;
       }
@@ -3401,6 +3431,67 @@ void Simulation::tick_ships(double dt_days) {
       return false;
     };
 
+    // Colonist transfer mirrors troop transfer, but operates on embarked colonists
+    // and colony module capacities.
+    auto do_colonist_transfer = [&]() -> double {
+      auto* tgt = find_ptr(state_.ships, colonist_target_ship_id);
+      if (!tgt) return 0.0;
+      if (tgt->faction_id != ship.faction_id) return 0.0;
+      if (tgt->system_id != ship.system_id) return 0.0;
+
+      const auto* src_d = find_design(ship.design_id);
+      const auto* tgt_d = find_design(tgt->design_id);
+      const double src_cap = src_d ? std::max(0.0, src_d->colony_capacity_millions) : 0.0;
+      const double tgt_cap = tgt_d ? std::max(0.0, tgt_d->colony_capacity_millions) : 0.0;
+      if (src_cap <= 1e-9 || tgt_cap <= 1e-9) return 0.0;
+
+      // Clamp for safety: older saves / refits could momentarily violate caps.
+      ship.colonists_millions = std::max(0.0, std::min(ship.colonists_millions, src_cap));
+      tgt->colonists_millions = std::max(0.0, std::min(tgt->colonists_millions, tgt_cap));
+
+      const double free = std::max(0.0, tgt_cap - tgt->colonists_millions);
+      if (free <= 1e-9) return 0.0;
+
+      double remaining_request = (colonist_transfer_millions > 0.0) ? colonist_transfer_millions : 1e300;
+      remaining_request = std::min(remaining_request, free);
+
+      // Throughput limit per tick (prevents instant ship-to-ship population transfers at 1h ticks).
+      if (dt_days > 0.0) {
+        const double cap_for_rate = std::min(src_cap, tgt_cap);
+        const double per_cap = std::max(0.0, cfg_.colonist_transfer_millions_per_day_per_colony_cap);
+        const double min_rate = std::max(0.0, cfg_.colonist_transfer_millions_per_day_min);
+        const double rate_per_day = std::max(min_rate, cap_for_rate * per_cap);
+        remaining_request = std::min(remaining_request, rate_per_day * dt_days);
+      }
+
+      if (remaining_request <= 1e-9) return 0.0;
+
+      const double have = std::max(0.0, ship.colonists_millions);
+      const double give = std::min(have, remaining_request);
+      if (give <= 1e-9) return 0.0;
+
+      ship.colonists_millions -= give;
+      tgt->colonists_millions += give;
+      return give;
+    };
+
+    auto colonist_transfer_order_complete = [&](double moved_this_tick) {
+      if (colonist_transfer_millions <= 0.0) {
+        // "As much as possible": keep the order until we can't move anything
+        // (source empty / target full / etc.).
+        return moved_this_tick <= 1e-9;
+      }
+
+      if (colonist_transfer_ord) {
+        colonist_transfer_ord->millions = std::max(0.0, colonist_transfer_ord->millions - moved_this_tick);
+        colonist_transfer_millions = colonist_transfer_ord->millions;
+      }
+
+      if (colonist_transfer_millions <= 1e-9) return true;
+      if (moved_this_tick <= 1e-9) return true; // blocked
+      return false;
+    };
+
     auto process_salvage_loop_docked = [&]() {
       // Note: We intentionally do not allow the generic cargo/salvage completion logic
       // to erase this order. Instead, we transition between salvage <-> unload modes.
@@ -3561,6 +3652,13 @@ void Simulation::tick_ships(double dt_days) {
       ship.position_mkm = target;
       const double moved = do_troop_transfer();
       if (troop_transfer_order_complete(moved)) q.erase(q.begin());
+      continue;
+    }
+
+    if (is_colonist_transfer_op && dist <= dock_range) {
+      ship.position_mkm = target;
+      const double moved = do_colonist_transfer();
+      if (colonist_transfer_order_complete(moved)) q.erase(q.begin());
       continue;
     }
 
@@ -4911,7 +5009,7 @@ void Simulation::tick_ships(double dt_days) {
     }
 
     if (!is_attack && !is_escort && !is_bombard && !is_jump && !is_survey_jump_op && !is_cargo_op && !is_salvage_op && !is_salvage_loop_op && !is_investigate_anomaly_op &&
-        !is_fuel_transfer_op && !is_troop_transfer_op && !is_troop_op && !is_colonist_op && !is_mining_op && !is_body &&
+        !is_fuel_transfer_op && !is_troop_transfer_op && !is_colonist_transfer_op && !is_troop_op && !is_colonist_op && !is_mining_op && !is_body &&
         !is_orbit && !is_scrap && dist <= arrive_eps) {
       q.erase(q.begin());
       continue;
@@ -5309,6 +5407,9 @@ void Simulation::tick_ships(double dt_days) {
       } else if (is_troop_transfer_op) {
         const double moved = do_troop_transfer();
         if (troop_transfer_order_complete(moved)) q.erase(q.begin());
+      } else if (is_colonist_transfer_op) {
+        const double moved = do_colonist_transfer();
+        if (colonist_transfer_order_complete(moved)) q.erase(q.begin());
       } else if (is_troop_op) {
         // Don't pop here; troop orders execute in the dock-range check above.
       } else if (is_scrap) {

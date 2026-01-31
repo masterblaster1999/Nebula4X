@@ -305,6 +305,13 @@ struct TransferTroopsToShip {
   double strength{0.0};
 };
 
+// Transfer embarked colonists (population) from this ship into another friendly ship.
+// If millions <= 0, transfer as much as possible (up to target free colony capacity).
+struct TransferColonistsToShip {
+  Id target_ship_id{kInvalidId};
+  double millions{0.0};
+};
+
 // Decommission (scrap) a ship at a friendly colony.
 struct ScrapShip {
   Id colony_id{kInvalidId};
@@ -334,6 +341,7 @@ using Order = std::variant<MoveToPoint,
                            TransferCargoToShip,
                            TransferFuelToShip,
                            TransferTroopsToShip,
+                           TransferColonistsToShip,
                            ScrapShip>;
 
 struct ShipOrders {
@@ -371,6 +379,27 @@ struct ShipOrders {
   int suspended_repeat_count_remaining{0};
   std::vector<Order> suspended_repeat_template;
 };
+
+// Returns true when a ship's orders are considered "idle" for automation/planners.
+//
+// A ship is NOT idle when:
+//  - it is suspended (auto-retreat temporary plan),
+//  - it has any queued orders, or
+//  - it has active repeating orders that will auto-refill on the next ship tick.
+//
+// This is used to prevent planners/automation from overwriting ships that are
+// running player-defined repeating routes/patrols.
+inline bool ship_orders_is_idle_for_automation(const ShipOrders& so) {
+  if (so.suspended) return false;
+  if (!so.queue.empty()) return false;
+  if (so.repeat && !so.repeat_template.empty() && so.repeat_count_remaining != 0) return false;
+  return true;
+}
+
+inline bool ship_orders_is_idle_for_automation(const ShipOrders* so) {
+  if (!so) return true;
+  return ship_orders_is_idle_for_automation(*so);
+}
 
 std::string order_to_string(const Order& order);
 

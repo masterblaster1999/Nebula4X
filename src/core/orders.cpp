@@ -106,6 +106,10 @@ std::string order_to_string(const Order& order) {
           ss << "TransferTroopsToShip(target_ship_id=" << o.target_ship_id;
           if (o.strength > 0.0) ss << ", strength=" << o.strength;
           ss << ")";
+        } else if constexpr (std::is_same_v<T, TransferColonistsToShip>) {
+          ss << "TransferColonistsToShip(target_ship_id=" << o.target_ship_id;
+          if (o.millions > 0.0) ss << ", millions=" << o.millions;
+          ss << ")";
         } else if constexpr (std::is_same_v<T, ScrapShip>) {
           ss << "ScrapShip(colony_id=" << o.colony_id << ")";
         } else {

@@ -145,11 +145,3 @@ int test_maintenance_planner() {
   return 0;
 }
 
-int main() {
-  int rc = 0;
-  rc |= test_maintenance_planner();
-  if (rc == 0) {
-    std::cout << "test_maintenance_planner: ok\n";
-  }
-  return rc;
-}

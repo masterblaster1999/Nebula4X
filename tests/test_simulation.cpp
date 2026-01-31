@@ -574,6 +574,84 @@ int test_simulation() {
     N4X_ASSERT(std::abs(tgt_after->troops - 50.0) < 1e-6);
   }
 
+
+// --- ship-to-ship colonist transfer sanity check ---
+// Transfer embarked colonists directly between two friendly ships.
+{
+  nebula4x::ContentDB content;
+
+  // Installations referenced by the default scenario.
+  nebula4x::InstallationDef mine;
+  mine.id = "automated_mine";
+  mine.name = "Automated Mine";
+  mine.produces_per_day = {{"Duranium", 0.0}};
+  content.installations[mine.id] = mine;
+
+  nebula4x::InstallationDef yard;
+  yard.id = "shipyard";
+  yard.name = "Shipyard";
+  yard.build_rate_tons_per_day = 0.0;
+  content.installations[yard.id] = yard;
+
+  auto make_min_design = [](const std::string& id) {
+    nebula4x::ShipDesign d;
+    d.id = id;
+    d.name = id;
+    d.max_hp = 10.0;
+    d.speed_km_s = 0.0;
+    d.sensor_range_mkm = 0.0;
+    return d;
+  };
+
+  nebula4x::ShipDesign src = make_min_design("freighter_alpha");
+  src.name = "Freighter Alpha";
+  src.colony_capacity_millions = 100.0;
+  content.designs[src.id] = src;
+
+  nebula4x::ShipDesign tgt = make_min_design("escort_gamma");
+  tgt.name = "Escort Gamma";
+  tgt.colony_capacity_millions = 60.0;
+  content.designs[tgt.id] = tgt;
+
+  // Other scenario ships.
+  content.designs["surveyor_beta"] = make_min_design("surveyor_beta");
+  content.designs["pirate_raider"] = make_min_design("pirate_raider");
+
+  nebula4x::Simulation sim(std::move(content), nebula4x::SimConfig{});
+
+  const auto src_id = find_ship_id(sim.state(), "Freighter Alpha");
+  const auto tgt_id = find_ship_id(sim.state(), "Escort Gamma");
+  N4X_ASSERT(src_id != nebula4x::kInvalidId);
+  N4X_ASSERT(tgt_id != nebula4x::kInvalidId);
+
+  // Place both ships together away from colonies so other ticks don't interfere.
+  auto* sh_src = nebula4x::find_ptr(sim.state().ships, src_id);
+  auto* sh_tgt = nebula4x::find_ptr(sim.state().ships, tgt_id);
+  N4X_ASSERT(sh_src);
+  N4X_ASSERT(sh_tgt);
+
+  sh_tgt->system_id = sh_src->system_id;
+  sh_src->position_mkm = {0.0, 0.0};
+  sh_tgt->position_mkm = {0.0, 0.0};
+
+  sh_src->colonists_millions = 80.0;
+  sh_tgt->colonists_millions = 10.0;
+
+  // millions <= 0 => transfer as much as possible (bounded by target free capacity).
+  N4X_ASSERT(sim.issue_transfer_colonists_to_ship(src_id, tgt_id, 0.0));
+
+  sim.advance_days(1);
+
+  const auto* src_after = nebula4x::find_ptr(sim.state().ships, src_id);
+  const auto* tgt_after = nebula4x::find_ptr(sim.state().ships, tgt_id);
+  N4X_ASSERT(src_after);
+  N4X_ASSERT(tgt_after);
+
+  // Target starts with 10 and has 60 capacity -> can receive 50.
+  N4X_ASSERT(std::abs(src_after->colonists_millions - 30.0) < 1e-6);
+  N4X_ASSERT(std::abs(tgt_after->colonists_millions - 60.0) < 1e-6);
+}
+
   // --- auto-refuel (idle) sanity check ---
   // When enabled and fuel is below threshold, an idle ship should queue a refuel trip.
   {

@@ -695,6 +695,10 @@ Value order_to_json(const Order& order) {
           obj["type"] = std::string("transfer_troops_to_ship");
           obj["target_ship_id"] = static_cast<double>(o.target_ship_id);
           obj["strength"] = o.strength;
+        } else if constexpr (std::is_same_v<T, TransferColonistsToShip>) {
+          obj["type"] = std::string("transfer_colonists_to_ship");
+          obj["target_ship_id"] = static_cast<double>(o.target_ship_id);
+          obj["millions"] = o.millions;
         } else if constexpr (std::is_same_v<T, ScrapShip>) {
           obj["type"] = std::string("scrap_ship");
           obj["colony_id"] = static_cast<double>(o.colony_id);
@@ -935,6 +939,12 @@ Order order_from_json(const Value& v) {
     TransferTroopsToShip t;
     t.target_ship_id = static_cast<Id>(o.at("target_ship_id").int_value(kInvalidId));
     if (auto s_it = o.find("strength"); s_it != o.end()) t.strength = s_it->second.number_value(0.0);
+    return t;
+  }
+  if (type == "transfer_colonists_to_ship") {
+    TransferColonistsToShip t;
+    t.target_ship_id = static_cast<Id>(o.at("target_ship_id").int_value(kInvalidId));
+    if (auto m_it = o.find("millions"); m_it != o.end()) t.millions = m_it->second.number_value(0.0);
     return t;
   }
   if (type == "scrap_ship") {

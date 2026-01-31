@@ -1383,6 +1383,23 @@ double colony_event_existing_condition_chance_factor{0.75};
 // Safety cap: maximum number of concurrent conditions stored on a colony.
 int colony_condition_max_active{4};
 
+// --- Colony stability output scaling ---
+//
+// When enabled, colony stability penalizes local production throughput when unstable.
+// Stability is computed by colony_stability_status_for_colony() and normalized to [0,1].
+//
+// Colonies with stability >= colony_stability_neutral_threshold are unaffected (x1.0).
+// Below that threshold, output is scaled down linearly toward
+// colony_stability_min_output_multiplier at stability=0.
+bool enable_colony_stability_output_scaling{true};
+
+// Stability threshold above which colonies take no production penalty.
+double colony_stability_neutral_threshold{0.80};
+
+// Minimum production multiplier at stability=0.
+double colony_stability_min_output_multiplier{0.50};
+
+
 
 
 
@@ -2725,6 +2742,11 @@ bool resolve_colony_condition(Id colony_id, const std::string& condition_id, std
 
 // Colony stability (0..1) derived from environment/economy + conditions.
 ColonyStabilityStatus colony_stability_status_for_colony(Id colony_id) const;
+ColonyStabilityStatus colony_stability_status_for_colony(const Colony& colony) const;
+
+// Output scaling factor derived from colony stability (1.0 when scaling is disabled).
+double colony_stability_output_multiplier_for_colony(Id colony_id) const;
+double colony_stability_output_multiplier_for_colony(const Colony& colony) const;
 
 
   // Crew grade helpers.
@@ -2757,6 +2779,18 @@ ColonyStabilityStatus colony_stability_status_for_colony(Id colony_id) const;
   // - Both ships must have non-zero troop capacity.
   bool issue_transfer_troops_to_ship(Id ship_id, Id target_ship_id, double strength = 0.0,
                                      bool restrict_to_discovered = false);
+
+  // Transfer embarked colonists directly to another ship in space.
+  //
+  // This enables ship-to-ship passenger movement between friendly colony ships/transports.
+  // Colonists are moved from the source ship's colony capacity into the target ship's
+  // colony capacity.
+  //
+  // - millions <= 0 means "as much as possible" (up to target free colony capacity).
+  // - Both ships must belong to the same faction.
+  // - Both ships must have non-zero colony capacity.
+  bool issue_transfer_colonists_to_ship(Id ship_id, Id target_ship_id, double millions = 0.0,
+                                       bool restrict_to_discovered = false);
 
   // Decommission a ship at a friendly colony, recovering some mineral cost.
   bool issue_scrap_ship(Id ship_id, Id colony_id, bool restrict_to_discovered = false);

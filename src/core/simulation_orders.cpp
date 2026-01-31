@@ -611,6 +611,9 @@ bool Simulation::apply_order_template_to_ship_smart(Id ship_id, const std::strin
     } else if (std::holds_alternative<TransferTroopsToShip>(ord)) {
       required_system = ship_system(std::get<TransferTroopsToShip>(ord).target_ship_id);
       if (!required_system) return fail("Template TransferTroopsToShip references an invalid target ship");
+    } else if (std::holds_alternative<TransferColonistsToShip>(ord)) {
+      required_system = ship_system(std::get<TransferColonistsToShip>(ord).target_ship_id);
+      if (!required_system) return fail("Template TransferColonistsToShip references an invalid target ship");
     } else if (std::holds_alternative<TravelViaJump>(ord)) {
       const Id jid = std::get<TravelViaJump>(ord).jump_point_id;
       const auto* jp = find_ptr(state_.jump_points, jid);
@@ -666,6 +669,8 @@ bool Simulation::apply_order_template_to_ship_smart(Id ship_id, const std::strin
       goal_pos_mkm = ship_pos(std::get<TransferFuelToShip>(ord).target_ship_id);
     } else if (std::holds_alternative<TransferTroopsToShip>(ord)) {
       goal_pos_mkm = ship_pos(std::get<TransferTroopsToShip>(ord).target_ship_id);
+    } else if (std::holds_alternative<TransferColonistsToShip>(ord)) {
+      goal_pos_mkm = ship_pos(std::get<TransferColonistsToShip>(ord).target_ship_id);
     } else if (std::holds_alternative<SurveyJumpPoint>(ord)) {
       const Id jid = std::get<SurveyJumpPoint>(ord).jump_point_id;
       if (const auto* jp = find_ptr(state_.jump_points, jid)) {
@@ -760,6 +765,11 @@ bool Simulation::apply_order_template_to_ship_smart(Id ship_id, const std::strin
       }
     } else if (std::holds_alternative<TransferTroopsToShip>(ord)) {
       const Id tid = std::get<TransferTroopsToShip>(ord).target_ship_id;
+      if (const auto* t = find_ptr(state_.ships, tid)) {
+        if (t->system_id == nav.system_id) nav.position_mkm = t->position_mkm;
+      }
+    } else if (std::holds_alternative<TransferColonistsToShip>(ord)) {
+      const Id tid = std::get<TransferColonistsToShip>(ord).target_ship_id;
       if (const auto* t = find_ptr(state_.ships, tid)) {
         if (t->system_id == nav.system_id) nav.position_mkm = t->position_mkm;
       }
@@ -2040,6 +2050,11 @@ bool Simulation::issue_investigate_anomaly(Id ship_id, Id anomaly_id, bool restr
   if (!an) return false;
   if (an->resolved) return false;
 
+  // Require at least some sensor capability for anomaly investigations.
+  const auto* d = find_design(ship->design_id);
+  const double sensor = d ? std::max(0.0, d->sensor_range_mkm) : 0.0;
+  if (sensor <= 1e-9) return false;
+
   const Id sys_id = an->system_id;
   if (sys_id == kInvalidId) return false;
   if (!find_ptr(state_.systems, sys_id)) return false;
@@ -2287,6 +2302,7 @@ double Simulation::terraforming_points_per_day(const Colony& c) const {
     total *= std::max(0.0, m.terraforming);
   }
   total *= colony_condition_multipliers(c).terraforming;
+  total *= colony_stability_output_multiplier_for_colony(c);
   if (cfg_.enable_blockades) total *= blockade_output_multiplier_for_colony(c.id);
   return std::max(0.0, total);
 }
@@ -2305,6 +2321,7 @@ double Simulation::troop_training_points_per_day(const Colony& c) const {
     total *= std::max(0.0, m.troop_training);
   }
   total *= colony_condition_multipliers(c).troop_training;
+  total *= colony_stability_output_multiplier_for_colony(c);
   if (cfg_.enable_blockades) total *= blockade_output_multiplier_for_colony(c.id);
   return std::max(0.0, total);
 }
@@ -2325,6 +2342,7 @@ double Simulation::crew_training_points_per_day(const Colony& c) const {
   }
   total *= std::max(0.0, cfg_.crew_training_points_multiplier);
   total *= colony_condition_multipliers(c).troop_training;
+  total *= colony_stability_output_multiplier_for_colony(c);
   if (cfg_.enable_blockades) total *= blockade_output_multiplier_for_colony(c.id);
   return std::max(0.0, total);
 }
@@ -2395,6 +2413,8 @@ bool Simulation::issue_transfer_fuel_to_ship(Id ship_id, Id target_ship_id, doub
   auto* target = find_ptr(state_.ships, target_ship_id);
   if (!target) return false;
 
+  if (ship_id == target_ship_id) return false;
+
   if (ship->faction_id != target->faction_id) return false;
   if (tons < 0.0) return false;
 
@@ -2433,6 +2453,30 @@ bool Simulation::issue_transfer_troops_to_ship(Id ship_id, Id target_ship_id, do
 
   auto& orders = state_.ship_orders[ship_id];
   orders.queue.push_back(TransferTroopsToShip{target_ship_id, strength});
+  return true;
+}
+
+bool Simulation::issue_transfer_colonists_to_ship(Id ship_id, Id target_ship_id, double millions,
+                                                  bool restrict_to_discovered) {
+  auto* ship = find_ptr(state_.ships, ship_id);
+  if (!ship) return false;
+  auto* target = find_ptr(state_.ships, target_ship_id);
+  if (!target) return false;
+
+  if (ship->faction_id != target->faction_id) return false;
+  if (millions < 0.0) return false;
+
+  // Both ships must be capable of carrying colonists.
+  const auto* src_design = find_design(ship->design_id);
+  const auto* tgt_design = find_design(target->design_id);
+  if (!src_design || !tgt_design) return false;
+  if (src_design->colony_capacity_millions <= 0.0) return false;
+  if (tgt_design->colony_capacity_millions <= 0.0) return false;
+
+  if (!issue_travel_to_system(ship_id, target->system_id, restrict_to_discovered, target->position_mkm)) return false;
+
+  auto& orders = state_.ship_orders[ship_id];
+  orders.queue.push_back(TransferColonistsToShip{target_ship_id, millions});
   return true;
 }
 

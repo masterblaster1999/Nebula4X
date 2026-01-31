@@ -126,114 +126,106 @@ static void hash_victory_state(Digest64& d, const VictoryState& s) {
 }
 
 static void hash_order(Digest64& d, const Order& ord) {
+  // Include the variant index as a stable discriminator between order types.
+  //
+  // This avoids maintaining a manual tag table (which can accidentally
+  // duplicate values) while remaining deterministic within a given build.
+  d.add_u64(static_cast<std::uint64_t>(ord.index()));
+
   std::visit(
       [&](const auto& o) {
         using T = std::decay_t<decltype(o)>;
         if constexpr (std::is_same_v<T, MoveToPoint>) {
-          d.add_u64(1);
           hash_vec2(d, o.target_mkm);
         } else if constexpr (std::is_same_v<T, MoveToBody>) {
-          d.add_u64(2);
           d.add_u64(o.body_id);
         } else if constexpr (std::is_same_v<T, ColonizeBody>) {
-          d.add_u64(3);
           d.add_u64(o.body_id);
           d.add_string(o.colony_name);
         } else if constexpr (std::is_same_v<T, OrbitBody>) {
-          d.add_u64(4);
           d.add_u64(o.body_id);
           d.add_i64(o.duration_days);
           d.add_double(o.progress_days);
         } else if constexpr (std::is_same_v<T, TravelViaJump>) {
-          d.add_u64(5);
           d.add_u64(o.jump_point_id);
         } else if constexpr (std::is_same_v<T, SurveyJumpPoint>) {
-          d.add_u64(24);
           d.add_u64(o.jump_point_id);
           d.add_bool(o.transit_when_done);
         } else if constexpr (std::is_same_v<T, AttackShip>) {
-          d.add_u64(6);
           d.add_u64(o.target_ship_id);
           d.add_bool(o.has_last_known);
           hash_vec2(d, o.last_known_position_mkm);
+          d.add_u64(o.last_known_system_id);
+          d.add_i64(o.last_known_day);
+          d.add_i64(o.pursuit_hops);
+          d.add_i64(o.search_waypoint_index);
+          d.add_bool(o.has_search_offset);
+          hash_vec2(d, o.search_offset_mkm);
         } else if constexpr (std::is_same_v<T, EscortShip>) {
-          d.add_u64(19);
           d.add_u64(o.target_ship_id);
           d.add_double(o.follow_distance_mkm);
           d.add_bool(o.restrict_to_discovered);
+          d.add_bool(o.allow_neutral);
         } else if constexpr (std::is_same_v<T, WaitDays>) {
-          d.add_u64(7);
           d.add_i64(o.days_remaining);
           d.add_double(o.progress_days);
         } else if constexpr (std::is_same_v<T, LoadMineral>) {
-          d.add_u64(8);
           d.add_u64(o.colony_id);
           d.add_string(o.mineral);
           d.add_double(o.tons);
         } else if constexpr (std::is_same_v<T, UnloadMineral>) {
-          d.add_u64(9);
           d.add_u64(o.colony_id);
           d.add_string(o.mineral);
           d.add_double(o.tons);
         } else if constexpr (std::is_same_v<T, MineBody>) {
-          d.add_u64(22);
           d.add_u64(o.body_id);
           d.add_string(o.mineral);
           d.add_bool(o.stop_when_cargo_full);
         } else if constexpr (std::is_same_v<T, LoadTroops>) {
-          d.add_u64(12);
           d.add_u64(o.colony_id);
           d.add_double(o.strength);
         } else if constexpr (std::is_same_v<T, UnloadTroops>) {
-          d.add_u64(13);
           d.add_u64(o.colony_id);
           d.add_double(o.strength);
         } else if constexpr (std::is_same_v<T, LoadColonists>) {
-          d.add_u64(20);
           d.add_u64(o.colony_id);
           d.add_double(o.millions);
         } else if constexpr (std::is_same_v<T, UnloadColonists>) {
-          d.add_u64(21);
           d.add_u64(o.colony_id);
           d.add_double(o.millions);
         } else if constexpr (std::is_same_v<T, InvadeColony>) {
-          d.add_u64(14);
           d.add_u64(o.colony_id);
         } else if constexpr (std::is_same_v<T, BombardColony>) {
-          d.add_u64(17);
           d.add_u64(o.colony_id);
           d.add_i64(o.duration_days);
+          d.add_double(o.progress_days);
         } else if constexpr (std::is_same_v<T, SalvageWreck>) {
-          d.add_u64(18);
           d.add_u64(o.wreck_id);
           d.add_string(o.mineral);
           d.add_double(o.tons);
         } else if constexpr (std::is_same_v<T, SalvageWreckLoop>) {
-          d.add_u64(24);
           d.add_u64(o.wreck_id);
           d.add_u64(o.dropoff_colony_id);
           d.add_bool(o.restrict_to_discovered);
           d.add_i64(o.mode);
         } else if constexpr (std::is_same_v<T, InvestigateAnomaly>) {
-          d.add_u64(23);
           d.add_u64(o.anomaly_id);
           d.add_i64(o.duration_days);
           d.add_double(o.progress_days);
         } else if constexpr (std::is_same_v<T, TransferCargoToShip>) {
-          d.add_u64(10);
           d.add_u64(o.target_ship_id);
           d.add_string(o.mineral);
           d.add_double(o.tons);
         } else if constexpr (std::is_same_v<T, TransferFuelToShip>) {
-          d.add_u64(15);
           d.add_u64(o.target_ship_id);
           d.add_double(o.tons);
         } else if constexpr (std::is_same_v<T, TransferTroopsToShip>) {
-          d.add_u64(16);
           d.add_u64(o.target_ship_id);
           d.add_double(o.strength);
+        } else if constexpr (std::is_same_v<T, TransferColonistsToShip>) {
+          d.add_u64(o.target_ship_id);
+          d.add_double(o.millions);
         } else if constexpr (std::is_same_v<T, ScrapShip>) {
-          d.add_u64(11);
           d.add_u64(o.colony_id);
         } else {
           // If we add new order types, force a compile-time error until hashing is updated.
@@ -242,6 +234,7 @@ static void hash_order(Digest64& d, const Order& ord) {
       },
       ord);
 }
+
 
 static void hash_string_double_map(Digest64& d, const std::unordered_map<std::string, double>& m) {
   d.add_size(m.size());

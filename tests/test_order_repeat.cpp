@@ -59,6 +59,7 @@ int test_order_repeat() {
     N4X_ASSERT(so.repeat_count_remaining == -1);
     N4X_ASSERT(so.queue.size() == 2);
     N4X_ASSERT(so.repeat_template.size() == 2);
+    N4X_ASSERT(!nebula4x::ship_orders_is_idle_for_automation(so));
   }
 
   // After 2 days, both waits should be consumed and the queue should be empty,
@@ -129,6 +130,7 @@ int test_order_repeat() {
     N4X_ASSERT(so.queue.empty());
     N4X_ASSERT(so.repeat);
     N4X_ASSERT(so.repeat_count_remaining == 0);
+    N4X_ASSERT(nebula4x::ship_orders_is_idle_for_automation(so));
   }
 
   // Next day: repeat auto-stops (template preserved for manual restart).

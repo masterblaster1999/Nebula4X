@@ -354,6 +354,23 @@ int test_fleets() {
     sim.state().fleets.at(fid).mission.sustainment_mode = FleetSustainmentMode::Refuel;
     sim.state().fleets.at(fid).mission.sustainment_colony_id = 999;
     sim.state().fleets.at(fid).mission.last_target_ship_id = 4242;
+    sim.state().fleets.at(fid).mission.blockade_colony_id = 1001;
+    sim.state().fleets.at(fid).mission.blockade_radius_mkm = 77.7;
+    sim.state().fleets.at(fid).mission.patrol_route_a_system_id = 2001;
+    sim.state().fleets.at(fid).mission.patrol_route_b_system_id = 2002;
+    sim.state().fleets.at(fid).mission.guard_jump_point_id = 3001;
+    sim.state().fleets.at(fid).mission.guard_jump_radius_mkm = 55.5;
+    sim.state().fleets.at(fid).mission.guard_jump_dwell_days = 6;
+    sim.state().fleets.at(fid).mission.guard_last_alert_day = 1234;
+    sim.state().fleets.at(fid).mission.patrol_circuit_system_ids = {4001, 4002, 4003};
+    sim.state().fleets.at(fid).mission.patrol_region_id = 5001;
+    sim.state().fleets.at(fid).mission.patrol_region_dwell_days = 2;
+    sim.state().fleets.at(fid).mission.patrol_region_system_index = 1;
+    sim.state().fleets.at(fid).mission.explore_survey_first = false;
+    sim.state().fleets.at(fid).mission.explore_allow_transit = false;
+    sim.state().fleets.at(fid).mission.explore_survey_transit_when_done = false;
+    sim.state().fleets.at(fid).mission.explore_investigate_anomalies = false;
+    sim.state().fleets.at(fid).mission.explore_salvage_wrecks = false;
 
     // Assault mission params should also round-trip.
     sim.state().fleets.at(fid).mission.assault_colony_id = 123;
@@ -401,6 +418,26 @@ int test_fleets() {
     N4X_ASSERT(fl.mission.sustainment_mode == FleetSustainmentMode::Refuel);
     N4X_ASSERT(fl.mission.sustainment_colony_id == 999);
     N4X_ASSERT(fl.mission.last_target_ship_id == 4242);
+    N4X_ASSERT(fl.mission.blockade_colony_id == 1001);
+    N4X_ASSERT(std::fabs(fl.mission.blockade_radius_mkm - 77.7) < 1e-9);
+    N4X_ASSERT(fl.mission.patrol_route_a_system_id == 2001);
+    N4X_ASSERT(fl.mission.patrol_route_b_system_id == 2002);
+    N4X_ASSERT(fl.mission.guard_jump_point_id == 3001);
+    N4X_ASSERT(std::fabs(fl.mission.guard_jump_radius_mkm - 55.5) < 1e-9);
+    N4X_ASSERT(fl.mission.guard_jump_dwell_days == 6);
+    N4X_ASSERT(fl.mission.guard_last_alert_day == 1234);
+    N4X_ASSERT(fl.mission.patrol_circuit_system_ids.size() == 3);
+    N4X_ASSERT(fl.mission.patrol_circuit_system_ids[0] == 4001);
+    N4X_ASSERT(fl.mission.patrol_circuit_system_ids[1] == 4002);
+    N4X_ASSERT(fl.mission.patrol_circuit_system_ids[2] == 4003);
+    N4X_ASSERT(fl.mission.patrol_region_id == 5001);
+    N4X_ASSERT(fl.mission.patrol_region_dwell_days == 2);
+    N4X_ASSERT(fl.mission.patrol_region_system_index == 1);
+    N4X_ASSERT(fl.mission.explore_survey_first == false);
+    N4X_ASSERT(fl.mission.explore_allow_transit == false);
+    N4X_ASSERT(fl.mission.explore_survey_transit_when_done == false);
+    N4X_ASSERT(fl.mission.explore_investigate_anomalies == false);
+    N4X_ASSERT(fl.mission.explore_salvage_wrecks == false);
 
     N4X_ASSERT(fl.mission.assault_colony_id == 123);
     N4X_ASSERT(fl.mission.assault_staging_colony_id == 456);

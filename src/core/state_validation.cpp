@@ -649,6 +649,16 @@ std::vector<std::string> validate_game_state(const GameState& s, const ContentDB
                 } else if (ord.target_ship_id == ship_id) {
                   push(errors, prefix() + "TransferTroopsToShip targets itself");
                 }
+              } else if constexpr (std::is_same_v<T, TransferColonistsToShip>) {
+                if (ord.target_ship_id == kInvalidId) {
+                  push(errors, prefix() + "TransferColonistsToShip has invalid target_ship_id");
+                } else if (!has_ship(ord.target_ship_id)) {
+                  push(errors,
+                       prefix() + join("TransferColonistsToShip references missing target_ship_id ",
+                                       id_u64(ord.target_ship_id)));
+                } else if (ord.target_ship_id == ship_id) {
+                  push(errors, prefix() + "TransferColonistsToShip targets itself");
+                }
               } else if constexpr (std::is_same_v<T, ScrapShip>) {
                 if (ord.colony_id == kInvalidId) {
                   push(errors, prefix() + "ScrapShip has invalid colony_id");
@@ -898,6 +908,14 @@ std::vector<std::string> validate_game_state(const GameState& s, const ContentDB
               } else if (!has_ship(ord.target_ship_id)) {
                 push(errors,
                      prefix() + join("TransferTroopsToShip references missing target_ship_id ",
+                                     id_u64(ord.target_ship_id)));
+              }
+            } else if constexpr (std::is_same_v<T, TransferColonistsToShip>) {
+              if (ord.target_ship_id == kInvalidId) {
+                push(errors, prefix() + "TransferColonistsToShip has invalid target_ship_id");
+              } else if (!has_ship(ord.target_ship_id)) {
+                push(errors,
+                     prefix() + join("TransferColonistsToShip references missing target_ship_id ",
                                      id_u64(ord.target_ship_id)));
               }
             } else if constexpr (std::is_same_v<T, ScrapShip>) {
@@ -2458,6 +2476,12 @@ FixReport fix_game_state(GameState& s, const ContentDB* content) {
                   (self_ship_id != kInvalidId && ord.target_ship_id == self_ship_id)) {
                 keep = false;
                 drop(i, "TransferTroopsToShip invalid target_ship_id");
+              }
+            } else if constexpr (std::is_same_v<T, TransferColonistsToShip>) {
+              if (ord.target_ship_id == kInvalidId || !has_ship(ord.target_ship_id) ||
+                  (self_ship_id != kInvalidId && ord.target_ship_id == self_ship_id)) {
+                keep = false;
+                drop(i, "TransferColonistsToShip invalid target_ship_id");
               }
             } else if constexpr (std::is_same_v<T, ScrapShip>) {
               if (ord.colony_id == kInvalidId || !has_colony(ord.colony_id)) {

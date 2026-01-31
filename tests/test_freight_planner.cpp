@@ -255,5 +255,45 @@ int test_freight_planner() {
     N4X_ASSERT(!plan2.assignments.empty(), "assignment exists when not filtering auto_freight");
   }
 
+
+
+  // --- 5) require_idle must treat active repeating orders as non-idle (even if the queue is currently empty).
+  // This prevents max_ships truncation from selecting a ship that will auto-refill its queue in tick_ships().
+  {
+    Simulation sim5(content, cfg);
+    GameState st5 = sim.state();
+
+    // Add a second auto-freight ship with a lower id, but configure it with active repeating orders.
+    const Id repeat_ship_id = 99;
+    Ship sh2 = st5.ships.at(sh.id);
+    sh2.id = repeat_ship_id;
+    sh2.name = "Cargo-Repeat";
+    sh2.auto_freight = true;
+    st5.ships[repeat_ship_id] = sh2;
+
+    // Repeat is enabled with remaining refills, and the repeat template is non-empty, but the active queue is empty.
+    // The ship is therefore *not* idle for automation.
+    ShipOrders so;
+    so.repeat = true;
+    so.repeat_count_remaining = -1;
+    so.repeat_template.push_back(WaitDays{10});
+    so.queue.clear();
+    st5.ship_orders[repeat_ship_id] = so;
+
+    sim5.load_game(st5);
+
+    FreightPlannerOptions opt;
+    opt.require_auto_freight_flag = true;
+    opt.require_idle = true;
+    opt.restrict_to_discovered = false;
+    opt.max_ships = 1;
+
+    const auto plan = compute_freight_plan(sim5, f.id, opt);
+    N4X_ASSERT(plan.ok, "plan ok (repeat idle)");
+    N4X_ASSERT(!plan.assignments.empty(), "assignment exists (repeat idle)");
+
+    const auto& asg = plan.assignments.front();
+    N4X_ASSERT(asg.ship_id == sh.id, "planner should select the truly idle ship, not the repeating one");
+  }
   return 0;
 }

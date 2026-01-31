@@ -689,6 +689,9 @@ OrderPlan compute_order_plan_for_queue(const Simulation& sim, Id ship_id,
     } else if (std::holds_alternative<TransferTroopsToShip>(ord)) {
       const auto& o = std::get<TransferTroopsToShip>(ord);
       ok = travel_to_ship(o.target_ship_id, dock_range);
+    } else if (std::holds_alternative<TransferColonistsToShip>(ord)) {
+      const auto& o = std::get<TransferColonistsToShip>(ord);
+      ok = travel_to_ship(o.target_ship_id, dock_range);
     } else if (std::holds_alternative<AttackShip>(ord)) {
       const auto& o = std::get<AttackShip>(ord);
       const Ship* tgt = find_ptr(st.ships, o.target_ship_id);

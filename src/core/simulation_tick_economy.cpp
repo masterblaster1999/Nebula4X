@@ -73,8 +73,9 @@ void Simulation::tick_colonies(double dt_days, bool emit_daily_events) {
   for (Id cid : sorted_keys(state_.colonies)) {
     auto& colony = state_.colonies.at(cid);
     const ColonyConditionMultipliers cond_mult = colony_condition_multipliers(colony);
+    const double stability_mult = colony_stability_output_multiplier_for_colony(colony);
 
-    const double mining_mult = std::max(0.0, mult_for(colony.faction_id).mining) * cond_mult.mining;
+    const double mining_mult = std::max(0.0, mult_for(colony.faction_id).mining) * cond_mult.mining * stability_mult;
 
     // --- Installation-based production ---
     for (const auto& [inst_id, count] : colony.installations) {
@@ -302,11 +303,13 @@ void Simulation::tick_colonies(double dt_days, bool emit_daily_events) {
   for (Id cid : sorted_keys(state_.colonies)) {
     Colony& colony = state_.colonies.at(cid);
     const ColonyConditionMultipliers cond_mult = colony_condition_multipliers(colony);
+    const double stability_mult = colony_stability_output_multiplier_for_colony(colony);
 
     double industry_mult = std::max(0.0, mult_for(colony.faction_id).industry);
     // Trade prosperity bonus (market access / hub activity), reduced by piracy/blockade disruption.
     industry_mult *= trade_prosperity_output_multiplier_for_colony(colony.id);
     industry_mult *= cond_mult.industry;
+    industry_mult *= stability_mult;
 
     // Deterministic processing: installation iteration order of unordered_map is unspecified.
     std::vector<std::string> inst_ids;
@@ -983,6 +986,7 @@ void Simulation::tick_research(double dt_days) {
     // Trade prosperity bonus (system market access / hub activity).
     rp_per_day *= trade_prosperity_output_multiplier_for_colony(col.id);
     rp_per_day *= colony_condition_multipliers(col).research;
+    rp_per_day *= colony_stability_output_multiplier_for_colony(col);
     if (rp_per_day <= 0.0) continue;
 
     auto fit = state_.factions.find(col.faction_id);
@@ -1381,7 +1385,8 @@ void Simulation::tick_shipyards(double dt_days) {
       const auto it_yard = colony.installations.find("shipyard");
       const int yards = (it_yard != colony.installations.end()) ? it_yard->second : 0;
       const double shipyard_mult = std::max(0.0, mult_for(fid).shipyard) *
-                                 colony_condition_multipliers(colony).shipyard;
+                                 colony_condition_multipliers(colony).shipyard *
+                                 colony_stability_output_multiplier_for_colony(colony);
       const double prosperity = trade_prosperity_output_multiplier_for_colony(cid2);
       const double rate = base_rate * static_cast<double>(yards) * shipyard_mult * prosperity;
       if (rate <= 1e-9) return std::numeric_limits<double>::infinity();
@@ -1474,7 +1479,8 @@ void Simulation::tick_shipyards(double dt_days) {
     if (colony.shipyard_queue.empty()) continue;
 
     const double shipyard_mult = std::max(0.0, mult_for(colony.faction_id).shipyard) *
-                                 colony_condition_multipliers(colony).shipyard;
+                                 colony_condition_multipliers(colony).shipyard *
+                                 colony_stability_output_multiplier_for_colony(colony);
     const double prosperity = trade_prosperity_output_multiplier_for_colony(colony.id);
     const double per_team_capacity_tons = base_rate * shipyard_mult * prosperity * dt_days;
     if (per_team_capacity_tons <= 1e-9) continue;

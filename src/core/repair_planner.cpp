@@ -32,13 +32,7 @@ int priority_rank(RepairPriority p) {
 bool ship_orders_empty(const GameState& st, Id ship_id) {
   auto it = st.ship_orders.find(ship_id);
   if (it == st.ship_orders.end()) return true;
-  if (!it->second.queue.empty()) return false;
-  // If the ship is configured to repeat, treat it as non-idle even when the
-  // queue is currently empty (it may refill on completion).
-  if (it->second.repeat && it->second.repeat_count_remaining != 0) return false;
-  // Suspended plans imply there is a pending emergency context.
-  if (it->second.suspended) return false;
-  return true;
+  return ship_orders_is_idle_for_automation(it->second);
 }
 
 double clamp_nonneg(double v) {

@@ -460,6 +460,7 @@ if(NEBULA4X_BUILD_TESTS)
     tests/test_missile_components.cpp
     tests/test_auto_tanker.cpp
   tests/test_auto_refuel.cpp
+  tests/test_body_occlusion.cpp
     tests/test_ship_repairs.cpp
   tests/test_crew_experience.cpp
   tests/test_electronic_warfare.cpp

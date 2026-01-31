@@ -30,6 +30,16 @@ int test_anomalies() {
     content.designs[d.id] = d;
   }
   {
+    ShipDesign d;
+    d.id = "blind";
+    d.name = "Blind Hull";
+    d.speed_km_s = 100.0;
+    d.sensor_range_mkm = 0.0;
+    d.cargo_tons = 50.0;
+    d.max_hp = 10.0;
+    content.designs[d.id] = d;
+  }
+  {
     ComponentDef c;
     c.id = "anomaly_comp";
     c.name = "Recovered Xeno Sensor";
@@ -78,6 +88,19 @@ int test_anomalies() {
     s.systems[sys_id].ships = {ship_id};
   }
 
+  const Id blind_ship_id = allocate_id(s);
+  {
+    Ship sh;
+    sh.id = blind_ship_id;
+    sh.name = "Blind";
+    sh.faction_id = fac_id;
+    sh.system_id = sys_id;
+    sh.position_mkm = {0.0, 0.0};
+    sh.design_id = "blind";
+    s.ships[blind_ship_id] = sh;
+    s.systems[sys_id].ships.push_back(blind_ship_id);
+  }
+
   const Id anom_id = allocate_id(s);
   {
     Anomaly a;
@@ -100,6 +123,10 @@ int test_anomalies() {
   GameState s2 = deserialize_game_from_json(json);
 
   sim.load_game(std::move(s2));
+
+  // Ships without sensors cannot take investigation orders.
+  N4X_ASSERT(sim.clear_orders(blind_ship_id));
+  N4X_ASSERT(!sim.issue_investigate_anomaly(blind_ship_id, anom_id, /*restrict_to_discovered=*/false));
 
   // Issue the investigation order and advance time until completion.
   N4X_ASSERT(sim.clear_orders(ship_id));

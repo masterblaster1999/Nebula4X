@@ -554,6 +554,9 @@ double Simulation::construction_points_per_day(const Colony& colony) const {
   // Local temporary conditions (strikes, accidents, festivals, etc.).
   total *= colony_condition_multipliers(colony).construction;
 
+  // Colony stability output scaling (optional).
+  total *= colony_stability_output_multiplier_for_colony(colony);
+
   return std::max(0.0, total);
 }
 
@@ -2523,19 +2526,29 @@ ColonyStabilityStatus Simulation::colony_stability_status_for_colony(Id colony_i
   const Colony* col = find_ptr(state_.colonies, colony_id);
   if (!col) return st;
 
-  st.habitability = std::clamp(body_habitability(col->body_id), 0.0, 1.0);
+  return colony_stability_status_for_colony(*col);
+}
 
-  const double pop = std::max(0.0, col->population_millions);
+ColonyStabilityStatus Simulation::colony_stability_status_for_colony(const Colony& col) const {
+  ColonyStabilityStatus st;
+  st.colony_id = col.id;
+  st.stability = 1.0;
+
+  if (col.id == kInvalidId) return st;
+
+  st.habitability = std::clamp(body_habitability(col.body_id), 0.0, 1.0);
+
+  const double pop = std::max(0.0, col.population_millions);
   if (pop > 1e-9) {
-    const double required = std::max(0.0, required_habitation_capacity_millions(*col));
-    const double available = std::max(0.0, habitation_capacity_millions(*col));
+    const double required = std::max(0.0, required_habitation_capacity_millions(col));
+    const double available = std::max(0.0, habitation_capacity_millions(col));
     const double shortfall = std::max(0.0, required - available);
     st.habitation_shortfall_frac = std::clamp(shortfall / pop, 0.0, 1.0);
   } else {
     st.habitation_shortfall_frac = 0.0;
   }
 
-  const TradeProsperityStatus tp = trade_prosperity_status_for_colony(colony_id);
+  const TradeProsperityStatus tp = trade_prosperity_status_for_colony(col.id);
   st.trade_bonus = std::max(0.0, tp.output_bonus);
   st.piracy_risk = std::clamp(tp.piracy_risk, 0.0, 1.0);
   st.blockade_pressure = std::clamp(tp.blockade_pressure, 0.0, 1.0);
@@ -2544,7 +2557,7 @@ ColonyStabilityStatus Simulation::colony_stability_status_for_colony(Id colony_i
   // Conditions stability delta (additive).
   st.condition_delta = 0.0;
   if (cfg_.enable_colony_conditions) {
-    for (const auto& cond : col->conditions) {
+    for (const auto& cond : col.conditions) {
       if (cond.remaining_days <= 1e-9) continue;
       const auto* def = colony_condition_def(cond.id);
       if (!def) continue;
@@ -2577,6 +2590,31 @@ ColonyStabilityStatus Simulation::colony_stability_status_for_colony(Id colony_i
   st.stability = std::clamp(stability, 0.0, 1.0);
   return st;
 }
+
+
+double Simulation::colony_stability_output_multiplier_for_colony(Id colony_id) const {
+  if (!cfg_.enable_colony_stability_output_scaling) return 1.0;
+
+  const Colony* col = find_ptr(state_.colonies, colony_id);
+  if (!col) return 1.0;
+
+  return colony_stability_output_multiplier_for_colony(*col);
+}
+
+double Simulation::colony_stability_output_multiplier_for_colony(const Colony& colony) const {
+  if (!cfg_.enable_colony_stability_output_scaling) return 1.0;
+
+  const double neutral = std::clamp(cfg_.colony_stability_neutral_threshold, 0.0, 1.0);
+  const double min_mult = std::clamp(cfg_.colony_stability_min_output_multiplier, 0.0, 1.0);
+  if (!(neutral > 1e-9)) return 1.0;
+
+  const double st = std::clamp(colony_stability_status_for_colony(colony).stability, 0.0, 1.0);
+  if (st >= neutral) return 1.0;
+
+  const double t = std::clamp(st / neutral, 0.0, 1.0);
+  return std::max(0.0, min_mult + (1.0 - min_mult) * t);
+}
+
 
 
 

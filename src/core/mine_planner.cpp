@@ -230,7 +230,7 @@ MinePlannerResult compute_mine_plan(const Simulation& sim, Id faction_id, const 
     if (!(design->cargo_tons >= min_tons)) continue;
 
     const ShipOrders* so = find_ptr(st.ship_orders, sid);
-    if (opt.require_idle && so && !(so->queue.empty() || (so->repeat && so->repeat_count_remaining == 0))) {
+    if (opt.require_idle && so && !ship_orders_is_idle_for_automation(*so)) {
       continue;
     }
 
