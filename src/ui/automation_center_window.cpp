@@ -15,6 +15,8 @@
 
 #include "nebula4x/core/orders.h"
 
+#include "ui/order_ui.h"
+
 namespace nebula4x::ui {
 namespace {
 
@@ -140,18 +142,13 @@ bool str_contains_case_sensitive(const std::string& hay, const std::string& need
   return hay.find(needle) != std::string::npos;
 }
 
-bool any_orders_queued(const GameState& s, Id ship_id) {
+bool ship_is_idle_for_automation_center(const GameState& s, Id ship_id) {
   auto it = s.ship_orders.find(ship_id);
-  if (it == s.ship_orders.end()) return false;
-  return !it->second.queue.empty();
+  if (it == s.ship_orders.end()) return true;
+  return ship_orders_is_idle_for_automation(it->second);
 }
 
-std::string first_order_label(const GameState& s, Id ship_id) {
-  auto it = s.ship_orders.find(ship_id);
-  if (it == s.ship_orders.end()) return std::string();
-  if (it->second.queue.empty()) return std::string();
-  return order_to_string(it->second.queue.front());
-}
+// (Order string rendering lives in ui/order_ui.*)
 
 double clamp01(double v) {
   if (!std::isfinite(v)) return 0.0;
@@ -534,7 +531,7 @@ void draw_automation_center_window(Simulation& sim, UIState& ui, Id& selected_sh
     const bool in_fleet = (fleet_id != kInvalidId);
     if (ac.hide_fleet_ships && in_fleet) continue;
 
-    const bool idle = !any_orders_queued(s, sid);
+    const bool idle = ship_is_idle_for_automation_center(s, sid);
     if (ac.only_idle && !idle) continue;
 
     const int conflicts = mission_flag_count(sh);
@@ -1027,11 +1024,18 @@ void draw_automation_center_window(Simulation& sim, UIState& ui, Id& selected_sh
 
       if (ac.show_first_order) {
         ImGui::TableSetColumnIndex(col++);
-        const std::string ord = first_order_label(s, r.id);
+        const auto* so = find_ptr(s.ship_orders, r.id);
+        const std::string ord = ship_orders_first_action_label(sim, so, ui.viewer_faction_id, ui.fog_of_war);
         if (!ord.empty()) {
           ImGui::TextUnformatted(ord.c_str());
+          if (ImGui::IsItemHovered()) {
+            draw_ship_orders_tooltip(sim, so, ui.viewer_faction_id, ui.fog_of_war);
+          }
         } else {
           ImGui::TextDisabled("(none)");
+          if (ImGui::IsItemHovered()) {
+            draw_ship_orders_tooltip(sim, so, ui.viewer_faction_id, ui.fog_of_war);
+          }
         }
       }
     }

@@ -237,6 +237,10 @@ FetchContent_Declare(
     src/ui/new_game_modal.cpp
     src/ui/hud.cpp
     src/ui/ui_commands.cpp
+    src/ui/order_ui.cpp
+    src/ui/order_template_portable.cpp
+    src/ui/order_plan_ui.cpp
+    src/ui/fleet_plan_ui.cpp
     src/ui/navigation.cpp
     src/ui/navigator_window.cpp
     src/ui/map_render.cpp

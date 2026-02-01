@@ -1312,6 +1312,80 @@ using json::Array;
 using json::Object;
 using json::Value;
 
+
+json::Value serialize_order_template_to_json_value(const std::string& name,
+                                                   const std::vector<Order>& orders,
+                                                   int template_format_version) {
+  Object root;
+  root["nebula4x_order_template_version"] = static_cast<double>(template_format_version);
+  if (!name.empty()) root["name"] = name;
+
+  Array arr;
+  arr.reserve(orders.size());
+  for (const auto& ord : orders) arr.push_back(order_to_json(ord));
+  root["orders"] = arr;
+
+  return root;
+}
+
+std::string serialize_order_template_to_json(const std::string& name, const std::vector<Order>& orders, int indent,
+                                             int template_format_version) {
+  return json::stringify(serialize_order_template_to_json_value(name, orders, template_format_version), indent);
+}
+
+bool deserialize_order_template_from_json(const std::string& json_text, ParsedOrderTemplate* out,
+                                         std::string* error) {
+  auto fail = [&](const std::string& msg) {
+    if (error) *error = msg;
+    return false;
+  };
+
+  if (!out) return fail("Output pointer is null");
+  out->name.clear();
+  out->orders.clear();
+
+  Value v;
+  try {
+    v = json::parse(json_text);
+  } catch (const std::exception& e) {
+    return fail(std::string("JSON parse failed: ") + e.what());
+  }
+
+  const Value* orders_v = nullptr;
+
+  if (v.is_object()) {
+    const auto& obj = v.object();
+    if (auto itn = obj.find("name"); itn != obj.end()) {
+      out->name = itn->second.string_value();
+    }
+
+    if (auto ito = obj.find("orders"); ito != obj.end()) {
+      orders_v = &ito->second;
+    } else if (auto itq = obj.find("queue"); itq != obj.end()) {
+      // Allow the ship-orders shape for convenience.
+      orders_v = &itq->second;
+    } else {
+      return fail("Missing 'orders' array");
+    }
+  } else if (v.is_array()) {
+    orders_v = &v;
+  } else {
+    return fail("Expected a JSON object or array");
+  }
+
+  if (!orders_v || !orders_v->is_array()) return fail("'orders' is not an array");
+
+  for (const auto& ov : orders_v->array()) {
+    try {
+      out->orders.push_back(order_from_json(ov));
+    } catch (const std::exception& e) {
+      return fail(std::string("Order parse failed: ") + e.what());
+    }
+  }
+
+  return true;
+}
+
 json::Value serialize_game_to_json_value(const GameState& s) {
   Object root;
   root["save_version"] = static_cast<double>(s.save_version);

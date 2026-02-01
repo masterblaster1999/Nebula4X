@@ -41,6 +41,7 @@ using sim_internal::strongest_active_treaty_between;
 
 using sim_nav::PredictedNavState;
 using sim_nav::predicted_nav_state_after_queued_jumps;
+using sim_nav::predicted_nav_state_after_queued_orders;
 
 const char* treaty_type_display_name(TreatyType t) {
   switch (t) {
@@ -200,6 +201,16 @@ bool Simulation::move_queued_order(Id ship_id, int from_index, int to_index) {
   q.insert(q.begin() + to_index, std::move(moved));
   return true;
 }
+
+
+bool Simulation::set_queued_orders(Id ship_id, const std::vector<Order>& queue) {
+  if (!find_ptr(state_.ships, ship_id)) return false;
+  auto& so = state_.ship_orders[ship_id];
+  clear_order_suspension(so);
+  so.queue = queue;
+  return true;
+}
+
 
 
 // --- Colony production queue editing (UI convenience) ---
@@ -449,33 +460,35 @@ bool Simulation::apply_order_template_to_fleet(Id fleet_id, const std::string& n
   return ok;
 }
 
-bool Simulation::apply_order_template_to_ship_smart(Id ship_id, const std::string& name, bool append,
-                                                    bool restrict_to_discovered, std::string* error) {
+bool Simulation::compile_orders_smart(Id ship_id, const std::vector<Order>& orders, bool append,
+                                     bool restrict_to_discovered, std::vector<Order>* out_compiled,
+                                     std::string* error) const {
   auto fail = [&](const std::string& msg) {
     if (error) *error = msg;
+    if (out_compiled) out_compiled->clear();
     return false;
   };
 
-  const auto* tmpl = find_order_template(name);
-  if (!tmpl) return fail("Template not found");
+  if (!out_compiled) return fail("Output queue is null");
+  out_compiled->clear();
 
+  if (orders.empty()) return fail("No orders to compile");
   const auto* ship = find_ptr(state_.ships, ship_id);
   if (!ship) return fail("Ship not found");
 
-  // Start from the ship's predicted system after any queued jumps if we are appending.
-  PredictedNavState nav = predicted_nav_state_after_queued_jumps(state_, ship_id, append);
+  // Start from the ship's predicted system/position after any queued orders if we are appending.
+  PredictedNavState nav = predicted_nav_state_after_queued_orders(state_, ship_id, append);
   if (nav.system_id == kInvalidId) return fail("Invalid ship navigation state");
 
   std::vector<Order> compiled;
-  compiled.reserve(tmpl->size() + 8);
+  compiled.reserve(orders.size() + 8);
 
   auto route_to_system = [&](Id required_system_id, std::optional<Vec2> goal_pos_mkm) {
     if (required_system_id == kInvalidId) return fail("Invalid required system id");
     if (required_system_id == nav.system_id) return true;
 
-    const auto plan = plan_jump_route_cached(nav.system_id, nav.position_mkm, ship->faction_id,
-                                             ship->speed_km_s, required_system_id, restrict_to_discovered,
-                                             goal_pos_mkm);
+    const auto plan = plan_jump_route_cached(nav.system_id, nav.position_mkm, ship->faction_id, ship->speed_km_s,
+                                             required_system_id, restrict_to_discovered, goal_pos_mkm);
     if (!plan) {
       return fail("No jump route available to required system");
     }
@@ -499,7 +512,7 @@ bool Simulation::apply_order_template_to_ship_smart(Id ship_id, const std::strin
     return true;
   };
 
-  // Compile the template into a queue, injecting any missing travel.
+  // Compile orders into a queue, injecting any missing travel.
 
   // Helper to validate a body exists and returns its system.
   auto body_system = [&](Id body_id) -> std::optional<Id> {
@@ -517,6 +530,24 @@ bool Simulation::apply_order_template_to_ship_smart(Id ship_id, const std::strin
     return body_system(c->body_id);
   };
 
+  // Helper to find the system of a wreck.
+  auto wreck_system = [&](Id wreck_id) -> std::optional<Id> {
+    const auto* w = find_ptr(state_.wrecks, wreck_id);
+    if (!w) return std::nullopt;
+    if (w->system_id == kInvalidId) return std::nullopt;
+    if (!find_ptr(state_.systems, w->system_id)) return std::nullopt;
+    return w->system_id;
+  };
+
+  // Helper to find the system of an anomaly.
+  auto anomaly_system = [&](Id anomaly_id) -> std::optional<Id> {
+    const auto* a = find_ptr(state_.anomalies, anomaly_id);
+    if (!a) return std::nullopt;
+    if (a->system_id == kInvalidId) return std::nullopt;
+    if (!find_ptr(state_.systems, a->system_id)) return std::nullopt;
+    return a->system_id;
+  };
+
   // Helper to get a body's position (for goal-aware routing).
   auto body_pos = [&](Id body_id) -> std::optional<Vec2> {
     const auto* b = find_ptr(state_.bodies, body_id);
@@ -531,13 +562,26 @@ bool Simulation::apply_order_template_to_ship_smart(Id ship_id, const std::strin
     return body_pos(c->body_id);
   };
 
+  // Helper to get a wreck's position.
+  auto wreck_pos = [&](Id wreck_id) -> std::optional<Vec2> {
+    const auto* w = find_ptr(state_.wrecks, wreck_id);
+    if (!w) return std::nullopt;
+    return w->position_mkm;
+  };
+
+  // Helper to get an anomaly's position.
+  auto anomaly_pos = [&](Id anomaly_id) -> std::optional<Vec2> {
+    const auto* a = find_ptr(state_.anomalies, anomaly_id);
+    if (!a) return std::nullopt;
+    return a->position_mkm;
+  };
+
   // Helper to get a ship's current position (best-effort; may be stale for fog-of-war uses).
   auto ship_pos = [&](Id target_ship_id) -> std::optional<Vec2> {
     const auto* sh = find_ptr(state_.ships, target_ship_id);
     if (!sh) return std::nullopt;
     return sh->position_mkm;
   };
-
 
   auto ship_system = [&](Id target_ship_id) -> std::optional<Id> {
     const auto* sh = find_ptr(state_.ships, target_ship_id);
@@ -561,74 +605,109 @@ bool Simulation::apply_order_template_to_ship_smart(Id ship_id, const std::strin
     update_position_to_body(c->body_id);
   };
 
-  for (const auto& ord : *tmpl) {
+  auto update_position_to_wreck = [&](Id wreck_id) {
+    const auto* w = find_ptr(state_.wrecks, wreck_id);
+    if (!w) return;
+    if (w->system_id == nav.system_id) nav.position_mkm = w->position_mkm;
+  };
+
+  auto update_position_to_anomaly = [&](Id anomaly_id) {
+    const auto* a = find_ptr(state_.anomalies, anomaly_id);
+    if (!a) return;
+    if (a->system_id == nav.system_id) nav.position_mkm = a->position_mkm;
+  };
+
+  for (const auto& ord : orders) {
     // Figure out which system the ship must be in for this order to be valid.
     std::optional<Id> required_system;
     std::optional<Vec2> goal_pos_mkm;
 
     if (std::holds_alternative<MoveToBody>(ord)) {
       required_system = body_system(std::get<MoveToBody>(ord).body_id);
-      if (!required_system) return fail("Template MoveToBody references an invalid body");
+      if (!required_system) return fail("MoveToBody references an invalid body");
     } else if (std::holds_alternative<ColonizeBody>(ord)) {
       required_system = body_system(std::get<ColonizeBody>(ord).body_id);
-      if (!required_system) return fail("Template ColonizeBody references an invalid body");
+      if (!required_system) return fail("ColonizeBody references an invalid body");
     } else if (std::holds_alternative<OrbitBody>(ord)) {
       required_system = body_system(std::get<OrbitBody>(ord).body_id);
-      if (!required_system) return fail("Template OrbitBody references an invalid body");
+      if (!required_system) return fail("OrbitBody references an invalid body");
+    } else if (std::holds_alternative<MineBody>(ord)) {
+      required_system = body_system(std::get<MineBody>(ord).body_id);
+      if (!required_system) return fail("MineBody references an invalid body");
     } else if (std::holds_alternative<LoadMineral>(ord)) {
       required_system = colony_system(std::get<LoadMineral>(ord).colony_id);
-      if (!required_system) return fail("Template LoadMineral references an invalid colony");
+      if (!required_system) return fail("LoadMineral references an invalid colony");
     } else if (std::holds_alternative<UnloadMineral>(ord)) {
       required_system = colony_system(std::get<UnloadMineral>(ord).colony_id);
-      if (!required_system) return fail("Template UnloadMineral references an invalid colony");
+      if (!required_system) return fail("UnloadMineral references an invalid colony");
     } else if (std::holds_alternative<LoadTroops>(ord)) {
       required_system = colony_system(std::get<LoadTroops>(ord).colony_id);
-      if (!required_system) return fail("Template LoadTroops references an invalid colony");
+      if (!required_system) return fail("LoadTroops references an invalid colony");
     } else if (std::holds_alternative<UnloadTroops>(ord)) {
       required_system = colony_system(std::get<UnloadTroops>(ord).colony_id);
-      if (!required_system) return fail("Template UnloadTroops references an invalid colony");
+      if (!required_system) return fail("UnloadTroops references an invalid colony");
     } else if (std::holds_alternative<LoadColonists>(ord)) {
       required_system = colony_system(std::get<LoadColonists>(ord).colony_id);
-      if (!required_system) return fail("Template LoadColonists references an invalid colony");
+      if (!required_system) return fail("LoadColonists references an invalid colony");
     } else if (std::holds_alternative<UnloadColonists>(ord)) {
       required_system = colony_system(std::get<UnloadColonists>(ord).colony_id);
-      if (!required_system) return fail("Template UnloadColonists references an invalid colony");
+      if (!required_system) return fail("UnloadColonists references an invalid colony");
     } else if (std::holds_alternative<InvadeColony>(ord)) {
       required_system = colony_system(std::get<InvadeColony>(ord).colony_id);
-      if (!required_system) return fail("Template InvadeColony references an invalid colony");
+      if (!required_system) return fail("InvadeColony references an invalid colony");
+    } else if (std::holds_alternative<BombardColony>(ord)) {
+      required_system = colony_system(std::get<BombardColony>(ord).colony_id);
+      if (!required_system) return fail("BombardColony references an invalid colony");
     } else if (std::holds_alternative<ScrapShip>(ord)) {
       required_system = colony_system(std::get<ScrapShip>(ord).colony_id);
-      if (!required_system) return fail("Template ScrapShip references an invalid colony");
-        } else if (std::holds_alternative<AttackShip>(ord)) {
-      required_system = ship_system(std::get<AttackShip>(ord).target_ship_id);
-      if (!required_system) return fail("Template AttackShip references an invalid target ship");
+      if (!required_system) return fail("ScrapShip references an invalid colony");
+    } else if (std::holds_alternative<SalvageWreck>(ord)) {
+      required_system = wreck_system(std::get<SalvageWreck>(ord).wreck_id);
+      if (!required_system) return fail("SalvageWreck references an invalid wreck");
+    } else if (std::holds_alternative<SalvageWreckLoop>(ord)) {
+      required_system = wreck_system(std::get<SalvageWreckLoop>(ord).wreck_id);
+      if (!required_system) return fail("SalvageWreckLoop references an invalid wreck");
+    } else if (std::holds_alternative<InvestigateAnomaly>(ord)) {
+      required_system = anomaly_system(std::get<InvestigateAnomaly>(ord).anomaly_id);
+      if (!required_system) return fail("InvestigateAnomaly references an invalid anomaly");
+    } else if (std::holds_alternative<AttackShip>(ord)) {
+      const auto& a = std::get<AttackShip>(ord);
+      if (a.has_last_known && a.last_known_system_id != kInvalidId && find_ptr(state_.systems, a.last_known_system_id)) {
+        required_system = a.last_known_system_id;
+      } else {
+        required_system = ship_system(a.target_ship_id);
+        if (!required_system) return fail("AttackShip references an invalid target ship");
+      }
+    } else if (std::holds_alternative<EscortShip>(ord)) {
+      required_system = ship_system(std::get<EscortShip>(ord).target_ship_id);
+      if (!required_system) return fail("EscortShip references an invalid target ship");
     } else if (std::holds_alternative<TransferCargoToShip>(ord)) {
       required_system = ship_system(std::get<TransferCargoToShip>(ord).target_ship_id);
-      if (!required_system) return fail("Template TransferCargoToShip references an invalid target ship");
+      if (!required_system) return fail("TransferCargoToShip references an invalid target ship");
     } else if (std::holds_alternative<TransferFuelToShip>(ord)) {
       required_system = ship_system(std::get<TransferFuelToShip>(ord).target_ship_id);
-      if (!required_system) return fail("Template TransferFuelToShip references an invalid target ship");
+      if (!required_system) return fail("TransferFuelToShip references an invalid target ship");
     } else if (std::holds_alternative<TransferTroopsToShip>(ord)) {
       required_system = ship_system(std::get<TransferTroopsToShip>(ord).target_ship_id);
-      if (!required_system) return fail("Template TransferTroopsToShip references an invalid target ship");
+      if (!required_system) return fail("TransferTroopsToShip references an invalid target ship");
     } else if (std::holds_alternative<TransferColonistsToShip>(ord)) {
       required_system = ship_system(std::get<TransferColonistsToShip>(ord).target_ship_id);
-      if (!required_system) return fail("Template TransferColonistsToShip references an invalid target ship");
+      if (!required_system) return fail("TransferColonistsToShip references an invalid target ship");
     } else if (std::holds_alternative<TravelViaJump>(ord)) {
       const Id jid = std::get<TravelViaJump>(ord).jump_point_id;
       const auto* jp = find_ptr(state_.jump_points, jid);
-      if (!jp) return fail("Template TravelViaJump references an invalid jump point");
+      if (!jp) return fail("TravelViaJump references an invalid jump point");
       required_system = jp->system_id;
       if (!required_system || *required_system == kInvalidId) {
-        return fail("Template TravelViaJump has an invalid source system");
+        return fail("TravelViaJump has an invalid source system");
       }
     } else if (std::holds_alternative<SurveyJumpPoint>(ord)) {
       const Id jid = std::get<SurveyJumpPoint>(ord).jump_point_id;
       const auto* jp = find_ptr(state_.jump_points, jid);
-      if (!jp) return fail("Template SurveyJumpPoint references an invalid jump point");
+      if (!jp) return fail("SurveyJumpPoint references an invalid jump point");
       required_system = jp->system_id;
       if (!required_system || *required_system == kInvalidId) {
-        return fail("Template SurveyJumpPoint has an invalid source system");
+        return fail("SurveyJumpPoint has an invalid source system");
       }
     }
 
@@ -640,6 +719,8 @@ bool Simulation::apply_order_template_to_ship_smart(Id ship_id, const std::strin
       goal_pos_mkm = body_pos(std::get<ColonizeBody>(ord).body_id);
     } else if (std::holds_alternative<OrbitBody>(ord)) {
       goal_pos_mkm = body_pos(std::get<OrbitBody>(ord).body_id);
+    } else if (std::holds_alternative<MineBody>(ord)) {
+      goal_pos_mkm = body_pos(std::get<MineBody>(ord).body_id);
     } else if (std::holds_alternative<LoadMineral>(ord)) {
       goal_pos_mkm = colony_pos(std::get<LoadMineral>(ord).colony_id);
     } else if (std::holds_alternative<UnloadMineral>(ord)) {
@@ -654,8 +735,16 @@ bool Simulation::apply_order_template_to_ship_smart(Id ship_id, const std::strin
       goal_pos_mkm = colony_pos(std::get<UnloadColonists>(ord).colony_id);
     } else if (std::holds_alternative<InvadeColony>(ord)) {
       goal_pos_mkm = colony_pos(std::get<InvadeColony>(ord).colony_id);
+    } else if (std::holds_alternative<BombardColony>(ord)) {
+      goal_pos_mkm = colony_pos(std::get<BombardColony>(ord).colony_id);
     } else if (std::holds_alternative<ScrapShip>(ord)) {
       goal_pos_mkm = colony_pos(std::get<ScrapShip>(ord).colony_id);
+    } else if (std::holds_alternative<SalvageWreck>(ord)) {
+      goal_pos_mkm = wreck_pos(std::get<SalvageWreck>(ord).wreck_id);
+    } else if (std::holds_alternative<SalvageWreckLoop>(ord)) {
+      goal_pos_mkm = wreck_pos(std::get<SalvageWreckLoop>(ord).wreck_id);
+    } else if (std::holds_alternative<InvestigateAnomaly>(ord)) {
+      goal_pos_mkm = anomaly_pos(std::get<InvestigateAnomaly>(ord).anomaly_id);
     } else if (std::holds_alternative<AttackShip>(ord)) {
       const auto& a = std::get<AttackShip>(ord);
       if (a.has_last_known) {
@@ -663,6 +752,8 @@ bool Simulation::apply_order_template_to_ship_smart(Id ship_id, const std::strin
       } else {
         goal_pos_mkm = ship_pos(a.target_ship_id);
       }
+    } else if (std::holds_alternative<EscortShip>(ord)) {
+      goal_pos_mkm = ship_pos(std::get<EscortShip>(ord).target_ship_id);
     } else if (std::holds_alternative<TransferCargoToShip>(ord)) {
       goal_pos_mkm = ship_pos(std::get<TransferCargoToShip>(ord).target_ship_id);
     } else if (std::holds_alternative<TransferFuelToShip>(ord)) {
@@ -682,7 +773,7 @@ bool Simulation::apply_order_template_to_ship_smart(Id ship_id, const std::strin
       if (!route_to_system(*required_system, goal_pos_mkm)) return false;
     }
 
-    // Enqueue the actual template order.
+    // Enqueue the actual order.
     compiled.push_back(ord);
 
     // Update predicted nav state based on the order.
@@ -694,6 +785,8 @@ bool Simulation::apply_order_template_to_ship_smart(Id ship_id, const std::strin
       update_position_to_body(std::get<ColonizeBody>(ord).body_id);
     } else if (std::holds_alternative<OrbitBody>(ord)) {
       update_position_to_body(std::get<OrbitBody>(ord).body_id);
+    } else if (std::holds_alternative<MineBody>(ord)) {
+      update_position_to_body(std::get<MineBody>(ord).body_id);
     } else if (std::holds_alternative<LoadMineral>(ord)) {
       update_position_to_colony(std::get<LoadMineral>(ord).colony_id);
     } else if (std::holds_alternative<UnloadMineral>(ord)) {
@@ -708,6 +801,19 @@ bool Simulation::apply_order_template_to_ship_smart(Id ship_id, const std::strin
       update_position_to_colony(std::get<UnloadColonists>(ord).colony_id);
     } else if (std::holds_alternative<InvadeColony>(ord)) {
       update_position_to_colony(std::get<InvadeColony>(ord).colony_id);
+    } else if (std::holds_alternative<BombardColony>(ord)) {
+      update_position_to_colony(std::get<BombardColony>(ord).colony_id);
+    } else if (std::holds_alternative<SalvageWreck>(ord)) {
+      update_position_to_wreck(std::get<SalvageWreck>(ord).wreck_id);
+    } else if (std::holds_alternative<SalvageWreckLoop>(ord)) {
+      const auto& sl = std::get<SalvageWreckLoop>(ord);
+      if (sl.mode == 1 && sl.dropoff_colony_id != kInvalidId) {
+        update_position_to_colony(sl.dropoff_colony_id);
+      } else {
+        update_position_to_wreck(sl.wreck_id);
+      }
+    } else if (std::holds_alternative<InvestigateAnomaly>(ord)) {
+      update_position_to_anomaly(std::get<InvestigateAnomaly>(ord).anomaly_id);
     } else if (std::holds_alternative<ScrapShip>(ord)) {
       update_position_to_colony(std::get<ScrapShip>(ord).colony_id);
       // Scrapping removes the ship; any subsequent orders would be meaningless.
@@ -715,41 +821,50 @@ bool Simulation::apply_order_template_to_ship_smart(Id ship_id, const std::strin
     } else if (std::holds_alternative<TravelViaJump>(ord)) {
       const Id jid = std::get<TravelViaJump>(ord).jump_point_id;
       const auto* jp = find_ptr(state_.jump_points, jid);
-      if (!jp) return fail("Template TravelViaJump references an invalid jump point");
+      if (!jp) return fail("TravelViaJump references an invalid jump point");
       if (jp->system_id != nav.system_id) {
         // nav.system_id should already match required_system.
-        return fail("Template TravelViaJump is not in the predicted system after routing");
+        return fail("TravelViaJump is not in the predicted system after routing");
       }
-      if (jp->linked_jump_id == kInvalidId) return fail("Template TravelViaJump uses an unlinked jump point");
+      if (jp->linked_jump_id == kInvalidId) return fail("TravelViaJump uses an unlinked jump point");
       const auto* dest = find_ptr(state_.jump_points, jp->linked_jump_id);
-      if (!dest) return fail("Template TravelViaJump has invalid destination");
-      if (dest->system_id == kInvalidId) return fail("Template TravelViaJump has invalid destination system");
-      if (!find_ptr(state_.systems, dest->system_id)) return fail("Template TravelViaJump destination system missing");
+      if (!dest) return fail("TravelViaJump has invalid destination");
+      if (dest->system_id == kInvalidId) return fail("TravelViaJump has invalid destination system");
+      if (!find_ptr(state_.systems, dest->system_id)) return fail("TravelViaJump destination system missing");
       nav.system_id = dest->system_id;
       nav.position_mkm = dest->position_mkm;
     } else if (std::holds_alternative<SurveyJumpPoint>(ord)) {
       const auto& sj = std::get<SurveyJumpPoint>(ord);
       const Id jid = sj.jump_point_id;
       const auto* jp = find_ptr(state_.jump_points, jid);
-      if (!jp) return fail("Template SurveyJumpPoint references an invalid jump point");
+      if (!jp) return fail("SurveyJumpPoint references an invalid jump point");
       if (jp->system_id != nav.system_id) {
         // nav.system_id should already match required_system.
-        return fail("Template SurveyJumpPoint is not in the predicted system after routing");
+        return fail("SurveyJumpPoint is not in the predicted system after routing");
       }
       nav.position_mkm = jp->position_mkm;
 
       if (sj.transit_when_done) {
-        if (jp->linked_jump_id == kInvalidId) return fail("Template SurveyJumpPoint uses an unlinked jump point");
+        if (jp->linked_jump_id == kInvalidId) return fail("SurveyJumpPoint uses an unlinked jump point");
         const auto* dest = find_ptr(state_.jump_points, jp->linked_jump_id);
-        if (!dest) return fail("Template SurveyJumpPoint has invalid destination");
-        if (dest->system_id == kInvalidId) return fail("Template SurveyJumpPoint has invalid destination system");
-        if (!find_ptr(state_.systems, dest->system_id)) return fail("Template SurveyJumpPoint destination system missing");
+        if (!dest) return fail("SurveyJumpPoint has invalid destination");
+        if (dest->system_id == kInvalidId) return fail("SurveyJumpPoint has invalid destination system");
+        if (!find_ptr(state_.systems, dest->system_id)) return fail("SurveyJumpPoint destination system missing");
         nav.system_id = dest->system_id;
         nav.position_mkm = dest->position_mkm;
       }
     } else if (std::holds_alternative<AttackShip>(ord)) {
       // Best-effort: update position to the current target snapshot if it's in the same system.
       const Id tid = std::get<AttackShip>(ord).target_ship_id;
+      if (const auto* t = find_ptr(state_.ships, tid)) {
+        if (t->system_id == nav.system_id) nav.position_mkm = t->position_mkm;
+      } else {
+        // When the target doesn't exist, fall back to last-known.
+        const auto& a = std::get<AttackShip>(ord);
+        if (a.has_last_known && a.last_known_system_id == nav.system_id) nav.position_mkm = a.last_known_position_mkm;
+      }
+    } else if (std::holds_alternative<EscortShip>(ord)) {
+      const Id tid = std::get<EscortShip>(ord).target_ship_id;
       if (const auto* t = find_ptr(state_.ships, tid)) {
         if (t->system_id == nav.system_id) nav.position_mkm = t->position_mkm;
       }
@@ -776,6 +891,99 @@ bool Simulation::apply_order_template_to_ship_smart(Id ship_id, const std::strin
     }
   }
 
+  if (compiled.empty()) return fail("Orders produced no steps");
+
+  *out_compiled = std::move(compiled);
+  return true;
+}
+
+bool Simulation::apply_orders_to_ship(Id ship_id, const std::vector<Order>& orders, bool append) {
+  if (!find_ptr(state_.ships, ship_id)) return false;
+  if (orders.empty()) return false;
+
+  if (!append) {
+    clear_orders(ship_id);
+  }
+
+  auto& so = state_.ship_orders[ship_id];
+  so.queue.insert(so.queue.end(), orders.begin(), orders.end());
+  return true;
+}
+
+bool Simulation::apply_orders_to_fleet(Id fleet_id, const std::vector<Order>& orders, bool append) {
+  prune_fleets();
+  const auto* fl = find_ptr(state_.fleets, fleet_id);
+  if (!fl) return false;
+  if (orders.empty()) return false;
+
+  bool ok = true;
+  for (Id sid : fl->ship_ids) {
+    if (!apply_orders_to_ship(sid, orders, append)) ok = false;
+  }
+  return ok;
+}
+
+bool Simulation::apply_orders_to_ship_smart(Id ship_id, const std::vector<Order>& orders, bool append,
+                                            bool restrict_to_discovered, std::string* error) {
+  auto fail = [&](const std::string& msg) {
+    if (error) *error = msg;
+    return false;
+  };
+
+  std::vector<Order> compiled;
+  if (!compile_orders_smart(ship_id, orders, append, restrict_to_discovered, &compiled, error)) return false;
+  if (compiled.empty()) return fail("Orders produced no steps");
+
+  // Apply atomically after successful compilation.
+  if (!append) {
+    if (!clear_orders(ship_id)) return fail("Failed to clear orders");
+  }
+
+  auto& so = state_.ship_orders[ship_id];
+  so.queue.insert(so.queue.end(), compiled.begin(), compiled.end());
+  return true;
+}
+
+bool Simulation::apply_orders_to_fleet_smart(Id fleet_id, const std::vector<Order>& orders, bool append,
+                                             bool restrict_to_discovered, std::string* error) {
+  prune_fleets();
+  const auto* fl = find_ptr(state_.fleets, fleet_id);
+  if (!fl) {
+    if (error) *error = "Fleet not found";
+    return false;
+  }
+  if (orders.empty()) {
+    if (error) *error = "No orders provided";
+    return false;
+  }
+
+  bool ok_any = false;
+  std::string last_err;
+  for (Id sid : fl->ship_ids) {
+    std::string err;
+    if (apply_orders_to_ship_smart(sid, orders, append, restrict_to_discovered, &err)) {
+      ok_any = true;
+    } else {
+      last_err = err;
+    }
+  }
+
+  if (!ok_any && error) *error = last_err;
+  return ok_any;
+}
+
+bool Simulation::apply_order_template_to_ship_smart(Id ship_id, const std::string& name, bool append,
+                                                    bool restrict_to_discovered, std::string* error) {
+  auto fail = [&](const std::string& msg) {
+    if (error) *error = msg;
+    return false;
+  };
+
+  const auto* tmpl = find_order_template(name);
+  if (!tmpl) return fail("Template not found");
+
+  std::vector<Order> compiled;
+  if (!compile_orders_smart(ship_id, *tmpl, append, restrict_to_discovered, &compiled, error)) return false;
   if (compiled.empty()) return fail("Template produced no orders");
 
   // Apply atomically after successful compilation.

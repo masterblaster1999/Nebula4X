@@ -2404,6 +2404,15 @@ class Simulation {
   // Returns false if ship/from_index is invalid.
   bool move_queued_order(Id ship_id, int from_index, int to_index);
 
+  // Replace the ship's queued orders with the provided queue.
+  //
+  // This is a UI convenience helper used for bulk editing (multi-delete, paste, undo/redo).
+  // It intentionally does NOT modify repeat settings/templates (so editing the active queue
+  // while repeat is on behaves consistently with the per-row edit helpers).
+  //
+  // Clears any emergency suspension state.
+  bool set_queued_orders(Id ship_id, const std::vector<Order>& queue);
+
   // --- Order template library (persisted in saves) ---
   // Store a named order template.
   //
@@ -2438,6 +2447,33 @@ class Simulation {
   bool apply_order_template_to_fleet_smart(Id fleet_id, const std::string& name, bool append = true,
                                           bool restrict_to_discovered = false,
                                           std::string* error = nullptr);
+
+  // Smart compilation of an arbitrary order queue (without applying it).
+  //
+  // This is the core "route injector" used by smart template application.
+  // It recompiles the provided orders, inserting any necessary TravelViaJump
+  // orders *between* steps based on the ship's predicted system after any queued
+  // jumps (when append=true).
+  //
+  // When restrict_to_discovered is true, any auto-routing performed during
+  // compilation will only traverse systems discovered by the ship's faction.
+  //
+  // Returns false on failure and fills error.
+  bool compile_orders_smart(Id ship_id, const std::vector<Order>& orders, bool append = true,
+                            bool restrict_to_discovered = false, std::vector<Order>* out_compiled = nullptr,
+                            std::string* error = nullptr) const;
+
+  // Apply an arbitrary order queue to a ship/fleet (without using a named template).
+  // If append is false, existing orders are cleared first.
+  bool apply_orders_to_ship(Id ship_id, const std::vector<Order>& orders, bool append = true);
+  bool apply_orders_to_fleet(Id fleet_id, const std::vector<Order>& orders, bool append = true);
+
+  // Smart apply for arbitrary orders (routes between systems like smart template apply).
+  bool apply_orders_to_ship_smart(Id ship_id, const std::vector<Order>& orders, bool append = true,
+                                  bool restrict_to_discovered = false, std::string* error = nullptr);
+  bool apply_orders_to_fleet_smart(Id fleet_id, const std::vector<Order>& orders, bool append = true,
+                                   bool restrict_to_discovered = false, std::string* error = nullptr);
+
 
   // --- Fleet helpers ---
   // Fleets are lightweight groupings of ships (same faction) to make it easier

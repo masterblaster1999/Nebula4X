@@ -4,6 +4,7 @@
 
 #include "nebula4x/core/contract_planner.h"
 #include "nebula4x/core/contact_prediction.h"
+#include "nebula4x/core/orders.h"
 
 #include <algorithm>
 #include <cmath>
@@ -224,12 +225,8 @@ bool contract_target_pos(const Simulation& sim, Id viewer_faction_id, const Game
 }
 
 bool is_ship_idle(const GameState& st, Id ship_id) {
-  const auto it = st.ship_orders.find(ship_id);
-  if (it == st.ship_orders.end()) return true;
-  const ShipOrders& so = it->second;
-  if (!so.queue.empty()) return false;
-  if (so.repeat && !so.repeat_template.empty() && so.repeat_count_remaining != 0) return false;
-  return true;
+  const ShipOrders* so = find_ptr(st.ship_orders, ship_id);
+  return ship_orders_is_idle_for_automation(so);
 }
 
 std::string fmt_eta_days(double days) {

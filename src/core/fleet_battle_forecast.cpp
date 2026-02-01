@@ -65,14 +65,6 @@ double side_effective_hp(const std::vector<Unit>& units, bool include_shields) {
   return sum;
 }
 
-int side_alive_count(const std::vector<Unit>& units) {
-  int n = 0;
-  for (const auto& u : units) {
-    if (u.hp > 0.0) ++n;
-  }
-  return n;
-}
-
 double max_side_engagement_range_mkm(const std::vector<Unit>& units) {
   double r = 0.0;
   for (const auto& u : units) {

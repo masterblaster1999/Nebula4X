@@ -19,6 +19,8 @@
 
 #include "ui/procgen_graphics.h"
 
+#include "ui/order_ui.h"
+
 #include "core/simulation_sensors.h"
 
 #include "nebula4x/core/contact_prediction.h"
@@ -1841,7 +1843,8 @@ void draw_system_map(Simulation& sim,
 
           if (hovered >= 0) {
             const PlannedOrderStep& stp = plan.steps[static_cast<std::size_t>(hovered)];
-            const std::string ord_str = order_to_string(q[static_cast<std::size_t>(hovered)]);
+            const std::string ord_str = order_to_ui_string(
+                sim, q[static_cast<std::size_t>(hovered)], ui.viewer_faction_id, ui.fog_of_war);
 
             ImGui::BeginTooltip();
             ImGui::Text("Order %d: %s", hovered + 1, ord_str.c_str());

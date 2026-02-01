@@ -3,6 +3,7 @@
 #include <imgui.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cctype>
@@ -24,6 +25,12 @@
 #include "nebula4x/core/research_planner.h"
 #include "nebula4x/core/research_schedule.h"
 #include "nebula4x/core/order_planner.h"
+#include "nebula4x/core/orders.h"
+
+#include "ui/order_ui.h"
+#include "ui/order_plan_ui.h"
+#include "ui/fleet_plan_ui.h"
+#include "ui/order_template_portable.h"
 #include "nebula4x/core/colony_schedule.h"
 #include "nebula4x/core/ground_battle_forecast.h"
 #include "nebula4x/core/invasion_planner.h"
@@ -2564,7 +2571,1857 @@ if (sim.cfg().enable_ship_maintenance) {
         ImGui::Separator();
         ImGui::Text("Orders");
         auto* ship_orders = find_ptr(s.ship_orders, selected_ship);
-        const bool has_orders = (ship_orders && !ship_orders->queue.empty());
+        bool has_orders = (ship_orders && !ship_orders->queue.empty());
+
+// Queue editor state (selection + undo/redo + clipboard).
+struct ShipOrderQueueEditState {
+  std::vector<std::vector<Order>> undo;
+  std::vector<std::vector<Order>> redo;
+
+  // Sorted unique indices into the current queue.
+  std::vector<int> selected;
+
+  // Anchor for shift-selection range.
+  int anchor{-1};
+};
+
+
+// Retarget (find/replace) state for selected orders in the ship queue editor.
+struct ShipOrderQueueRetargetState {
+  // Mapping: old_id -> new_id (entries are only stored when new_id != old_id).
+  std::unordered_map<Id, Id> body_map;
+  std::unordered_map<Id, Id> colony_map;
+  std::unordered_map<Id, Id> jump_point_map;
+  std::unordered_map<Id, Id> ship_map;
+  std::unordered_map<Id, Id> anomaly_map;
+  std::unordered_map<Id, Id> wreck_map;
+  std::unordered_map<Id, Id> system_map;
+
+  // Optional per-type filters to keep combos manageable in large saves.
+  std::array<char, 64> body_filter{};
+  std::array<char, 64> colony_filter{};
+  std::array<char, 64> jump_point_filter{};
+  std::array<char, 64> ship_filter{};
+  std::array<char, 64> anomaly_filter{};
+  std::array<char, 64> wreck_filter{};
+  std::array<char, 64> system_filter{};
+
+  // Auto-map macro state (system -> system).
+  //
+  // This helps retarget a copied route quickly by attempting to match entities
+  // by name between two systems (e.g. map all referenced bodies from Sol -> Alpha Centauri).
+  Id macro_from_system{kInvalidId};
+  Id macro_to_system{kInvalidId};
+
+  bool macro_overwrite_existing{false};
+  bool macro_map_bodies{true};
+  bool macro_map_colonies{true};
+  bool macro_map_jump_points{true};
+  bool macro_map_systems{true};
+  bool macro_map_anomalies{false};
+  bool macro_map_wrecks{false};
+  bool macro_map_ships{false};
+
+  bool macro_prefer_same_faction_colonies{true};
+
+  std::array<char, 64> macro_from_filter{};
+  std::array<char, 64> macro_to_filter{};
+
+  std::string macro_last_report;
+};
+
+static std::unordered_map<Id, ShipOrderQueueRetargetState> ship_order_queue_retarget_state;
+
+static std::unordered_map<Id, ShipOrderQueueEditState> ship_order_queue_edit_state;
+static std::string ship_order_queue_edit_status;
+static int ship_order_queue_paste_mode = 1;  // 0=start,1=end,2=before sel,3=after sel
+static bool ship_order_queue_paste_replace_selection = false;
+
+// Copy options for portable JSON.
+static bool ship_order_queue_copy_include_source_ids = true;
+static bool ship_order_queue_copy_strip_travel = false;
+
+// Smart route rebuild options.
+static bool ship_order_queue_smart_rebuild_strip_travel = true;
+static bool ship_order_queue_smart_rebuild_restrict_discovered = true;
+
+// Paste session for ambiguous portable references.
+static PortableTemplateImportSession ship_order_queue_paste_session;
+static bool ship_order_queue_paste_session_active = false;
+static bool ship_order_queue_paste_open_popup = false;
+static Id ship_order_queue_paste_ship_id = kInvalidId;
+static int ship_order_queue_paste_insert_index = 0;
+static bool ship_order_queue_paste_replace = false;
+static std::vector<int> ship_order_queue_paste_delete_indices;
+
+auto& qe = ship_order_queue_edit_state[selected_ship];
+
+auto& rt = ship_order_queue_retarget_state[selected_ship];
+
+auto sel_contains = [&](int idx) -> bool {
+  return std::binary_search(qe.selected.begin(), qe.selected.end(), idx);
+};
+auto sel_add = [&](int idx) {
+  auto it = std::lower_bound(qe.selected.begin(), qe.selected.end(), idx);
+  if (it == qe.selected.end() || *it != idx) qe.selected.insert(it, idx);
+};
+auto sel_remove = [&](int idx) {
+  auto it = std::lower_bound(qe.selected.begin(), qe.selected.end(), idx);
+  if (it != qe.selected.end() && *it == idx) qe.selected.erase(it);
+};
+auto normalize_sel = [&](int n) {
+  qe.selected.erase(std::remove_if(qe.selected.begin(), qe.selected.end(),
+                                  [&](int v) { return v < 0 || v >= n; }),
+                    qe.selected.end());
+  qe.selected.erase(std::unique(qe.selected.begin(), qe.selected.end()), qe.selected.end());
+  if (qe.anchor < 0 || qe.anchor >= n) {
+    qe.anchor = qe.selected.empty() ? -1 : qe.selected.back();
+  }
+};
+auto push_undo = [&](const std::vector<Order>& snapshot) {
+  constexpr std::size_t kMaxHistory = 32;
+  if (qe.undo.size() >= kMaxHistory) qe.undo.erase(qe.undo.begin());
+  qe.undo.push_back(snapshot);
+  qe.redo.clear();
+};
+
+std::vector<Order> cur_q = ship_orders ? ship_orders->queue : std::vector<Order>{};
+normalize_sel(static_cast<int>(cur_q.size()));
+
+auto set_queue_and_refresh = [&](const std::vector<Order>& new_q) {
+  sim.set_queued_orders(selected_ship, new_q);
+  ship_orders = find_ptr(s.ship_orders, selected_ship);
+  has_orders = (ship_orders && !ship_orders->queue.empty());
+  cur_q = ship_orders ? ship_orders->queue : std::vector<Order>{};
+  normalize_sel(static_cast<int>(cur_q.size()));
+};
+
+// --- Queue editor toolbar (undo/redo + clipboard multi-edit) ---
+{
+  const ImGuiIO& io = ImGui::GetIO();
+  const bool shortcuts_active =
+      ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) && !io.WantTextInput && !ship_order_queue_paste_session_active;
+
+  bool shortcut_undo = false;
+  bool shortcut_redo = false;
+  bool shortcut_copy = false;
+  bool shortcut_cut = false;
+  bool shortcut_del = false;
+  bool shortcut_dup = false;
+  bool shortcut_paste = false;
+  bool shortcut_select_all = false;
+  bool shortcut_clear_sel = false;
+  bool shortcut_smart_rebuild = false;
+
+  if (shortcuts_active) {
+    // Standard (portable) clipboard shortcuts.
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Z, false)) shortcut_undo = true;
+    if (io.KeyCtrl && (ImGui::IsKeyPressed(ImGuiKey_Y, false) || (io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z, false)))) shortcut_redo = true;
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_C, false)) shortcut_copy = true;
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_X, false)) shortcut_cut = true;
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_V, false)) shortcut_paste = true;
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_D, false)) shortcut_dup = true;
+    if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_R, false)) shortcut_smart_rebuild = true;
+
+    if (ImGui::IsKeyPressed(ImGuiKey_Delete, false)) shortcut_del = true;
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_A, false)) shortcut_select_all = true;
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) shortcut_clear_sel = true;
+  }
+
+  const int q_n = static_cast<int>(cur_q.size());
+
+  if (shortcut_select_all) {
+    qe.selected.clear();
+    qe.selected.reserve(static_cast<std::size_t>(q_n));
+    for (int i = 0; i < q_n; ++i) qe.selected.push_back(i);
+    qe.anchor = qe.selected.empty() ? -1 : qe.selected.back();
+    ship_order_queue_edit_status = q_n > 0 ? "Selected all orders." : "Queue is empty.";
+  }
+
+  if (shortcut_clear_sel) {
+    qe.selected.clear();
+    qe.anchor = -1;
+    ship_order_queue_edit_status = "Selection cleared.";
+  }
+
+  const int sel_n = static_cast<int>(qe.selected.size());
+
+  if (q_n > 0) {
+    ImGui::TextDisabled("Queue: %d orders  |  Selected: %d", q_n, sel_n);
+  } else {
+    ImGui::TextDisabled("Queue: (empty)");
+  }
+
+  // Undo / Redo.
+  if (qe.undo.empty()) ImGui::BeginDisabled();
+  if (ImGui::SmallButton("Undo##ship_order_queue_undo") || shortcut_undo) {
+    if (!qe.undo.empty()) {
+      constexpr std::size_t kMaxHistory = 32;
+      if (qe.redo.size() >= kMaxHistory) qe.redo.erase(qe.redo.begin());
+      qe.redo.push_back(cur_q);
+      auto prev = qe.undo.back();
+      qe.undo.pop_back();
+      sim.set_queued_orders(selected_ship, prev);
+      ship_order_queue_edit_status = "Undo: restored previous queue.";
+      qe.selected.clear();
+      qe.anchor = -1;
+      ship_orders = find_ptr(s.ship_orders, selected_ship);
+      has_orders = (ship_orders && !ship_orders->queue.empty());
+      cur_q = ship_orders ? ship_orders->queue : std::vector<Order>{};
+      normalize_sel(static_cast<int>(cur_q.size()));
+    }
+  }
+  if (qe.undo.empty()) ImGui::EndDisabled();
+
+  ImGui::SameLine();
+  if (qe.redo.empty()) ImGui::BeginDisabled();
+  if (ImGui::SmallButton("Redo##ship_order_queue_redo") || shortcut_redo) {
+    if (!qe.redo.empty()) {
+      constexpr std::size_t kMaxHistory = 32;
+      if (qe.undo.size() >= kMaxHistory) qe.undo.erase(qe.undo.begin());
+      qe.undo.push_back(cur_q);
+      auto next = qe.redo.back();
+      qe.redo.pop_back();
+      sim.set_queued_orders(selected_ship, next);
+      ship_order_queue_edit_status = "Redo: restored later queue.";
+      qe.selected.clear();
+      qe.anchor = -1;
+      ship_orders = find_ptr(s.ship_orders, selected_ship);
+      has_orders = (ship_orders && !ship_orders->queue.empty());
+      cur_q = ship_orders ? ship_orders->queue : std::vector<Order>{};
+      normalize_sel(static_cast<int>(cur_q.size()));
+    }
+  }
+  if (qe.redo.empty()) ImGui::EndDisabled();
+
+  ImGui::SameLine();
+  ImGui::TextDisabled("|");
+  ImGui::SameLine();
+
+  const bool has_sel = !qe.selected.empty();
+
+  // Copy selection (portable JSON).
+  if (!has_sel) ImGui::BeginDisabled();
+  if (ImGui::SmallButton("Copy sel##ship_order_queue_copy") || shortcut_copy) {
+    std::vector<Order> clip_orders;
+    clip_orders.reserve(static_cast<std::size_t>(sel_n));
+    for (int idx : qe.selected) {
+      if (idx >= 0 && idx < q_n) {
+        clip_orders.push_back(cur_q[static_cast<std::size_t>(idx)]);
+      }
+    }
+
+    PortableOrderTemplateOptions opts;
+    opts.viewer_faction_id = ui.viewer_faction_id;
+    opts.fog_of_war = ui.fog_of_war;
+    opts.include_source_ids = ship_order_queue_copy_include_source_ids;
+    opts.strip_travel_via_jump = ship_order_queue_copy_strip_travel;
+
+    const std::string json =
+        serialize_order_template_to_json_portable(sim, "Queue Selection", clip_orders, opts, 2);
+    ImGui::SetClipboardText(json.c_str());
+    ship_order_queue_edit_status =
+        "Copied selection to clipboard (portable JSON, " + std::to_string(clip_orders.size()) + " orders).";
+  }
+  if (!has_sel) ImGui::EndDisabled();
+
+  ImGui::SameLine();
+  if (!has_sel) ImGui::BeginDisabled();
+  if (ImGui::SmallButton("Cut##ship_order_queue_cut") || shortcut_cut) {
+    // Copy first.
+    std::vector<Order> clip_orders;
+    clip_orders.reserve(static_cast<std::size_t>(sel_n));
+    for (int idx : qe.selected) {
+      if (idx >= 0 && idx < q_n) {
+        clip_orders.push_back(cur_q[static_cast<std::size_t>(idx)]);
+      }
+    }
+
+    PortableOrderTemplateOptions opts;
+    opts.viewer_faction_id = ui.viewer_faction_id;
+    opts.fog_of_war = ui.fog_of_war;
+    opts.include_source_ids = ship_order_queue_copy_include_source_ids;
+    opts.strip_travel_via_jump = ship_order_queue_copy_strip_travel;
+
+    const std::string json =
+        serialize_order_template_to_json_portable(sim, "Queue Selection", clip_orders, opts, 2);
+    ImGui::SetClipboardText(json.c_str());
+
+    // Then delete selected from queue.
+    push_undo(cur_q);
+    std::vector<Order> new_q;
+    new_q.reserve(static_cast<std::size_t>(q_n - sel_n));
+    std::size_t sel_pos = 0;
+    for (int i = 0; i < q_n; ++i) {
+      if (sel_pos < qe.selected.size() && qe.selected[sel_pos] == i) {
+        ++sel_pos;
+        continue;
+      }
+      new_q.push_back(cur_q[static_cast<std::size_t>(i)]);
+    }
+    set_queue_and_refresh(new_q);
+    qe.selected.clear();
+    qe.anchor = -1;
+    ship_order_queue_edit_status =
+        "Cut: copied " + std::to_string(clip_orders.size()) + " orders and removed them from the queue.";
+  }
+  if (!has_sel) ImGui::EndDisabled();
+
+  ImGui::SameLine();
+  if (!has_sel) ImGui::BeginDisabled();
+  if (ImGui::SmallButton("Del sel##ship_order_queue_del_sel")) {
+    push_undo(cur_q);
+    std::vector<Order> new_q;
+    new_q.reserve(static_cast<std::size_t>(q_n - sel_n));
+    std::size_t sel_pos = 0;
+    for (int i = 0; i < q_n; ++i) {
+      if (sel_pos < qe.selected.size() && qe.selected[sel_pos] == i) {
+        ++sel_pos;
+        continue;
+      }
+      new_q.push_back(cur_q[static_cast<std::size_t>(i)]);
+    }
+    set_queue_and_refresh(new_q);
+    qe.selected.clear();
+    qe.anchor = -1;
+    ship_order_queue_edit_status = "Deleted selected orders.";
+  }
+  if (!has_sel) ImGui::EndDisabled();
+
+  ImGui::SameLine();
+  if (!has_sel) ImGui::BeginDisabled();
+  if (ImGui::SmallButton("Dup sel##ship_order_queue_dup_sel")) {
+    push_undo(cur_q);
+    std::vector<Order> new_q;
+    new_q.reserve(static_cast<std::size_t>(q_n + sel_n));
+    std::vector<int> new_sel;
+    new_sel.reserve(static_cast<std::size_t>(sel_n));
+
+    for (int i = 0; i < q_n; ++i) {
+      new_q.push_back(cur_q[static_cast<std::size_t>(i)]);
+      if (sel_contains(i)) {
+        new_q.push_back(cur_q[static_cast<std::size_t>(i)]);
+        new_sel.push_back(static_cast<int>(new_q.size() - 1));
+      }
+    }
+    set_queue_and_refresh(new_q);
+    qe.selected = std::move(new_sel);
+    qe.anchor = qe.selected.empty() ? -1 : qe.selected.back();
+    ship_order_queue_edit_status = "Duplicated selected orders (copies are now selected).";
+  }
+  if (!has_sel) ImGui::EndDisabled();
+
+  ImGui::SameLine();
+  ImGui::TextDisabled("|");
+  ImGui::SameLine();
+
+  if (q_n == 0) ImGui::BeginDisabled();
+  if (ImGui::SmallButton("Smart rebuild route##ship_order_queue_smart_rebuild") || shortcut_smart_rebuild) {
+    if (q_n <= 0) {
+      ship_order_queue_edit_status = "Smart rebuild: queue is empty.";
+    } else {
+      std::vector<Order> base_orders;
+      base_orders.reserve(static_cast<std::size_t>(q_n));
+      for (const auto& ord : cur_q) {
+        if (ship_order_queue_smart_rebuild_strip_travel && std::holds_alternative<TravelViaJump>(ord)) continue;
+        base_orders.push_back(ord);
+      }
+
+      if (base_orders.empty()) {
+        ship_order_queue_edit_status =
+            "Smart rebuild: after stripping TravelViaJump there are no orders left to rebuild.";
+      } else {
+        const bool restrict = ui.fog_of_war && ship_order_queue_smart_rebuild_restrict_discovered;
+        std::vector<Order> compiled;
+        std::string err;
+        if (!sim.compile_orders_smart(selected_ship, base_orders, /*append=*/false, restrict, &compiled, &err)) {
+          ship_order_queue_edit_status = err.empty() ? "Smart rebuild failed." : ("Smart rebuild failed: " + err);
+        } else {
+          push_undo(cur_q);
+          set_queue_and_refresh(compiled);
+          qe.selected.clear();
+          qe.anchor = -1;
+          ship_order_queue_edit_status = "Smart rebuild: rebuilt route (" + std::to_string(compiled.size()) + " orders).";
+        }
+      }
+    }
+  }
+  if (q_n == 0) ImGui::EndDisabled();
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip("Recompile the entire queue using smart routing.\n"
+                      "This can insert missing TravelViaJump legs after edits.\n"
+                      "Hotkey: Ctrl+Shift+R");
+  }
+
+  ImGui::Spacing();
+  ImGui::TextDisabled("Paste:");
+
+  ImGui::SameLine();
+  if (ImGui::SmallButton("Paste##ship_order_queue_paste") || shortcut_paste) {
+    const char* clip_c = ImGui::GetClipboardText();
+    if (!clip_c || clip_c[0] == '\0') {
+      ship_order_queue_edit_status = "Clipboard is empty.";
+    } else {
+      const int qn = static_cast<int>(cur_q.size());
+
+      int insert_at = qn;  // default end
+      switch (ship_order_queue_paste_mode) {
+        case 0: insert_at = 0; break;
+        case 1: insert_at = qn; break;
+        case 2: insert_at = qe.selected.empty() ? qn : qe.selected.front(); break;
+        case 3: insert_at = qe.selected.empty() ? qn : (qe.selected.back() + 1); break;
+        default: insert_at = qn; break;
+      }
+
+      const bool do_replace = ship_order_queue_paste_replace_selection && !qe.selected.empty();
+      if (do_replace) insert_at = qe.selected.front();
+
+      std::string err;
+      PortableTemplateImportSession sess;
+      if (!start_portable_template_import_session(sim, ui.viewer_faction_id, ui.fog_of_war, std::string(clip_c),
+                                                 &sess, &err)) {
+        ship_order_queue_edit_status = err.empty() ? "Paste failed (unrecognized JSON)." : err;
+      } else if (sess.issues.empty()) {
+        nebula4x::ParsedOrderTemplate parsed;
+        if (!finalize_portable_template_import_session(sim, &sess, &parsed, &err)) {
+          ship_order_queue_edit_status = err.empty() ? "Paste failed." : err;
+        } else if (parsed.orders.empty()) {
+          ship_order_queue_edit_status = "Clipboard contained 0 orders.";
+        } else {
+          push_undo(cur_q);
+
+          const int ins = std::clamp(insert_at, 0, qn);
+          const auto& del = qe.selected;
+
+          std::vector<Order> new_q;
+          new_q.reserve(static_cast<std::size_t>(qn - (do_replace ? static_cast<int>(del.size()) : 0) +
+                                               static_cast<int>(parsed.orders.size())));
+          std::size_t del_pos = 0;
+          for (int i = 0; i <= qn; ++i) {
+            if (i == ins) {
+              new_q.insert(new_q.end(), parsed.orders.begin(), parsed.orders.end());
+            }
+            if (i == qn) break;
+
+            if (do_replace) {
+              while (del_pos < del.size() && del[del_pos] < i) ++del_pos;
+              if (del_pos < del.size() && del[del_pos] == i) continue;
+            }
+
+            new_q.push_back(cur_q[static_cast<std::size_t>(i)]);
+          }
+
+          set_queue_and_refresh(new_q);
+
+          qe.selected.clear();
+          const int pasted_n = static_cast<int>(parsed.orders.size());
+          for (int k = 0; k < pasted_n; ++k) qe.selected.push_back(ins + k);
+          qe.anchor = qe.selected.empty() ? -1 : qe.selected.back();
+
+          ship_order_queue_edit_status =
+              "Pasted " + std::to_string(parsed.orders.size()) + " orders into queue.";
+        }
+      } else {
+        ship_order_queue_paste_session = std::move(sess);
+        ship_order_queue_paste_session_active = true;
+        ship_order_queue_paste_open_popup = true;
+        ship_order_queue_paste_ship_id = selected_ship;
+        ship_order_queue_paste_insert_index = insert_at;
+        ship_order_queue_paste_replace = do_replace;
+        ship_order_queue_paste_delete_indices = qe.selected;
+        ship_order_queue_edit_status = "Paste loaded: needs reference resolution (" +
+                                       std::to_string(ship_order_queue_paste_session.issues.size()) + " refs).";
+      }
+    }
+  }
+
+  ImGui::SameLine();
+  ImGui::SetNextItemWidth(170.0f);
+  const char* paste_modes = "Start\0End\0Before selection\0After selection\0";
+  ImGui::Combo("##ship_order_queue_paste_mode", &ship_order_queue_paste_mode, paste_modes);
+
+  ImGui::SameLine();
+  ImGui::Checkbox("Replace selection##ship_order_queue_replace", &ship_order_queue_paste_replace_selection);
+
+  if (ImGui::TreeNode("Clipboard options##ship_order_queue_clip_opts")) {
+    ImGui::Checkbox("Copy: include source ids", &ship_order_queue_copy_include_source_ids);
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip("When enabled, portable JSON keeps original numeric ids under source_*_id keys.\n"
+                        "This can help debugging cross-save imports.");
+    }
+    ImGui::Checkbox("Copy: strip TravelViaJump", &ship_order_queue_copy_strip_travel);
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip("When enabled, TravelViaJump orders are removed when copying.\n"
+                        "Useful when you plan to use Smart apply to rebuild routes.");
+    }
+    ImGui::TreePop();
+  }
+
+  if (ImGui::TreeNode("Smart route options##ship_order_queue_smart_opts")) {
+    ImGui::Checkbox("Rebuild: strip TravelViaJump", &ship_order_queue_smart_rebuild_strip_travel);
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip("When enabled, all TravelViaJump orders are removed before rebuilding.\n"
+                        "The smart router will re-insert travel legs as needed.");
+    }
+
+    ImGui::Checkbox("Rebuild: restrict to discovered systems (fog-of-war)", &ship_order_queue_smart_rebuild_restrict_discovered);
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip("When fog-of-war is enabled, restrict smart routing to systems discovered by your faction.");
+    }
+
+    ImGui::TextDisabled("Shortcuts: Ctrl+C/X/V, Del, Ctrl+Z/Y, Ctrl+A, Esc, Ctrl+Shift+R");
+    ImGui::TreePop();
+  }
+
+  
+  if (ImGui::TreeNode("Retarget selection##ship_order_queue_retarget")) {
+    if (qe.selected.empty()) {
+      ImGui::TextDisabled(
+          "Select one or more orders in the queue below, then use this to remap their references (IDs).\n"
+          "Useful for quickly retargeting a copied mining/transport route to a different body/colony without\n"
+          "rebuilding the orders manually.");
+    } else {
+      // Snapshot selected orders in queue order.
+      std::vector<Order> sel_orders;
+      sel_orders.reserve(qe.selected.size());
+      for (int idx : qe.selected) {
+        if (idx >= 0 && idx < static_cast<int>(cur_q.size())) {
+          sel_orders.push_back(cur_q[static_cast<std::size_t>(idx)]);
+        }
+      }
+
+      using nebula4x::json::Array;
+      using nebula4x::json::Object;
+      using nebula4x::json::Value;
+
+      Value root = nebula4x::serialize_order_template_to_json_value(
+          "Retarget selection", sel_orders, /*template_format_version=*/1);
+      auto* robj = root.as_object();
+      Array* arr = nullptr;
+      if (robj) arr = (*robj)["orders"].as_array();
+
+      std::unordered_map<Id, int> body_counts;
+      std::unordered_map<Id, int> colony_counts;
+      std::unordered_map<Id, int> jump_counts;
+      std::unordered_map<Id, int> ship_counts;
+      std::unordered_map<Id, int> anomaly_counts;
+      std::unordered_map<Id, int> wreck_counts;
+      std::unordered_map<Id, int> system_counts;
+
+      if (!arr) {
+        ImGui::TextDisabled("Internal error: could not inspect selected orders.");
+      } else {
+        auto scan_id_key = [&](const Object& o, const char* key, std::unordered_map<Id, int>& out_counts) {
+          auto it = o.find(key);
+          if (it == o.end()) return;
+          const Id id = static_cast<Id>(it->second.int_value(kInvalidId));
+          if (id != kInvalidId) out_counts[id] += 1;
+        };
+
+        for (auto& v : *arr) {
+          auto* o = v.as_object();
+          if (!o) continue;
+          scan_id_key(*o, "body_id", body_counts);
+          scan_id_key(*o, "colony_id", colony_counts);
+          scan_id_key(*o, "dropoff_colony_id", colony_counts);
+          scan_id_key(*o, "jump_point_id", jump_counts);
+          scan_id_key(*o, "target_ship_id", ship_counts);
+          scan_id_key(*o, "anomaly_id", anomaly_counts);
+          scan_id_key(*o, "wreck_id", wreck_counts);
+          scan_id_key(*o, "last_known_system_id", system_counts);
+          scan_id_key(*o, "system_id", system_counts);
+        }
+
+        auto prune_map = [&](std::unordered_map<Id, Id>& m, const std::unordered_map<Id, int>& present) {
+          for (auto it = m.begin(); it != m.end();) {
+            if (present.find(it->first) == present.end() || it->second == it->first) {
+              it = m.erase(it);
+            } else {
+              ++it;
+            }
+          }
+        };
+
+        prune_map(rt.body_map, body_counts);
+        prune_map(rt.colony_map, colony_counts);
+        prune_map(rt.jump_point_map, jump_counts);
+        prune_map(rt.ship_map, ship_counts);
+        prune_map(rt.anomaly_map, anomaly_counts);
+        prune_map(rt.wreck_map, wreck_counts);
+        prune_map(rt.system_map, system_counts);
+
+        ImGui::TextDisabled("Refs found: Bodies %d | Colonies %d | Jump points %d | Ships %d | Anomalies %d | Wrecks %d | Systems %d",
+                            static_cast<int>(body_counts.size()),
+                            static_cast<int>(colony_counts.size()),
+                            static_cast<int>(jump_counts.size()),
+                            static_cast<int>(ship_counts.size()),
+                            static_cast<int>(anomaly_counts.size()),
+                            static_cast<int>(wreck_counts.size()),
+                            static_cast<int>(system_counts.size()));
+
+        if (ImGui::SmallButton("Clear mapping##ship_order_queue_retarget_clear")) {
+          rt.body_map.clear();
+          rt.colony_map.clear();
+          rt.jump_point_map.clear();
+          rt.ship_map.clear();
+          rt.anomaly_map.clear();
+          rt.wreck_map.clear();
+          rt.system_map.clear();
+          ship_order_queue_edit_status = "Retarget: cleared mapping.";
+        }
+
+        const auto allow_system = [&](Id sys_id) -> bool {
+          if (!ui.fog_of_war || ui.viewer_faction_id == kInvalidId) return true;
+          return sim.is_system_discovered_by_faction(ui.viewer_faction_id, sys_id);
+        };
+        const auto allow_body = [&](Id body_id) -> bool {
+          const auto* b = find_ptr(s.bodies, body_id);
+          return b && allow_system(b->system_id);
+        };
+        const auto allow_colony = [&](Id colony_id) -> bool {
+          const auto* c = find_ptr(s.colonies, colony_id);
+          const auto* b = c ? find_ptr(s.bodies, c->body_id) : nullptr;
+          return c && b && allow_system(b->system_id);
+        };
+        const auto allow_jump_point = [&](Id jump_point_id) -> bool {
+          const auto* jp = find_ptr(s.jump_points, jump_point_id);
+          if (!jp) return false;
+          if (!allow_system(jp->system_id)) return false;
+          if (!ui.fog_of_war || ui.viewer_faction_id == kInvalidId) return true;
+          return sim.is_jump_point_surveyed_by_faction(ui.viewer_faction_id, jump_point_id);
+        };
+        const auto allow_ship = [&](Id ship_id) -> bool {
+          const auto* sh = find_ptr(s.ships, ship_id);
+          if (!sh) return false;
+          if (!allow_system(sh->system_id)) return false;
+          if (!ui.fog_of_war || ui.viewer_faction_id == kInvalidId) return true;
+          return sim.is_ship_detected_by_faction(ui.viewer_faction_id, ship_id);
+        };
+        const auto allow_anomaly = [&](Id anomaly_id) -> bool {
+          const auto* a = find_ptr(s.anomalies, anomaly_id);
+          if (!a) return false;
+          if (!allow_system(a->system_id)) return false;
+          if (!ui.fog_of_war || ui.viewer_faction_id == kInvalidId) return true;
+          return sim.is_anomaly_discovered_by_faction(ui.viewer_faction_id, anomaly_id);
+        };
+        const auto allow_wreck = [&](Id wreck_id) -> bool {
+          const auto* w = find_ptr(s.wrecks, wreck_id);
+          return w && allow_system(w->system_id);
+        };
+
+        const auto sys_label = [&](Id sys_id) -> std::string {
+          const auto* sys = find_ptr(s.systems, sys_id);
+          if (!sys) return "System #" + std::to_string(static_cast<unsigned long long>(sys_id));
+          if (!allow_system(sys_id)) return "System #" + std::to_string(static_cast<unsigned long long>(sys_id)) + " (undiscovered)";
+          return sys->name.empty() ? ("System #" + std::to_string(static_cast<unsigned long long>(sys_id))) : sys->name;
+        };
+
+        const auto body_label = [&](Id body_id) -> std::string {
+          const auto* b = find_ptr(s.bodies, body_id);
+          if (!b) return "Body #" + std::to_string(static_cast<unsigned long long>(body_id));
+          if (!allow_body(body_id)) return "Body #" + std::to_string(static_cast<unsigned long long>(body_id)) + " (undiscovered)";
+          std::string out = b->name.empty() ? ("Body #" + std::to_string(static_cast<unsigned long long>(body_id))) : b->name;
+          if (const auto* sys = find_ptr(s.systems, b->system_id)) {
+            if (!sys->name.empty()) out += " — " + sys->name;
+          }
+          return out;
+        };
+
+        const auto colony_label = [&](Id colony_id) -> std::string {
+          const auto* c = find_ptr(s.colonies, colony_id);
+          if (!c) return "Colony #" + std::to_string(static_cast<unsigned long long>(colony_id));
+          if (!allow_colony(colony_id)) return "Colony #" + std::to_string(static_cast<unsigned long long>(colony_id)) + " (undiscovered)";
+          std::string out = c->name.empty() ? ("Colony #" + std::to_string(static_cast<unsigned long long>(colony_id))) : c->name;
+          if (const auto* b = find_ptr(s.bodies, c->body_id)) {
+            out += " — " + (b->name.empty() ? ("Body #" + std::to_string(static_cast<unsigned long long>(b->id))) : b->name);
+            if (const auto* sys = find_ptr(s.systems, b->system_id)) {
+              if (!sys->name.empty()) out += " (" + sys->name + ")";
+            }
+          }
+          if (const auto* f = find_ptr(s.factions, c->faction_id)) {
+            if (!f->name.empty()) out += " — " + f->name;
+          }
+          return out;
+        };
+
+        const auto jump_point_label = [&](Id jump_point_id) -> std::string {
+          const auto* jp = find_ptr(s.jump_points, jump_point_id);
+          if (!jp) return "JumpPoint #" + std::to_string(static_cast<unsigned long long>(jump_point_id));
+          if (!allow_jump_point(jump_point_id)) {
+            return "JumpPoint #" + std::to_string(static_cast<unsigned long long>(jump_point_id)) + " (unavailable)";
+          }
+          const std::string jn = jp->name.empty()
+                                     ? ("JumpPoint #" + std::to_string(static_cast<unsigned long long>(jump_point_id)))
+                                     : jp->name;
+          const std::string sn = sys_label(jp->system_id);
+
+          std::string dest;
+          if (jp->linked_jump_id != kInvalidId) {
+            if (const auto* other = find_ptr(s.jump_points, jp->linked_jump_id)) {
+              dest = sys_label(other->system_id);
+            }
+          }
+          if (!dest.empty()) return jn + " — " + sn + " -> " + dest;
+          return jn + " — " + sn;
+        };
+
+        const auto ship_label = [&](Id ship_id) -> std::string {
+          const auto* sh = find_ptr(s.ships, ship_id);
+          if (!sh) return "Ship #" + std::to_string(static_cast<unsigned long long>(ship_id));
+          if (!allow_ship(ship_id)) return "Ship #" + std::to_string(static_cast<unsigned long long>(ship_id)) + " (undetected)";
+          const auto* f = find_ptr(s.factions, sh->faction_id);
+          const std::string sn = sys_label(sh->system_id);
+          const std::string fn = (f && !f->name.empty()) ? f->name : "(unknown faction)";
+          const std::string nm =
+              sh->name.empty() ? ("Ship #" + std::to_string(static_cast<unsigned long long>(ship_id))) : sh->name;
+          return nm + " — " + sn + " — " + fn;
+        };
+
+        const auto anomaly_label = [&](Id anomaly_id) -> std::string {
+          const auto* a = find_ptr(s.anomalies, anomaly_id);
+          if (!a) return "Anomaly #" + std::to_string(static_cast<unsigned long long>(anomaly_id));
+          if (!allow_anomaly(anomaly_id)) return "Anomaly #" + std::to_string(static_cast<unsigned long long>(anomaly_id)) + " (undiscovered)";
+          const std::string nm =
+              a->name.empty() ? ("Anomaly #" + std::to_string(static_cast<unsigned long long>(anomaly_id))) : a->name;
+          return nm + " — " + sys_label(a->system_id);
+        };
+
+        const auto wreck_label = [&](Id wreck_id) -> std::string {
+          const auto* w = find_ptr(s.wrecks, wreck_id);
+          if (!w) return "Wreck #" + std::to_string(static_cast<unsigned long long>(wreck_id));
+          if (!allow_wreck(wreck_id)) return "Wreck #" + std::to_string(static_cast<unsigned long long>(wreck_id)) + " (undiscovered)";
+          const std::string nm =
+              w->name.empty() ? ("Wreck #" + std::to_string(static_cast<unsigned long long>(wreck_id))) : w->name;
+          return nm + " — " + sys_label(w->system_id);
+        };
+
+
+        // --- Auto-map macro: system -> system (name match) ---
+        //
+        // This is a fast path for "clone route" workflows: copy a set of orders that
+        // reference multiple bodies/colonies/jump points in a source system, then
+        // auto-fill the mapping by matching names in a destination system.
+        std::unordered_map<Id, int> sys_occ;
+        sys_occ.reserve(body_counts.size() + colony_counts.size() + jump_counts.size() + system_counts.size());
+
+        auto bump_sys = [&](Id sys_id, int w) {
+          if (sys_id == kInvalidId) return;
+          if (!allow_system(sys_id)) return;
+          sys_occ[sys_id] += w;
+        };
+
+        // Aggregate referenced systems (fog-of-war safe).
+        for (const auto& kv : body_counts) {
+          const auto* b = find_ptr(s.bodies, kv.first);
+          if (!b) continue;
+          if (!allow_body(b->id)) continue;
+          bump_sys(b->system_id, kv.second);
+        }
+        for (const auto& kv : colony_counts) {
+          const auto* c = find_ptr(s.colonies, kv.first);
+          const auto* b = c ? find_ptr(s.bodies, c->body_id) : nullptr;
+          if (!c || !b) continue;
+          if (!allow_colony(c->id)) continue;
+          bump_sys(b->system_id, kv.second);
+        }
+        for (const auto& kv : jump_counts) {
+          const auto* jp = find_ptr(s.jump_points, kv.first);
+          if (!jp) continue;
+          if (!allow_jump_point(jp->id)) continue;
+          bump_sys(jp->system_id, kv.second);
+        }
+        for (const auto& kv : ship_counts) {
+          const auto* sh2 = find_ptr(s.ships, kv.first);
+          if (!sh2) continue;
+          if (!allow_ship(sh2->id)) continue;
+          bump_sys(sh2->system_id, kv.second);
+        }
+        for (const auto& kv : anomaly_counts) {
+          const auto* a = find_ptr(s.anomalies, kv.first);
+          if (!a) continue;
+          if (!allow_anomaly(a->id)) continue;
+          bump_sys(a->system_id, kv.second);
+        }
+        for (const auto& kv : wreck_counts) {
+          const auto* w = find_ptr(s.wrecks, kv.first);
+          if (!w) continue;
+          if (!allow_wreck(w->id)) continue;
+          bump_sys(w->system_id, kv.second);
+        }
+        for (const auto& kv : system_counts) {
+          bump_sys(kv.first, kv.second);
+        }
+
+        std::vector<std::pair<int, Id>> sys_rank;
+        sys_rank.reserve(sys_occ.size());
+        for (const auto& kv : sys_occ) sys_rank.push_back({kv.second, kv.first});
+        std::sort(sys_rank.begin(), sys_rank.end(),
+                  [](const auto& a, const auto& b) {
+                    if (a.first != b.first) return a.first > b.first;
+                    return a.second < b.second;
+                  });
+
+        // Pick sensible defaults.
+        if (rt.macro_from_system == kInvalidId || !allow_system(rt.macro_from_system)) {
+          rt.macro_from_system = sys_rank.empty() ? kInvalidId : sys_rank.front().second;
+        }
+        if (rt.macro_to_system == kInvalidId || !allow_system(rt.macro_to_system)) {
+          // Prefer the ship's current system as a destination.
+          if (sh && sh->system_id != kInvalidId && allow_system(sh->system_id)) {
+            rt.macro_to_system = sh->system_id;
+          } else {
+            // Fall back to any discovered system different from the source.
+            rt.macro_to_system = kInvalidId;
+            for (const auto& kv : s.systems) {
+              if (!allow_system(kv.second.id)) continue;
+              if (kv.second.id == rt.macro_from_system) continue;
+              rt.macro_to_system = kv.second.id;
+              break;
+            }
+          }
+        }
+
+        if (ImGui::TreeNode("Auto-map by system (name match)##ship_order_queue_retarget_macro")) {
+          ImGui::TextDisabled(
+              "Attempts to automatically fill mapping entries by matching names between two systems.\n"
+              "Best for route cloning (e.g. copy a mining/logistics script in one system and retarget it to another).\n"
+              "This does not change your orders until you click 'Apply mapping to selection' below.");
+
+          if (sys_rank.empty()) {
+            ImGui::TextDisabled("(No discovered systems referenced by the current selection.)");
+          } else {
+            // Show a short summary of detected systems.
+            std::string summary = "Detected in selection: ";
+            const int show_n = static_cast<int>(std::min<std::size_t>(3, sys_rank.size()));
+            for (int i = 0; i < show_n; ++i) {
+              if (i > 0) summary += " | ";
+              summary += sys_label(sys_rank[i].second) + " (" + std::to_string(sys_rank[i].first) + ")";
+            }
+            if (sys_rank.size() > 3) summary += " | ...";
+            ImGui::TextWrapped("%s", summary.c_str());
+          }
+
+          // From / To pickers.
+          {
+            std::string from_lbl = rt.macro_from_system == kInvalidId ? "(pick)" : sys_label(rt.macro_from_system);
+            std::string to_lbl = rt.macro_to_system == kInvalidId ? "(pick)" : sys_label(rt.macro_to_system);
+
+            ImGui::Text("From:");
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(320.0f);
+            if (ImGui::BeginCombo("##retarget_auto_from", from_lbl.c_str())) {
+              ImGui::InputText("Filter##retarget_auto_from_filter", rt.macro_from_filter.data(), rt.macro_from_filter.size());
+              ImGui::Separator();
+              for (const auto& item : sys_rank) {
+                const Id sid = item.second;
+                const std::string lbl = sys_label(sid) + " (" + std::to_string(item.first) + ")";
+                if (!case_insensitive_contains(lbl, rt.macro_from_filter.data())) continue;
+                const bool sel = (sid == rt.macro_from_system);
+                if (ImGui::Selectable((lbl + "##retarget_auto_from_" + std::to_string(static_cast<unsigned long long>(sid))).c_str(), sel)) {
+                  rt.macro_from_system = sid;
+                }
+                if (sel) ImGui::SetItemDefaultFocus();
+              }
+              ImGui::EndCombo();
+            }
+
+            ImGui::SameLine();
+            ImGui::Text("To:");
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(320.0f);
+            if (ImGui::BeginCombo("##retarget_auto_to", to_lbl.c_str())) {
+              ImGui::InputText("Filter##retarget_auto_to_filter", rt.macro_to_filter.data(), rt.macro_to_filter.size());
+              ImGui::Separator();
+
+              // All discovered systems as potential destinations.
+              std::vector<std::pair<std::string, Id>> to_items;
+              to_items.reserve(s.systems.size());
+              for (const auto& kv : s.systems) {
+                const auto& sys = kv.second;
+                if (!allow_system(sys.id)) continue;
+                const std::string nm = sys.name.empty()
+                                           ? ("System #" + std::to_string(static_cast<unsigned long long>(sys.id)))
+                                           : sys.name;
+                to_items.push_back({nm, sys.id});
+              }
+              std::sort(to_items.begin(), to_items.end(),
+                        [](const auto& a, const auto& b) { return a.first < b.first; });
+
+              for (const auto& it : to_items) {
+                const Id sid = it.second;
+                const std::string lbl = sys_label(sid);
+                if (!case_insensitive_contains(lbl, rt.macro_to_filter.data())) continue;
+                const bool sel = (sid == rt.macro_to_system);
+                if (ImGui::Selectable((lbl + "##retarget_auto_to_" + std::to_string(static_cast<unsigned long long>(sid))).c_str(), sel)) {
+                  rt.macro_to_system = sid;
+                }
+                if (sel) ImGui::SetItemDefaultFocus();
+              }
+              ImGui::EndCombo();
+            }
+
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Swap##retarget_auto_swap")) {
+              std::swap(rt.macro_from_system, rt.macro_to_system);
+            }
+            if (ImGui::IsItemHovered()) {
+              ImGui::SetTooltip("Swap the From/To systems.");
+            }
+          }
+
+          ImGui::Spacing();
+
+          // Options.
+          ImGui::Checkbox("Overwrite existing mappings", &rt.macro_overwrite_existing);
+          ImGui::SameLine();
+          ImGui::Checkbox("Prefer same-faction colonies", &rt.macro_prefer_same_faction_colonies);
+
+          ImGui::TextDisabled("Auto-map types:");
+          ImGui::SameLine();
+          ImGui::Checkbox("Bodies", &rt.macro_map_bodies);
+          ImGui::SameLine();
+          ImGui::Checkbox("Colonies", &rt.macro_map_colonies);
+          ImGui::SameLine();
+          ImGui::Checkbox("Jump points", &rt.macro_map_jump_points);
+          ImGui::SameLine();
+          ImGui::Checkbox("Systems", &rt.macro_map_systems);
+          ImGui::SameLine();
+          ImGui::Checkbox("Anomalies", &rt.macro_map_anomalies);
+          ImGui::SameLine();
+          ImGui::Checkbox("Wrecks", &rt.macro_map_wrecks);
+          ImGui::SameLine();
+          ImGui::Checkbox("Ships", &rt.macro_map_ships);
+
+          auto norm_key = [&](const std::string& in) -> std::string {
+            std::string out;
+            out.reserve(in.size());
+            for (char c : in) {
+              const unsigned char uc = static_cast<unsigned char>(c);
+              if (std::isalnum(uc)) out.push_back(static_cast<char>(std::tolower(uc)));
+            }
+            return out;
+          };
+
+          auto map_set = [&](std::unordered_map<Id, Id>& m, Id from, Id to) {
+            if (from == kInvalidId || to == kInvalidId) return;
+            if (from == to) {
+              m.erase(from);
+              return;
+            }
+            if (!rt.macro_overwrite_existing) {
+              if (m.find(from) != m.end()) return;
+            }
+            m[from] = to;
+          };
+
+          const bool can_auto =
+              rt.macro_from_system != kInvalidId && rt.macro_to_system != kInvalidId && rt.macro_from_system != rt.macro_to_system;
+
+          if (!can_auto) ImGui::BeginDisabled();
+          if (ImGui::SmallButton("Auto-map by name##retarget_auto_run")) {
+            std::ostringstream rep;
+            rep << "Auto-map by system (name match)\n";
+            rep << "From: " << sys_label(rt.macro_from_system) << "\n";
+            rep << "To:   " << sys_label(rt.macro_to_system) << "\n\n";
+
+            int mapped_bodies = 0, mapped_colonies = 0, mapped_jumps = 0, mapped_systems = 0;
+            int mapped_anom = 0, mapped_wreck = 0, mapped_ships = 0;
+            int amb_bodies = 0, amb_colonies = 0, amb_jumps = 0, amb_ships = 0, amb_anom = 0, amb_wreck = 0;
+            int miss_bodies = 0, miss_colonies = 0, miss_jumps = 0, miss_ships = 0, miss_anom = 0, miss_wreck = 0;
+            int skip_bodies = 0, skip_colonies = 0, skip_jumps = 0, skip_ships = 0, skip_anom = 0, skip_wreck = 0;
+
+            // Destination indices.
+            std::unordered_map<std::string, std::vector<Id>> dest_bodies;
+            std::unordered_map<std::string, std::vector<Id>> dest_jumps;
+            std::unordered_map<std::string, std::vector<Id>> dest_colonies_by_name;
+            std::unordered_map<std::string, std::vector<Id>> dest_anom;
+            std::unordered_map<std::string, std::vector<Id>> dest_wreck;
+            std::unordered_map<std::string, std::vector<Id>> dest_ships;
+
+            std::unordered_map<Id, std::vector<Id>> dest_colonies_by_body;
+
+            auto add_idx = [&](auto& idx, const std::string& name, Id id) {
+              if (name.empty()) return;
+              idx[norm_key(name)].push_back(id);
+            };
+
+            for (const auto& kv : s.bodies) {
+              const auto& b = kv.second;
+              if (b.system_id != rt.macro_to_system) continue;
+              if (!allow_body(b.id)) continue;
+              add_idx(dest_bodies, b.name, b.id);
+            }
+
+            for (const auto& kv : s.jump_points) {
+              const auto& jp = kv.second;
+              if (jp.system_id != rt.macro_to_system) continue;
+              if (!allow_jump_point(jp.id)) continue;
+              add_idx(dest_jumps, jp.name, jp.id);
+            }
+
+            for (const auto& kv : s.colonies) {
+              const auto& c = kv.second;
+              if (!allow_colony(c.id)) continue;
+              const auto* b = find_ptr(s.bodies, c.body_id);
+              if (!b) continue;
+              if (b->system_id != rt.macro_to_system) continue;
+              add_idx(dest_colonies_by_name, c.name, c.id);
+              dest_colonies_by_body[b->id].push_back(c.id);
+            }
+
+            for (const auto& kv : s.anomalies) {
+              const auto& a = kv.second;
+              if (a.system_id != rt.macro_to_system) continue;
+              if (!allow_anomaly(a.id)) continue;
+              add_idx(dest_anom, a.name, a.id);
+            }
+
+            for (const auto& kv : s.wrecks) {
+              const auto& w = kv.second;
+              if (w.system_id != rt.macro_to_system) continue;
+              if (!allow_wreck(w.id)) continue;
+              add_idx(dest_wreck, w.name, w.id);
+            }
+
+            for (const auto& kv : s.ships) {
+              const auto& sh2 = kv.second;
+              if (sh2.system_id != rt.macro_to_system) continue;
+              if (!allow_ship(sh2.id)) continue;
+              add_idx(dest_ships, sh2.name, sh2.id);
+            }
+
+            // Bodies.
+            if (rt.macro_map_bodies) {
+              for (const auto& kv : body_counts) {
+                const Id from_id = kv.first;
+                const auto* b = find_ptr(s.bodies, from_id);
+                if (!b) { ++skip_bodies; continue; }
+                if (!allow_body(b->id)) { ++skip_bodies; continue; }
+                if (b->system_id != rt.macro_from_system) continue;
+                if (b->name.empty()) { ++skip_bodies; continue; }
+
+                const std::string key = norm_key(b->name);
+                auto it = dest_bodies.find(key);
+                if (it == dest_bodies.end()) { ++miss_bodies; continue; }
+
+                const auto& cands = it->second;
+                if (cands.size() == 1) {
+                  map_set(rt.body_map, from_id, cands.front());
+                  ++mapped_bodies;
+                } else {
+                  // Disambiguate by body type if possible.
+                  Id pick = kInvalidId;
+                  int matches = 0;
+                  for (Id cid : cands) {
+                    const auto* b2 = find_ptr(s.bodies, cid);
+                    if (!b2) continue;
+                    if (b2->type == b->type) {
+                      pick = cid;
+                      ++matches;
+                      if (matches > 1) break;
+                    }
+                  }
+                  if (matches == 1) {
+                    map_set(rt.body_map, from_id, pick);
+                    ++mapped_bodies;
+                  } else {
+                    ++amb_bodies;
+                  }
+                }
+              }
+            }
+
+            // Systems (only for ids that appear in selection).
+            if (rt.macro_map_systems) {
+              if (system_counts.find(rt.macro_from_system) != system_counts.end()) {
+                map_set(rt.system_map, rt.macro_from_system, rt.macro_to_system);
+                ++mapped_systems;
+              }
+            }
+
+            auto mapped_body_for = [&](Id src_body_id) -> Id {
+              if (src_body_id == kInvalidId) return kInvalidId;
+              if (auto it = rt.body_map.find(src_body_id); it != rt.body_map.end()) return it->second;
+
+              // If bodies weren't auto-mapped, attempt a local name match for colony mapping.
+              const auto* b = find_ptr(s.bodies, src_body_id);
+              if (!b || b->name.empty()) return kInvalidId;
+              const std::string key = norm_key(b->name);
+              auto it2 = dest_bodies.find(key);
+              if (it2 == dest_bodies.end()) return kInvalidId;
+              if (it2->second.size() == 1) return it2->second.front();
+              return kInvalidId;
+            };
+
+            // Colonies.
+            if (rt.macro_map_colonies) {
+              for (const auto& kv : colony_counts) {
+                const Id from_id = kv.first;
+                const auto* c = find_ptr(s.colonies, from_id);
+                const auto* b = c ? find_ptr(s.bodies, c->body_id) : nullptr;
+                if (!c || !b) { ++skip_colonies; continue; }
+                if (!allow_colony(c->id)) { ++skip_colonies; continue; }
+                if (b->system_id != rt.macro_from_system) continue;
+
+                Id target = kInvalidId;
+
+                // Prefer mapping via body mapping.
+                const Id dst_body = mapped_body_for(b->id);
+                if (dst_body != kInvalidId) {
+                  auto it = dest_colonies_by_body.find(dst_body);
+                  if (it != dest_colonies_by_body.end() && !it->second.empty()) {
+                    std::vector<Id> body_cands = it->second;
+
+                    // Prefer same faction.
+                    if (rt.macro_prefer_same_faction_colonies) {
+                      std::vector<Id> fac;
+                      for (Id cid : body_cands) {
+                        const auto* c2 = find_ptr(s.colonies, cid);
+                        if (c2 && c2->faction_id == c->faction_id) fac.push_back(cid);
+                      }
+                      if (fac.size() == 1) target = fac.front();
+                      if (fac.size() > 1) body_cands = std::move(fac);
+                    }
+
+                    if (target == kInvalidId) {
+                      if (body_cands.size() == 1) {
+                        target = body_cands.front();
+                      } else if (!c->name.empty()) {
+                        // Try name match among the body candidates.
+                        const std::string ck = norm_key(c->name);
+                        Id pick = kInvalidId;
+                        int hits = 0;
+                        for (Id cid : body_cands) {
+                          const auto* c2 = find_ptr(s.colonies, cid);
+                          if (!c2) continue;
+                          if (norm_key(c2->name) == ck) {
+                            pick = cid;
+                            ++hits;
+                            if (hits > 1) break;
+                          }
+                        }
+                        if (hits == 1) target = pick;
+                      }
+                    }
+                  }
+                }
+
+                // Fallback: colony name match in destination system.
+                if (target == kInvalidId && !c->name.empty()) {
+                  const std::string ck = norm_key(c->name);
+                  auto itn = dest_colonies_by_name.find(ck);
+                  if (itn == dest_colonies_by_name.end()) {
+                    ++miss_colonies;
+                    continue;
+                  }
+                  if (itn->second.size() == 1) {
+                    target = itn->second.front();
+                  } else {
+                    // Disambiguate by faction if possible.
+                    Id pick = kInvalidId;
+                    int hits = 0;
+                    if (rt.macro_prefer_same_faction_colonies) {
+                      for (Id cid : itn->second) {
+                        const auto* c2 = find_ptr(s.colonies, cid);
+                        if (c2 && c2->faction_id == c->faction_id) {
+                          pick = cid;
+                          ++hits;
+                          if (hits > 1) break;
+                        }
+                      }
+                      if (hits == 1) target = pick;
+                    }
+                    if (target == kInvalidId) ++amb_colonies;
+                  }
+                }
+
+                if (target != kInvalidId) {
+                  map_set(rt.colony_map, from_id, target);
+                  ++mapped_colonies;
+                }
+              }
+            }
+
+            // Jump points.
+            if (rt.macro_map_jump_points) {
+              for (const auto& kv : jump_counts) {
+                const Id from_id = kv.first;
+                const auto* jp = find_ptr(s.jump_points, from_id);
+                if (!jp) { ++skip_jumps; continue; }
+                if (!allow_jump_point(jp->id)) { ++skip_jumps; continue; }
+                if (jp->system_id != rt.macro_from_system) continue;
+                if (jp->name.empty()) { ++skip_jumps; continue; }
+
+                const std::string key = norm_key(jp->name);
+                auto it = dest_jumps.find(key);
+                if (it == dest_jumps.end()) { ++miss_jumps; continue; }
+
+                const auto& cands = it->second;
+                if (cands.size() == 1) {
+                  map_set(rt.jump_point_map, from_id, cands.front());
+                  ++mapped_jumps;
+                } else {
+                  // Disambiguate by linked destination system name if visible.
+                  std::string src_dest;
+                  if (jp->linked_jump_id != kInvalidId) {
+                    if (const auto* other = find_ptr(s.jump_points, jp->linked_jump_id)) {
+                      const auto* sys = find_ptr(s.systems, other->system_id);
+                      if (sys && allow_system(sys->id) && !sys->name.empty()) src_dest = norm_key(sys->name);
+                    }
+                  }
+
+                  Id pick = kInvalidId;
+                  int hits = 0;
+                  if (!src_dest.empty()) {
+                    for (Id cid : cands) {
+                      const auto* djp = find_ptr(s.jump_points, cid);
+                      if (!djp) continue;
+                      std::string dst_dest;
+                      if (djp->linked_jump_id != kInvalidId) {
+                        if (const auto* other = find_ptr(s.jump_points, djp->linked_jump_id)) {
+                          const auto* sys = find_ptr(s.systems, other->system_id);
+                          if (sys && allow_system(sys->id) && !sys->name.empty()) dst_dest = norm_key(sys->name);
+                        }
+                      }
+                      if (!dst_dest.empty() && dst_dest == src_dest) {
+                        pick = cid;
+                        ++hits;
+                        if (hits > 1) break;
+                      }
+                    }
+                  }
+                  if (hits == 1) {
+                    map_set(rt.jump_point_map, from_id, pick);
+                    ++mapped_jumps;
+                  } else {
+                    ++amb_jumps;
+                  }
+                }
+              }
+            }
+
+            // Anomalies.
+            if (rt.macro_map_anomalies) {
+              for (const auto& kv : anomaly_counts) {
+                const Id from_id = kv.first;
+                const auto* a = find_ptr(s.anomalies, from_id);
+                if (!a) { ++skip_anom; continue; }
+                if (!allow_anomaly(a->id)) { ++skip_anom; continue; }
+                if (a->system_id != rt.macro_from_system) continue;
+                if (a->name.empty()) { ++skip_anom; continue; }
+
+                const std::string key = norm_key(a->name);
+                auto it = dest_anom.find(key);
+                if (it == dest_anom.end()) { ++miss_anom; continue; }
+                if (it->second.size() == 1) {
+                  map_set(rt.anomaly_map, from_id, it->second.front());
+                  ++mapped_anom;
+                } else {
+                  ++amb_anom;
+                }
+              }
+            }
+
+            // Wrecks.
+            if (rt.macro_map_wrecks) {
+              for (const auto& kv : wreck_counts) {
+                const Id from_id = kv.first;
+                const auto* w = find_ptr(s.wrecks, from_id);
+                if (!w) { ++skip_wreck; continue; }
+                if (!allow_wreck(w->id)) { ++skip_wreck; continue; }
+                if (w->system_id != rt.macro_from_system) continue;
+                if (w->name.empty()) { ++skip_wreck; continue; }
+
+                const std::string key = norm_key(w->name);
+                auto it = dest_wreck.find(key);
+                if (it == dest_wreck.end()) { ++miss_wreck; continue; }
+                if (it->second.size() == 1) {
+                  map_set(rt.wreck_map, from_id, it->second.front());
+                  ++mapped_wreck;
+                } else {
+                  ++amb_wreck;
+                }
+              }
+            }
+
+            // Ships.
+            if (rt.macro_map_ships) {
+              for (const auto& kv : ship_counts) {
+                const Id from_id = kv.first;
+                const auto* sh2 = find_ptr(s.ships, from_id);
+                if (!sh2) { ++skip_ships; continue; }
+                if (!allow_ship(sh2->id)) { ++skip_ships; continue; }
+                if (sh2->system_id != rt.macro_from_system) continue;
+                if (sh2->name.empty()) { ++skip_ships; continue; }
+
+                const std::string key = norm_key(sh2->name);
+                auto it = dest_ships.find(key);
+                if (it == dest_ships.end()) { ++miss_ships; continue; }
+                if (it->second.size() == 1) {
+                  map_set(rt.ship_map, from_id, it->second.front());
+                  ++mapped_ships;
+                } else {
+                  // Disambiguate by faction.
+                  Id pick = kInvalidId;
+                  int hits = 0;
+                  for (Id cid : it->second) {
+                    const auto* sh3 = find_ptr(s.ships, cid);
+                    if (sh3 && sh3->faction_id == sh2->faction_id) {
+                      pick = cid;
+                      ++hits;
+                      if (hits > 1) break;
+                    }
+                  }
+                  if (hits == 1) {
+                    map_set(rt.ship_map, from_id, pick);
+                    ++mapped_ships;
+                  } else {
+                    ++amb_ships;
+                  }
+                }
+              }
+            }
+
+            rep << "Mapped:\n";
+            rep << "  Bodies:      " << mapped_bodies << " (missing " << miss_bodies << ", ambiguous " << amb_bodies
+                << ", skipped " << skip_bodies << ")\n";
+            rep << "  Colonies:    " << mapped_colonies << " (missing " << miss_colonies << ", ambiguous "
+                << amb_colonies << ", skipped " << skip_colonies << ")\n";
+            rep << "  JumpPoints:  " << mapped_jumps << " (missing " << miss_jumps << ", ambiguous " << amb_jumps
+                << ", skipped " << skip_jumps << ")\n";
+            rep << "  Systems:     " << mapped_systems << "\n";
+            rep << "  Anomalies:   " << mapped_anom << " (missing " << miss_anom << ", ambiguous " << amb_anom
+                << ", skipped " << skip_anom << ")\n";
+            rep << "  Wrecks:      " << mapped_wreck << " (missing " << miss_wreck << ", ambiguous " << amb_wreck
+                << ", skipped " << skip_wreck << ")\n";
+            rep << "  Ships:       " << mapped_ships << " (missing " << miss_ships << ", ambiguous " << amb_ships
+                << ", skipped " << skip_ships << ")\n";
+
+            rt.macro_last_report = rep.str();
+            ship_order_queue_edit_status = "Auto-map complete. Review mapping tables, then click 'Apply mapping to selection'.";
+          }
+          if (!can_auto) ImGui::EndDisabled();
+
+          if (!rt.macro_last_report.empty()) {
+            ImGui::Separator();
+            ImGui::Text("Auto-map report:");
+            ImGui::BeginChild("##retarget_auto_report", ImVec2(0, 120), true);
+            ImGui::TextUnformatted(rt.macro_last_report.c_str());
+            ImGui::EndChild();
+
+            if (ImGui::SmallButton("Copy report##retarget_auto_copy_report")) {
+              ImGui::SetClipboardText(rt.macro_last_report.c_str());
+              ship_order_queue_edit_status = "Copied auto-map report to clipboard.";
+            }
+          }
+
+          ImGui::TreePop();
+        }
+
+        auto any_changes = [&]() -> bool {
+          return !rt.body_map.empty() || !rt.colony_map.empty() || !rt.jump_point_map.empty() || !rt.ship_map.empty() ||
+                 !rt.anomaly_map.empty() || !rt.wreck_map.empty() || !rt.system_map.empty();
+        };
+
+        auto draw_mapping_section = [&](const char* title, const char* id_prefix,
+                                       const std::unordered_map<Id, int>& counts,
+                                       std::unordered_map<Id, Id>& mapping,
+                                       const std::vector<PortableTemplateRefCandidate>& candidates,
+                                       std::array<char, 64>& filter_buf,
+                                       auto label_fn) {
+          if (counts.empty()) return;
+
+          ImGui::Separator();
+          ImGui::Text("%s", title);
+
+          std::string filter_id = std::string("Filter##") + id_prefix;
+          ImGui::SetNextItemWidth(240.0f);
+          ImGui::InputText(filter_id.c_str(), filter_buf.data(), filter_buf.size());
+          if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Case-insensitive substring filter for the dropdown list.");
+          }
+          ImGui::SameLine();
+          ImGui::TextDisabled("%d candidates", static_cast<int>(candidates.size()));
+
+          if (candidates.empty()) {
+            ImGui::TextDisabled("(No valid targets available under current fog-of-war settings.)");
+            return;
+          }
+
+          std::unordered_map<Id, std::string> cand_label;
+          cand_label.reserve(candidates.size());
+          for (const auto& c : candidates) cand_label[c.id] = c.label;
+
+          std::vector<std::pair<std::string, Id>> from_items;
+          from_items.reserve(counts.size());
+          for (const auto& kv : counts) {
+            from_items.push_back({label_fn(kv.first), kv.first});
+          }
+          std::sort(from_items.begin(), from_items.end(),
+                    [](const auto& a, const auto& b) { return a.first < b.first; });
+
+          const ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
+                                        ImGuiTableFlags_SizingStretchProp;
+          std::string table_id = std::string("##") + id_prefix + "_tbl";
+          if (ImGui::BeginTable(table_id.c_str(), 3, flags)) {
+            ImGui::TableSetupColumn("From", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("Count", ImGuiTableColumnFlags_WidthFixed, 55.0f);
+            ImGui::TableSetupColumn("To", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableHeadersRow();
+
+            for (const auto& item : from_items) {
+              const std::string& from_label = item.first;
+              const Id from_id = item.second;
+              const int cnt = counts.at(from_id);
+
+              ImGui::TableNextRow();
+              ImGui::TableSetColumnIndex(0);
+              ImGui::TextWrapped("%s", from_label.c_str());
+
+              ImGui::TableSetColumnIndex(1);
+              ImGui::Text("%d", cnt);
+
+              ImGui::TableSetColumnIndex(2);
+              Id to_id = from_id;
+              if (auto it = mapping.find(from_id); it != mapping.end()) to_id = it->second;
+
+              std::string to_label;
+              if (auto it = cand_label.find(to_id); it != cand_label.end()) {
+                to_label = it->second;
+              } else {
+                to_label = label_fn(to_id);
+              }
+
+              std::string combo_id =
+                  std::string("##") + id_prefix + "_to_" + std::to_string(static_cast<unsigned long long>(from_id));
+              if (ImGui::BeginCombo(combo_id.c_str(), to_label.c_str())) {
+                const std::string keep = std::string("Keep: ") + from_label;
+                const bool keep_sel = (to_id == from_id);
+                if (ImGui::Selectable(keep.c_str(), keep_sel)) {
+                  mapping.erase(from_id);
+                }
+                ImGui::Separator();
+
+                for (const auto& cand : candidates) {
+                  const bool match = case_insensitive_contains(cand.label, filter_buf.data());
+                  if (!match && cand.id != to_id) continue;
+
+                  std::string item_id =
+                      cand.label + "##" + id_prefix + "_cand_" +
+                      std::to_string(static_cast<unsigned long long>(cand.id)) + "_" +
+                      std::to_string(static_cast<unsigned long long>(from_id));
+                  const bool sel = (cand.id == to_id);
+                  if (ImGui::Selectable(item_id.c_str(), sel)) {
+                    if (cand.id == from_id) {
+                      mapping.erase(from_id);
+                    } else {
+                      mapping[from_id] = cand.id;
+                    }
+                  }
+                  if (sel) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+              }
+            }
+
+            ImGui::EndTable();
+          }
+        };
+
+        // Candidate lists (fog-of-war safe).
+        std::vector<PortableTemplateRefCandidate> body_cands;
+        if (!body_counts.empty()) {
+          body_cands.reserve(s.bodies.size());
+          for (const auto& kv : s.bodies) {
+            const auto& b = kv.second;
+            if (!allow_system(b.system_id)) continue;
+            body_cands.push_back({b.id, body_label(b.id)});
+          }
+          std::sort(body_cands.begin(), body_cands.end(),
+                    [](const auto& a, const auto& b) { return a.label < b.label; });
+        }
+
+        std::vector<PortableTemplateRefCandidate> colony_cands;
+        if (!colony_counts.empty()) {
+          colony_cands.reserve(s.colonies.size());
+          for (const auto& kv : s.colonies) {
+            const auto& c = kv.second;
+            if (!allow_colony(c.id)) continue;
+            colony_cands.push_back({c.id, colony_label(c.id)});
+          }
+          std::sort(colony_cands.begin(), colony_cands.end(),
+                    [](const auto& a, const auto& b) { return a.label < b.label; });
+        }
+
+        std::vector<PortableTemplateRefCandidate> jump_cands;
+        if (!jump_counts.empty()) {
+          jump_cands.reserve(s.jump_points.size());
+          for (const auto& kv : s.jump_points) {
+            const auto& jp = kv.second;
+            if (!allow_jump_point(jp.id)) continue;
+            jump_cands.push_back({jp.id, jump_point_label(jp.id)});
+          }
+          std::sort(jump_cands.begin(), jump_cands.end(),
+                    [](const auto& a, const auto& b) { return a.label < b.label; });
+        }
+
+        std::vector<PortableTemplateRefCandidate> ship_cands;
+        if (!ship_counts.empty()) {
+          ship_cands.reserve(s.ships.size());
+          for (const auto& kv : s.ships) {
+            const auto& sh = kv.second;
+            if (!allow_ship(sh.id)) continue;
+            ship_cands.push_back({sh.id, ship_label(sh.id)});
+          }
+          std::sort(ship_cands.begin(), ship_cands.end(),
+                    [](const auto& a, const auto& b) { return a.label < b.label; });
+        }
+
+        std::vector<PortableTemplateRefCandidate> anomaly_cands;
+        if (!anomaly_counts.empty()) {
+          anomaly_cands.reserve(s.anomalies.size());
+          for (const auto& kv : s.anomalies) {
+            const auto& a = kv.second;
+            if (!allow_anomaly(a.id)) continue;
+            anomaly_cands.push_back({a.id, anomaly_label(a.id)});
+          }
+          std::sort(anomaly_cands.begin(), anomaly_cands.end(),
+                    [](const auto& a, const auto& b) { return a.label < b.label; });
+        }
+
+        std::vector<PortableTemplateRefCandidate> wreck_cands;
+        if (!wreck_counts.empty()) {
+          wreck_cands.reserve(s.wrecks.size());
+          for (const auto& kv : s.wrecks) {
+            const auto& w = kv.second;
+            if (!allow_wreck(w.id)) continue;
+            wreck_cands.push_back({w.id, wreck_label(w.id)});
+          }
+          std::sort(wreck_cands.begin(), wreck_cands.end(),
+                    [](const auto& a, const auto& b) { return a.label < b.label; });
+        }
+
+        std::vector<PortableTemplateRefCandidate> system_cands;
+        if (!system_counts.empty()) {
+          system_cands.reserve(s.systems.size());
+          for (const auto& kv : s.systems) {
+            const auto& sys = kv.second;
+            if (!allow_system(sys.id)) continue;
+            const std::string nm = sys.name.empty()
+                                       ? ("System #" + std::to_string(static_cast<unsigned long long>(sys.id)))
+                                       : sys.name;
+            system_cands.push_back({sys.id, nm});
+          }
+          std::sort(system_cands.begin(), system_cands.end(),
+                    [](const auto& a, const auto& b) { return a.label < b.label; });
+        }
+
+        draw_mapping_section("Bodies", "retarget_body", body_counts, rt.body_map, body_cands, rt.body_filter, body_label);
+        draw_mapping_section("Colonies", "retarget_colony", colony_counts, rt.colony_map, colony_cands, rt.colony_filter, colony_label);
+        draw_mapping_section("Jump points", "retarget_jump", jump_counts, rt.jump_point_map, jump_cands, rt.jump_point_filter, jump_point_label);
+        draw_mapping_section("Ships", "retarget_ship", ship_counts, rt.ship_map, ship_cands, rt.ship_filter, ship_label);
+        draw_mapping_section("Anomalies", "retarget_anomaly", anomaly_counts, rt.anomaly_map, anomaly_cands, rt.anomaly_filter, anomaly_label);
+        draw_mapping_section("Wrecks", "retarget_wreck", wreck_counts, rt.wreck_map, wreck_cands, rt.wreck_filter, wreck_label);
+        draw_mapping_section("Systems", "retarget_system", system_counts, rt.system_map, system_cands, rt.system_filter, sys_label);
+
+        if (!any_changes()) ImGui::BeginDisabled();
+        if (ImGui::SmallButton("Apply mapping to selection##ship_order_queue_retarget_apply")) {
+          // Validate mapped targets under fog-of-war (avoid leaking via hidden picks).
+          bool ok = true;
+          auto validate_map = [&](const std::unordered_map<Id, Id>& m, auto allow_fn,
+                                  const char* label) {
+            for (const auto& kv : m) {
+              if (!allow_fn(kv.second)) {
+                ship_order_queue_edit_status =
+                    std::string("Retarget: target ") + label + " is not available under fog-of-war settings.";
+                ok = false;
+                return;
+              }
+            }
+          };
+          validate_map(rt.body_map, allow_body, "body");
+          if (ok) validate_map(rt.colony_map, allow_colony, "colony");
+          if (ok) validate_map(rt.jump_point_map, allow_jump_point, "jump point");
+          if (ok) validate_map(rt.ship_map, allow_ship, "ship");
+          if (ok) validate_map(rt.anomaly_map, allow_anomaly, "anomaly");
+          if (ok) validate_map(rt.wreck_map, allow_wreck, "wreck");
+          if (ok) validate_map(rt.system_map, allow_system, "system");
+
+          if (ok && arr) {
+            auto apply_id_key = [&](Object& o, const char* key, const std::unordered_map<Id, Id>& m, int* replaced) {
+              auto it = o.find(key);
+              if (it == o.end()) return;
+              const Id from = static_cast<Id>(it->second.int_value(kInvalidId));
+              auto mit = m.find(from);
+              if (mit == m.end()) return;
+              it->second = static_cast<double>(mit->second);
+              if (replaced) ++(*replaced);
+            };
+
+            int replaced = 0;
+            for (auto& v : *arr) {
+              auto* o = v.as_object();
+              if (!o) continue;
+              apply_id_key(*o, "body_id", rt.body_map, &replaced);
+              apply_id_key(*o, "colony_id", rt.colony_map, &replaced);
+              apply_id_key(*o, "dropoff_colony_id", rt.colony_map, &replaced);
+              apply_id_key(*o, "jump_point_id", rt.jump_point_map, &replaced);
+              apply_id_key(*o, "target_ship_id", rt.ship_map, &replaced);
+              apply_id_key(*o, "anomaly_id", rt.anomaly_map, &replaced);
+              apply_id_key(*o, "wreck_id", rt.wreck_map, &replaced);
+              apply_id_key(*o, "last_known_system_id", rt.system_map, &replaced);
+              apply_id_key(*o, "system_id", rt.system_map, &replaced);
+            }
+
+            const std::string json_text = nebula4x::json::stringify(root, /*indent=*/2);
+            nebula4x::ParsedOrderTemplate parsed;
+            std::string err;
+            if (!nebula4x::deserialize_order_template_from_json(json_text, &parsed, &err)) {
+              ship_order_queue_edit_status = err.empty() ? "Retarget failed (parse error)." : err;
+            } else if (parsed.orders.size() != sel_orders.size()) {
+              ship_order_queue_edit_status = "Retarget failed: order count changed unexpectedly.";
+            } else {
+              push_undo(cur_q);
+              std::vector<Order> new_q = cur_q;
+              for (std::size_t i = 0; i < qe.selected.size() && i < parsed.orders.size(); ++i) {
+                const int qidx = qe.selected[i];
+                if (qidx >= 0 && qidx < static_cast<int>(new_q.size())) {
+                  new_q[static_cast<std::size_t>(qidx)] = parsed.orders[i];
+                }
+              }
+              set_queue_and_refresh(new_q);
+              ship_order_queue_edit_status =
+                  "Retargeted selection (" + std::to_string(sel_orders.size()) +
+                  " orders, " + std::to_string(replaced) + " id fields updated).";
+            }
+          }
+        }
+        if (!any_changes()) ImGui::EndDisabled();
+
+        if (ImGui::IsItemHovered()) {
+          ImGui::SetTooltip("Applies the mapping to the selected orders only. This is undoable.");
+        }
+      }
+    }
+    ImGui::TreePop();
+  }
+
+
+  if (!ship_order_queue_edit_status.empty()) {
+    ImGui::TextDisabled("%s", ship_order_queue_edit_status.c_str());
+  }
+}
+
+if (ship_order_queue_paste_open_popup) {
+  ImGui::OpenPopup("Paste orders: resolve references##ship_order_queue");
+  ship_order_queue_paste_open_popup = false;
+}
+
+if (ImGui::BeginPopupModal("Paste orders: resolve references##ship_order_queue", nullptr,
+                           ImGuiWindowFlags_NoSavedSettings)) {
+  ImGui::SetWindowSize(ImVec2(860, 540), ImGuiCond_Appearing);
+
+  if (!ship_order_queue_paste_session_active || ship_order_queue_paste_ship_id != selected_ship) {
+    ImGui::Text("No active paste session.");
+    if (ImGui::SmallButton("Close")) {
+      ship_order_queue_paste_session = PortableTemplateImportSession{};
+      ship_order_queue_paste_session_active = false;
+      ship_order_queue_paste_ship_id = kInvalidId;
+      ship_order_queue_paste_delete_indices.clear();
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+  } else {
+    int resolved = 0;
+    for (const auto& iss : ship_order_queue_paste_session.issues) {
+      if (iss.selected_candidate >= 0) ++resolved;
+    }
+
+    ImGui::Text("Template: %s", ship_order_queue_paste_session.template_name.empty()
+                                      ? "(unnamed)"
+                                      : ship_order_queue_paste_session.template_name.c_str());
+    ImGui::Text("Orders: %d | References: %d resolved / %d total", ship_order_queue_paste_session.total_orders,
+                resolved, static_cast<int>(ship_order_queue_paste_session.issues.size()));
+
+    if (ImGui::SmallButton("Auto-pick first candidates")) {
+      for (auto& iss : ship_order_queue_paste_session.issues) {
+        if (iss.selected_candidate < 0 && !iss.candidates.empty()) {
+          iss.selected_candidate = 0;
+        }
+      }
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Copy resolution report")) {
+      std::string rep;
+      rep += "Paste resolution report\n";
+      rep += "Template: " + ship_order_queue_paste_session.template_name + "\n";
+      rep += "Orders: " + std::to_string(ship_order_queue_paste_session.total_orders) + "\n\n";
+      for (const auto& iss : ship_order_queue_paste_session.issues) {
+        rep += "#" + std::to_string(iss.order_index + 1) + " " + iss.order_type + "\n";
+        rep += "  " + iss.ref_summary + "\n";
+        rep += "  Need: " + iss.id_key + "\n";
+        rep += "  Why: " + iss.message + "\n";
+        if (iss.selected_candidate >= 0 && iss.selected_candidate < static_cast<int>(iss.candidates.size())) {
+          rep += "  Pick: " + iss.candidates[static_cast<std::size_t>(iss.selected_candidate)].label + "\n";
+        } else {
+          rep += "  Pick: (unresolved)\n";
+        }
+        rep += "\n";
+      }
+      ImGui::SetClipboardText(rep.c_str());
+      ship_order_queue_edit_status = "Copied paste resolution report to clipboard.";
+    }
+
+    ImGui::Separator();
+
+    ImGui::BeginChild("##ship_order_queue_paste_refs", ImVec2(0, 340), true);
+    const ImGuiTableFlags tflags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
+                                   ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_Resizable |
+                                   ImGuiTableFlags_ScrollY;
+
+    if (ImGui::BeginTable("##ship_order_queue_paste_table", 6, tflags)) {
+      ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, 28.0f);
+      ImGui::TableSetupColumn("Order", ImGuiTableColumnFlags_WidthFixed, 130.0f);
+      ImGui::TableSetupColumn("Reference", ImGuiTableColumnFlags_WidthStretch);
+      ImGui::TableSetupColumn("Need", ImGuiTableColumnFlags_WidthFixed, 90.0f);
+      ImGui::TableSetupColumn("Pick", ImGuiTableColumnFlags_WidthFixed, 220.0f);
+      ImGui::TableSetupColumn("Why", ImGuiTableColumnFlags_WidthStretch);
+      ImGui::TableHeadersRow();
+
+      for (std::size_t ii = 0; ii < ship_order_queue_paste_session.issues.size(); ++ii) {
+        auto& iss = ship_order_queue_paste_session.issues[ii];
+
+        ImGui::TableNextRow();
+        ImGui::TableSetColumnIndex(0);
+        ImGui::Text("%d", iss.order_index + 1);
+
+        ImGui::TableSetColumnIndex(1);
+        ImGui::TextUnformatted(iss.order_type.c_str());
+
+        ImGui::TableSetColumnIndex(2);
+        ImGui::TextWrapped("%s", iss.ref_summary.c_str());
+
+        ImGui::TableSetColumnIndex(3);
+        ImGui::TextUnformatted(iss.id_key.c_str());
+
+        ImGui::TableSetColumnIndex(4);
+        std::string cur_label = "(unresolved)";
+        if (iss.selected_candidate >= 0 && iss.selected_candidate < static_cast<int>(iss.candidates.size())) {
+          cur_label = iss.candidates[static_cast<std::size_t>(iss.selected_candidate)].label;
+        }
+        const std::string combo_id = "##pick_" + std::to_string(static_cast<unsigned long long>(ii));
+        if (ImGui::BeginCombo(combo_id.c_str(), cur_label.c_str())) {
+          for (int ci = 0; ci < static_cast<int>(iss.candidates.size()); ++ci) {
+            const bool is_sel = (ci == iss.selected_candidate);
+            if (ImGui::Selectable(iss.candidates[static_cast<std::size_t>(ci)].label.c_str(), is_sel)) {
+              iss.selected_candidate = ci;
+            }
+            if (is_sel) ImGui::SetItemDefaultFocus();
+          }
+          ImGui::EndCombo();
+        }
+
+        ImGui::TableSetColumnIndex(5);
+        ImGui::TextWrapped("%s", iss.message.c_str());
+      }
+
+      ImGui::EndTable();
+    }
+    ImGui::EndChild();
+
+    ImGui::Separator();
+
+    const bool can_finalize = (resolved == static_cast<int>(ship_order_queue_paste_session.issues.size()));
+    if (!can_finalize) ImGui::BeginDisabled();
+    if (ImGui::SmallButton("Finalize paste")) {
+      std::string err;
+      nebula4x::ParsedOrderTemplate parsed;
+      if (!finalize_portable_template_import_session(sim, &ship_order_queue_paste_session, &parsed, &err)) {
+        ship_order_queue_edit_status = err.empty() ? "Finalize failed." : err;
+      } else if (parsed.orders.empty()) {
+        ship_order_queue_edit_status = "Template produced 0 orders.";
+      } else {
+        // Rebuild against current queue (may have changed while the popup was open).
+        const auto* so_now = find_ptr(s.ship_orders, selected_ship);
+        std::vector<Order> base_q = so_now ? so_now->queue : std::vector<Order>{};
+
+        std::vector<int> del = ship_order_queue_paste_replace
+                                   ? ship_order_queue_paste_delete_indices
+                                   : std::vector<int>{};
+        std::sort(del.begin(), del.end());
+        del.erase(std::unique(del.begin(), del.end()), del.end());
+        del.erase(std::remove_if(del.begin(), del.end(),
+                                 [&](int v) { return v < 0 || v >= static_cast<int>(base_q.size()); }),
+                  del.end());
+
+        int insert_at = ship_order_queue_paste_insert_index;
+        if (ship_order_queue_paste_replace && !del.empty()) insert_at = del.front();
+        insert_at = std::clamp(insert_at, 0, static_cast<int>(base_q.size()));
+
+        push_undo(base_q);
+
+        std::vector<Order> new_q;
+        const int qn = static_cast<int>(base_q.size());
+        new_q.reserve(static_cast<std::size_t>(qn - static_cast<int>(del.size()) +
+                                               static_cast<int>(parsed.orders.size())));
+        std::size_t del_pos = 0;
+
+        for (int i = 0; i <= qn; ++i) {
+          if (i == insert_at) {
+            new_q.insert(new_q.end(), parsed.orders.begin(), parsed.orders.end());
+          }
+          if (i == qn) break;
+
+          if (ship_order_queue_paste_replace) {
+            while (del_pos < del.size() && del[del_pos] < i) ++del_pos;
+            if (del_pos < del.size() && del[del_pos] == i) continue;
+          }
+
+          new_q.push_back(base_q[static_cast<std::size_t>(i)]);
+        }
+
+        set_queue_and_refresh(new_q);
+
+        qe.selected.clear();
+        const int pasted_n = static_cast<int>(parsed.orders.size());
+        for (int k = 0; k < pasted_n; ++k) qe.selected.push_back(insert_at + k);
+        qe.anchor = qe.selected.empty() ? -1 : qe.selected.back();
+
+        ship_order_queue_edit_status =
+            "Pasted " + std::to_string(parsed.orders.size()) + " orders into queue.";
+        ship_order_queue_paste_session_active = false;
+        ship_order_queue_paste_ship_id = kInvalidId;
+        ship_order_queue_paste_delete_indices.clear();
+        ImGui::CloseCurrentPopup();
+      }
+    }
+    if (!can_finalize) ImGui::EndDisabled();
+
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Cancel")) {
+      ship_order_queue_paste_session = PortableTemplateImportSession{};
+      ship_order_queue_paste_session_active = false;
+      ship_order_queue_paste_ship_id = kInvalidId;
+      ship_order_queue_paste_delete_indices.clear();
+      ship_order_queue_edit_status = "Paste cancelled.";
+      ImGui::CloseCurrentPopup();
+    }
+
+    ImGui::EndPopup();
+  }
+}
+
+// Refresh pointer after clipboard edits (paste may create ship_orders entry).
+ship_orders = find_ptr(s.ship_orders, selected_ship);
+has_orders = (ship_orders && !ship_orders->queue.empty());
+if (ship_orders) {
+  cur_q = ship_orders->queue;
+  normalize_sel(static_cast<int>(cur_q.size()));
+} else {
+  cur_q.clear();
+  normalize_sel(0);
+}
+
 
         // Editable queue view (drag-and-drop reorder, duplicate/delete, etc.)
         if (!has_orders) {
@@ -2617,12 +4474,42 @@ if (plan.ok) {
               ImGui::TableNextRow();
 
               ImGui::TableSetColumnIndex(0);
-              ImGui::Text("%d", i);
+              ImGui::Text("%d", i + 1);
 
               ImGui::TableSetColumnIndex(1);
-              const std::string ord_str = order_to_string(q[static_cast<std::size_t>(i)]);
+              const std::string ord_str =
+                  order_to_ui_string(sim, q[static_cast<std::size_t>(i)], ui.viewer_faction_id, ui.fog_of_war);
               const std::string row_id = "##ship_order_row_" + std::to_string(static_cast<unsigned long long>(i));
-              ImGui::Selectable((ord_str + row_id).c_str(), false, ImGuiSelectableFlags_SpanAllColumns);
+              const bool row_selected = sel_contains(i);
+              if (ImGui::Selectable((ord_str + row_id).c_str(), row_selected, ImGuiSelectableFlags_SpanAllColumns)) {
+                const ImGuiIO& io = ImGui::GetIO();
+                const bool ctrl = io.KeyCtrl;
+                const bool shift = io.KeyShift;
+
+                if (shift) {
+                  const int a = (qe.anchor >= 0) ? qe.anchor : i;
+                  const int lo = std::min(a, i);
+                  const int hi = std::max(a, i);
+                  if (!ctrl) qe.selected.clear();
+                  for (int j = lo; j <= hi; ++j) sel_add(j);
+                } else if (ctrl) {
+                  if (row_selected) {
+                    sel_remove(i);
+                  } else {
+                    sel_add(i);
+                  }
+                } else {
+                  qe.selected.clear();
+                  sel_add(i);
+                }
+                qe.anchor = i;
+              }
+
+              if (ImGui::IsItemHovered()) {
+                ImGui::BeginTooltip();
+                ImGui::TextUnformatted(ord_str.c_str());
+                ImGui::EndTooltip();
+              }
 
               if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
                 ImGui::SetDragDropPayload("N4X_SHIP_ORDER_IDX", &i, sizeof(int));
@@ -2718,16 +4605,68 @@ const bool can_up = (i > 0);
             ImGui::EndTable();
           }
 
-          // Apply edits after rendering to avoid iterator invalidation mid-loop.
-          if (dup_idx >= 0) {
-            sim.duplicate_queued_order(selected_ship, dup_idx);
+          // Optional: full per-order planner table + clipboard export.
+          if (plan.ok) {
+            ImGui::Spacing();
+            if (ImGui::TreeNode("Mission planner table/export##ship_orders_plan_table")) {
+              static bool plan_show_system = true;
+              static bool plan_show_pos = false;
+              static bool plan_show_note = true;
+              static bool plan_collapse_jumps = true;
+              static int plan_max_rows = 256;
+
+              ImGui::Checkbox("Show system", &plan_show_system);
+              ImGui::SameLine();
+              ImGui::Checkbox("Show position", &plan_show_pos);
+              ImGui::SameLine();
+              ImGui::Checkbox("Show notes", &plan_show_note);
+
+              ImGui::Checkbox("Collapse jump chains", &plan_collapse_jumps);
+              if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("When enabled, consecutive TravelViaJump orders are collapsed into a single row in the planner view.");
+              }
+
+              ImGui::PushItemWidth(120);
+              ImGui::InputInt("Max rows##ship_plan_max_rows", &plan_max_rows);
+              ImGui::PopItemWidth();
+
+              OrderPlanRenderOptions ro;
+              ro.viewer_faction_id = ui.viewer_faction_id;
+              ro.fog_of_war = ui.fog_of_war;
+              ro.max_rows = std::clamp(plan_max_rows, 1, 4096);
+              ro.show_system = plan_show_system;
+              ro.show_position = plan_show_pos;
+              ro.show_note = plan_show_note;
+              ro.collapse_jump_chains = plan_collapse_jumps;
+
+              draw_order_plan_table(sim, q, plan, plan_fuel_cap, ro, "##ship_plan_table");
+              ImGui::TreePop();
+            }
           }
-          if (delete_idx >= 0) {
-            sim.delete_queued_order(selected_ship, delete_idx);
-          }
-          if (move_from >= 0 && move_to >= 0) {
-            sim.move_queued_order(selected_ship, move_from, move_to);
-          }
+
+// Apply edits after rendering to avoid iterator invalidation mid-loop.
+if (dup_idx >= 0 || delete_idx >= 0 || (move_from >= 0 && move_to >= 0)) {
+  push_undo(q);
+}
+
+if (dup_idx >= 0) {
+  sim.duplicate_queued_order(selected_ship, dup_idx);
+  qe.selected.clear();
+  qe.anchor = -1;
+  ship_order_queue_edit_status = "Duplicated one queued order.";
+}
+if (delete_idx >= 0) {
+  sim.delete_queued_order(selected_ship, delete_idx);
+  qe.selected.clear();
+  qe.anchor = -1;
+  ship_order_queue_edit_status = "Deleted one queued order.";
+}
+if (move_from >= 0 && move_to >= 0) {
+  sim.move_queued_order(selected_ship, move_from, move_to);
+  qe.selected.clear();
+  qe.anchor = -1;
+  ship_order_queue_edit_status = "Reordered queued orders.";
+}
         }
 
         const bool repeat_on = ship_orders ? ship_orders->repeat : false;
@@ -2845,6 +4784,14 @@ const bool can_up = (i > 0);
           static bool confirm_delete = false;
           static std::string status;
 
+          // Clipboard import/export state (persist across frames).
+          static char import_name_buf[128] = "";
+          static bool import_overwrite_existing = false;
+          static std::vector<Order> imported_orders;
+          static std::string imported_name_from_json;
+          static PortableTemplateImportSession import_session;
+          static bool import_session_active = false;
+
           const auto names = sim.order_template_names();
 
           auto exists = [&](const std::string& nm) {
@@ -2931,6 +4878,257 @@ const bool can_up = (i > 0);
             if (!can_apply_fleet) ImGui::EndDisabled();
           }
 
+
+          // Quick-share: copy the ship's current order queue as JSON (without saving a template).
+          const bool can_copy_queue_json = ship_orders && !ship_orders->queue.empty();
+          if (!can_copy_queue_json) ImGui::BeginDisabled();
+          if (ImGui::SmallButton("Copy current queue JSON (portable)##tmpl_copy_queue_json")) {
+            std::string nm = "Ship Queue";
+            if (const auto* cur_ship = find_ptr(s.ships, selected_ship)) {
+              if (!cur_ship->name.empty()) nm = cur_ship->name + " queue";
+            }
+            PortableOrderTemplateOptions popt;
+            popt.viewer_faction_id = ui.viewer_faction_id;
+            popt.fog_of_war = ui.fog_of_war;
+            popt.include_source_ids = true;
+            const std::string json = serialize_order_template_to_json_portable(sim, nm, ship_orders->queue, popt);
+            ImGui::SetClipboardText(json.c_str());
+            status = "Copied current queue JSON (portable) to clipboard.";
+          }
+          if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "Portable export: embeds name-based references so templates can be pasted into other saves.\n"
+                "Tip: paste into the Import section below to save/apply elsewhere.");
+          }
+          ImGui::SameLine();
+          if (ImGui::SmallButton("Copy legacy IDs##tmpl_copy_queue_json_legacy")) {
+            std::string nm = "Ship Queue";
+            if (const auto* cur_ship = find_ptr(s.ships, selected_ship)) {
+              if (!cur_ship->name.empty()) nm = cur_ship->name + " queue";
+            }
+            const std::string json = nebula4x::serialize_order_template_to_json(nm, ship_orders->queue);
+            ImGui::SetClipboardText(json.c_str());
+            status = "Copied current queue JSON (legacy IDs) to clipboard.";
+          }
+          if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "Legacy export: stores raw numeric IDs (only safe within the same save).\n"
+                "Prefer portable export when sharing.");
+          }
+
+          // --- Selected template preview / export ---
+          if (!selected_template.empty()) {
+            const auto* tmpl = sim.find_order_template(selected_template);
+            if (tmpl) {
+              ImGui::Separator();
+              ImGui::Text("Selected template (%d orders)", static_cast<int>(tmpl->size()));
+
+              if (tmpl->empty()) {
+                ImGui::TextDisabled("(empty)");
+              } else {
+                const int kMaxShow = 64;
+                const int n = static_cast<int>(tmpl->size());
+                const int show = std::min(n, kMaxShow);
+
+                ImGui::BeginChild("##tmpl_preview", ImVec2(0, 120), true, ImGuiWindowFlags_HorizontalScrollbar);
+                for (int i = 0; i < show; ++i) {
+                  const std::string ord_s =
+                      order_to_ui_string(sim, (*tmpl)[static_cast<std::size_t>(i)], ui.viewer_faction_id, ui.fog_of_war);
+                  ImGui::BulletText("%d. %s", i + 1, ord_s.c_str());
+                }
+                if (n > show) {
+                  ImGui::TextDisabled("... (%d more)", n - show);
+                }
+                ImGui::EndChild();
+              }
+
+              if (ImGui::SmallButton("Copy selected template JSON (portable)##tmpl_copy_selected_portable")) {
+                PortableOrderTemplateOptions popt;
+                popt.viewer_faction_id = ui.viewer_faction_id;
+                popt.fog_of_war = ui.fog_of_war;
+                popt.include_source_ids = true;
+                const std::string json = serialize_order_template_to_json_portable(sim, selected_template, *tmpl, popt);
+                ImGui::SetClipboardText(json.c_str());
+                status = "Copied template JSON (portable) to clipboard.";
+              }
+              if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip(
+                    "Portable export: embeds name-based references so templates can be pasted into other saves.");
+              }
+              ImGui::SameLine();
+              if (ImGui::SmallButton("Copy legacy IDs##tmpl_copy_selected_legacy")) {
+                const std::string json = nebula4x::serialize_order_template_to_json(selected_template, *tmpl);
+                ImGui::SetClipboardText(json.c_str());
+                status = "Copied template JSON (legacy IDs) to clipboard.";
+              }
+              if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip(
+                    "Legacy export: stores raw numeric IDs (only safe within the same save).");
+              }
+
+              if (ImGui::TreeNode("Preview apply to this ship (ETA/fuel)##tmpl_apply_preview")) {
+                std::vector<Order> compiled_preview;
+                std::string compile_err;
+                bool compile_ok = true;
+
+                if (smart_apply) {
+                  compile_ok = sim.compile_orders_smart(selected_ship, *tmpl, append_when_applying, ui.fog_of_war,
+                                                       &compiled_preview, &compile_err);
+                  if (!compile_ok) {
+                    ImGui::TextDisabled("Smart compile failed: %s", compile_err.c_str());
+                  } else {
+                    ImGui::TextDisabled("Smart-compiled orders: %d", static_cast<int>(compiled_preview.size()));
+                    if (ImGui::SmallButton("Copy compiled JSON (portable)##tmpl_copy_compiled_portable")) {
+                      PortableOrderTemplateOptions popt;
+                      popt.viewer_faction_id = ui.viewer_faction_id;
+                      popt.fog_of_war = ui.fog_of_war;
+                      popt.include_source_ids = true;
+                      const std::string json = serialize_order_template_to_json_portable(
+                          sim, selected_template + " (compiled)", compiled_preview, popt);
+                      ImGui::SetClipboardText(json.c_str());
+                      status = "Copied compiled template JSON (portable) to clipboard.";
+                    }
+                    if (ImGui::IsItemHovered()) {
+                      ImGui::SetTooltip(
+                          "Copies the smart-compiled orders (with inserted TravelViaJump legs) as portable JSON.");
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("Copy legacy IDs##tmpl_copy_compiled_legacy")) {
+                      const std::string json = nebula4x::serialize_order_template_to_json(
+                          selected_template + " (compiled)", compiled_preview);
+                      ImGui::SetClipboardText(json.c_str());
+                      status = "Copied compiled template JSON (legacy IDs) to clipboard.";
+                    }
+                    if (ImGui::IsItemHovered()) {
+                      ImGui::SetTooltip("Legacy ID export (only safe within the same save).");
+                    }
+                  }
+                } else {
+                  compiled_preview = *tmpl;
+                }
+
+                if (compile_ok) {
+                  std::vector<Order> final_q;
+                  if (append_when_applying && ship_orders) final_q = ship_orders->queue;
+                  final_q.insert(final_q.end(), compiled_preview.begin(), compiled_preview.end());
+
+                  nebula4x::OrderPlannerOptions opts;
+                  opts.viewer_faction_id = ui.viewer_faction_id;
+                  const auto plan = nebula4x::compute_order_plan_for_queue(sim, selected_ship, final_q, opts);
+
+                  const auto* cur_ship = find_ptr(s.ships, selected_ship);
+                  const auto* cur_design = cur_ship ? sim.find_design(cur_ship->design_id) : nullptr;
+                  const double fuel_cap = cur_design ? std::max(0.0, cur_design->fuel_capacity_tons) : 0.0;
+
+                  if (plan.ok) {
+                    if (plan.steps.empty()) {
+                      ImGui::TextDisabled("Plan: (no resulting orders)");
+                    } else if (fuel_cap > 1e-9) {
+                      ImGui::TextDisabled("Plan: +%.2f d | Fuel: %.0f -> %.0f / %.0f", plan.total_eta_days,
+                                          plan.start_fuel_tons, plan.end_fuel_tons, fuel_cap);
+                    } else {
+                      ImGui::TextDisabled("Plan: +%.2f d", plan.total_eta_days);
+                    }
+                    if (plan.truncated) {
+                      ImGui::SameLine();
+                      ImGui::TextDisabled("(truncated: %s)", plan.truncated_reason.c_str());
+                    }
+                  } else {
+                    ImGui::TextDisabled("Plan: unavailable");
+                  }
+
+                  if (!compiled_preview.empty()) {
+                    const int kMaxShow = 48;
+                    const int n = static_cast<int>(compiled_preview.size());
+                    const int show = std::min(n, kMaxShow);
+
+                    ImGui::BeginChild("##tmpl_compiled_preview_sel", ImVec2(0, 110), true,
+                                      ImGuiWindowFlags_HorizontalScrollbar);
+                    for (int i = 0; i < show; ++i) {
+                      const std::string ord_s =
+                          order_to_ui_string(sim, compiled_preview[static_cast<std::size_t>(i)], ui.viewer_faction_id,
+                                             ui.fog_of_war);
+                      ImGui::BulletText("%d. %s", i + 1, ord_s.c_str());
+                    }
+                    if (n > show) {
+                      ImGui::TextDisabled("... (%d more)", n - show);
+                    }
+                    ImGui::EndChild();
+                  } else {
+                    ImGui::TextDisabled("(no orders)");
+                  }
+
+                  if (plan.ok) {
+                    ImGui::Spacing();
+                    if (ImGui::TreeNode("Mission planner table/export##tmpl_apply_plan_table")) {
+                      static bool collapse_jump_chains = true;
+                      ImGui::Checkbox("Collapse jump chains##tmpl_apply_collapse", &collapse_jump_chains);
+                      if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip(
+                            "When enabled, consecutive TravelViaJump orders are collapsed into a single row in the planner view.");
+                      }
+
+                      OrderPlanRenderOptions ro;
+                      ro.viewer_faction_id = ui.viewer_faction_id;
+                      ro.fog_of_war = ui.fog_of_war;
+                      ro.max_rows = 256;
+                      ro.collapse_jump_chains = collapse_jump_chains;
+                      draw_order_plan_table(sim, final_q, plan, fuel_cap, ro, "##tmpl_apply_plan_table");
+                      ImGui::TreePop();
+                    }
+                  }
+
+                  // Fleet-level preview for applying the same template to all ships.
+                  if (ui.selected_fleet_id != kInvalidId) {
+                    if (ImGui::TreeNode("Fleet mission planner preview##tmpl_fleet_plan_preview")) {
+                      static bool fleet_predict_orbits = true;
+                      static bool fleet_simulate_refuel = true;
+                      static int fleet_max_orders = 512;
+                      static int fleet_max_ships = 64;
+                      static float fleet_reserve_pct = 10.0f;
+                      static bool fleet_highlight_reserve = true;
+
+                      ImGui::Checkbox("Predict orbits##tmpl_fleet_predict", &fleet_predict_orbits);
+                      ImGui::SameLine();
+                      ImGui::Checkbox("Simulate refuel##tmpl_fleet_refuel", &fleet_simulate_refuel);
+
+                      ImGui::PushItemWidth(120);
+                      ImGui::InputInt("Max orders##tmpl_fleet_max_orders", &fleet_max_orders);
+                      ImGui::SameLine();
+                      ImGui::InputInt("Max ships##tmpl_fleet_max_ships", &fleet_max_ships);
+                      ImGui::PopItemWidth();
+
+                      ImGui::Checkbox("Highlight fuel reserve##tmpl_fleet_reserve_on", &fleet_highlight_reserve);
+                      ImGui::SameLine();
+                      ImGui::PushItemWidth(120);
+                      ImGui::SliderFloat("Reserve##tmpl_fleet_reserve", &fleet_reserve_pct, 0.0f, 100.0f, "%.0f%%");
+                      ImGui::PopItemWidth();
+
+                      FleetPlanPreviewOptions fpo;
+                      fpo.viewer_faction_id = ui.viewer_faction_id;
+                      fpo.fog_of_war = ui.fog_of_war;
+                      fpo.smart_apply = smart_apply;
+                      fpo.append_when_applying = append_when_applying;
+                      fpo.restrict_to_discovered = ui.fog_of_war;
+                      fpo.predict_orbits = fleet_predict_orbits;
+                      fpo.simulate_refuel = fleet_simulate_refuel;
+                      fpo.max_orders = std::clamp(fleet_max_orders, 1, 4096);
+                      fpo.max_ships = std::clamp(fleet_max_ships, 1, 4096);
+                      fpo.highlight_reserve = fleet_highlight_reserve;
+                      fpo.reserve_fraction = std::clamp(static_cast<double>(fleet_reserve_pct) / 100.0, 0.0, 1.0);
+                      fpo.collapse_jump_chains = true;
+
+                      draw_fleet_plan_preview(sim, ui.selected_fleet_id, *tmpl, fpo, "##tmpl_fleet");
+                      ImGui::TreePop();
+                    }
+                  }
+                }
+
+                ImGui::TreePop();
+              }
+            }
+          }
+
           ImGui::Spacing();
           ImGui::InputText("Save name##tmpl_save", save_name_buf, IM_ARRAYSIZE(save_name_buf));
           ImGui::Checkbox("Overwrite existing##tmpl_overwrite", &overwrite_existing);
@@ -2971,6 +5169,514 @@ const bool can_up = (i > 0);
             }
           }
           if (!can_save) ImGui::EndDisabled();
+
+          ImGui::Separator();
+          ImGui::Text("Template exchange (clipboard)");
+
+          if (ImGui::SmallButton("Paste template JSON from clipboard")) {
+            const char* clip_c = ImGui::GetClipboardText();
+            if (!clip_c || clip_c[0] == '\0') {
+              status = "Clipboard is empty.";
+            } else {
+              std::string err;
+              PortableTemplateImportSession sess;
+              if (!start_portable_template_import_session(sim, ui.viewer_faction_id, ui.fog_of_war, std::string(clip_c), &sess,
+                                                         &err)) {
+                status = err.empty() ? "Import failed." : err;
+              } else {
+                import_session = std::move(sess);
+                import_session_active = true;
+
+                imported_orders.clear();
+                imported_name_from_json = import_session.template_name;
+
+                const std::string suggested =
+                    !imported_name_from_json.empty() ? imported_name_from_json : std::string("Imported Template");
+                std::snprintf(import_name_buf, sizeof(import_name_buf), "%s", suggested.c_str());
+
+                if (import_session.issues.empty()) {
+                  nebula4x::ParsedOrderTemplate parsed;
+                  if (finalize_portable_template_import_session(sim, &import_session, &parsed, &err)) {
+                    imported_orders = std::move(parsed.orders);
+                    imported_name_from_json = parsed.name;
+                    import_session_active = false;
+                    status = "Parsed template from clipboard (" + std::to_string(imported_orders.size()) + " orders).";
+                  } else {
+                    status = err.empty() ? "Import failed." : err;
+                  }
+                } else {
+                  status = "Import parsed (" + std::to_string(import_session.total_orders) + " orders) — needs resolution (" +
+                           std::to_string(import_session.issues.size()) + " refs).";
+                }
+              }
+            }
+          }
+          ImGui::SameLine();
+          if (ImGui::SmallButton("Clear import buffer")) {
+            imported_orders.clear();
+            imported_name_from_json.clear();
+            import_session = PortableTemplateImportSession{};
+            import_session_active = false;
+            import_name_buf[0] = '\0';
+            status.clear();
+          }
+
+          ImGui::InputText("Import name##tmpl_import", import_name_buf, IM_ARRAYSIZE(import_name_buf));
+          ImGui::Checkbox("Overwrite existing##tmpl_import_overwrite", &import_overwrite_existing);
+
+          const bool has_imported_orders = !imported_orders.empty();
+          const bool has_pending_resolution = import_session_active && !import_session.issues.empty() && !has_imported_orders;
+
+          if (!has_imported_orders && !has_pending_resolution) {
+            ImGui::TextDisabled("No imported template loaded.");
+          } else if (has_imported_orders) {
+            ImGui::TextDisabled("Imported preview (%d orders)", static_cast<int>(imported_orders.size()));
+
+            const int kMaxShow = 64;
+            const int n = static_cast<int>(imported_orders.size());
+            const int show = std::min(n, kMaxShow);
+
+            ImGui::BeginChild("##tmpl_import_preview", ImVec2(0, 120), true, ImGuiWindowFlags_HorizontalScrollbar);
+            for (int i = 0; i < show; ++i) {
+              const std::string ord_s =
+                  order_to_ui_string(sim, imported_orders[static_cast<std::size_t>(i)], ui.viewer_faction_id, ui.fog_of_war);
+              ImGui::BulletText("%d. %s", i + 1, ord_s.c_str());
+            }
+            if (n > show) {
+              ImGui::TextDisabled("... (%d more)", n - show);
+            }
+            ImGui::EndChild();
+          } else {
+            // Pending resolution: show a raw preview plus a resolution UI.
+            ImGui::TextDisabled("Imported template loaded (%d orders) — needs resolution (%d refs)",
+                                import_session.total_orders, static_cast<int>(import_session.issues.size()));
+
+            // Raw preview of order types + refs.
+            auto ref_brief = [](const nebula4x::json::Value& rv) -> std::string {
+              if (!rv.is_object()) return {};
+              const auto& ro = rv.object();
+              const std::string nm = ro.count("name") ? ro.at("name").string_value() : std::string();
+              const std::string sys = ro.count("system") ? ro.at("system").string_value() : std::string();
+              const std::string dst = ro.count("dest_system") ? ro.at("dest_system").string_value() : std::string();
+              const std::string body = ro.count("body") ? ro.at("body").string_value() : std::string();
+              const std::string fac = ro.count("faction") ? ro.at("faction").string_value() : std::string();
+
+              std::string out = nm;
+              if (!body.empty()) {
+                if (!out.empty()) out += " — ";
+                out += body;
+              }
+              if (!fac.empty()) {
+                if (!out.empty()) out += " — ";
+                out += fac;
+              }
+              if (!sys.empty()) {
+                if (!out.empty()) out += " @ ";
+                out += sys;
+              }
+              if (!dst.empty()) {
+                out += " -> ";
+                out += dst;
+              }
+              return out;
+            };
+
+            const auto* robj = import_session.root.is_object() ? &import_session.root.object() : nullptr;
+            const nebula4x::json::Value* orders_v = nullptr;
+            if (robj) {
+              if (auto ito = robj->find("orders"); ito != robj->end()) orders_v = &ito->second;
+            }
+
+            ImGui::BeginChild("##tmpl_import_preview_raw", ImVec2(0, 120), true, ImGuiWindowFlags_HorizontalScrollbar);
+            if (!orders_v || !orders_v->is_array()) {
+              ImGui::TextDisabled("(invalid template JSON: missing orders array)");
+            } else {
+              const int kMaxShow = 64;
+              const int n = static_cast<int>(orders_v->array().size());
+              const int show = std::min(n, kMaxShow);
+              for (int i = 0; i < show; ++i) {
+                const auto& ov = orders_v->array()[static_cast<std::size_t>(i)];
+                if (!ov.is_object()) {
+                  ImGui::BulletText("%d. (invalid order)", i + 1);
+                  continue;
+                }
+                const auto& o = ov.object();
+                const std::string type = o.count("type") ? o.at("type").string_value() : std::string("(unknown)");
+
+                std::string line = type;
+                auto add_ref = [&](const char* key, const char* tag) {
+                  if (auto it = o.find(key); it != o.end()) {
+                    const std::string brief = ref_brief(it->second);
+                    if (!brief.empty()) {
+                      line += " | ";
+                      line += tag;
+                      line += ": ";
+                      line += brief;
+                    }
+                  }
+                };
+
+                add_ref("body_ref", "body");
+                add_ref("colony_ref", "colony");
+                add_ref("dropoff_colony_ref", "dropoff");
+                add_ref("jump_point_ref", "jump");
+                add_ref("target_ship_ref", "ship");
+                add_ref("anomaly_ref", "anomaly");
+                add_ref("wreck_ref", "wreck");
+                add_ref("last_known_system_ref", "last_known_sys");
+
+                ImGui::BulletText("%d. %s", i + 1, line.c_str());
+              }
+              if (n > show) {
+                ImGui::TextDisabled("... (%d more)", n - show);
+              }
+            }
+            ImGui::EndChild();
+
+            if (ImGui::SmallButton("Copy resolution report##tmpl_import_copy_report")) {
+              std::ostringstream oss;
+              oss << "Order template import resolution report\n";
+              oss << "Template: "
+                  << (import_session.template_name.empty() ? std::string("(unnamed)") : import_session.template_name)
+                  << "\n";
+              oss << "Orders: " << import_session.total_orders << "\n";
+              oss << "Issues: " << import_session.issues.size() << "\n\n";
+              for (std::size_t i = 0; i < import_session.issues.size(); ++i) {
+                const auto& iss = import_session.issues[i];
+                oss << (i + 1) << ". Order #" << (iss.order_index + 1) << " (" << iss.order_type << ") "
+                    << iss.id_key << " = " << iss.ref_summary << "\n";
+                if (!iss.message.empty()) oss << "   " << iss.message << "\n";
+                if (!iss.candidates.empty()) {
+                  oss << "   Candidates:\n";
+                  for (const auto& c : iss.candidates) {
+                    oss << "     - " << c.label << " [id " << c.id << "]\n";
+                  }
+                } else {
+                  oss << "   Candidates: (none)\n";
+                }
+                oss << "\n";
+              }
+              const std::string txt = oss.str();
+              ImGui::SetClipboardText(txt.c_str());
+              status = "Copied import resolution report to clipboard.";
+            }
+            if (ImGui::IsItemHovered()) {
+              ImGui::SetTooltip("Copies a plain-text report of unresolved/ambiguous refs for debugging or sharing.");
+            }
+
+            if (ImGui::CollapsingHeader("Resolve references (required)##tmpl_import_resolve",
+                                        ImGuiTreeNodeFlags_DefaultOpen)) {
+              bool all_selected = true;
+              bool has_unresolvable = false;
+
+              const ImGuiTableFlags tbl_flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY |
+                                               ImGuiTableFlags_Resizable;
+              if (ImGui::BeginTable("##tmpl_import_issue_table", 5, tbl_flags, ImVec2(0, 220))) {
+                ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, 28);
+                ImGui::TableSetupColumn("Order", ImGuiTableColumnFlags_WidthFixed, 72);
+                ImGui::TableSetupColumn("Field", ImGuiTableColumnFlags_WidthFixed, 130);
+                ImGui::TableSetupColumn("Ref", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+                ImGui::TableSetupColumn("Selection", ImGuiTableColumnFlags_WidthStretch, 1.2f);
+                ImGui::TableHeadersRow();
+
+                for (int row = 0; row < static_cast<int>(import_session.issues.size()); ++row) {
+                  auto& iss = import_session.issues[static_cast<std::size_t>(row)];
+                  if (!iss.candidates.empty() && iss.selected_candidate < 0) all_selected = false;
+                  if (iss.candidates.empty()) {
+                    has_unresolvable = true;
+                    all_selected = false;
+                  }
+
+                  ImGui::TableNextRow();
+
+                  ImGui::TableSetColumnIndex(0);
+                  ImGui::Text("%d", row + 1);
+
+                  ImGui::TableSetColumnIndex(1);
+                  ImGui::Text("#%d", iss.order_index + 1);
+                  if (!iss.order_type.empty() && ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("%s", iss.order_type.c_str());
+                  }
+
+                  ImGui::TableSetColumnIndex(2);
+                  ImGui::TextUnformatted(iss.id_key.c_str());
+
+                  ImGui::TableSetColumnIndex(3);
+                  ImGui::TextUnformatted(iss.ref_summary.c_str());
+                  if (!iss.message.empty() && ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("%s", iss.message.c_str());
+                  }
+
+                  ImGui::TableSetColumnIndex(4);
+                  ImGui::PushID(row);
+                  if (iss.candidates.empty()) {
+                    ImGui::TextDisabled("(no matches)");
+                  } else {
+                    const char* preview = (iss.selected_candidate >= 0)
+                                              ? iss.candidates[static_cast<std::size_t>(iss.selected_candidate)].label.c_str()
+                                              : "(select...)";
+                    if (ImGui::BeginCombo("##tmpl_import_issue_sel", preview)) {
+                      for (int j = 0; j < static_cast<int>(iss.candidates.size()); ++j) {
+                        const bool sel = (iss.selected_candidate == j);
+                        if (ImGui::Selectable(iss.candidates[static_cast<std::size_t>(j)].label.c_str(), sel)) {
+                          iss.selected_candidate = j;
+                        }
+                      }
+                      ImGui::EndCombo();
+                    }
+                  }
+                  ImGui::PopID();
+                }
+
+                ImGui::EndTable();
+              }
+
+              if (has_unresolvable) {
+                ImGui::TextDisabled(
+                    "Some references have no matches in this save (or are hidden by fog-of-war). Edit the JSON or discover the targets.");
+              } else if (!all_selected) {
+                ImGui::TextDisabled("Select an entity for each ambiguous reference, then Finalize.");
+              }
+
+              const bool can_finalize = !has_unresolvable && all_selected;
+              if (!can_finalize) ImGui::BeginDisabled();
+              if (ImGui::SmallButton("Finalize import##tmpl_import_finalize")) {
+                nebula4x::ParsedOrderTemplate parsed;
+                std::string err;
+                if (finalize_portable_template_import_session(sim, &import_session, &parsed, &err)) {
+                  imported_orders = std::move(parsed.orders);
+                  imported_name_from_json = parsed.name;
+                  import_session = PortableTemplateImportSession{};
+                  import_session_active = false;
+                  status = "Finalized import (" + std::to_string(imported_orders.size()) + " orders).";
+                } else {
+                  status = err.empty() ? "Finalize import failed." : err;
+                }
+              }
+              if (!can_finalize) ImGui::EndDisabled();
+            }
+          }
+
+
+          if (!imported_orders.empty()) {
+            if (ImGui::SmallButton("Apply imported to this ship")) {
+              if (smart_apply) {
+                std::string err;
+                if (!sim.apply_orders_to_ship_smart(selected_ship, imported_orders, append_when_applying, ui.fog_of_war,
+                                                    &err)) {
+                  status = err.empty() ? "Apply imported (smart) failed." : err;
+                } else {
+                  status = "Applied imported orders to ship (smart).";
+                }
+              } else {
+                if (!sim.apply_orders_to_ship(selected_ship, imported_orders, append_when_applying)) {
+                  status = "Apply imported failed.";
+                } else {
+                  status = "Applied imported orders to ship.";
+                }
+              }
+            }
+
+            if (ui.selected_fleet_id != kInvalidId) {
+              ImGui::SameLine();
+              const bool has_fleet = (find_ptr(s.fleets, ui.selected_fleet_id) != nullptr);
+              const bool can_apply_fleet = has_fleet;
+              if (!can_apply_fleet) ImGui::BeginDisabled();
+              if (ImGui::SmallButton("Apply imported to selected fleet")) {
+                if (smart_apply) {
+                  std::string err;
+                  if (!sim.apply_orders_to_fleet_smart(ui.selected_fleet_id, imported_orders, append_when_applying,
+                                                      ui.fog_of_war, &err)) {
+                    status = err.empty() ? "Apply imported to fleet (smart) failed." : err;
+                  } else {
+                    status = "Applied imported orders to fleet (smart).";
+                  }
+                } else {
+                  if (!sim.apply_orders_to_fleet(ui.selected_fleet_id, imported_orders, append_when_applying)) {
+                    status = "Apply imported to fleet failed.";
+                  } else {
+                    status = "Applied imported orders to fleet.";
+                  }
+                }
+              }
+              if (!can_apply_fleet) ImGui::EndDisabled();
+            }
+
+            if (ImGui::TreeNode("Preview imported apply (ETA/fuel)##tmpl_import_apply_preview")) {
+              std::vector<Order> compiled_preview;
+              std::string compile_err;
+              bool compile_ok = true;
+
+              if (smart_apply) {
+                compile_ok = sim.compile_orders_smart(selected_ship, imported_orders, append_when_applying, ui.fog_of_war,
+                                                     &compiled_preview, &compile_err);
+                if (!compile_ok) {
+                  ImGui::TextDisabled("Smart compile failed: %s", compile_err.c_str());
+                } else {
+                  ImGui::TextDisabled("Smart-compiled orders: %d", static_cast<int>(compiled_preview.size()));
+                  if (ImGui::SmallButton("Copy compiled JSON (portable)##tmpl_import_copy_compiled_portable")) {
+                    PortableOrderTemplateOptions popt;
+                    popt.viewer_faction_id = ui.viewer_faction_id;
+                    popt.fog_of_war = ui.fog_of_war;
+                    popt.include_source_ids = true;
+                    const std::string json = serialize_order_template_to_json_portable(
+                        sim, std::string(import_name_buf) + " (compiled)", compiled_preview, popt);
+                    ImGui::SetClipboardText(json.c_str());
+                    status = "Copied compiled imported JSON (portable) to clipboard.";
+                  }
+                  if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Portable export: name-resolved JSON for pasting into other saves.");
+                  }
+                  ImGui::SameLine();
+                  if (ImGui::SmallButton("Copy legacy IDs##tmpl_import_copy_compiled_legacy")) {
+                    const std::string json = nebula4x::serialize_order_template_to_json(
+                        std::string(import_name_buf) + " (compiled)", compiled_preview);
+                    ImGui::SetClipboardText(json.c_str());
+                    status = "Copied compiled imported JSON (legacy IDs) to clipboard.";
+                  }
+                  if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Legacy ID export (only safe within the same save).");
+                  }
+                }
+              } else {
+                compiled_preview = imported_orders;
+              }
+
+              if (compile_ok) {
+                std::vector<Order> final_q;
+                if (append_when_applying && ship_orders) final_q = ship_orders->queue;
+                final_q.insert(final_q.end(), compiled_preview.begin(), compiled_preview.end());
+
+                nebula4x::OrderPlannerOptions opts;
+                opts.viewer_faction_id = ui.viewer_faction_id;
+                const auto plan = nebula4x::compute_order_plan_for_queue(sim, selected_ship, final_q, opts);
+
+                const auto* cur_ship = find_ptr(s.ships, selected_ship);
+                const auto* cur_design = cur_ship ? sim.find_design(cur_ship->design_id) : nullptr;
+                const double fuel_cap = cur_design ? std::max(0.0, cur_design->fuel_capacity_tons) : 0.0;
+
+                if (plan.ok) {
+                  if (plan.steps.empty()) {
+                    ImGui::TextDisabled("Plan: (no resulting orders)");
+                  } else if (fuel_cap > 1e-9) {
+                    ImGui::TextDisabled("Plan: +%.2f d | Fuel: %.0f -> %.0f / %.0f", plan.total_eta_days,
+                                        plan.start_fuel_tons, plan.end_fuel_tons, fuel_cap);
+                  } else {
+                    ImGui::TextDisabled("Plan: +%.2f d", plan.total_eta_days);
+                  }
+                  if (plan.truncated) {
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(truncated: %s)", plan.truncated_reason.c_str());
+                  }
+                } else {
+                  ImGui::TextDisabled("Plan: unavailable");
+                }
+
+                if (!compiled_preview.empty()) {
+                  const int kMaxShow = 48;
+                  const int n = static_cast<int>(compiled_preview.size());
+                  const int show = std::min(n, kMaxShow);
+
+                  ImGui::BeginChild("##tmpl_import_compiled_preview", ImVec2(0, 110), true,
+                                    ImGuiWindowFlags_HorizontalScrollbar);
+                  for (int i = 0; i < show; ++i) {
+                    const std::string ord_s =
+                        order_to_ui_string(sim, compiled_preview[static_cast<std::size_t>(i)], ui.viewer_faction_id,
+                                           ui.fog_of_war);
+                    ImGui::BulletText("%d. %s", i + 1, ord_s.c_str());
+                  }
+                  if (n > show) {
+                    ImGui::TextDisabled("... (%d more)", n - show);
+                  }
+                  ImGui::EndChild();
+                } else {
+                  ImGui::TextDisabled("(no orders)");
+                }
+
+                if (plan.ok) {
+                  ImGui::Spacing();
+                  if (ImGui::TreeNode("Mission planner table/export##tmpl_import_plan_table")) {
+                    static bool collapse_jump_chains = true;
+                    ImGui::Checkbox("Collapse jump chains##tmpl_import_collapse", &collapse_jump_chains);
+                    if (ImGui::IsItemHovered()) {
+                      ImGui::SetTooltip(
+                          "When enabled, consecutive TravelViaJump orders are collapsed into a single row in the planner view.");
+                    }
+
+                    OrderPlanRenderOptions ro;
+                    ro.viewer_faction_id = ui.viewer_faction_id;
+                    ro.fog_of_war = ui.fog_of_war;
+                    ro.max_rows = 256;
+                    ro.collapse_jump_chains = collapse_jump_chains;
+                    draw_order_plan_table(sim, final_q, plan, fuel_cap, ro, "##tmpl_import_plan_table");
+                    ImGui::TreePop();
+                  }
+                }
+
+                // Fleet-level preview for applying the same imported template to all ships.
+                if (ui.selected_fleet_id != kInvalidId) {
+                  if (ImGui::TreeNode("Fleet mission planner preview##tmpl_import_fleet_plan_preview")) {
+                    static bool fleet_predict_orbits = true;
+                    static bool fleet_simulate_refuel = true;
+                    static int fleet_max_orders = 512;
+                    static int fleet_max_ships = 64;
+                    static float fleet_reserve_pct = 10.0f;
+                    static bool fleet_highlight_reserve = true;
+
+                    ImGui::Checkbox("Predict orbits##tmpl_import_fleet_predict", &fleet_predict_orbits);
+                    ImGui::SameLine();
+                    ImGui::Checkbox("Simulate refuel##tmpl_import_fleet_refuel", &fleet_simulate_refuel);
+
+                    ImGui::PushItemWidth(120);
+                    ImGui::InputInt("Max orders##tmpl_import_fleet_max_orders", &fleet_max_orders);
+                    ImGui::SameLine();
+                    ImGui::InputInt("Max ships##tmpl_import_fleet_max_ships", &fleet_max_ships);
+                    ImGui::PopItemWidth();
+
+                    ImGui::Checkbox("Highlight fuel reserve##tmpl_import_fleet_reserve_on", &fleet_highlight_reserve);
+                    ImGui::SameLine();
+                    ImGui::PushItemWidth(120);
+                    ImGui::SliderFloat("Reserve##tmpl_import_fleet_reserve", &fleet_reserve_pct, 0.0f, 100.0f, "%.0f%%");
+                    ImGui::PopItemWidth();
+
+                    FleetPlanPreviewOptions fpo;
+                    fpo.viewer_faction_id = ui.viewer_faction_id;
+                    fpo.fog_of_war = ui.fog_of_war;
+                    fpo.smart_apply = smart_apply;
+                    fpo.append_when_applying = append_when_applying;
+                    fpo.restrict_to_discovered = ui.fog_of_war;
+                    fpo.predict_orbits = fleet_predict_orbits;
+                    fpo.simulate_refuel = fleet_simulate_refuel;
+                    fpo.max_orders = std::clamp(fleet_max_orders, 1, 4096);
+                    fpo.max_ships = std::clamp(fleet_max_ships, 1, 4096);
+                    fpo.highlight_reserve = fleet_highlight_reserve;
+                    fpo.reserve_fraction = std::clamp(static_cast<double>(fleet_reserve_pct) / 100.0, 0.0, 1.0);
+                    fpo.collapse_jump_chains = true;
+
+                    draw_fleet_plan_preview(sim, ui.selected_fleet_id, imported_orders, fpo, "##tmpl_import_fleet");
+                    ImGui::TreePop();
+                  }
+                }
+              }
+
+              ImGui::TreePop();
+            }
+          }
+
+          const bool can_import_save = !imported_orders.empty() && std::strlen(import_name_buf) > 0;
+          if (!can_import_save) ImGui::BeginDisabled();
+          if (ImGui::SmallButton("Save imported template")) {
+            std::string err;
+            if (sim.save_order_template(import_name_buf, imported_orders, import_overwrite_existing, &err)) {
+              status = std::string("Imported template saved: ") + import_name_buf;
+              selected_template = import_name_buf;
+              std::snprintf(rename_buf, sizeof(rename_buf), "%s", selected_template.c_str());
+              confirm_delete = false;
+            } else {
+              status = err.empty() ? "Import save failed." : err;
+            }
+          }
+          if (!can_import_save) ImGui::EndDisabled();
 
           ImGui::Spacing();
           if (selected_template.empty()) {
@@ -7688,20 +10394,18 @@ if (colony->shipyard_queue.empty()) {
             ImGui::TextUnformatted(sys ? sys->name.c_str() : "?");
             ImGui::TableSetColumnIndex(2);
             const ShipOrders* so = find_ptr(s.ship_orders, sid);
-            if (!so || so->queue.empty()) {
+            const bool idle = ship_orders_is_idle_for_automation(so);
+
+            if (idle) {
               ImGui::TextDisabled("Idle");
             } else {
-              std::string order_str = order_to_string(so->queue.front());
-              if (so->repeat) {
-                if (so->repeat_count_remaining < 0) {
-                  order_str += " (repeat inf)";
-                } else if (so->repeat_count_remaining == 0) {
-                  order_str += " (repeat stop)";
-                } else {
-                  order_str += " (repeat " + std::to_string(so->repeat_count_remaining) + ")";
-                }
-              }
+              std::string order_str = ship_orders_first_action_label(sim, so, ui.viewer_faction_id, ui.fog_of_war);
+              if (order_str.empty()) order_str = "(busy)";
               ImGui::TextUnformatted(order_str.c_str());
+            }
+
+            if (ImGui::IsItemHovered()) {
+              draw_ship_orders_tooltip(sim, so, ui.viewer_faction_id, ui.fog_of_war);
             }
             ImGui::TableSetColumnIndex(3);
             if (cap > 0.0) {
@@ -11954,21 +14658,8 @@ void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& 
           if (r.orders > 0) {
             ImGui::Text("%d", r.orders);
             if (ImGui::IsItemHovered()) {
-              if (const ShipOrders* so = find_ptr(s.ship_orders, r.id)) {
-                if (!so->queue.empty()) {
-                  ImGui::BeginTooltip();
-                  ImGui::TextUnformatted("Current orders:");
-                  const int max_show = std::min(6, (int)so->queue.size());
-                  for (int oi = 0; oi < max_show; ++oi) {
-                    const std::string os = nebula4x::order_to_string(so->queue[(std::size_t)oi]);
-                    ImGui::BulletText("%s", os.c_str());
-                  }
-                  if ((int)so->queue.size() > max_show) {
-                    ImGui::TextDisabled("... (%d more)", (int)so->queue.size() - max_show);
-                  }
-                  ImGui::EndTooltip();
-                }
-              }
+              const ShipOrders* so = find_ptr(s.ship_orders, r.id);
+              draw_ship_orders_tooltip(sim, so, ui.viewer_faction_id, ui.fog_of_war, /*max_lines=*/8);
             }
           } else {
             ImGui::TextDisabled("0");
