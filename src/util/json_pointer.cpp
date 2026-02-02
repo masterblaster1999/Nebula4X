@@ -7,6 +7,134 @@
 
 namespace nebula4x {
 
+namespace {
+
+using ObjKV = json::Object::value_type;
+
+// Return pointers to object kv pairs in sorted key order (deterministic traversal).
+std::vector<const ObjKV*> sorted_object_items(const json::Object& o) {
+  std::vector<const ObjKV*> items;
+  items.reserve(o.size());
+  for (const auto& kv : o) items.push_back(&kv);
+  std::sort(items.begin(), items.end(), [](const ObjKV* a, const ObjKV* b) {
+    return a->first < b->first;
+  });
+  return items;
+}
+
+bool token_looks_like_glob(std::string_view tok) {
+  // We opt into glob matching if any potentially-special character is present.
+  // Backslash acts as an escape introducer for '*', '?', and '\\'.
+  return tok.find_first_of("*?\\") != std::string_view::npos;
+}
+
+// Glob match for a single path segment.
+//
+// Supports:
+//   *  any sequence (including empty)
+//   ?  any single character
+//   \* \? \\ for literal '*', '?', '\\'.
+// Backslash before other characters is treated as a literal '\\'.
+bool glob_match(std::string_view text, std::string_view pattern) {
+  std::size_t ti = 0;
+  std::size_t pi = 0;
+
+  std::size_t star_pi = std::string_view::npos;
+  std::size_t star_ti = 0;
+
+  auto peek_pat = [&](std::size_t p, char& out_c, std::size_t& out_advance,
+                      bool& out_wild_any, bool& out_wild_one) -> bool {
+    if (p >= pattern.size()) return false;
+    const char c = pattern[p];
+    out_wild_any = false;
+    out_wild_one = false;
+
+    if (c == '*') {
+      out_c = '*';
+      out_advance = 1;
+      out_wild_any = true;
+      return true;
+    }
+    if (c == '?') {
+      out_c = '?';
+      out_advance = 1;
+      out_wild_one = true;
+      return true;
+    }
+    if (c == '\\' && (p + 1) < pattern.size()) {
+      const char n = pattern[p + 1];
+      if (n == '*' || n == '?' || n == '\\') {
+        out_c = n;
+        out_advance = 2;
+        return true;
+      }
+      // Backslash before a non-special char is treated literally.
+      out_c = '\\';
+      out_advance = 1;
+      return true;
+    }
+
+    out_c = c;
+    out_advance = 1;
+    return true;
+  };
+
+  while (ti < text.size()) {
+    char pc = '\0';
+    std::size_t adv = 0;
+    bool wild_any = false;
+    bool wild_one = false;
+    const bool have_pat = peek_pat(pi, pc, adv, wild_any, wild_one);
+
+    if (have_pat) {
+      if (wild_any) {
+        star_pi = pi;
+        pi += adv;
+        star_ti = ti;
+        continue;
+      }
+      if (wild_one) {
+        ++ti;
+        pi += adv;
+        continue;
+      }
+      if (text[ti] == pc) {
+        ++ti;
+        pi += adv;
+        continue;
+      }
+    }
+
+    // Mismatch: if we have a previous '*', backtrack.
+    if (star_pi != std::string_view::npos) {
+      ++star_ti;
+      ti = star_ti;
+      pi = star_pi + 1; // '*' is always a single character token.
+      continue;
+    }
+
+    return false;
+  }
+
+  // Consume remaining pattern. Only '*' can match an empty suffix.
+  while (pi < pattern.size()) {
+    char pc = '\0';
+    std::size_t adv = 0;
+    bool wild_any = false;
+    bool wild_one = false;
+    if (!peek_pat(pi, pc, adv, wild_any, wild_one)) break;
+    if (wild_any) {
+      pi += adv;
+      continue;
+    }
+    return false;
+  }
+
+  return true;
+}
+
+} // namespace
+
 std::string json_pointer_escape_token(std::string_view token) {
   std::string out;
   out.reserve(token.size());
@@ -247,7 +375,11 @@ std::vector<JsonPointerQueryMatch> query_json_pointer_glob(const json::Value& do
       if (cur.is_object()) {
         const auto* o = cur.as_object();
         if (!o) return;
-        for (const auto& [k, v] : *o) {
+
+        for (const auto* kv : sorted_object_items(*o)) {
+          const auto& k = kv->first;
+          const auto& v = kv->second;
+
           const std::size_t old_sz = cur_path.size();
           cur_path.push_back('/');
           cur_path += json_pointer_escape_token(k);
@@ -275,7 +407,11 @@ std::vector<JsonPointerQueryMatch> query_json_pointer_glob(const json::Value& do
       if (cur.is_object()) {
         const auto* o = cur.as_object();
         if (!o) return;
-        for (const auto& [k, v] : *o) {
+
+        for (const auto* kv : sorted_object_items(*o)) {
+          const auto& k = kv->first;
+          const auto& v = kv->second;
+
           const std::size_t old_sz = cur_path.size();
           cur_path.push_back('/');
           cur_path += json_pointer_escape_token(k);
@@ -304,10 +440,30 @@ std::vector<JsonPointerQueryMatch> query_json_pointer_glob(const json::Value& do
       return;
     }
 
-    // Regular token.
+    // Regular segment. If the token looks like a glob pattern (contains '*'/'?'
+    // and/or backslash escapes), match against all children at this level.
+    const bool seg_is_glob = token_looks_like_glob(t);
+
     if (cur.is_object()) {
       const auto* o = cur.as_object();
       if (!o) return;
+
+      if (seg_is_glob) {
+        for (const auto* kv : sorted_object_items(*o)) {
+          const auto& k = kv->first;
+          const auto& v = kv->second;
+          if (!glob_match(k, t)) continue;
+
+          const std::size_t old_sz = cur_path.size();
+          cur_path.push_back('/');
+          cur_path += json_pointer_escape_token(k);
+          rec(v, ti + 1);
+          cur_path.resize(old_sz);
+          if (ctx.hit_match_limit || ctx.hit_node_limit) return;
+        }
+        return;
+      }
+
       auto it = o->find(t);
       if (it == o->end()) return; // no match
 
@@ -322,6 +478,21 @@ std::vector<JsonPointerQueryMatch> query_json_pointer_glob(const json::Value& do
     if (cur.is_array()) {
       const auto* a = cur.as_array();
       if (!a) return;
+
+      if (seg_is_glob) {
+        for (std::size_t i = 0; i < a->size(); ++i) {
+          const std::string idx = std::to_string(i);
+          if (!glob_match(idx, t)) continue;
+
+          const std::size_t old_sz = cur_path.size();
+          cur_path.push_back('/');
+          cur_path += idx;
+          rec((*a)[i], ti + 1);
+          cur_path.resize(old_sz);
+          if (ctx.hit_match_limit || ctx.hit_node_limit) return;
+        }
+        return;
+      }
 
       std::size_t idx = 0;
       if (!parse_json_pointer_index(t, idx)) {
@@ -354,5 +525,6 @@ std::vector<JsonPointerQueryMatch> query_json_pointer_glob(const json::Value& do
   }
   return out;
 }
+
 
 } // namespace nebula4x

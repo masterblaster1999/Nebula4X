@@ -2,6 +2,7 @@
 #include <cctype>
 #include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -27,6 +28,8 @@
 #include "nebula4x/util/timeline_export.h"
 #include "nebula4x/util/tech_export.h"
 #include "nebula4x/util/json.h"
+#include "nebula4x/util/json_pointer.h"
+#include "nebula4x/util/json_pointer_autocomplete.h"
 #include "nebula4x/util/log.h"
 #include "nebula4x/util/strings.h"
 #include "nebula4x/util/time.h"
@@ -94,6 +97,15 @@ bool has_flag(int argc, char** argv, const std::string& flag) {
   return false;
 }
 
+std::string read_text_file_or_stdin(const std::string& path) {
+  if (path == "-") {
+    std::ostringstream ss;
+    ss << std::cin.rdbuf();
+    return ss.str();
+  }
+  return nebula4x::read_text_file(path);
+}
+
 bool is_absolute_path(const std::string& p) {
   if (p.empty()) return false;
   if (p[0] == '/' || p[0] == '\\') return true; // POSIX or UNC
@@ -141,6 +153,7 @@ const char* event_category_label(nebula4x::EventCategory c) {
     case nebula4x::EventCategory::Intel: return "INTEL";
     case nebula4x::EventCategory::Exploration: return "EXPLORATION";
     case nebula4x::EventCategory::Diplomacy: return "DIPLOMACY";
+    case nebula4x::EventCategory::Terraforming: return "TERRAFORMING";
   }
   return "GENERAL";
 }
@@ -196,6 +209,9 @@ bool parse_event_category(const std::string& raw, nebula4x::EventCategory& out) 
     return true;
   } else if (s == "diplomacy") {
     out = nebula4x::EventCategory::Diplomacy;
+    return true;
+  } else if (s == "terraforming" || s == "terraform") {
+    out = nebula4x::EventCategory::Terraforming;
     return true;
   }
   return false;
@@ -394,6 +410,15 @@ void print_usage(const char* exe) {
   std::cout << "  --diff-saves-json PATH  (optional) Also emit a JSON diff report (PATH can be '-' for stdout)\n";
   std::cout << "  --diff-saves-jsonpatch PATH  (optional) Also emit an RFC 6902 JSON Patch (PATH can be '-' for stdout)\n";
   std::cout << "  --diff-saves-jsonmergepatch PATH  (optional) Also emit an RFC 7386 JSON Merge Patch (PATH can be '-' for stdout)\n";
+  std::cout << "  --query-json FILE PATTERN  Query a JSON document with a JSON pointer glob pattern (FILE can be "-" for stdin)\n";
+  std::cout << "    --query-json-out PATH    (optional) Output JSON report (PATH can be '-' for stdout)\n";
+  std::cout << "    --query-json-jsonl PATH  (optional) Output matches as JSONL/NDJSON (PATH can be '-' for stdout)\n";
+  std::cout << "    --query-max-matches N    Max matches (default: 64)\n";
+  std::cout << "    --query-max-nodes N      Max traversal nodes for '**' patterns (default: 200000)\n";
+  std::cout << "    --query-max-value-chars N  Max value chars per line in text output (default: 240)\n";
+  std::cout << "  --complete-json-pointer FILE PREFIX  Suggest JSON Pointer completions (PREFIX may omit leading '/') (FILE can be \"-\" for stdin)\n";
+  std::cout << "    --complete-max N           Max suggestions (default: 32)\n";
+  std::cout << "    --complete-case-sensitive  Use case-sensitive prefix matching (default: case-insensitive)\n";
   std::cout << "  --apply-save-patch SAVE PATCH  Apply an RFC 6902 JSON Patch to SAVE\n";
   std::cout << "  --apply-save-patch-out PATH   (optional) Output path for the patched save (PATH can be '-' for stdout; default: -)\n";
   std::cout << "  --apply-save-mergepatch SAVE PATCH  Apply an RFC 7386 JSON Merge Patch to SAVE\n";
@@ -475,7 +500,7 @@ void print_usage(const char* exe) {
   std::cout << "  --export-events-jsonl PATH Export the persistent simulation event log to JSONL/NDJSON (PATH can be '-' for stdout)\n";
   std::cout << "  --trace PATH     Write a Chrome trace JSON (PATH can be '-' for stdout)\n";
   std::cout << "    --events-last N         Only print the last N matching events (0 = all)\n";
-  std::cout << "    --events-category NAME  Filter by category (general|research|shipyard|construction|movement|combat|intel|exploration)\n";
+  std::cout << "    --events-category NAME  Filter by category (general|research|shipyard|construction|movement|combat|intel|exploration|diplomacy|terraforming)\n";
   std::cout << "    --events-faction X      Filter by faction id or exact name (case-insensitive)\n";
   std::cout << "    --events-system X       Filter by system id or exact name (case-insensitive)\n";
   std::cout << "    --events-ship X         Filter by ship id or exact name (case-insensitive)\n";
@@ -595,6 +620,254 @@ int main(int argc, char** argv) {
         std::ostream& out = machine_to_stdout ? std::cerr : std::cout;
         out << nebula4x::diff_saves_to_text(a_canon, b_canon);
       }
+      return 0;
+    }
+
+    // JSON pointer autocomplete utility:
+    //   --complete-json-pointer FILE PREFIX
+    //   --complete-json-pointer - PREFIX  (read JSON from stdin)
+    std::string complete_json_path;
+    std::string complete_prefix;
+    const bool complete_json_pointer =
+        get_two_str_args(argc, argv, "--complete-json-pointer", complete_json_path, complete_prefix);
+    const bool complete_json_pointer_flag = has_flag(argc, argv, "--complete-json-pointer");
+    const bool complete_case_sensitive = has_flag(argc, argv, "--complete-case-sensitive");
+    const bool complete_max_flag = has_kv_arg(argc, argv, "--complete-max");
+    const int complete_max = get_int_arg(argc, argv, "--complete-max", 32);
+
+    if (complete_json_pointer_flag && !complete_json_pointer) {
+      std::cerr << "--complete-json-pointer requires two args: --complete-json-pointer FILE PREFIX\n\n";
+      print_usage(argv[0]);
+      return 2;
+    }
+    if (complete_case_sensitive && !complete_json_pointer) {
+      std::cerr << "--complete-case-sensitive requires --complete-json-pointer\n\n";
+      print_usage(argv[0]);
+      return 2;
+    }
+    if (complete_max_flag && !complete_json_pointer) {
+      std::cerr << "--complete-max requires --complete-json-pointer\n\n";
+      print_usage(argv[0]);
+      return 2;
+    }
+
+    if (complete_json_pointer) {
+      const std::string input_label = (complete_json_path == "-" ? std::string("stdin") : complete_json_path);
+
+      std::string doc_text;
+      try {
+        doc_text = read_text_file_or_stdin(complete_json_path);
+      } catch (const std::exception& e) {
+        std::cerr << "complete-json-pointer error: failed to read JSON from " << input_label << ": " << e.what()
+                  << "\n";
+        return 1;
+      }
+
+      nebula4x::json::Value doc;
+      try {
+        doc = nebula4x::json::parse(doc_text);
+      } catch (const std::exception& e) {
+        std::cerr << "complete-json-pointer error: failed to parse JSON from " << input_label << ": " << e.what()
+                  << "\n";
+        return 1;
+      }
+
+      const int max_sug = std::max(0, complete_max);
+      const auto sug = nebula4x::suggest_json_pointer_completions(
+          doc, complete_prefix, max_sug, /*accept_root_slash=*/true, complete_case_sensitive);
+
+      for (const auto& s : sug) {
+        std::cout << s << "\n";
+      }
+
+      if (!quiet) {
+        std::cerr << "complete-json-pointer: " << sug.size() << " suggestions\n";
+      }
+      return 0;
+    }
+
+    // JSON pointer glob query utility:
+    //   --query-json FILE.json PATTERN
+    //   --query-json - PATTERN                       (read JSON from stdin)
+    //   --query-json FILE.json PATTERN --query-json-out OUT.json
+    //   --query-json FILE.json PATTERN --query-json-out -   (JSON to stdout; summary to stderr unless --quiet)
+    //   --query-json FILE.json PATTERN --query-json-jsonl OUT.jsonl
+    //   --query-json FILE.json PATTERN --query-json-jsonl - (JSONL to stdout; summary to stderr unless --quiet)
+    std::string query_json_path;
+    std::string query_pattern;
+    const bool query_json = get_two_str_args(argc, argv, "--query-json", query_json_path, query_pattern);
+    const bool query_json_flag = has_flag(argc, argv, "--query-json");
+    const std::string query_out_path = get_str_arg(argc, argv, "--query-json-out", "");
+    const std::string query_jsonl_path = get_str_arg(argc, argv, "--query-json-jsonl", "");
+    const int query_max_matches = get_int_arg(argc, argv, "--query-max-matches", 64);
+    const int query_max_nodes = get_int_arg(argc, argv, "--query-max-nodes", 200000);
+    const int query_max_value_chars = get_int_arg(argc, argv, "--query-max-value-chars", 240);
+
+    if (query_json_flag && !query_json) {
+      std::cerr << "--query-json requires two args: --query-json FILE PATTERN\n\n";
+      print_usage(argv[0]);
+      return 2;
+    }
+    if (!query_out_path.empty() && !query_json) {
+      std::cerr << "--query-json-out requires --query-json\n\n";
+      print_usage(argv[0]);
+      return 2;
+    }
+    if (!query_jsonl_path.empty() && !query_json) {
+      std::cerr << "--query-json-jsonl requires --query-json\n\n";
+      print_usage(argv[0]);
+      return 2;
+    }
+
+    if (!query_out_path.empty() && !query_jsonl_path.empty() && query_out_path == "-" && query_jsonl_path == "-") {
+      std::cerr << "--query-json-out and --query-json-jsonl cannot both write to stdout ('-')\n";
+      return 2;
+    }
+
+    if (query_json) {
+      const std::string input_label = (query_json_path == "-" ? std::string("stdin") : query_json_path);
+
+      std::string doc_text;
+      try {
+        doc_text = read_text_file_or_stdin(query_json_path);
+      } catch (const std::exception& e) {
+        std::cerr << "query-json error: failed to read JSON from " << input_label << ": " << e.what() << "\n";
+        return 1;
+      }
+
+      nebula4x::json::Value doc;
+      try {
+        doc = nebula4x::json::parse(doc_text);
+      } catch (const std::exception& e) {
+        std::cerr << "query-json error: failed to parse JSON from " << input_label << ": " << e.what() << "\n";
+        return 1;
+      }
+
+      std::string err;
+      nebula4x::JsonPointerQueryStats st;
+      std::string query_pattern_norm = query_pattern;
+      if (!query_pattern_norm.empty() && query_pattern_norm[0] != '/') {
+        query_pattern_norm = "/" + query_pattern_norm;
+      }
+
+      const auto matches = nebula4x::query_json_pointer_glob(
+          doc, query_pattern_norm, /*accept_root_slash=*/true, query_max_matches, query_max_nodes, &st, &err);
+
+      if (!err.empty()) {
+        std::cerr << "query-json error: " << err << "\n";
+        return 1;
+      }
+
+      const bool machine_to_stdout = (!query_out_path.empty() && query_out_path == "-") ||
+                                    (!query_jsonl_path.empty() && query_jsonl_path == "-");
+      std::ostream& info = machine_to_stdout ? std::cerr : std::cout;
+
+      bool wrote_machine = false;
+
+      if (!query_out_path.empty()) {
+        // Machine-readable JSON report.
+        nebula4x::json::Object st_obj;
+        st_obj["nodes_visited"] = static_cast<double>(st.nodes_visited);
+        st_obj["matches"] = static_cast<double>(st.matches);
+        st_obj["hit_match_limit"] = st.hit_match_limit;
+        st_obj["hit_node_limit"] = st.hit_node_limit;
+
+        nebula4x::json::Array match_arr;
+        match_arr.reserve(matches.size());
+        for (const auto& m : matches) {
+          nebula4x::json::Object mo;
+          mo["path"] = m.path;
+          if (m.value) mo["value"] = *m.value;
+          match_arr.push_back(nebula4x::json::object(std::move(mo)));
+        }
+
+        nebula4x::json::Object report;
+        report["pattern"] = query_pattern_norm;
+        report["stats"] = nebula4x::json::object(std::move(st_obj));
+        report["matches"] = nebula4x::json::array(std::move(match_arr));
+
+        std::string out = nebula4x::json::stringify(nebula4x::json::object(std::move(report)), /*indent=*/2);
+        out.push_back('\n');
+
+        if (query_out_path == "-") {
+          std::cout << out;
+        } else {
+          try {
+            nebula4x::write_text_file(query_out_path, out);
+          } catch (const std::exception& e) {
+            std::cerr << "query-json error: failed to write report to " << query_out_path << ": " << e.what() << "\n";
+            return 1;
+          }
+          if (!quiet) {
+            info << "Query report written to " << query_out_path << "\n";
+          }
+        }
+        wrote_machine = true;
+      }
+
+      if (!query_jsonl_path.empty()) {
+        auto emit_jsonl = [&](std::ostream& os) {
+          for (const auto& m : matches) {
+            os << "{\"path\":" << nebula4x::json::stringify(nebula4x::json::Value(m.path), /*indent=*/0) << ",\"value\":";
+            if (m.value) {
+              os << nebula4x::json::stringify(*m.value, /*indent=*/0);
+            } else {
+              os << "null";
+            }
+            os << "}\n";
+          }
+        };
+
+        if (query_jsonl_path == "-") {
+          emit_jsonl(std::cout);
+        } else {
+          std::ostringstream ss;
+          emit_jsonl(ss);
+          try {
+            nebula4x::write_text_file(query_jsonl_path, ss.str());
+          } catch (const std::exception& e) {
+            std::cerr << "query-json error: failed to write JSONL to " << query_jsonl_path << ": " << e.what() << "\n";
+            return 1;
+          }
+          if (!quiet) {
+            info << "Query JSONL written to " << query_jsonl_path << "\n";
+          }
+        }
+        wrote_machine = true;
+      }
+
+      if (wrote_machine) {
+        if (!quiet) {
+          info << "query-json: " << matches.size() << " matches (nodes visited " << st.nodes_visited << ")";
+          if (st.hit_match_limit) info << " [hit match limit]";
+          if (st.hit_node_limit) info << " [hit node limit]";
+          info << "\n";
+        }
+        return 0;
+      }
+
+      // Text output (paths + compact value preview).
+      const int max_chars = std::max(0, query_max_value_chars);
+      for (const auto& m : matches) {
+        std::cout << m.path;
+        if (max_chars > 0 && m.value) {
+          std::string v = nebula4x::json::stringify(*m.value, /*indent=*/0);
+          if ((int)v.size() > max_chars) {
+            v.resize(static_cast<std::size_t>(max_chars));
+            v += "...";
+          }
+          std::cout << "\t" << v;
+        }
+        std::cout << "\n";
+      }
+
+      if (!quiet) {
+        std::cerr << "query-json: " << matches.size() << " matches (nodes visited " << st.nodes_visited << ")";
+        if (st.hit_match_limit) std::cerr << " [hit match limit]";
+        if (st.hit_node_limit) std::cerr << " [hit node limit]";
+        std::cerr << "\n";
+      }
+
       return 0;
     }
 

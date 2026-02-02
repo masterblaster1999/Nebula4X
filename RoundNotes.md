@@ -1,3 +1,60 @@
+## Round 25
+
+- **CLI (`--complete-json-pointer`):** added a JSON Pointer autocomplete mode for scripts and debugging.
+  - `--complete-json-pointer FILE PREFIX` prints full-pointer suggestions (FILE can be `-` for stdin; PREFIX may omit leading `/`).
+  - Tuning flags:
+    - `--complete-max N`
+    - `--complete-case-sensitive`
+- **CLI (`--query-json`):** PATTERN is now forgiving if you omit the leading `/` (it will be added automatically).
+
+Verification:
+- `nebula4x_cli --complete-json-pointer save.json "/systems/0/n"`
+- `echo '{"a":{"b":1}}' | nebula4x_cli --complete-json-pointer - "/a/"`
+- `nebula4x_cli --query-json save.json "**/name"`
+
+---
+
+## Round 24
+
+- **CLI (`--query-json`):** `FILE` can now be `-` to read the JSON document from **stdin**.
+- **CLI (`--query-json`):** added `--query-json-jsonl PATH` to emit matches as **JSONL/NDJSON** (`PATH` can be `-` for stdout).
+- **CLI (events):** `--events-category` now supports `terraforming` and help text includes `diplomacy|terraforming`.
+
+Verification:
+- `echo '{"a":1}' | nebula4x_cli --query-json - "/a"`
+- `nebula4x_cli --query-json save.json "/**/name" --query-json-jsonl -`
+- `nebula4x_cli --dump-events --events-category terraforming`
+
+---
+
+## Round 23
+
+### Added: `--query-json` CLI utility (JSON pointer glob queries)
+
+A lightweight JSON inspection mode for scripts and debugging:
+
+- `--query-json FILE PATTERN` prints matching JSON pointer paths (and compact value snippets) to stdout.
+- `--query-json-out PATH` writes a machine-readable JSON report containing matches + traversal stats.
+- Tuning flags:
+  - `--query-max-matches N`
+  - `--query-max-nodes N`
+  - `--query-max-value-chars N`
+
+### Improved: JSON pointer glob matching
+
+- Deterministic traversal: when expanding objects, keys are visited in sorted order.
+- Added per-segment glob patterns:
+  - `*` matches any substring (including empty)
+  - `?` matches exactly one character
+  - Backslash escapes `*`, `?`, and `\` for literal matches
+
+Verification:
+- `tests/test_json_pointer_glob.cpp` covers `*`/`**`, segment glob patterns, and escaping.
+- Example:
+  - `nebula4x_cli --query-json my.json "/e/1*"`
+
+---
+
 ## Round 22
 
 ### Added: Retarget macro “Auto-map by system” (UI)

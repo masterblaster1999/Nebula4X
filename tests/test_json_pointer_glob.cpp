@@ -30,7 +30,9 @@ int test_json_pointer_glob() {
   const std::string doc_txt = R"({
     "a": {"x": 1, "y": 2},
     "b": [ {"v": 3}, {"v": 4}, {"w": 5} ],
-    "c": {"nested": {"k": 6}}
+    "c": {"nested": {"k": 6}},
+    "d": {"alpha": 7, "alps": 8, "beta": 9, "a*b": 10, "a?c": 11},
+    "e": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
   })";
 
   Value doc = nebula4x::json::parse(doc_txt);
@@ -101,6 +103,56 @@ int test_json_pointer_glob() {
     N4X_ASSERT(err.empty());
     N4X_ASSERT(matches.size() == 3);
     N4X_ASSERT(st.hit_match_limit);
+  }
+
+
+  // Segment glob patterns over object keys.
+  {
+    std::string err;
+    nebula4x::JsonPointerQueryStats st;
+    const auto matches = nebula4x::query_json_pointer_glob(doc, "/d/al*", true, 64, 10000, &st, &err);
+    N4X_ASSERT(err.empty());
+    N4X_ASSERT(matches.size() == 2);
+    N4X_ASSERT(has_path(matches, "/d/alpha"));
+    N4X_ASSERT(has_path(matches, "/d/alps"));
+  }
+
+  // '?' matches exactly one character.
+  {
+    std::string err;
+    nebula4x::JsonPointerQueryStats st;
+    const auto matches = nebula4x::query_json_pointer_glob(doc, "/d/a?ps", true, 64, 10000, &st, &err);
+    N4X_ASSERT(err.empty());
+    N4X_ASSERT(matches.size() == 1);
+    N4X_ASSERT(matches[0].path == "/d/alps");
+  }
+
+  // Escaped '*' and '?' match literally.
+  {
+    std::string err;
+    nebula4x::JsonPointerQueryStats st;
+    const auto m1 = nebula4x::query_json_pointer_glob(doc, "/d/a\\*b", true, 64, 10000, &st, &err);
+    N4X_ASSERT(err.empty());
+    N4X_ASSERT(m1.size() == 1);
+    N4X_ASSERT(m1[0].path == "/d/a*b");
+
+    const auto m2 = nebula4x::query_json_pointer_glob(doc, "/d/a\\?c", true, 64, 10000, &st, &err);
+    N4X_ASSERT(err.empty());
+    N4X_ASSERT(m2.size() == 1);
+    N4X_ASSERT(m2[0].path == "/d/a?c");
+  }
+
+  // Segment glob patterns over array indices (indices are matched as strings).
+  {
+    std::string err;
+    nebula4x::JsonPointerQueryStats st;
+    const auto matches = nebula4x::query_json_pointer_glob(doc, "/e/1*", true, 64, 10000, &st, &err);
+    N4X_ASSERT(err.empty());
+    N4X_ASSERT(matches.size() == 4);
+    N4X_ASSERT(has_path(matches, "/e/1"));
+    N4X_ASSERT(has_path(matches, "/e/10"));
+    N4X_ASSERT(has_path(matches, "/e/11"));
+    N4X_ASSERT(has_path(matches, "/e/12"));
   }
 
   return 0;

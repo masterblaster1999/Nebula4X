@@ -50,12 +50,22 @@ json::Value* resolve_json_pointer(json::Value& doc, const std::string& path,
 // Nebula4X uses JSON Pointer strings per RFC 6901, but many procedural tooling
 // surfaces benefit from addressing *sets* of values instead of exactly one.
 //
-// query_json_pointer_glob extends JSON Pointer syntax with two special tokens:
-//   *  matches any object key or array index at a single path segment
-//   ** matches zero or more path segments (recursive descent)
+// query_json_pointer_glob extends JSON Pointer syntax with wildcards:
+//
+// Segment wildcards:
+//   *   matches any object key or array index at a single path segment
+//   **  matches zero or more path segments (recursive descent)
+//
+// Segment glob patterns (object keys and array indices treated as strings):
+//   - '*' matches any sequence of characters (including empty)
+//   - '?' matches any single character
+//   - Use backslash to escape '*', '?', and '\\' to match them literally
+//     (example: "/d/a\\*b" matches a key named "a*b")
 //
 // These wildcards are only interpreted by the query function; resolve_json_pointer
 // retains strict RFC 6901 semantics.
+//
+// Matching is deterministic: when expanding objects, keys are visited in sorted order.
 struct JsonPointerQueryMatch {
   // JSON Pointer to the matched value.
   std::string path;
