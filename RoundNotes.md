@@ -1,3 +1,302 @@
+## Round 51
+
+- **Delta-save conversion:** added `convert_delta_save_patch_kind()` to convert a delta-save between merge_patch (RFC 7396) and json_patch (RFC 6902) while preserving patch count.
+  - CLI: `--convert-delta-save DELTA` (select output kind via `--delta-save-jsonpatch`)
+  - CLI: `--delta-save-stats DELTA` prints patch size stats (min/med/max/avg)
+
+Verification:
+- Unit: `tests/test_save_delta.cpp`
+
+---
+
+## Round 50
+
+- **CI:** added GitHub Actions workflow to build + run tests headless (no UI) on Ubuntu and Windows.
+- **Delta-save tooling:** added `squash_delta_save_as()` / `squash_delta_save()` to compact history to a single patch (or snapshot).
+  - CLI: `--squash-delta-save DELTA` (optionally rebase via `--delta-save-index N`, optionally convert via `--delta-save-jsonpatch`).
+- **Delta-save performance:** `compute_delta_save_digests()` and CLI `--verify-delta-save` now reconstruct incrementally (O(n) instead of O(n^2)).
+
+Verification:
+- Unit: `tests/test_save_delta.cpp`
+
+---
+
+## Round 49
+
+- **Time Machine (smarter delta history):** added a new storage mode **Delta (JSON Patch)** alongside existing **Delta (Merge Patch)**.
+  - Mode 2 stores RFC 6902 JSON Patch operations between snapshots (often smaller/more precise for arrays).
+  - Delta-save export now matches the active delta storage type (merge patch v1 vs JSON patch v2).
+- **Delta-save v2:** delta-save files now support a `patch_kind` field and JSON Patch patch chains.
+  - CLI: `--delta-save-jsonpatch` to create v2 delta-save files.
+- **JSON Patch apply:** exposed a `apply_json_patch(json::Value&, json::Value)` overload to apply patches without repeated parse/stringify.
+
+Verification:
+- Unit: `tests/test_save_delta.cpp`
+
+---
+
+## Round 48
+
+- **Save merge (even smarter arrays):**
+  - Added *insertion-wise* array merging for append/insert-only changes when the base array is a subsequence of both LOCAL and REMOTE.
+    - Reduces conflicts for log-like or set-like arrays of primitives without requiring a merge key.
+    - Option: `merge_arrays_by_insertions` (default: on), guardrail `max_array_insertion_merge_elems`.
+  - Added *auto key discovery* for key-wise array merging when `id/guid/uuid` aren’t present.
+    - Option: `auto_discover_array_key` (default: on).
+- **CLI:** extended `--merge-saves` with:
+  - `--merge-saves-no-insertion-merge`
+  - `--merge-saves-no-auto-key-discovery`
+
+Verification:
+- Unit: `tests/test_save_merge.cpp`
+
+---
+
+## Round 47
+
+- **Save merge (smart arrays):** three-way merge now supports *key-wise* merging for arrays of objects with a unique id-like field.
+  - Greatly reduces conflicts for common save patterns like `[{"id":...}, ...]` when one side adds/removes elements and the other side edits fields.
+  - Options: `merge_arrays_by_key`, `array_key_candidates` (default: id,guid,uuid), `array_key_override`, `max_array_key_merge_elems`.
+- **CLI:** extended `--merge-saves` with:
+  - `--merge-saves-no-key-merge` to disable key-wise array merging.
+  - `--merge-saves-array-key KEY` to force a specific key name.
+
+Verification:
+- Unit: `tests/test_save_merge.cpp`
+- CLI: `--merge-saves BASE.json LOCAL.json REMOTE.json --merge-saves-report -` (try with arrays of `{id:...}` objects)
+
+---
+
+## Round 46
+
+- **Save tooling:** added a three-way save merge utility (BASE + LOCAL + REMOTE) with a structured conflict report and optional auto-resolution strategy.
+  - New CLI command: `--merge-saves BASE LOCAL REMOTE` (+ `--merge-saves-out`, `--merge-saves-report`, `--merge-saves-strategy`, `--merge-saves-no-array-merge`).
+  - New util module: `save_merge.h/.cpp`.
+- **Docs/Comments:** corrected JSON Merge Patch RFC number to **RFC 7396** across CLI/UI/docs.
+
+Verification:
+- Unit: `tests/test_save_merge.cpp`
+- CLI: run `--merge-saves` with a known base + two variants; inspect report output on conflict.
+
+---
+
+## Round 45
+
+- **CLI (Save diff JSON Patch):** added `--diff-saves-jsonpatch-tests` to emit RFC 6902 JSON Patch output with `test` preconditions (safer when applying to drifted bases).
+
+Verification:
+- CLI: `--diff-saves A.json B.json --diff-saves-jsonpatch OUT.patch.json --diff-saves-jsonpatch-tests`
+- Unit: `tests/test_save_diff.cpp`
+
+---
+
+## Round 44
+
+- **JSON Patch generation (RFC 6902):** `emit_tests` now also emits `test` preconditions for `move`/`copy` sources (in addition to `replace`/`remove`) so drifted bases fail fast.
+- **Docs/Tests:** updated `save_diff.h` docs and added coverage for `test`+`move` and `test`+`copy` (including array append-copy via `/-`).
+
+Verification:
+- Unit: `tests/test_save_diff.cpp`
+
+---
+
+## Round 43
+
+- **JSON Patch generation (RFC 6902):** object-level duplicate-value replacements/additions can now emit `copy` from keys that become stable earlier in the same object diff (not just keys that were already identical).
+- **Headers/Docs:** restored the `include/nebula4x/util/*.h` patch set in the cumulative patch zip and updated `save_diff.h` docs for `emit_tests`.
+- **Tests:** added coverage for copying from an earlier-patched key within the same object diff.
+
+Verification:
+- Unit: `tests/test_save_diff.cpp`
+
+---
+
+## Round 42
+
+- **JSON Patch generation (RFC 6902):** added optional `JsonPatchOptions::emit_tests` to emit `test` preconditions before `replace`/`remove` operations (safer application on drifting bases, at the cost of larger patches).
+- **Tests:** added coverage that verifies `test`+`replace` emission and that mismatched bases fail fast.
+
+Verification:
+- Unit: `tests/test_save_diff.cpp`
+
+---
+
+## Round 41
+
+- **JSON Patch generation (RFC 6902):** when an object key’s value changes to a value that already exists on another *stable* key within the same object, emit a `copy` op (instead of nested diffs/replaces).
+- **Safety:** `copy` emission now uses strict JSON equality to avoid copying "almost equal" numeric values.
+- **Docs/Tests:** updated `save_diff.h` docs and added coverage in `tests/test_save_diff.cpp`.
+
+Verification:
+- Unit: `tests/test_save_diff.cpp`
+
+---
+
+## Round 40
+
+- **JSON Patch generation (RFC 6902):** when inserting/appending array elements whose value already exists at a stable earlier index (including earlier inserted values), emit a `copy` op instead of embedding the full value (smaller patches for repeated subtrees).
+- **Docs/Tests:** documented the array `copy` heuristic in `save_diff.h` and added coverage in `tests/test_save_diff.cpp`.
+
+Verification:
+- Unit: `tests/test_save_diff.cpp`
+
+---
+
+## Round 39
+
+- **JSON Patch generation (RFC 6902):** when adding an object key whose value already exists on another stable key within the same object, emit a `copy` op instead of embedding the full value (keeps patches smaller for repeated subtrees).
+- **Docs/Tests:** updated `save_diff.h` docs and added a generator test for the new `copy` emission.
+
+Verification:
+- Unit: `tests/test_save_diff.cpp`
+
+---
+
+## Round 38
+
+- **JSON Patch generation (RFC 6902):** avoid emitting `move` + full-element `replace` for scalar/type-changes during array relocation detection (falls back to clearer `remove` + `add` shift/insert heuristics instead).
+- **Tests:** existing shift-left test in `tests/test_save_diff.cpp` now passes with the intended `remove` + `add` output.
+
+Verification:
+- Unit: `tests/test_save_diff.cpp`
+
+---
+
+## Round 37
+
+- **JSON Patch generation (RFC 6902):** prefer `"/-"` for array appends when emitting `add` operations at the end of an array.
+  - Applies to both simple append cases and LCS-aligned array diffs.
+
+- **Tests:** added coverage for `add` appends using `"/arr/-"` (including insertion+append sequences).
+
+Verification:
+- Unit: `tests/test_save_diff.cpp`
+
+---
+
+## Round 36
+
+- **JSON Patch generation (RFC 6902):** when an array element is relocated *and* edited, emit `move` + a nested diff at the destination (keeps patches small for reorder+edit workflows).
+- **JSON Patch generation (RFC 6902):** conservatively detect **rename + edit** when exactly one object key is removed and one is added with container values of the same type; emit `move` + nested diffs instead of remove+add of large objects.
+- **Tests:** added coverage for both scenarios.
+
+Verification:
+- Unit: `tests/test_save_diff.cpp`
+
+---
+
+## Round 35
+
+- **JSON Patch generation (RFC 6902):** added an LCS-based alignment step for small arrays when the trimmed middle windows differ in length. This prevents noisy replace cascades when items are inserted/removed and later elements also change.
+- **Tests:** added coverage for insertion + later modification producing a concise `add` + `replace`.
+
+Verification:
+- Unit: `tests/test_save_diff.cpp`
+
+---
+
+## Round 34
+
+- **JSON Patch apply (RFC 6902):** improved error diagnostics by including the failing operation index and basic context (`op`, `path`, optional `from`).
+- **Tests:** added coverage ensuring both apply-time failures and parse-time errors include op indices.
+
+Verification:
+- Unit: `tests/test_save_diff.cpp`
+
+---
+
+## Round 33
+
+- **JSON Patch generation (RFC 6902):** detect simple object member *renames* (removed key + added key with identical value) and emit a single `move` op instead of `remove`+`add`.
+- **Tests:** added coverage for object rename-as-move.
+
+Verification:
+- Unit: `tests/test_save_diff.cpp`
+
+---
+
+## Round 32
+
+- **JSON Patch generation (RFC 6902):** detect a single relocated element within the trimmed array window and emit a single `move` op (not just rotations).
+- **Tests:** added coverage for swap-like moves and moving a tail element into the middle.
+
+Verification:
+- Unit: `tests/test_save_diff.cpp`
+
+---
+
+## Round 31
+
+- **JSON Patch generation (RFC 6902):** detect simple array one-step shifts/rotations to emit smaller patches.
+  - Shift + new element uses `remove` + `add` instead of cascades of `replace`.
+  - Pure rotations use a single `move`.
+- **JSON Patch JSON output:** includes `"from"` for `move`/`copy` ops.
+- **Tests:** added coverage for shift and rotation cases.
+
+Verification:
+- Unit: `tests/test_save_diff.cpp`
+
+---
+
+## Round 30
+
+- **JSON Patch generation (RFC 6902):** improved array diffing by trimming common prefix/suffix before generating operations. This greatly reduces noisy patches when items are inserted/removed near the front or middle of arrays.
+- **Tests:** added coverage ensuring simple array insertions/deletions produce concise `add`/`remove` operations.
+
+Verification:
+- Unit: `tests/test_save_diff.cpp`
+
+---
+
+## Round 29
+
+- **JSON Patch apply (RFC 6902):** implemented `move`, `copy`, and `test` operations.
+  - `test` uses strict logical JSON equality (object member ordering is ignored).
+  - `move` enforces the RFC rule that `from` must not be a proper prefix of `path`.
+- **Tests:** added coverage for `move`, `copy`, and `test`.
+
+Verification:
+- Unit: `tests/test_save_diff.cpp`
+
+---
+
+## Round 28
+
+- **JSON Patch apply (RFC 6902):** aligned array-index parsing with Nebula4X JSON Pointer rules.
+  - Leading zeros are rejected (except the single token `"0"`).
+  - Indices are parsed into `std::size_t` so out-of-range values fail cleanly (no truncation).
+- **Tests:** added coverage for leading-zero array indices in JSON Patch apply.
+
+Verification:
+- Unit: `tests/test_save_diff.cpp`
+
+---
+
+## Round 27
+
+- **JSON Pointer index parsing:** tightened array-index token rules and improved safety.
+  - Leading zeros are rejected (except the single token `"0"`) to match UI/autocomplete expectations.
+  - Indices are parsed directly into `std::size_t` so out-of-range values fail instead of truncating.
+- **JSON Pointer glob queries:** non-numeric array segments are treated as "no match" (not a fatal error), so patterns like `/**/k` work even in docs that contain arrays.
+- **Tests:** added coverage for leading-zero and out-of-range array index tokens.
+
+Verification:
+- Unit: `tests/test_json_pointer.cpp`, `tests/test_json_pointer_glob.cpp`
+
+---
+
+## Round 26
+
+- **JSON Pointer autocomplete:** improved array-index completion for large arrays.
+  - Numeric prefixes (e.g. `/big/99`) now generate matching indices across the full array without a fixed scan window.
+
+Verification:
+- `nebula4x_cli --complete-json-pointer save.json "/systems/0/n"`
+- `echo '{"big":[]}' | nebula4x_cli --complete-json-pointer - "/big/"`
+- Unit: `tests/test_json_pointer_autocomplete.cpp` (large array case)
+
+---
+
 ## Round 25
 
 - **CLI (`--complete-json-pointer`):** added a JSON Pointer autocomplete mode for scripts and debugging.

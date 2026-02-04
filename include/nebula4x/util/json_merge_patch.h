@@ -6,7 +6,7 @@
 
 namespace nebula4x {
 
-// RFC 7386 JSON Merge Patch.
+// RFC 7396 JSON Merge Patch.
 //
 // Semantics:
 // - If `patch` is NOT an object, `base` becomes `patch` (full replacement).

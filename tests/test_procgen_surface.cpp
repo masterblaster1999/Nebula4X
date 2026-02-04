@@ -41,6 +41,23 @@ int test_procgen_surface() {
   // Biome sanity for a temperate, ~1 atm world.
   N4X_ASSERT(f1.biome.find("Temperate") != std::string::npos);
 
+
+  // Oxygen influences biome labeling and vegetation stamping when present.
+  Body anoxic = earthish;
+  anoxic.oxygen_atm = 0.0;
+  anoxic.terraforming_target_o2_atm = 0.0;
+  const auto fa = procgen_surface::flavor(anoxic, 26, 12);
+
+  Body oxygenated = earthish;
+  oxygenated.oxygen_atm = 0.21;
+  oxygenated.terraforming_target_o2_atm = 0.21;
+  const auto fo = procgen_surface::flavor(oxygenated, 26, 12);
+
+  N4X_ASSERT(fa.biome.find("Breathable") == std::string::npos);
+  N4X_ASSERT(fo.biome.find("Breathable") != std::string::npos);
+  N4X_ASSERT(fa.legend.find('v') == std::string::npos);
+  N4X_ASSERT(fo.legend.find('v') != std::string::npos);
+
   // Nearby body id should produce a different stamp (almost surely).
   Body other = earthish;
   other.id = 2;

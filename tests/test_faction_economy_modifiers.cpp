@@ -232,5 +232,61 @@ int test_faction_economy_modifiers() {
     N4X_ASSERT(std::abs(fac_out.research_points - 10.5) < 1e-9);
   }
 
+  // --- Procedural trait multipliers ---
+  //
+  // Faction traits should scale economic output in a simple, deterministic way.
+  {
+    ContentDB trait_content;
+    InstallationDef mine;
+    mine.id = "automated_mine";
+    mine.name = "Automated Mine";
+    mine.produces_per_day = {{"Duranium", 10.0}};
+    trait_content.installations[mine.id] = mine;
+
+    Simulation sim_trait(std::move(trait_content), SimConfig{});
+    GameState st;
+    st.save_version = GameState{}.save_version;
+
+    StarSystem sys;
+    sys.id = 1;
+    sys.name = "Sys";
+    st.systems[sys.id] = sys;
+
+    Body b;
+    b.id = 1;
+    b.name = "Asteroid";
+    b.type = BodyType::Asteroid;
+    b.system_id = sys.id;
+    b.orbit_radius_mkm = 0.0;
+    b.orbit_period_days = 1.0;
+    b.orbit_phase_radians = 0.0;
+    // Empty mineral deposits => unlimited extraction in the legacy mining model.
+    st.bodies[b.id] = b;
+    st.systems[sys.id].bodies.push_back(b.id);
+
+    Faction f;
+    f.id = 1;
+    f.name = "Trait Faction";
+    f.control = FactionControl::Player;
+    f.traits.mining = 1.2;
+    st.factions[f.id] = f;
+
+    Colony col;
+    col.id = 1;
+    col.name = "Col";
+    col.faction_id = f.id;
+    col.body_id = b.id;
+    col.installations = {{"automated_mine", 1}};
+    st.colonies[col.id] = col;
+
+    st.next_id = 10;
+    sim_trait.load_game(std::move(st));
+    sim_trait.advance_days(1);
+
+    const auto* col_out = find_ptr(sim_trait.state().colonies, col.id);
+    N4X_ASSERT(col_out);
+    N4X_ASSERT(std::abs(col_out->minerals.at("Duranium") - 12.0) < 1e-9);
+  }
+
   return 0;
 }

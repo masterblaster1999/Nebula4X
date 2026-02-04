@@ -365,6 +365,16 @@ inline FactionEconomyMultipliers compute_faction_economy_multipliers(const Conte
       apply_factor(out, key, factor);
     }
   }
+
+  // Apply innate faction traits (procedural species/empires). These are stored on
+  // the faction and default to 1.0.
+  out.mining *= clamp_factor(f.traits.mining);
+  out.industry *= clamp_factor(f.traits.industry);
+  out.research *= clamp_factor(f.traits.research);
+  out.construction *= clamp_factor(f.traits.construction);
+  out.shipyard *= clamp_factor(f.traits.shipyard);
+  out.terraforming *= clamp_factor(f.traits.terraforming);
+  out.troop_training *= clamp_factor(f.traits.troop_training);
   // Clamp any NaN/inf that slipped through.
   out.mining = clamp_factor(out.mining);
   out.industry = clamp_factor(out.industry);

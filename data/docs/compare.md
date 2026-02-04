@@ -10,7 +10,7 @@ It compares two entities from the **live game JSON** (or a snapshot) and present
 
 - A readable, flattened diff of scalar fields (`number`, `string`, `bool`, `null`)
 - Optional container summaries (object/array sizes)
-- A **JSON Merge Patch (RFC 7386)** export (A → B) for debugging/save-edit workflows
+- A **JSON Merge Patch (RFC 7396)** export (A → B) for debugging/save-edit workflows
 
 ---
 

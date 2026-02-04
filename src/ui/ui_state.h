@@ -794,7 +794,9 @@ struct UIState {
   bool time_machine_recording{false};
   float time_machine_refresh_sec{0.75f};
   // 0 = Full JSON snapshots (fastest access; higher memory).
-  // 1 = Delta chain of RFC 7386 JSON Merge Patches (lower memory).
+  // 1 = Delta chain of RFC 7396 JSON Merge Patches (lower memory; arrays replace wholesale).
+  // 2 = Delta chain of RFC 6902 JSON Patches (usually larger than merge patches for objects,
+  //     but can be dramatically smaller when many arrays change between snapshots).
   int time_machine_storage_mode{1};
   // When in delta mode, store a full checkpoint snapshot every N captures.
   // 1 => every snapshot is a checkpoint (equivalent to full snapshots, but still stores patches).

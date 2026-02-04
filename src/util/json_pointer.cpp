@@ -213,12 +213,17 @@ std::vector<std::string> split_json_pointer(const std::string& path, bool accept
 bool parse_json_pointer_index(std::string_view tok, std::size_t& out) {
   if (tok.empty()) return false;
   if (tok[0] == '-') return false;
-  unsigned long long v = 0;
+
+  // For determinism and to avoid ambiguity in user-facing paths, we disallow
+  // leading zeros except for the single token "0".
+  if (tok.size() > 1 && tok[0] == '0') return false;
+
+  std::size_t v = 0;
   const char* b = tok.data();
   const char* e = tok.data() + tok.size();
   auto res = std::from_chars(b, e, v);
   if (res.ec != std::errc() || res.ptr != e) return false;
-  out = static_cast<std::size_t>(v);
+  out = v;
   return true;
 }
 
@@ -495,10 +500,7 @@ std::vector<JsonPointerQueryMatch> query_json_pointer_glob(const json::Value& do
       }
 
       std::size_t idx = 0;
-      if (!parse_json_pointer_index(t, idx)) {
-        ctx.error = "JSON pointer glob: invalid array index token: " + t;
-        return;
-      }
+      if (!parse_json_pointer_index(t, idx)) return; // no match
       if (idx >= a->size()) return; // no match
 
       const std::size_t old_sz = cur_path.size();

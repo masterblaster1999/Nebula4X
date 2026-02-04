@@ -117,16 +117,20 @@ GameState make_sol_scenario() {
     auto& e = s.bodies.at(earth);
     e.surface_temp_k = 288.0;
     e.atmosphere_atm = 1.0;
+    e.oxygen_atm = 0.21;
     e.terraforming_target_temp_k = 288.0;
     e.terraforming_target_atm = 1.0;
+    e.terraforming_target_o2_atm = 0.21;
     e.terraforming_complete = true;
 
     auto& m = s.bodies.at(mars);
     m.surface_temp_k = 210.0;
     m.atmosphere_atm = 0.006;
+    m.oxygen_atm = 0.0;
     // Prototype target: "Earthlike".
     m.terraforming_target_temp_k = 288.0;
     m.terraforming_target_atm = 0.8;
+    m.terraforming_target_o2_atm = 0.168;
     m.terraforming_complete = false;
   }
 
@@ -184,15 +188,19 @@ GameState make_sol_scenario() {
     auto& cp = s.bodies.at(centauri_prime);
     cp.surface_temp_k = 285.0;
     cp.atmosphere_atm = 0.95;
+    cp.oxygen_atm = 0.20;
     cp.terraforming_target_temp_k = cp.surface_temp_k;
     cp.terraforming_target_atm = cp.atmosphere_atm;
+    cp.terraforming_target_o2_atm = cp.oxygen_atm;
     cp.terraforming_complete = true;
 
     auto& bb = s.bodies.at(barnard_b);
     bb.surface_temp_k = 240.0;
     bb.atmosphere_atm = 0.20;
+    bb.oxygen_atm = 0.0;
     bb.terraforming_target_temp_k = 288.0;
     bb.terraforming_target_atm = 1.0;
+    bb.terraforming_target_o2_atm = 0.21;
     bb.terraforming_complete = false;
   }
 
@@ -798,6 +806,54 @@ double sample_atmosphere_atm(std::mt19937& rng, BodyType type, double orbit_au, 
   if (type == BodyType::Moon) atm *= 0.35;
 
   return std::max(0.0, atm);
+}
+
+double sample_oxygen_atm(std::mt19937& rng, BodyType type, double orbit_au, double hz_au,
+                        double mass_earths, double surface_temp_k, double atmosphere_atm) {
+  // Prototype oxygen model:
+  // - Only terrestrial bodies may have free oxygen.
+  // - Oxygenated worlds are more likely near the HZ and at moderate temperatures.
+  // - We model oxygen as a partial pressure (atm), bounded by a safe fraction of total pressure.
+  if (type != BodyType::Planet && type != BodyType::Moon) return 0.0;
+
+  const double atm = std::max(0.0, atmosphere_atm);
+  if (atm < 0.05) return 0.0;
+
+  const double hz = std::max(0.05, hz_au);
+  const double rel = orbit_au / hz;
+  const double d = std::abs(rel - 1.0);
+
+  // "Habitable zone likeness" in [0,1].
+  const double hz_like = clamp01(1.0 - (d / 0.90));
+
+  // Temperature likeness: peaks near ~288K.
+  const double temp_like = clamp01(1.0 - std::abs(surface_temp_k - 288.0) / 110.0);
+
+  // Atmosphere likeness: we prefer broadly Earthlike pressures.
+  const double atm_like = clamp01(1.0 - std::abs(atm - 1.0) / 1.10);
+
+  // Small bodies have weaker retention and (prototype) less stable biospheres.
+  const double m = std::max(0.01, mass_earths);
+  const double bio = std::clamp(std::pow(m, 0.25), 0.20, 1.0);
+
+  // Oxygenated worlds should be uncommon but not vanishingly rare.
+  double p = 0.55 * hz_like * (0.25 + 0.75 * temp_like) * (0.15 + 0.85 * atm_like) * bio;
+  if (type == BodyType::Moon) p *= 0.35;
+
+  if (rand_unit(rng) >= p) return 0.0;
+
+  // Sample oxygen partial pressure around Earth's, with modest spread.
+  double o2 = rand_real(rng, 0.16, 0.26);
+
+  // Safety cushion against the global habitability clamp (default max fraction 0.30).
+  const double max_frac = 0.28;
+  o2 = std::min(o2, atm * max_frac);
+  o2 = std::min(o2, atm);
+
+  // If clamped too low, treat as effectively anoxic.
+  if (o2 < 0.02) return 0.0;
+
+  return std::max(0.0, o2);
 }
 
 double rocky_radius_km(double mass_earths) {
@@ -1472,12 +1528,19 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
       // Basic atmosphere model (used by the habitability system).
       pb.atmosphere_atm = sample_atmosphere_atm(rng, type, orbit_au, hz_au, pb.mass_earths);
 
+      // Optional oxygen model (partial pressure; used by habitability + terraforming UI when present).
+      pb.oxygen_atm = sample_oxygen_atm(rng, type, orbit_au, hz_au, pb.mass_earths, pb.surface_temp_k, pb.atmosphere_atm);
+      if (pb.oxygen_atm < 0.0) pb.oxygen_atm = 0.0;
+      if (pb.oxygen_atm > pb.atmosphere_atm) pb.oxygen_atm = pb.atmosphere_atm;
+
       // For the forced homeworld orbit, mark terraforming complete so it behaves
       // as fully habitable regardless of small temperature/atmosphere deviations.
       if (idx == forced_home_idx) {
         pb.atmosphere_atm = std::clamp(pb.atmosphere_atm, 0.8, 1.2);
+        pb.oxygen_atm = std::min(0.21, pb.atmosphere_atm * 0.28);
         pb.terraforming_target_temp_k = pb.surface_temp_k;
         pb.terraforming_target_atm = pb.atmosphere_atm;
+        pb.terraforming_target_o2_atm = pb.oxygen_atm;
         pb.terraforming_complete = true;
       }
 
@@ -1553,6 +1616,9 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
         mb.radius_km = rocky_radius_km(mb.mass_earths);
         mb.surface_temp_k = equilibrium_temp_k(sp.luminosity_solar, orbit_au, sample_albedo(rng, BodyType::Moon));
         mb.atmosphere_atm = sample_atmosphere_atm(rng, BodyType::Moon, orbit_au, hz_au, mb.mass_earths);
+        mb.oxygen_atm = sample_oxygen_atm(rng, BodyType::Moon, orbit_au, hz_au, mb.mass_earths, mb.surface_temp_k, mb.atmosphere_atm);
+        if (mb.oxygen_atm < 0.0) mb.oxygen_atm = 0.0;
+        if (mb.oxygen_atm > mb.atmosphere_atm) mb.oxygen_atm = mb.atmosphere_atm;
         seed_basic_deposits(mid, BodyType::Moon, orbit_au, sp.metallicity, 0.9, sys.nebula_density);
 
         max_extent_mkm = std::max(max_extent_mkm, orbit_mkm + mr);
@@ -2003,16 +2069,204 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
       "Stellar", "Crimson", "Azure", "Golden", "Emerald", "Obsidian", "Radiant",
       "Silent", "Frontier", "Arcadian"};
 
-  auto gen_empire_name = [&](const std::string& capital) -> std::string {
+  // Procedural species / empire identity.
+  std::unordered_set<std::string> used_species_names;
+  used_species_names.reserve(8 + empire_idxs.size());
+  used_species_names.insert("Human");
+
+  static const std::array<const char*, 8> kSpeciesArchetypes = {
+      "Humanoid", "Reptilian", "Avian", "Insectoid", "Aquatic", "Fungoid", "Lithoid", "Synthetic"};
+  static const std::array<const char*, 9> kSpeciesEthos = {
+      "Militarist", "Pacifist", "Materialist", "Spiritualist", "Industrialist", "Expansionist", "Ecologist", "Trader",
+      "Collectivist"};
+  static const std::array<const char*, 48> kSpeciesSyllables = {
+      "za",  "zor", "xan", "thi",  "kur", "mar", "vel", "shi", "dra", "rin", "tal", "vor",
+      "ka",  "ra",  "na",  "so",   "li",  "chi", "zen", "qar", "mu",  "no",  "tri", "pha",
+      "ul",  "ur",  "ek",  "ix",   "oma", "eph", "syl", "lun", "ark", "bel", "cen", "dor",
+      "fyn", "gar", "hel", "ira",  "jus", "kel", "lor", "nyx", "oro", "pra", "qui", "syn"};
+  static const std::array<const char*, 8> kAdjectiveSuffixes = {"an", "ian", "ite", "ese", "ari", "oid", "ish", "ic"};
+
+  auto gen_species_name = [&](std::unordered_set<std::string>& used) -> std::string {
     for (int attempt = 0; attempt < 200; ++attempt) {
-      const char* gov = kGovTypes[static_cast<std::size_t>(rand_int(rng, 0, static_cast<int>(kGovTypes.size()) - 1))];
-      const char* adj = kAdjectives[static_cast<std::size_t>(rand_int(rng, 0, static_cast<int>(kAdjectives.size()) - 1))];
+      const int n_syl = std::clamp(rand_int(rng, 2, 4), 2, 4);
+      std::string raw;
+      raw.reserve(12);
+      for (int i = 0; i < n_syl; ++i) {
+        const char* syl = kSpeciesSyllables[static_cast<std::size_t>(rand_int(rng, 0, (int)kSpeciesSyllables.size() - 1))];
+        raw += syl;
+      }
+      std::string name = capitalize(raw);
+      if (name.size() < 4 || name.size() > 14) continue;
+      if (used.insert(name).second) return name;
+    }
+    // Deterministic fallback.
+    std::string name = "Xenon";
+    int n = 2;
+    while (!used.insert(name).second) name = "Xenon" + std::to_string(n++);
+    return name;
+  };
+
+  auto gen_species_adjective = [&](const std::string& base) -> std::string {
+    if (base.empty()) return "";
+    const char* suf = kAdjectiveSuffixes[static_cast<std::size_t>(rand_int(rng, 0, (int)kAdjectiveSuffixes.size() - 1))];
+
+    std::string stem = base;
+    if (!stem.empty()) {
+      const char last = ascii_lower(stem.back());
+      // Gentle heuristics so some names read nicer.
+      if (last == 'a' || last == 'e' || last == 'i' || last == 'o') {
+        if (std::string(suf) == "an") suf = "n";
+      }
+    }
+
+    return stem + suf;
+  };
+
+  struct ProcEmpireIdentity {
+    SpeciesProfile species;
+    FactionTraitMultipliers traits;
+    double aggression_bias{0.0};
+  };
+
+  auto gen_empire_identity = [&]() -> ProcEmpireIdentity {
+    ProcEmpireIdentity out;
+    out.traits = FactionTraitMultipliers{};
+
+    SpeciesProfile sp;
+    sp.name = gen_species_name(used_species_names);
+    sp.adjective = gen_species_adjective(sp.name);
+    sp.archetype = kSpeciesArchetypes[static_cast<std::size_t>(rand_int(rng, 0, (int)kSpeciesArchetypes.size() - 1))];
+    sp.ethos = kSpeciesEthos[static_cast<std::size_t>(rand_int(rng, 0, (int)kSpeciesEthos.size() - 1))];
+    sp.government = kGovTypes[static_cast<std::size_t>(rand_int(rng, 0, (int)kGovTypes.size() - 1))];
+
+    // Species-environment preferences. Keep within a reasonable band so AI isn't
+    // totally stranded.
+    double t_lo = 260.0;
+    double t_hi = 320.0;
+    double a_lo = 0.6;
+    double a_hi = 2.2;
+    double o2_frac_lo = 0.10;
+    double o2_frac_hi = 0.25;
+
+    const std::string arch = sp.archetype;
+    if (arch == "Aquatic") {
+      t_lo = 270.0;
+      t_hi = 310.0;
+      a_lo = 0.8;
+      a_hi = 2.6;
+    } else if (arch == "Reptilian") {
+      t_lo = 285.0;
+      t_hi = 325.0;
+    } else if (arch == "Lithoid") {
+      t_lo = 275.0;
+      t_hi = 330.0;
+      a_lo = 0.9;
+      a_hi = 3.0;
+    } else if (arch == "Synthetic") {
+      t_lo = 255.0;
+      t_hi = 325.0;
+      a_lo = 0.4;
+      a_hi = 2.8;
+      o2_frac_lo = 0.04;
+      o2_frac_hi = 0.16;
+    }
+
+    sp.ideal_temp_k = rand_real(rng, t_lo, t_hi);
+    sp.ideal_atm = rand_real(rng, a_lo, a_hi);
+    const double o2_frac = rand_real(rng, o2_frac_lo, o2_frac_hi);
+    sp.ideal_o2_atm = std::min(sp.ideal_atm * o2_frac, sp.ideal_atm * 0.28);
+
+    sp.temp_tolerance_k = rand_real(rng, 18.0, 55.0);
+    sp.atm_tolerance = rand_real(rng, 0.20, 0.85);
+    sp.o2_tolerance_atm = rand_real(rng, 0.04, 0.14);
+
+    // Traits: start at 1.0 and apply a themed specialization.
+    auto apply_mult = [&](double& v, double mult) {
+      if (!std::isfinite(mult) || mult <= 0.0) return;
+      v *= mult;
+    };
+
+    const std::string ethos = sp.ethos;
+    if (ethos == "Militarist") {
+      apply_mult(out.traits.shipyard, rand_real(rng, 1.08, 1.18));
+      apply_mult(out.traits.troop_training, rand_real(rng, 1.10, 1.20));
+      apply_mult(out.traits.research, rand_real(rng, 0.92, 0.99));
+      out.aggression_bias += 0.18;
+    } else if (ethos == "Pacifist") {
+      apply_mult(out.traits.research, rand_real(rng, 1.06, 1.15));
+      apply_mult(out.traits.terraforming, rand_real(rng, 1.06, 1.16));
+      apply_mult(out.traits.troop_training, rand_real(rng, 0.88, 0.97));
+      out.aggression_bias -= 0.18;
+    } else if (ethos == "Materialist") {
+      apply_mult(out.traits.research, rand_real(rng, 1.10, 1.20));
+      apply_mult(out.traits.industry, rand_real(rng, 0.92, 0.99));
+    } else if (ethos == "Spiritualist") {
+      apply_mult(out.traits.pop_growth, rand_real(rng, 1.04, 1.12));
+      apply_mult(out.traits.terraforming, rand_real(rng, 1.02, 1.10));
+      apply_mult(out.traits.research, rand_real(rng, 0.94, 1.00));
+      out.aggression_bias -= 0.06;
+    } else if (ethos == "Industrialist") {
+      apply_mult(out.traits.industry, rand_real(rng, 1.10, 1.22));
+      apply_mult(out.traits.mining, rand_real(rng, 1.03, 1.12));
+      apply_mult(out.traits.research, rand_real(rng, 0.92, 0.99));
+    } else if (ethos == "Expansionist") {
+      apply_mult(out.traits.construction, rand_real(rng, 1.06, 1.16));
+      apply_mult(out.traits.shipyard, rand_real(rng, 1.03, 1.12));
+      apply_mult(out.traits.terraforming, rand_real(rng, 1.02, 1.10));
+      out.aggression_bias += 0.10;
+    } else if (ethos == "Ecologist") {
+      apply_mult(out.traits.terraforming, rand_real(rng, 1.12, 1.25));
+      apply_mult(out.traits.mining, rand_real(rng, 0.88, 0.97));
+      out.aggression_bias -= 0.10;
+    } else if (ethos == "Trader") {
+      apply_mult(out.traits.construction, rand_real(rng, 1.03, 1.10));
+      apply_mult(out.traits.industry, rand_real(rng, 1.03, 1.12));
+      apply_mult(out.traits.research, rand_real(rng, 0.95, 1.01));
+    } else if (ethos == "Collectivist") {
+      apply_mult(out.traits.pop_growth, rand_real(rng, 1.06, 1.16));
+      apply_mult(out.traits.mining, rand_real(rng, 1.02, 1.10));
+      apply_mult(out.traits.research, rand_real(rng, 0.92, 0.99));
+      out.aggression_bias += 0.04;
+    }
+
+    // Archetype tweaks (small).
+    if (arch == "Insectoid") {
+      apply_mult(out.traits.pop_growth, rand_real(rng, 1.06, 1.14));
+    } else if (arch == "Synthetic") {
+      apply_mult(out.traits.research, rand_real(rng, 1.04, 1.10));
+      apply_mult(out.traits.pop_growth, rand_real(rng, 0.86, 0.95));
+    } else if (arch == "Avian") {
+      apply_mult(out.traits.construction, rand_real(rng, 1.02, 1.08));
+    } else if (arch == "Lithoid") {
+      apply_mult(out.traits.mining, rand_real(rng, 1.03, 1.10));
+    }
+
+    // Mild universal jitter so empires don't collapse into identical buckets.
+    apply_mult(out.traits.mining, rand_real(rng, 0.98, 1.02));
+    apply_mult(out.traits.industry, rand_real(rng, 0.98, 1.02));
+    apply_mult(out.traits.research, rand_real(rng, 0.98, 1.02));
+    apply_mult(out.traits.construction, rand_real(rng, 0.98, 1.02));
+    apply_mult(out.traits.terraforming, rand_real(rng, 0.98, 1.02));
+    apply_mult(out.traits.shipyard, rand_real(rng, 0.98, 1.02));
+    apply_mult(out.traits.troop_training, rand_real(rng, 0.98, 1.02));
+    apply_mult(out.traits.pop_growth, rand_real(rng, 0.98, 1.02));
+
+    out.species = sp;
+    return out;
+  };
+
+  auto gen_empire_name = [&](const std::string& capital, const SpeciesProfile& sp) -> std::string {
+    for (int attempt = 0; attempt < 200; ++attempt) {
+      const char* gov = (!sp.government.empty()) ? sp.government.c_str()
+                                                 : kGovTypes[static_cast<std::size_t>(rand_int(rng, 0, static_cast<int>(kGovTypes.size()) - 1))];
+      const char* adj = (!sp.adjective.empty()) ? sp.adjective.c_str()
+                                                : kAdjectives[static_cast<std::size_t>(rand_int(rng, 0, static_cast<int>(kAdjectives.size()) - 1))];
       const double u = rand_unit(rng);
 
       std::string name;
-      if (u < 0.45) {
+      if (u < 0.50) {
         name = std::string(gov) + " of " + capital;
-      } else if (u < 0.75) {
+      } else if (u < 0.82) {
         name = std::string(adj) + " " + gov;
       } else {
         name = capital + " " + gov;
@@ -2069,13 +2323,18 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
     const SysInfo& sys = systems[static_cast<std::size_t>(idx)];
     const Id fid = allocate_id(s);
 
+    const ProcEmpireIdentity ident = gen_empire_identity();
+
     // Aggression is a small faction "personality" knob for initial diplomacy.
-    const double aggression = clamp01(rand_real(rng, 0.0, 1.0));
+    // We bias it based on ethos so generated empires feel distinct.
+    const double aggression = clamp01(rand_real(rng, 0.0, 1.0) + ident.aggression_bias);
 
     Faction f;
     f.id = fid;
     f.control = FactionControl::AI_Explorer;
-    f.name = gen_empire_name(sys.name);
+    f.species = ident.species;
+    f.traits = ident.traits;
+    f.name = gen_empire_name(sys.name, f.species);
     f.research_points = 0.0;
     f.known_techs = {"chemistry_1"};
     f.research_queue = doctrine_queue(aggression);
@@ -2177,6 +2436,10 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
     // we still defensively fill in any missing environment values.
     if (hb->surface_temp_k <= 0.0) hb->surface_temp_k = 288.0;
     if (hb->atmosphere_atm <= 0.0) hb->atmosphere_atm = 1.0;
+    if (hb->type == BodyType::Planet || hb->type == BodyType::Moon) {
+      hb->oxygen_atm = std::min(0.21, hb->atmosphere_atm * 0.28);
+      hb->terraforming_target_o2_atm = hb->oxygen_atm;
+    }
     hb->terraforming_target_temp_k = hb->surface_temp_k;
     hb->terraforming_target_atm = hb->atmosphere_atm;
     hb->terraforming_complete = true;
@@ -2188,9 +2451,20 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
   // Make empire capitals habitable and slightly above-average so AI can actually play.
   for (auto& es : empires) {
     if (auto* cb = find_ptr(s.bodies, es.capital_body)) {
+      const Faction* fac = find_ptr(s.factions, es.faction_id);
+      const SpeciesProfile* sp = fac ? &fac->species : nullptr;
+
       cb->orbit_phase_radians = 0.0;
-      if (cb->surface_temp_k <= 0.0) cb->surface_temp_k = rand_real(rng, 275.0, 305.0);
-      if (cb->atmosphere_atm <= 0.0) cb->atmosphere_atm = rand_real(rng, 0.9, 1.2);
+      // Always stamp a clearly-habitable homeworld. This avoids edge cases where
+      // the procedurally chosen preferred body is technically "colonizable" but
+      // starts with punishing conditions.
+      cb->surface_temp_k = (sp && sp->ideal_temp_k > 0.0) ? sp->ideal_temp_k : rand_real(rng, 275.0, 305.0);
+      cb->atmosphere_atm = (sp && sp->ideal_atm > 0.0) ? sp->ideal_atm : rand_real(rng, 0.9, 1.2);
+      if (cb->type == BodyType::Planet || cb->type == BodyType::Moon) {
+        const double desired_o2 = (sp && sp->ideal_o2_atm > 0.0) ? sp->ideal_o2_atm : 0.21;
+        cb->oxygen_atm = std::min(desired_o2, cb->atmosphere_atm * 0.28);
+        cb->terraforming_target_o2_atm = cb->oxygen_atm;
+      }
       cb->terraforming_target_temp_k = cb->surface_temp_k;
       cb->terraforming_target_atm = cb->atmosphere_atm;
       cb->terraforming_complete = true;

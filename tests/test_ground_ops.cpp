@@ -121,6 +121,105 @@ int test_ground_ops() {
     N4X_ASSERT(after.atmosphere_atm <= 0.52 + 1e-6);
   }
 
+  // --- Simulation: O2 terraforming should move oxygen toward its target and respect safety caps ---
+  {
+    nebula4x::ContentDB content = nebula4x::load_content_db_from_file("data/blueprints/starting_blueprints.json");
+
+    nebula4x::SimConfig cfg;
+    cfg.terraforming_split_points_between_axes = true;
+    cfg.terraforming_o2_max_fraction_of_atm = 0.30;
+
+    nebula4x::Simulation sim(std::move(content), cfg);
+
+    const auto earth_id = find_colony_id(sim.state(), "Earth");
+    N4X_ASSERT(earth_id != nebula4x::kInvalidId);
+
+    nebula4x::Colony& earth = sim.state().colonies[earth_id];
+    earth.installations["terraforming_plant"] += 1;
+
+    const nebula4x::Id body_id = earth.body_id;
+    nebula4x::Body& body = sim.state().bodies[body_id];
+
+    body.surface_temp_k = 288.0;
+    body.atmosphere_atm = 0.40;
+    body.oxygen_atm = 0.05;
+
+    // Invalid: O2 target without an atmosphere target.
+    N4X_ASSERT(!sim.set_terraforming_target(body_id, 0.0, 0.0, 0.05));
+    // Invalid: O2 exceeds safety cap (30% of 1 atm).
+    N4X_ASSERT(!sim.set_terraforming_target(body_id, 0.0, 1.0, 0.50));
+
+    // Valid target: raise atm and oxygen modestly (O2 below 30% cap).
+    N4X_ASSERT(sim.set_terraforming_target(body_id, 0.0, 0.50, 0.10));
+
+    const double o0 = body.oxygen_atm;
+    sim.advance_days(5);
+
+    const nebula4x::Body& after = sim.state().bodies[body_id];
+    N4X_ASSERT(after.oxygen_atm >= o0 - 1e-9);
+    N4X_ASSERT(after.oxygen_atm <= 0.10 + 1e-6);
+    N4X_ASSERT(after.oxygen_atm <= after.atmosphere_atm + 1e-9);
+    N4X_ASSERT(after.atmosphere_atm >= 0.40 - 1e-9);
+    N4X_ASSERT(after.oxygen_atm <= after.atmosphere_atm * cfg.terraforming_o2_max_fraction_of_atm + 1e-6);
+  }
+
+  // --- Simulation: manual terraforming axis weights should control split allocation ---
+  {
+    nebula4x::ContentDB content = nebula4x::load_content_db_from_file(
+        "data/blueprints/starting_blueprints.json");
+
+    nebula4x::SimConfig cfg;
+    cfg.terraforming_split_points_between_axes = true;
+    cfg.terraforming_o2_max_fraction_of_atm = 0.30;
+
+    nebula4x::Simulation sim(std::move(content), cfg);
+
+    const auto earth_id = find_colony_id(sim.state(), "Earth");
+    N4X_ASSERT(earth_id != nebula4x::kInvalidId);
+
+    nebula4x::Colony& earth = sim.state().colonies[earth_id];
+    earth.installations["terraforming_plant"] += 1;
+
+    const nebula4x::Id body_id = earth.body_id;
+    nebula4x::Body& body = sim.state().bodies[body_id];
+
+    body.surface_temp_k = 250.0;
+    body.atmosphere_atm = 0.40;
+    body.oxygen_atm = 0.05;
+
+    N4X_ASSERT(sim.set_terraforming_target(body_id, 252.0, 0.50, 0.10));
+
+    // 1) O2-only allocation should change only oxygen.
+    N4X_ASSERT(sim.set_terraforming_axis_weights(body_id, 0.0, 0.0, 1.0));
+    const double t0 = body.surface_temp_k;
+    const double a0 = body.atmosphere_atm;
+    const double o0 = body.oxygen_atm;
+
+    sim.advance_days(1);
+    const nebula4x::Body& b1 = sim.state().bodies[body_id];
+    N4X_ASSERT(b1.oxygen_atm > o0 + 1e-12);
+    N4X_ASSERT(std::abs(b1.surface_temp_k - t0) <= 1e-9);
+    N4X_ASSERT(std::abs(b1.atmosphere_atm - a0) <= 1e-12);
+
+    // 2) Atmosphere-only allocation should change only atmosphere.
+    N4X_ASSERT(sim.set_terraforming_axis_weights(body_id, 0.0, 1.0, 0.0));
+    const double a1 = b1.atmosphere_atm;
+    const double o1 = b1.oxygen_atm;
+
+    sim.advance_days(1);
+    const nebula4x::Body& b2 = sim.state().bodies[body_id];
+    N4X_ASSERT(b2.atmosphere_atm > a1 + 1e-12);
+    N4X_ASSERT(std::abs(b2.oxygen_atm - o1) <= 1e-9);
+    N4X_ASSERT(std::abs(b2.surface_temp_k - t0) <= 1e-9);
+
+    // 3) Clearing weights should fall back to delta-based allocation and advance temperature.
+    N4X_ASSERT(sim.clear_terraforming_axis_weights(body_id));
+    const double t_before = b2.surface_temp_k;
+    sim.advance_days(1);
+    const nebula4x::Body& b3 = sim.state().bodies[body_id];
+    N4X_ASSERT(b3.surface_temp_k > t_before + 1e-12);
+  }
+
   // --- Simulation: terraforming operational mineral costs should throttle output ---
   {
     nebula4x::ContentDB content = nebula4x::load_content_db_from_file(

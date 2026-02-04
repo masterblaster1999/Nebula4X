@@ -538,7 +538,7 @@ void Simulation::tick_ai() {
       if (reserved.contains(bid)) continue;
       if (!is_system_discovered_by_faction(ship->faction_id, b->system_id)) continue;
 
-      const double hab = std::clamp(body_habitability(bid), 0.0, 1.0);
+      const double hab = std::clamp(body_habitability_for_faction(bid, ship->faction_id), 0.0, 1.0);
       const double minerals = std::max(0.0, total_mineral_deposits(*b));
       const double mineral_score = std::log10(minerals + 1.0);
 

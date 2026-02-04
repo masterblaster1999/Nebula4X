@@ -11,7 +11,7 @@ namespace nebula4x::ui {
 //
 // Captures save-game JSON snapshots (from the live game JSON cache), computes
 // compact diffs between snapshots, and can store history either as full snapshots
-// or as a delta chain of RFC 7386 JSON Merge Patches with periodic checkpoints.
+// or as a delta chain of RFC 7396 JSON Merge Patches with periodic checkpoints.
 //
 // Lets the user export/copy diffs or patches, export the full history as a delta-save, or jump
 // directly to changed JSON Pointers in the JSON Explorer.

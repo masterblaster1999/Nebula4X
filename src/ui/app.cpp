@@ -5,11 +5,17 @@
 #include <imgui_internal.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <vector>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+
+#include <imgui_impl_sdlrenderer2.h>
+#if NEBULA4X_UI_RENDERER_OPENGL2
+#include <imgui_impl_opengl2.h>
+#endif
 
 #include "nebula4x/util/json.h"
 #include "nebula4x/util/log.h"
@@ -91,6 +97,48 @@
 
 namespace nebula4x::ui {
 
+namespace {
+
+// Default ImGui font size is 13px. Keep it as the baseline so ui_scale=1.0 matches
+// prior behavior while allowing crisp HiDPI rasterization.
+constexpr float kDefaultBaseFontSizePx = 13.0f;
+constexpr float kMinUiScale = 0.65f;
+constexpr float kMaxUiScale = 2.5f;
+constexpr int kMinAtlasFontPx = 8;
+constexpr int kMaxAtlasFontPx = 64;
+
+float clamp_finite(float v, float lo, float hi, float fallback) {
+  if (!std::isfinite(v)) return fallback;
+  return std::clamp(v, lo, hi);
+}
+
+float effective_framebuffer_scale(const ImGuiIO& io) {
+  // Prefer uniform scale. When they differ, take the smaller scale to avoid
+  // over-allocating the atlas.
+  float sx = clamp_finite(io.DisplayFramebufferScale.x, 0.1f, 8.0f, 1.0f);
+  float sy = clamp_finite(io.DisplayFramebufferScale.y, 0.1f, 8.0f, sx);
+  return std::min(sx, sy);
+}
+
+void recreate_imgui_device_objects(UIRendererBackend backend) {
+  switch (backend) {
+    case UIRendererBackend::SDLRenderer2:
+      ImGui_ImplSDLRenderer2_DestroyDeviceObjects();
+      (void)ImGui_ImplSDLRenderer2_CreateDeviceObjects();
+      break;
+#if NEBULA4X_UI_RENDERER_OPENGL2
+    case UIRendererBackend::OpenGL2:
+      ImGui_ImplOpenGL2_DestroyDeviceObjects();
+      (void)ImGui_ImplOpenGL2_CreateDeviceObjects();
+      break;
+#endif
+    default:
+      break;
+  }
+}
+
+} // namespace
+
 App::App(Simulation sim) : sim_(std::move(sim)) {
   last_seen_state_generation_ = sim_.state_generation();
   if (!sim_.state().colonies.empty()) {
@@ -158,6 +206,48 @@ void App::update_imgui_ini_path_from_ui() {
   if (imgui_ini_path_.empty()) imgui_ini_path_ = "ui_layouts/default.ini";
 }
 
+void App::apply_imgui_font_overrides() {
+  ImGuiIO& io = ImGui::GetIO();
+
+  ui_.ui_scale = std::clamp(ui_.ui_scale, kMinUiScale, kMaxUiScale);
+
+  const float fb = std::clamp(effective_framebuffer_scale(io), 0.75f, 4.0f);
+  const float desired_px = std::clamp(kDefaultBaseFontSizePx * ui_.ui_scale,
+                                      static_cast<float>(kMinAtlasFontPx),
+                                      static_cast<float>(kMaxAtlasFontPx));
+
+  // Rasterize at an integer pixel size for stable glyph metrics; use a small
+  // global scale factor to preserve fractional sizes.
+  const int atlas_px = std::clamp(static_cast<int>(std::lround(desired_px)), kMinAtlasFontPx, kMaxAtlasFontPx);
+  const float global_scale = desired_px / static_cast<float>(atlas_px);
+
+  const bool need_rebuild =
+      (atlas_px != last_font_atlas_size_px_) || (std::fabs(fb - last_font_rasterizer_density_) > 1e-3f) ||
+      io.Fonts->Fonts.empty();
+
+  if (need_rebuild) {
+    io.Fonts->Clear();
+
+    ImFontConfig cfg;
+    cfg.SizePixels = static_cast<float>(atlas_px);
+    cfg.RasterizerDensity = fb;
+
+    // Keep default oversampling and hinting; RasterizerDensity is the key for
+    // crisp HiDPI text without changing logical UI sizes.
+    io.FontDefault = io.Fonts->AddFontDefault(&cfg);
+    io.Fonts->Build();
+
+    // Force the active renderer backend to re-upload the font atlas immediately
+    // (this frame), avoiding stale texture references.
+    recreate_imgui_device_objects(ui_.runtime_renderer_backend);
+
+    last_font_atlas_size_px_ = atlas_px;
+    last_font_rasterizer_density_ = fb;
+  }
+
+  io.FontGlobalScale = global_scale;
+}
+
 void App::pre_frame() {
   // If there is no ImGui context yet, do nothing.
   if (ImGui::GetCurrentContext() == nullptr) return;
@@ -189,6 +279,9 @@ void App::pre_frame() {
     io.ConfigViewportsNoDecoration = ui_.viewports_no_decoration;
   }
 #endif
+
+  // HiDPI-aware font atlas (must happen before ImGui::NewFrame()).
+  apply_imgui_font_overrides();
 
   // Reload request or ini path change: load before NewFrame for best results.
   const bool path_changed = (imgui_ini_path_ != last_imgui_ini_path_applied_);
@@ -353,12 +446,8 @@ void App::frame() {
     victory_window_autoopened_ = false;
   };
 
-  // Apply UI scaling early so every window in this frame uses it.
-  {
-    ImGuiIO& io = ImGui::GetIO();
-    ui_.ui_scale = std::clamp(ui_.ui_scale, 0.65f, 2.5f);
-    io.FontGlobalScale = ui_.ui_scale;
-  }
+  // UI scaling is applied in pre_frame() via the font atlas rebuild.
+  ui_.ui_scale = std::clamp(ui_.ui_scale, kMinUiScale, kMaxUiScale);
 
   // Per-frame bookkeeping for procedural render caches.
   proc_render_engine_.begin_frame();
@@ -3092,7 +3181,7 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       ui_.time_machine_keep_snapshots = std::clamp(ui_.time_machine_keep_snapshots, 1, 512);
       ui_.time_machine_max_changes = std::clamp(ui_.time_machine_max_changes, 1, 50000);
       ui_.time_machine_max_value_chars = std::clamp(ui_.time_machine_max_value_chars, 16, 2000);
-      ui_.time_machine_storage_mode = std::clamp(ui_.time_machine_storage_mode, 0, 1);
+      ui_.time_machine_storage_mode = std::clamp(ui_.time_machine_storage_mode, 0, 2);
       ui_.time_machine_checkpoint_stride = std::clamp(ui_.time_machine_checkpoint_stride, 1, 128);
 
       ui_.compare_refresh_sec = std::clamp(ui_.compare_refresh_sec, 0.0f, 60.0f);

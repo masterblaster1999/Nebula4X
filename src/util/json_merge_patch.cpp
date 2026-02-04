@@ -50,7 +50,7 @@ bool values_equal(const json::Value& a, const json::Value& b) {
 }
 
 void apply_merge_patch_value(json::Value& base, const json::Value& patch) {
-  // RFC 7386-style merge patch semantics (objects recursively patch objects; arrays/primitive replace).
+  // RFC 7396-style merge patch semantics (objects recursively patch objects; arrays/primitive replace).
   if (!patch.is_object()) {
     base = patch;
     return;

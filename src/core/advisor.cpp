@@ -287,7 +287,7 @@ std::vector<AdvisorIssue> advisor_issues_for_faction(const Simulation& sim, Id f
           is.have = have;
           is.missing = std::max(0.0, req - have);
 
-          const double hab = sim.body_habitability(c->body_id);
+          const double hab = sim.body_habitability_for_faction(c->body_id, c->faction_id);
           std::ostringstream ss;
           ss << "Need " << fmt_double(req, 1) << "M; have " << fmt_double(have, 1) << "M (hab "
              << fmt_double(hab * 100.0, 0) << "%)";

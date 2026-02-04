@@ -136,6 +136,36 @@ int test_random_scenario() {
   N4X_ASSERT(static_cast<int>(s1.systems.size()) == n);
   N4X_ASSERT(!s1.bodies.empty());
   N4X_ASSERT(!s1.colonies.empty());
+
+
+  // Homeworld oxygen should be present and sane when generated.
+  nebula4x::Id terran_id = nebula4x::kInvalidId;
+  for (const auto& [fid, f] : s1.factions) {
+    if (f.name.find("Terran") != std::string::npos) {
+      terran_id = fid;
+      break;
+    }
+  }
+  N4X_ASSERT(terran_id != nebula4x::kInvalidId);
+
+  const nebula4x::Colony* terran_colony = nullptr;
+  for (const auto& [cid, c] : s1.colonies) {
+    if (c.faction_id == terran_id) {
+      terran_colony = &c;
+      break;
+    }
+  }
+  N4X_ASSERT(terran_colony != nullptr);
+
+  const nebula4x::Body* home = nebula4x::find_ptr(s1.bodies, terran_colony->body_id);
+  N4X_ASSERT(home != nullptr);
+  if (home->type == nebula4x::BodyType::Planet || home->type == nebula4x::BodyType::Moon) {
+    N4X_ASSERT(home->atmosphere_atm > 0.0);
+    N4X_ASSERT(home->oxygen_atm > 0.10);
+    N4X_ASSERT(home->oxygen_atm <= home->atmosphere_atm + 1e-9);
+    N4X_ASSERT(home->terraforming_target_o2_atm > 0.0);
+    N4X_ASSERT(std::fabs(home->terraforming_target_o2_atm - home->oxygen_atm) < 1e-6);
+  }
   N4X_ASSERT(!s1.ships.empty());
   N4X_ASSERT(!s1.jump_points.empty());
 
@@ -159,6 +189,36 @@ int test_random_scenario() {
     }
   }
   N4X_ASSERT(has_indep_colony);
+
+  // Procedural alien species / empire profiles should be generated for AI empires.
+  {
+    std::unordered_set<std::string> species_names;
+    int ai_empires = 0;
+    for (const auto& [fid, f] : s1.factions) {
+      (void)fid;
+      if (f.control != nebula4x::FactionControl::AI_Explorer) continue;
+      ++ai_empires;
+      N4X_ASSERT(!f.species.name.empty());
+      N4X_ASSERT(!f.species.adjective.empty());
+      N4X_ASSERT(!f.species.archetype.empty());
+      N4X_ASSERT(!f.species.ethos.empty());
+      N4X_ASSERT(!f.species.government.empty());
+      N4X_ASSERT(f.species.ideal_temp_k > 0.0);
+      N4X_ASSERT(f.species.ideal_atm > 0.0);
+      N4X_ASSERT(f.species.ideal_o2_atm > 0.0);
+      N4X_ASSERT(species_names.insert(f.species.name).second);
+
+      auto deviates = [](double v) { return std::abs(v - 1.0) > 1e-3; };
+      const auto& tr = f.traits;
+      N4X_ASSERT(tr.mining > 0.0 && tr.industry > 0.0 && tr.research > 0.0 && tr.construction > 0.0);
+      N4X_ASSERT(tr.shipyard > 0.0 && tr.terraforming > 0.0 && tr.pop_growth > 0.0 && tr.troop_training > 0.0);
+      const bool has_trait = deviates(tr.mining) || deviates(tr.industry) || deviates(tr.research) ||
+                             deviates(tr.construction) || deviates(tr.shipyard) || deviates(tr.terraforming) ||
+                             deviates(tr.pop_growth) || deviates(tr.troop_training);
+      N4X_ASSERT(has_trait);
+    }
+    N4X_ASSERT(ai_empires >= 1);
+  }
 
   // Config toggle: disable independents.
   nebula4x::RandomScenarioConfig noind;

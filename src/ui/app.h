@@ -108,6 +108,7 @@ class App {
 
  private:
   void update_imgui_ini_path_from_ui();
+  void apply_imgui_font_overrides();
   void apply_imgui_style_overrides();
   void draw_dockspace();
   void build_default_dock_layout(unsigned int dockspace_id);
@@ -182,6 +183,10 @@ class App {
   bool dock_layout_initialized_{false};
   bool dock_layout_checked_ini_{false};
   bool dock_layout_has_existing_ini_{false};
+
+  // Font atlas rebuild tracking (runtime only).
+  int last_font_atlas_size_px_{0};
+  float last_font_rasterizer_density_{0.0f};
 };
 
 } // namespace nebula4x::ui

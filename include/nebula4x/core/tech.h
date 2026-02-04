@@ -15,7 +15,7 @@ namespace nebula4x {
 // - Optional top-level "include" / "includes" (string or array of strings) to include
 //   additional blueprint JSON files. Includes are processed depth-first and merged
 //   in order, then the including file overrides the included content.
-// - Components and installations are merged using an RFC 7386-like "merge patch"
+// - Components and installations are merged using an RFC 7396-like "merge patch"
 //   semantics (objects patch objects; null deletes keys).
 // - Designs may use helper keys "components_add" / "components_remove" to patch the
 //   component list without rewriting it.

@@ -41,12 +41,22 @@ struct SimConfig {
   // no terraforming targets set.
   double habitability_ideal_temp_k{288.0};
   double habitability_ideal_atm{1.0};
+  // Optional breathable-gas axis (O2 partial pressure in atm).
+  //
+  // When a body has oxygen metadata (Body::oxygen_atm > 0) or a terraforming
+  // O2 target is set, habitability can incorporate this axis.
+  double habitability_ideal_o2_atm{0.21};
 
   // Linear tolerance bands for habitability scoring.
   // If abs(temp_k - ideal_temp_k) >= habitability_temp_tolerance_k => temp factor = 0.
   double habitability_temp_tolerance_k{50.0};
   // If abs(atm - ideal_atm) >= habitability_atm_tolerance => atmosphere factor = 0.
   double habitability_atm_tolerance{0.5};
+  // If abs(o2_atm - ideal_o2_atm) >= habitability_o2_tolerance_atm => O2 factor = 0.
+  double habitability_o2_tolerance_atm{0.15};
+  // Safety clamp: oxygen must not exceed this fraction of total pressure
+  // to be considered breathable.
+  double habitability_o2_max_fraction_of_atm{0.30};
 
   // Growth multiplier applied when a colony is living under artificial habitats
   // on a hostile world but has sufficient habitation capacity.
@@ -1239,6 +1249,14 @@ double ship_maintenance_breakdown_subsystem_damage_max{0.20};
   // Atmosphere change (atm) per terraforming point per day.
   double terraforming_atm_per_point_day{0.001};
 
+  // Oxygen partial pressure change (atm) per terraforming point per day.
+  //
+  // This is a simple "single breathable gas" axis intended to mirror common
+  // 4X terraforming abstractions.
+  //
+  // It is only used when a body has a non-zero terraforming_target_o2_atm.
+  double terraforming_o2_atm_per_point_day{0.00021};
+
   // Optional operational mineral costs per terraforming point.
   //
   // When enabled (>0), terraforming is scaled down to the maximum affordable
@@ -1273,6 +1291,11 @@ double ship_maintenance_breakdown_subsystem_damage_max{0.20};
   // When within these tolerances of the target, terraforming is considered complete.
   double terraforming_temp_tolerance_k{0.5};
   double terraforming_atm_tolerance{0.01};
+  double terraforming_o2_tolerance_atm{0.005};
+
+  // Safety clamp for O2 targets/values: O2 must not exceed this fraction of total
+  // atmospheric pressure.
+  double terraforming_o2_max_fraction_of_atm{0.30};
 
   // --- Fleet cohesion helpers ---
   //
@@ -2707,8 +2730,14 @@ class Simulation {
 
   // Terraforming targets for a body (prototype).
   // target_* <= 0 means "do not target that parameter".
-  bool set_terraforming_target(Id body_id, double target_temp_k, double target_atm);
+  bool set_terraforming_target(Id body_id, double target_temp_k, double target_atm, double target_o2_atm = 0.0);
   bool clear_terraforming_target(Id body_id);
+
+  // Terraforming axis weights for a body (prototype).
+  // Non-negative weights used when SimConfig::terraforming_split_points_between_axes is enabled.
+  // If all weights are <= 0, allocation is automatic (delta-based).
+  bool set_terraforming_axis_weights(Id body_id, double weight_temp, double weight_atm, double weight_o2);
+  bool clear_terraforming_axis_weights(Id body_id);
 
   // Ground ops query helpers (pure queries).
   double terraforming_points_per_day(const Colony& colony) const;
@@ -2870,6 +2899,13 @@ bool move_construction_order(Id colony_id, int from_index, int to_index);
 
   // Colony habitability / life support helpers (pure queries)
   double body_habitability(Id body_id) const;
+  // Habitability as perceived by a specific faction.
+  //
+  // If the faction has a SpeciesProfile with ideal/tolerance values set, those
+  // are used as the base ideal. Body terraforming targets (if set) always
+  // override the ideal since they represent the environment the body is being
+  // engineered toward.
+  double body_habitability_for_faction(Id body_id, Id faction_id) const;
   double habitation_capacity_millions(const Colony& colony) const;
   double required_habitation_capacity_millions(const Colony& colony) const;
 

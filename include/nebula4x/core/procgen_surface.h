@@ -133,29 +133,73 @@ inline double safe_atm(const Body& b) {
 
 inline double orbit_au(const Body& b) { return (b.orbit_radius_mkm > 0.0) ? (b.orbit_radius_mkm / 149.6) : 0.0; }
 
+inline double composition_atm(const Body& b) {
+  // If the body has an atmosphere, use it; otherwise fall back to terraforming targets.
+  // This is used only for flavor/labeling and avoids treating missing metadata as "airless".
+  if (b.atmosphere_atm > 0.0) return b.atmosphere_atm;
+  if (b.terraforming_target_atm > 0.0) return b.terraforming_target_atm;
+  return 0.0;
+}
+
+inline double composition_o2_atm(const Body& b) {
+  const double atm = std::max(0.0, composition_atm(b));
+  if (atm <= 0.0) return 0.0;
+  return std::clamp(b.oxygen_atm, 0.0, atm);
+}
+
+inline std::string oxygen_descriptor(const Body& b) {
+  // Oxygen is an optional axis: only attach a descriptor when the body has oxygen
+  // metadata or an explicit terraforming oxygen target.
+  const bool has = (b.oxygen_atm > 0.0) || (b.terraforming_target_o2_atm > 0.0);
+  if (!has) return "";
+
+  const double atm = composition_atm(b);
+  const double o2 = composition_o2_atm(b);
+  if (o2 <= 0.01) return "Anoxic";
+  if (atm <= 1e-9) return "";
+
+  const double frac = o2 / atm;
+  if (frac > 0.30) return "Hyperoxic";
+  if (o2 >= 0.16 && o2 <= 0.28 && frac <= 0.30) return "Breathable";
+  if (o2 < 0.16) return "Low O2";
+  if (o2 > 0.28) return "High O2";
+  return "Oxygenated";
+}
+
 inline std::string biome_for_terrestrial(const Body& b) {
   const double t = safe_temp_k(b);
   const double atm = safe_atm(b);
 
+  std::string base;
+
   if (atm < 0.01) {
-    if (t < 170.0) return "Airless Ice Rock";
-    if (t < 450.0) return "Airless Rock";
-    return "Airless Ember";
+    if (t < 170.0) base = "Airless Ice Rock";
+    else if (t < 450.0) base = "Airless Rock";
+    else base = "Airless Ember";
+    return base;
   }
 
   // Moderation factor peaks near ~288K.
   const double moderate = clamp01(1.0 - std::fabs(t - 288.0) / 140.0);
 
-  if (t < 190.0) return "Ice World";
-  if (t < 240.0) return (moderate > 0.3) ? "Cold Ocean World" : "Frozen World";
-  if (t < 320.0) {
-    if (atm > 3.0) return "Temperate Super-Atmosphere";
-    if (moderate > 0.72) return "Temperate World";
-    if (moderate > 0.45) return "Dry Temperate World";
-    return "Barren Temperate";
+  if (t < 190.0) {
+    base = "Ice World";
+  } else if (t < 240.0) {
+    base = (moderate > 0.3) ? "Cold Ocean World" : "Frozen World";
+  } else if (t < 320.0) {
+    if (atm > 3.0) base = "Temperate Super-Atmosphere";
+    else if (moderate > 0.72) base = "Temperate World";
+    else if (moderate > 0.45) base = "Dry Temperate World";
+    else base = "Barren Temperate";
+  } else if (t < 420.0) {
+    base = (atm > 1.5) ? "Greenhouse World" : "Hot Desert World";
+  } else {
+    base = (atm > 1.0) ? "Runaway Greenhouse" : "Inferno World";
   }
-  if (t < 420.0) return (atm > 1.5) ? "Greenhouse World" : "Hot Desert World";
-  return (atm > 1.0) ? "Runaway Greenhouse" : "Inferno World";
+
+  const std::string o2 = oxygen_descriptor(b);
+  if (!o2.empty()) base += " (" + o2 + ")";
+  return base;
 }
 
 inline double desired_water_fraction(const Body& b) {
@@ -318,17 +362,33 @@ inline std::string stamp_terrestrial(const Body& b, int w, int h, std::string* l
   const double ice_strength = desired_ice_strength(b);
   const double desertness = desired_desertness(b);
 
+  const double temp_k = safe_temp_k(b);
+
   // Terrain palette.
   const char ocean_ch = '~';
   const char ice_ch = '*';
   const char mtn_ch = '^';
   const char land_ch = (desertness > 0.65) ? ':' : '.';
   const char hill_ch = (desertness > 0.65) ? ';' : ',';
+  const char veg_ch = 'v';
+
+  const double atm_actual = std::max(0.0, b.atmosphere_atm);
+  const double o2_actual = std::clamp(b.oxygen_atm, 0.0, atm_actual);
+  const bool veg_enabled = (o2_actual > 0.08) && (atm_actual > 0.35) && (water_frac > 0.12) && (desertness <= 0.65) &&
+                           (temp_k > 240.0) && (temp_k < 330.0);
+  double veg_strength = 0.0;
+  if (veg_enabled) {
+    const double t_like = clamp01(1.0 - std::fabs(temp_k - 288.0) / 75.0);
+    const double o_like = clamp01((o2_actual - 0.08) / 0.16);
+    const double w_like = clamp01((water_frac - 0.12) / 0.40);
+    veg_strength = clamp01(t_like * (0.35 + 0.65 * o_like) * (0.25 + 0.75 * w_like));
+  }
 
   if (legend_out) {
     *legend_out = "Legend: ~ ocean   . land   , hills   ^ mountains   * ice";
     if (desertness > 0.65) *legend_out = "Legend: ~ (rare) seas   : desert   ; hills   ^ mountains   * ice";
     if (water_frac <= 0.02) *legend_out = "Legend: . rock   , broken terrain   ^ mountains   * frost";
+    if (veg_strength > 0.05) *legend_out += "   v vegetation";
   }
 
   // Determine a mountain threshold from the upper tail so every stamp has some relief.
@@ -338,6 +398,8 @@ inline std::string stamp_terrestrial(const Body& b, int w, int h, std::string* l
   rows.reserve(static_cast<std::size_t>(h));
 
   procgen_obscure::HashRng rng(body_seed(b, 0xB16B00B5ULL));
+
+  const std::uint64_t veg_seed = body_seed(b, 0xA61DCAFEULL);
 
   for (int y = 0; y < h; ++y) {
     std::string row;
@@ -369,6 +431,13 @@ inline std::string stamp_terrestrial(const Body& b, int w, int h, std::string* l
           const double chance = clamp01((lat - cap) / std::max(1e-6, (1.0 - cap)));
           if (micro < chance) c = ice_ch;
         }
+      }
+
+      if (veg_strength > 0.05 && (c == land_ch || c == hill_ch)) {
+        const double v = fbm(veg_seed, static_cast<double>(x) * 0.18, static_cast<double>(y) * 0.18, 3, 2.0, 0.55);
+        const double lat_factor = clamp01(1.0 - lat * 1.35);
+        const double p = veg_strength * (0.35 + 0.65 * lat_factor);
+        if (v < p) c = veg_ch;
       }
 
       row[static_cast<std::size_t>(x)] = c;
@@ -607,6 +676,17 @@ inline std::vector<Quirk> quirks_for_body(const Body& b, const std::string& biom
   add("Thin Atmosphere", "Sparse air; low insulation and minimal wind patterns.", 1.0, terrestrial && atm >= 0.01 && atm < 0.35);
   add("Dense Atmosphere", "Thick air; high drag and strong greenhouse effects.", 1.0, terrestrial && atm > 3.0);
   add("Toxic Clouds", "Reactive clouds corrode surfaces and hamper unshielded operations.", 0.8, terrestrial && atm > 0.35 && rng.next_u01() < 0.25);
+
+  // Oxygen / composition-driven (optional).
+  const double atm_comp = std::max(0.0, (b.atmosphere_atm > 0.0) ? b.atmosphere_atm : b.terraforming_target_atm);
+  const double o2 = std::clamp(b.oxygen_atm, 0.0, std::max(0.0, b.atmosphere_atm));
+  const double o2_frac = (atm_comp > 1e-9) ? (o2 / atm_comp) : 0.0;
+  const bool breathable_o2 = (o2 >= 0.16 && o2 <= 0.28 && o2_frac <= 0.30 && atm_comp >= 0.6 && t >= 240.0 && t <= 330.0);
+
+  add("Breathable Air", "Atmospheric composition supports unfiltered respiration.", 1.2, terrestrial && breathable_o2);
+  add("Oxygenated Biosphere", "Free oxygen suggests photosynthesis or engineered air.", 0.9, terrestrial && o2 > 0.12 && t >= 240.0 && t <= 330.0 && rng.next_u01() < 0.65);
+  add("Anoxic Atmosphere", "No free oxygen; life (if any) is anaerobic.", 1.0, terrestrial && b.terraforming_target_o2_atm > 0.0 && o2 <= 0.01 && atm >= 0.15);
+  add("Terraforming: Oxygen Seeding", "Oxygen levels are rising toward a breathable target.", 1.0, terrestrial && b.terraforming_target_o2_atm > 0.0 && !b.terraforming_complete && o2 < b.terraforming_target_o2_atm * 0.85 && rng.next_u01() < 0.75);
 
   // Temperature-driven.
   add("Cryovolcanic", "Subsurface volatiles erupt as icy lava.", 1.0, terrestrial && t < 180.0 && atm >= 0.02);

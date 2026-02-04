@@ -60,12 +60,15 @@ struct TerraformingSchedule {
   // Snapshot of start/end conditions used in the forecast.
   double start_temp_k{0.0};
   double start_atm{0.0};
+  double start_o2_atm{0.0};
 
   double target_temp_k{0.0};
   double target_atm{0.0};
+  double target_o2_atm{0.0};
 
   double end_temp_k{0.0};
   double end_atm{0.0};
+  double end_o2_atm{0.0};
 
   // Total points/day available at the start of the forecast.
   double points_per_day{0.0};

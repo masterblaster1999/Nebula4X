@@ -4903,7 +4903,7 @@ void Simulation::tick_ships(double dt_days) {
         // This models the colony module delivering domes / life support as part
         // of the colony ship payload.
         if (cfg_.enable_habitability && cfg_.seed_habitation_on_colonize) {
-          const double hab = body_habitability(body->id);
+          const double hab = body_habitability_for_faction(body->id, ship_snapshot.faction_id);
           if (hab < 0.999) {
             constexpr const char* kHabitationInstallationId = "infrastructure";
             auto it_install = content_.installations.find(kHabitationInstallationId);

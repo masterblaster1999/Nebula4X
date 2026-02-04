@@ -31,7 +31,20 @@ namespace nebula4x::ui {
 namespace {
 
 constexpr int kStorageModeFull = 0;
-constexpr int kStorageModeDelta = 1;
+constexpr int kStorageModeDeltaMergePatch = 1;
+constexpr int kStorageModeDeltaJsonPatch = 2;
+
+bool is_delta_storage_mode(int mode) {
+  return mode != kStorageModeFull;
+}
+
+bool is_merge_patch_delta_mode(int mode) {
+  return mode == kStorageModeDeltaMergePatch;
+}
+
+bool is_json_patch_delta_mode(int mode) {
+  return mode == kStorageModeDeltaJsonPatch;
+}
 
 char to_lower_ascii(char c) {
   return static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -165,15 +178,19 @@ struct Snapshot {
 
   // Storage:
   // - In Full mode: every snapshot stores full save-game JSON in `json_text`.
-  // - In Delta mode: `json_text` is stored only for checkpoint snapshots
-  //   (including snapshot[0]) and other snapshots store only `merge_patch`.
+  // - In Delta modes: `json_text` is stored only for checkpoint snapshots
+  //   (including snapshot[0]) and other snapshots store only `delta_patch`.
   std::string json_text;
 
-  // Merge patch that transforms (snapshot[i-1]) -> (snapshot[i]).
-  // Present in Delta mode. snapshot[0] has none.
-  bool has_merge_patch{false};
-  nebula4x::json::Value merge_patch;
-  std::size_t merge_patch_bytes{0};
+  // Delta patch that transforms (snapshot[i-1]) -> (snapshot[i]).
+  // Present in Delta modes. snapshot[0] has none.
+  //
+  // Patch encoding depends on TimeMachineRuntime::stored_storage_mode:
+  //  - DeltaMergePatch: RFC 7396 JSON Merge Patch
+  //  - DeltaJsonPatch:  RFC 6902 JSON Patch (array of op objects)
+  bool has_delta_patch{false};
+  nebula4x::json::Value delta_patch;
+  std::size_t delta_patch_bytes{0};
 
   // Diff vs previous snapshot (Prev mode). Snapshot[0] has none.
   bool diff_prev_truncated{false};
@@ -191,7 +208,7 @@ struct TimeMachineRuntime {
   std::uint64_t next_snapshot_id{1};
 
   // Storage settings currently applied to the stored history.
-  int stored_storage_mode{kStorageModeDelta};
+  int stored_storage_mode{kStorageModeDeltaMergePatch};
   int stored_checkpoint_stride{8};
 
   // Selection + compare.
@@ -244,7 +261,7 @@ std::size_t total_stored_json_bytes(const std::vector<Snapshot>& snaps) {
 
 std::size_t total_stored_patch_bytes(const std::vector<Snapshot>& snaps) {
   std::size_t sum = 0;
-  for (const auto& s : snaps) sum += s.merge_patch_bytes;
+  for (const auto& s : snaps) sum += s.delta_patch_bytes;
   return sum;
 }
 
@@ -277,7 +294,7 @@ void clamp_indices(TimeMachineRuntime& rt) {
 // Return the full snapshot JSON for index `idx`.
 //
 // In Full mode or for checkpoint snapshots, this returns the stored string.
-// In Delta mode for non-checkpoints, this reconstructs via merge patches.
+// In Delta modes for non-checkpoints, this reconstructs via delta patches.
 const std::string& snapshot_json(TimeMachineRuntime& rt, int idx) {
   static const std::string kEmpty;
 
@@ -319,11 +336,18 @@ const std::string& snapshot_json(TimeMachineRuntime& rt, int idx) {
     nebula4x::json::Value doc = nebula4x::json::parse(base_txt);
     for (int i = start + 1; i <= idx; ++i) {
       Snapshot& step = rt.snapshots[static_cast<std::size_t>(i)];
-      if (!step.has_merge_patch) {
-        rt.last_error = "Time Machine: missing merge patch for snapshot " + std::to_string(i) + ".";
+      if (!step.has_delta_patch) {
+        rt.last_error = "Time Machine: missing delta patch for snapshot " + std::to_string(i) + ".";
         return kEmpty;
       }
-      nebula4x::apply_json_merge_patch(doc, step.merge_patch);
+      if (is_merge_patch_delta_mode(rt.stored_storage_mode)) {
+        nebula4x::apply_json_merge_patch(doc, step.delta_patch);
+      } else if (is_json_patch_delta_mode(rt.stored_storage_mode)) {
+        nebula4x::apply_json_patch(doc, step.delta_patch);
+      } else {
+        rt.last_error = "Time Machine: unknown delta storage mode: " + std::to_string(rt.stored_storage_mode) + ".";
+        return kEmpty;
+      }
     }
 
     std::string out = nebula4x::json::stringify(doc, 2);
@@ -352,7 +376,7 @@ void trim_history(TimeMachineRuntime& rt, int keep) {
 
   const int to_remove = static_cast<int>(rt.snapshots.size()) - keep;
   std::string new_base_json;
-  if (rt.stored_storage_mode == kStorageModeDelta) {
+  if (is_delta_storage_mode(rt.stored_storage_mode)) {
     // Capture the full JSON for what will become the new base snapshot.
     new_base_json = snapshot_json_copy(rt, to_remove);
   }
@@ -364,12 +388,13 @@ void trim_history(TimeMachineRuntime& rt, int keep) {
     rt.snapshots.front().diff_prev.clear();
     rt.snapshots.front().diff_prev_truncated = false;
 
-    if (rt.stored_storage_mode == kStorageModeDelta) {
+    if (is_delta_storage_mode(rt.stored_storage_mode)) {
       // Ensure the new base is a real checkpoint with no incoming patch.
       rt.snapshots.front().json_text = std::move(new_base_json);
-      rt.snapshots.front().has_merge_patch = false;
-      rt.snapshots.front().merge_patch = nebula4x::json::object({});
-      rt.snapshots.front().merge_patch_bytes = 0;
+      rt.snapshots.front().has_delta_patch = false;
+      rt.snapshots.front().delta_patch = is_json_patch_delta_mode(rt.stored_storage_mode) ? nebula4x::json::array({})
+                                                                                        : nebula4x::json::object({});
+      rt.snapshots.front().delta_patch_bytes = 0;
     }
   }
 
@@ -414,7 +439,7 @@ void truncate_newer(TimeMachineRuntime& rt, int keep_up_to_idx) {
 //  - drop stored JSON for non-checkpoints in delta mode
 //  - compute missing merge patches when switching from full->delta
 void convert_history_storage(TimeMachineRuntime& rt, int new_mode, int new_stride) {
-  new_mode = std::clamp(new_mode, 0, 1);
+  new_mode = std::clamp(new_mode, 0, 2);
   new_stride = std::clamp(new_stride, 1, 128);
 
   if (rt.snapshots.empty()) {
@@ -424,7 +449,8 @@ void convert_history_storage(TimeMachineRuntime& rt, int new_mode, int new_strid
     return;
   }
 
-  if (rt.stored_storage_mode == new_mode && (new_mode != kStorageModeDelta || rt.stored_checkpoint_stride == new_stride)) {
+  const bool new_is_delta = is_delta_storage_mode(new_mode);
+  if (rt.stored_storage_mode == new_mode && (!new_is_delta || rt.stored_checkpoint_stride == new_stride)) {
     return;
   }
 
@@ -438,16 +464,16 @@ void convert_history_storage(TimeMachineRuntime& rt, int new_mode, int new_strid
 
   std::vector<Snapshot> new_snaps = rt.snapshots;
 
-  if (new_mode == kStorageModeFull) {
+  if (!new_is_delta) {
     for (int i = 0; i < n; ++i) {
       Snapshot& s = new_snaps[static_cast<std::size_t>(i)];
       s.json_text = std::move(full_json[static_cast<std::size_t>(i)]);
-      s.has_merge_patch = false;
-      s.merge_patch = nebula4x::json::object({});
-      s.merge_patch_bytes = 0;
+      s.has_delta_patch = false;
+      s.delta_patch = nebula4x::json::object({});
+      s.delta_patch_bytes = 0;
     }
   } else {
-    // Delta mode.
+    // Delta modes.
     for (int i = 0; i < n; ++i) {
       Snapshot& s = new_snaps[static_cast<std::size_t>(i)];
 
@@ -455,29 +481,42 @@ void convert_history_storage(TimeMachineRuntime& rt, int new_mode, int new_strid
       s.json_text = is_checkpoint ? full_json[static_cast<std::size_t>(i)] : std::string();
 
       if (i == 0) {
-        s.has_merge_patch = false;
-        s.merge_patch = nebula4x::json::object({});
-        s.merge_patch_bytes = 0;
+        s.has_delta_patch = false;
+        s.delta_patch = is_json_patch_delta_mode(new_mode) ? nebula4x::json::array({}) : nebula4x::json::object({});
+        s.delta_patch_bytes = 0;
         continue;
       }
 
-      if (rt.stored_storage_mode == kStorageModeDelta && rt.snapshots[static_cast<std::size_t>(i)].has_merge_patch) {
-        // Reuse existing patches when possible.
-        s.has_merge_patch = true;
-        s.merge_patch = rt.snapshots[static_cast<std::size_t>(i)].merge_patch;
-        s.merge_patch_bytes = rt.snapshots[static_cast<std::size_t>(i)].merge_patch_bytes;
+      if (rt.stored_storage_mode == new_mode && rt.snapshots[static_cast<std::size_t>(i)].has_delta_patch) {
+        // Reuse existing patches when only changing checkpoint stride.
+        s.has_delta_patch = true;
+        s.delta_patch = rt.snapshots[static_cast<std::size_t>(i)].delta_patch;
+        s.delta_patch_bytes = rt.snapshots[static_cast<std::size_t>(i)].delta_patch_bytes;
       } else {
         try {
-          // Compute merge patch from previous -> current.
-          const nebula4x::json::Value from = nebula4x::json::parse(full_json[static_cast<std::size_t>(i - 1)]);
-          const nebula4x::json::Value to = nebula4x::json::parse(full_json[static_cast<std::size_t>(i)]);
-          s.has_merge_patch = true;
-          s.merge_patch = nebula4x::diff_json_merge_patch(from, to);
-          s.merge_patch_bytes = nebula4x::json::stringify(s.merge_patch, 0).size();
+          // Compute delta patch from previous -> current.
+          const std::string& from_json = full_json[static_cast<std::size_t>(i - 1)];
+          const std::string& to_json = full_json[static_cast<std::size_t>(i)];
+          s.has_delta_patch = true;
+
+          if (is_merge_patch_delta_mode(new_mode)) {
+            const nebula4x::json::Value from = nebula4x::json::parse(from_json);
+            const nebula4x::json::Value to = nebula4x::json::parse(to_json);
+            s.delta_patch = nebula4x::diff_json_merge_patch(from, to);
+            s.delta_patch_bytes = nebula4x::json::stringify(s.delta_patch, 0).size();
+          } else if (is_json_patch_delta_mode(new_mode)) {
+            nebula4x::JsonPatchOptions jopt;
+            jopt.indent = 0;
+            const std::string patch_json = nebula4x::diff_saves_to_json_patch(from_json, to_json, jopt);
+            s.delta_patch = nebula4x::json::parse(patch_json);
+            s.delta_patch_bytes = patch_json.size();
+          } else {
+            throw std::runtime_error("Unknown delta storage mode: " + std::to_string(new_mode));
+          }
         } catch (const std::exception& e) {
-          s.has_merge_patch = false;
-          s.merge_patch = nebula4x::json::object({});
-          s.merge_patch_bytes = 0;
+          s.has_delta_patch = false;
+          s.delta_patch = is_json_patch_delta_mode(new_mode) ? nebula4x::json::array({}) : nebula4x::json::object({});
+          s.delta_patch_bytes = 0;
           rt.last_error = std::string("Storage conversion: patch compute failed: ") + e.what();
         }
       }
@@ -532,7 +571,7 @@ bool capture_snapshot(TimeMachineRuntime& rt, Simulation& sim, UIState& ui, bool
   snap.hour = sim.state().hour_of_day;
 
   const int new_index = static_cast<int>(rt.snapshots.size());
-  const bool is_delta = (rt.stored_storage_mode == kStorageModeDelta);
+  const bool is_delta = is_delta_storage_mode(rt.stored_storage_mode);
 
   // Determine whether to store the full JSON for this snapshot.
   const bool is_checkpoint = (!is_delta) || (new_index == 0) || (ui.time_machine_checkpoint_stride <= 1) ||
@@ -559,15 +598,26 @@ bool capture_snapshot(TimeMachineRuntime& rt, Simulation& sim, UIState& ui, bool
 
     if (is_delta) {
       try {
-        const nebula4x::json::Value from = nebula4x::json::parse(prev_json);
-        snap.has_merge_patch = true;
-        snap.merge_patch = nebula4x::diff_json_merge_patch(from, *c.root);
-        snap.merge_patch_bytes = nebula4x::json::stringify(snap.merge_patch, 0).size();
+        snap.has_delta_patch = true;
+        if (is_merge_patch_delta_mode(rt.stored_storage_mode)) {
+          const nebula4x::json::Value from = nebula4x::json::parse(prev_json);
+          snap.delta_patch = nebula4x::diff_json_merge_patch(from, *c.root);
+          snap.delta_patch_bytes = nebula4x::json::stringify(snap.delta_patch, 0).size();
+        } else if (is_json_patch_delta_mode(rt.stored_storage_mode)) {
+          nebula4x::JsonPatchOptions jopt;
+          jopt.indent = 0;
+          const std::string patch_json = nebula4x::diff_saves_to_json_patch(prev_json, txt, jopt);
+          snap.delta_patch = nebula4x::json::parse(patch_json);
+          snap.delta_patch_bytes = patch_json.size();
+        } else {
+          throw std::runtime_error("Unknown delta storage mode: " + std::to_string(rt.stored_storage_mode));
+        }
       } catch (const std::exception& e) {
-        snap.has_merge_patch = false;
-        snap.merge_patch = nebula4x::json::object({});
-        snap.merge_patch_bytes = 0;
-        rt.last_error = std::string("Merge patch error: ") + e.what();
+        snap.has_delta_patch = false;
+        snap.delta_patch = is_json_patch_delta_mode(rt.stored_storage_mode) ? nebula4x::json::array({})
+                                                                           : nebula4x::json::object({});
+        snap.delta_patch_bytes = 0;
+        rt.last_error = std::string("Delta patch error: ") + e.what();
       }
     }
   }
@@ -601,7 +651,7 @@ void draw_time_machine_window(Simulation& sim, UIState& ui, Id& selected_ship, I
   if (!rt.initialized) {
     rt.initialized = true;
     rt.last_seen_state_generation = sim.state_generation();
-    rt.stored_storage_mode = std::clamp(ui.time_machine_storage_mode, 0, 1);
+    rt.stored_storage_mode = std::clamp(ui.time_machine_storage_mode, 0, 2);
     rt.stored_checkpoint_stride = std::clamp(ui.time_machine_checkpoint_stride, 1, 128);
   }
 
@@ -619,12 +669,12 @@ void draw_time_machine_window(Simulation& sim, UIState& ui, Id& selected_ship, I
   ui.time_machine_keep_snapshots = std::clamp(ui.time_machine_keep_snapshots, 1, 512);
   ui.time_machine_max_changes = std::clamp(ui.time_machine_max_changes, 1, 50000);
   ui.time_machine_max_value_chars = std::clamp(ui.time_machine_max_value_chars, 16, 2000);
-  ui.time_machine_storage_mode = std::clamp(ui.time_machine_storage_mode, 0, 1);
+  ui.time_machine_storage_mode = std::clamp(ui.time_machine_storage_mode, 0, 2);
   ui.time_machine_checkpoint_stride = std::clamp(ui.time_machine_checkpoint_stride, 1, 128);
 
   // Apply storage mode/stride changes.
   if (rt.stored_storage_mode != ui.time_machine_storage_mode ||
-      (ui.time_machine_storage_mode == kStorageModeDelta && rt.stored_checkpoint_stride != ui.time_machine_checkpoint_stride)) {
+      (is_delta_storage_mode(ui.time_machine_storage_mode) && rt.stored_checkpoint_stride != ui.time_machine_checkpoint_stride)) {
     convert_history_storage(rt, ui.time_machine_storage_mode, ui.time_machine_checkpoint_stride);
   }
 
@@ -653,10 +703,17 @@ void draw_time_machine_window(Simulation& sim, UIState& ui, Id& selected_ship, I
         ImGui::SetTooltip(
             "In Full mode, snapshots are stored as full save-game JSON text.\n"
             "Reduce this value if memory usage is high.");
+      } else if (is_merge_patch_delta_mode(ui.time_machine_storage_mode)) {
+        ImGui::SetTooltip(
+            "In Delta (Merge Patch) mode, the Time Machine stores RFC 7396 JSON Merge Patches\n"
+            "between snapshots and keeps periodic full checkpoints for fast random access.\n"
+            "Arrays replace wholesale.\n"
+            "You can usually increase Keep substantially compared to Full mode.");
       } else {
         ImGui::SetTooltip(
-            "In Delta mode, the Time Machine stores merge patches between snapshots\n"
-            "(RFC 7386) and keeps periodic full checkpoints for fast random access.\n"
+            "In Delta (JSON Patch) mode, the Time Machine stores RFC 6902 JSON Patch operations\n"
+            "between snapshots and keeps periodic full checkpoints for fast random access.\n"
+            "This tends to be more space-efficient for small changes inside large arrays.\n"
             "You can usually increase Keep substantially compared to Full mode.");
       }
     }
@@ -673,12 +730,12 @@ void draw_time_machine_window(Simulation& sim, UIState& ui, Id& selected_ship, I
     ImGui::Checkbox("Follow latest##tm", &rt.follow_latest);
 
     ImGui::SameLine();
-    const char* storage_items[] = {"Full JSON", "Delta (Merge Patch)"};
+    const char* storage_items[] = {"Full JSON", "Delta (Merge Patch)", "Delta (JSON Patch)"};
     ImGui::SetNextItemWidth(180.0f);
     if (ImGui::Combo("Storage##tm", &ui.time_machine_storage_mode, storage_items, IM_ARRAYSIZE(storage_items))) {
       convert_history_storage(rt, ui.time_machine_storage_mode, ui.time_machine_checkpoint_stride);
     }
-    if (ui.time_machine_storage_mode == kStorageModeDelta) {
+    if (is_delta_storage_mode(ui.time_machine_storage_mode)) {
       ImGui::SameLine();
       ImGui::SetNextItemWidth(120.0f);
       if (ImGui::DragInt("Checkpoint##tm", &ui.time_machine_checkpoint_stride, 1.0f, 1, 128)) {
@@ -686,8 +743,8 @@ void draw_time_machine_window(Simulation& sim, UIState& ui, Id& selected_ship, I
       }
       if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip(
-            "Checkpoint stride for Delta mode.\n"
-            "A full JSON checkpoint is stored every N snapshots; other snapshots store only a merge patch.\n"
+            "Checkpoint stride for Delta modes.\n"
+            "A full JSON checkpoint is stored every N snapshots; other snapshots store only a delta patch.\n"
             "Lower values increase memory usage but make random access faster.");
       }
     }
@@ -740,7 +797,7 @@ void draw_time_machine_window(Simulation& sim, UIState& ui, Id& selected_ship, I
     const std::size_t total_bytes = json_bytes + patch_bytes;
 
     ImGui::SameLine();
-    if (ui.time_machine_storage_mode == kStorageModeDelta) {
+    if (is_delta_storage_mode(ui.time_machine_storage_mode)) {
       ImGui::TextDisabled(" | JSON: %.1f MB | Patches: %.1f MB | Total: %.1f MB", static_cast<double>(json_bytes) / (1024.0 * 1024.0),
                            static_cast<double>(patch_bytes) / (1024.0 * 1024.0), static_cast<double>(total_bytes) / (1024.0 * 1024.0));
     } else {
@@ -779,7 +836,7 @@ void draw_time_machine_window(Simulation& sim, UIState& ui, Id& selected_ship, I
           const int delta = (i == 0) ? 0 : static_cast<int>(s.diff_prev.size());
           const bool trunc = (i == 0) ? false : s.diff_prev_truncated;
 
-          const bool is_ckpt = (rt.stored_storage_mode == kStorageModeDelta) && !s.json_text.empty();
+          const bool is_ckpt = is_delta_storage_mode(rt.stored_storage_mode) && !s.json_text.empty();
 
           char label[320];
           if (i == rt.baseline_idx) {
@@ -809,8 +866,12 @@ void draw_time_machine_window(Simulation& sim, UIState& ui, Id& selected_ship, I
               } else {
                 ImGui::Text("Checkpoint JSON: (none)");
               }
-              if (i > 0 && s.has_merge_patch) {
-                ImGui::Text("Merge patch: %.1f KB", static_cast<double>(s.merge_patch_bytes) / 1024.0);
+              if (i > 0 && s.has_delta_patch) {
+                if (is_json_patch_delta_mode(rt.stored_storage_mode)) {
+                  ImGui::Text("JSON patch: %.1f KB", static_cast<double>(s.delta_patch_bytes) / 1024.0);
+                } else {
+                  ImGui::Text("Merge patch: %.1f KB", static_cast<double>(s.delta_patch_bytes) / 1024.0);
+                }
               }
             }
             ImGui::EndTooltip();
@@ -872,7 +933,7 @@ void draw_time_machine_window(Simulation& sim, UIState& ui, Id& selected_ship, I
     ImGui::SameLine();
     ImGui::TextDisabled(" | JSON: %.1f KB", static_cast<double>(cur_json.size()) / 1024.0);
 
-    if (rt.stored_storage_mode == kStorageModeDelta) {
+    if (is_delta_storage_mode(rt.stored_storage_mode)) {
       ImGui::SameLine();
       if (!cur.json_text.empty()) {
         ImGui::TextDisabled(" | Stored: checkpoint");
@@ -1044,7 +1105,7 @@ void draw_time_machine_window(Simulation& sim, UIState& ui, Id& selected_ship, I
       ImGui::SetNextItemWidth(260.0f);
       ImGui::InputText("Merge patch path##tm", rt.export_merge_patch_path, IM_ARRAYSIZE(rt.export_merge_patch_path));
       ImGui::SameLine();
-      if (ImGui::Button("Export merge patch (RFC7386)##tm")) {
+      if (ImGui::Button("Export merge patch (RFC7396)##tm")) {
         if (a_idx < 0 || b_idx < 0 || a_idx >= n || b_idx >= n) {
           rt.last_error = "Export merge patch: invalid snapshot indices.";
         } else {
@@ -1071,7 +1132,7 @@ void draw_time_machine_window(Simulation& sim, UIState& ui, Id& selected_ship, I
         }
       }
       if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("RFC 7386 JSON Merge Patch (compact structural delta).");
+        ImGui::SetTooltip("RFC 7396 JSON Merge Patch (compact structural delta).");
       }
     }
 
@@ -1081,9 +1142,16 @@ void draw_time_machine_window(Simulation& sim, UIState& ui, Id& selected_ship, I
       ImGui::SetNextItemWidth(280.0f);
       ImGui::InputText("Delta-save path##tm", rt.export_delta_save_path, IM_ARRAYSIZE(rt.export_delta_save_path));
       if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip(
-            "Exports a delta-save file: { base, patches[] } where patches are RFC 7386 merge patches.\n"
-            "This is compatible with the CLI delta-save tooling.");
+        if (is_json_patch_delta_mode(rt.stored_storage_mode)) {
+          ImGui::SetTooltip(
+              "Exports a delta-save file: { base, patches[] } where patches are RFC 6902 JSON Patch arrays.\n"
+              "This can be more space-efficient when large arrays change slightly.\n"
+              "Compatible with the CLI delta-save tooling.");
+        } else {
+          ImGui::SetTooltip(
+              "Exports a delta-save file: { base, patches[] } where patches are RFC 7396 JSON Merge Patches.\n"
+              "Compatible with the CLI delta-save tooling.");
+        }
       }
 
       const auto export_delta_range = [&](int start_idx, int end_idx) {
@@ -1093,7 +1161,10 @@ void draw_time_machine_window(Simulation& sim, UIState& ui, Id& selected_ship, I
         }
         try {
           nebula4x::DeltaSaveFile f;
-          f.format = nebula4x::kDeltaSaveFormatV1;
+          f.patch_kind = is_json_patch_delta_mode(rt.stored_storage_mode) ? nebula4x::DeltaSavePatchKind::JsonPatch
+                                                                        : nebula4x::DeltaSavePatchKind::MergePatch;
+          f.format = (f.patch_kind == nebula4x::DeltaSavePatchKind::JsonPatch) ? nebula4x::kDeltaSaveFormatV2
+                                                                              : nebula4x::kDeltaSaveFormatV1;
           f.base = nebula4x::json::parse(snapshot_json(rt, start_idx));
 
           f.patches.clear();
@@ -1101,21 +1172,32 @@ void draw_time_machine_window(Simulation& sim, UIState& ui, Id& selected_ship, I
 
           for (int i = start_idx + 1; i <= end_idx; ++i) {
             nebula4x::DeltaSavePatch p;
-            if (rt.stored_storage_mode == kStorageModeDelta && rt.snapshots[static_cast<std::size_t>(i)].has_merge_patch && i == start_idx + 1) {
-              // Patch is from (i-1)->i which is exactly base->first.
-              p.patch = rt.snapshots[static_cast<std::size_t>(i)].merge_patch;
-            } else if (rt.stored_storage_mode == kStorageModeDelta && rt.snapshots[static_cast<std::size_t>(i)].has_merge_patch &&
-                       start_idx == 0) {
-              // Common fast path for full-history export.
-              p.patch = rt.snapshots[static_cast<std::size_t>(i)].merge_patch;
-            } else if (rt.stored_storage_mode == kStorageModeDelta && rt.snapshots[static_cast<std::size_t>(i)].has_merge_patch) {
-              // Patch is from i-1->i; still correct for any contiguous range.
-              p.patch = rt.snapshots[static_cast<std::size_t>(i)].merge_patch;
+            const Snapshot& step = rt.snapshots[static_cast<std::size_t>(i)];
+            const bool reuse_ok = is_delta_storage_mode(rt.stored_storage_mode) && step.has_delta_patch &&
+                                  ((f.patch_kind == nebula4x::DeltaSavePatchKind::MergePatch &&
+                                    is_merge_patch_delta_mode(rt.stored_storage_mode)) ||
+                                   (f.patch_kind == nebula4x::DeltaSavePatchKind::JsonPatch &&
+                                    is_json_patch_delta_mode(rt.stored_storage_mode)));
+
+            if (reuse_ok) {
+              // Stored patch is from (i-1)->i; valid for any contiguous range.
+              p.patch = step.delta_patch;
             } else {
               // Compute patch (full-mode history or missing patch).
-              const nebula4x::json::Value from = nebula4x::json::parse(snapshot_json(rt, i - 1));
-              const nebula4x::json::Value to = nebula4x::json::parse(snapshot_json(rt, i));
-              p.patch = nebula4x::diff_json_merge_patch(from, to);
+              const std::string from_txt = snapshot_json(rt, i - 1);
+              const std::string to_txt = snapshot_json(rt, i);
+
+              if (f.patch_kind == nebula4x::DeltaSavePatchKind::JsonPatch) {
+                nebula4x::JsonPatchOptions jopt;
+                jopt.max_ops = 0;
+                jopt.indent = 0;
+                const std::string patch_json = nebula4x::diff_saves_to_json_patch(from_txt, to_txt, jopt);
+                p.patch = nebula4x::json::parse(patch_json);
+              } else {
+                const nebula4x::json::Value from = nebula4x::json::parse(from_txt);
+                const nebula4x::json::Value to = nebula4x::json::parse(to_txt);
+                p.patch = nebula4x::diff_json_merge_patch(from, to);
+              }
             }
             f.patches.push_back(std::move(p));
           }

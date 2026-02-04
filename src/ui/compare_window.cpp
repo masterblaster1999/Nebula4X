@@ -1091,10 +1091,10 @@ void draw_compare_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& se
     }
   }
   if (ImGui::IsItemHovered()) {
-    ImGui::SetTooltip("Copies an RFC 7386 JSON Merge Patch that transforms A into B (object-recursive; arrays replace).\nUseful with CLI save tooling.");
+    ImGui::SetTooltip("Copies an RFC 7396 JSON Merge Patch that transforms A into B (object-recursive; arrays replace).\nUseful with CLI save tooling.");
   }
 
-  if (ImGui::CollapsingHeader("Merge Patch (RFC 7386)", ImGuiTreeNodeFlags_DefaultOpen)) {
+  if (ImGui::CollapsingHeader("Merge Patch (RFC 7396)", ImGuiTreeNodeFlags_DefaultOpen)) {
     ensure_merge_patch_cached(ui, rt, *cache.root, cache.revision);
     if (!rt.merge_patch_error.empty()) {
       ImGui::TextWrapped("%s", rt.merge_patch_error.c_str());

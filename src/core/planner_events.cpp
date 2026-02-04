@@ -462,7 +462,8 @@ PlannerEventsResult compute_planner_events(const Simulation& sim, Id faction_id,
       if (c.body_id == kInvalidId) continue;
       const auto* b = find_ptr(sim.state().bodies, c.body_id);
       if (!b) continue;
-      const bool has_target = (b->terraforming_target_temp_k > 0.0 || b->terraforming_target_atm > 0.0);
+      const bool has_target = (b->terraforming_target_temp_k > 0.0 || b->terraforming_target_atm > 0.0 ||
+                               b->terraforming_target_o2_atm > 0.0);
       if (!has_target) continue;
       body_ids.push_back(c.body_id);
     }

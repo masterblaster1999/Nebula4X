@@ -1,4 +1,5 @@
 #include <iostream>
+#include <limits>
 #include <string>
 
 #include "nebula4x/util/json.h"
@@ -62,6 +63,19 @@ int test_json_pointer() {
 
     const Value* missing = nebula4x::resolve_json_pointer(doc, "/nope", true, &err);
     N4X_ASSERT(missing == nullptr);
+    N4X_ASSERT(!err.empty());
+
+    // Leading zeros are rejected for array index tokens (except the single token "0").
+    err.clear();
+    const Value* leading_zero = nebula4x::resolve_json_pointer(doc, "/a/b/01", true, &err);
+    N4X_ASSERT(leading_zero == nullptr);
+    N4X_ASSERT(!err.empty());
+
+    // An index token that doesn't fit in std::size_t must fail parse.
+    const std::string huge = std::to_string(std::numeric_limits<std::size_t>::max()) + "0";
+    err.clear();
+    const Value* huge_idx = nebula4x::resolve_json_pointer(doc, "/a/b/" + huge, true, &err);
+    N4X_ASSERT(huge_idx == nullptr);
     N4X_ASSERT(!err.empty());
   }
 

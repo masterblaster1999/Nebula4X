@@ -8395,11 +8395,21 @@ if (move_from >= 0 && move_to >= 0) {
           ImGui::Text("Points/day: %.1f", tf_pts);
           ImGui::Text("Temp: %.1f K", b->surface_temp_k);
           ImGui::Text("Atmosphere: %.3f atm", b->atmosphere_atm);
+          if (b->atmosphere_atm > 1e-9) {
+            const double pct = 100.0 * std::clamp(b->oxygen_atm / b->atmosphere_atm, 0.0, 1.0);
+            ImGui::Text("O2: %.3f atm (%.1f%%)", b->oxygen_atm, pct);
+          } else {
+            ImGui::Text("O2: %.3f atm", b->oxygen_atm);
+          }
 
-          const bool has_target = (b->terraforming_target_temp_k > 0.0 || b->terraforming_target_atm > 0.0);
+          const bool has_target = (b->terraforming_target_temp_k > 0.0 || b->terraforming_target_atm > 0.0 ||
+                                   b->terraforming_target_o2_atm > 0.0);
           if (has_target) {
             ImGui::Text("Target temp: %.1f K", b->terraforming_target_temp_k);
             ImGui::Text("Target atm: %.3f", b->terraforming_target_atm);
+            if (b->terraforming_target_o2_atm > 0.0) {
+              ImGui::Text("Target O2: %.3f atm", b->terraforming_target_o2_atm);
+            }
             if (b->terraforming_complete) ImGui::TextDisabled("(complete)");
 
             // Best-effort ETA forecast (based on current points/day and current mineral stockpiles).
@@ -8435,13 +8445,64 @@ if (move_from >= 0 && move_to >= 0) {
             ImGui::TextDisabled("No target set.");
           }
 
+          // Optional: manual axis allocation when split-axis terraforming is enabled.
+          if (sim.cfg().terraforming_split_points_between_axes) {
+            Body* bm = find_ptr(sim.state().bodies, colony->body_id);
+            if (bm) {
+              ImGui::SeparatorText("Allocation");
+              const double ws = std::max(0.0, bm->terraforming_weight_temp) +
+                                std::max(0.0, bm->terraforming_weight_atm) +
+                                std::max(0.0, bm->terraforming_weight_o2);
+              if (ws <= 1e-12) {
+                ImGui::TextDisabled("Mode: auto (delta-based)");
+              } else {
+                const double st = 100.0 * std::max(0.0, bm->terraforming_weight_temp) / ws;
+                const double sa = 100.0 * std::max(0.0, bm->terraforming_weight_atm) / ws;
+                const double so = 100.0 * std::max(0.0, bm->terraforming_weight_o2) / ws;
+                ImGui::TextDisabled("Mode: manual (Temp %.0f%% / Atm %.0f%% / O2 %.0f%%)", st, sa, so);
+              }
+
+              bool w_changed = false;
+              w_changed |= ImGui::InputDouble("Temp weight##tf_wt", &bm->terraforming_weight_temp, 0.1, 1.0, "%.2f");
+              w_changed |= ImGui::InputDouble("Atm weight##tf_wa", &bm->terraforming_weight_atm, 0.1, 1.0, "%.2f");
+              w_changed |= ImGui::InputDouble("O2 weight##tf_wo", &bm->terraforming_weight_o2, 0.1, 1.0, "%.2f");
+              if (w_changed) {
+                sim.set_terraforming_axis_weights(bm->id, bm->terraforming_weight_temp, bm->terraforming_weight_atm,
+                                                 bm->terraforming_weight_o2);
+              }
+
+              if (ImGui::SmallButton("Auto##tf_w_auto")) {
+                sim.clear_terraforming_axis_weights(bm->id);
+              }
+              ImGui::SameLine();
+              if (ImGui::SmallButton("Temp##tf_w_temp")) {
+                sim.set_terraforming_axis_weights(bm->id, 1.0, 0.0, 0.0);
+              }
+              ImGui::SameLine();
+              if (ImGui::SmallButton("Atm##tf_w_atm")) {
+                sim.set_terraforming_axis_weights(bm->id, 0.0, 1.0, 0.0);
+              }
+              ImGui::SameLine();
+              if (ImGui::SmallButton("O2##tf_w_o2")) {
+                sim.set_terraforming_axis_weights(bm->id, 0.0, 0.0, 1.0);
+              }
+            }
+          }
+
           static double target_temp = 288.0;
           static double target_atm = 1.0;
+          static bool target_o2_enabled = false;
+          static double target_o2 = 0.21;
           ImGui::InputDouble("Target temp (K)##tf", &target_temp, 1.0, 10.0, "%.1f");
           ImGui::InputDouble("Target atm##tf", &target_atm, 0.01, 0.1, "%.3f");
+          ImGui::Checkbox("Target O2##tf", &target_o2_enabled);
+          if (target_o2_enabled) {
+            ImGui::InputDouble("Target O2 (atm)##tf", &target_o2, 0.001, 0.01, "%.3f");
+          }
 
           if (ImGui::Button("Set target")) {
-            if (!sim.set_terraforming_target(colony->body_id, target_temp, target_atm)) {
+            const double o2 = target_o2_enabled ? target_o2 : 0.0;
+            if (!sim.set_terraforming_target(colony->body_id, target_temp, target_atm, o2)) {
               nebula4x::log::warn("Couldn't set terraforming target.");
             }
           }
@@ -8461,7 +8522,7 @@ if (move_from >= 0 && move_to >= 0) {
         } else if (!b) {
           ImGui::TextDisabled("Body missing.");
         } else {
-          const double hab = sim.body_habitability(b->id);
+          const double hab = sim.body_habitability_for_faction(b->id, colony->faction_id);
           const double required = sim.required_habitation_capacity_millions(*colony);
           const double have = sim.habitation_capacity_millions(*colony);
 
@@ -9914,8 +9975,21 @@ if (colony->shipyard_queue.empty()) {
           if (b->atmosphere_atm > 0.0 || b->terraforming_target_atm > 0.0) {
             ImGui::Text("Atmosphere: %.3f atm", b->atmosphere_atm);
           }
-          if (b->terraforming_target_temp_k > 0.0 || b->terraforming_target_atm > 0.0) {
-            ImGui::Text("Terraform target: %.1f K, %.3f atm", b->terraforming_target_temp_k, b->terraforming_target_atm);
+          if (b->oxygen_atm > 0.0 || b->terraforming_target_o2_atm > 0.0) {
+            if (b->atmosphere_atm > 1e-9) {
+              const double pct = 100.0 * std::clamp(b->oxygen_atm / b->atmosphere_atm, 0.0, 1.0);
+              ImGui::Text("O2: %.3f atm (%.1f%%)", b->oxygen_atm, pct);
+            } else {
+              ImGui::Text("O2: %.3f atm", b->oxygen_atm);
+            }
+          }
+          if (b->terraforming_target_temp_k > 0.0 || b->terraforming_target_atm > 0.0 || b->terraforming_target_o2_atm > 0.0) {
+            if (b->terraforming_target_o2_atm > 0.0) {
+              ImGui::Text("Terraform target: %.1f K, %.3f atm, O2 %.3f atm", b->terraforming_target_temp_k, b->terraforming_target_atm,
+                          b->terraforming_target_o2_atm);
+            } else {
+              ImGui::Text("Terraform target: %.1f K, %.3f atm", b->terraforming_target_temp_k, b->terraforming_target_atm);
+            }
             if (b->terraforming_complete) ImGui::TextDisabled("(terraforming complete)");
           }
 
@@ -11029,6 +11103,56 @@ if (colony->shipyard_queue.empty()) {
         fac_labels.reserve(factions.size());
         for (const auto& p : factions) fac_labels.push_back(p.second.c_str());
         ImGui::Combo("##faction_diplomacy", &faction_combo_idx, fac_labels.data(), static_cast<int>(fac_labels.size()));
+
+        // Procedural empire profile (optional).
+        {
+          const SpeciesProfile& sp = selected_faction->species;
+          const FactionTraitMultipliers& tr = selected_faction->traits;
+          const bool has_species_text = !sp.name.empty() || !sp.adjective.empty() || !sp.archetype.empty() ||
+                                        !sp.ethos.empty() || !sp.government.empty();
+          const bool has_species_numbers = (sp.ideal_temp_k > 0.0) || (sp.ideal_atm > 0.0) || (sp.ideal_o2_atm > 0.0);
+          auto deviates = [](double v) { return std::abs(v - 1.0) > 1e-3; };
+          const bool has_traits = deviates(tr.mining) || deviates(tr.industry) || deviates(tr.research) ||
+                                  deviates(tr.construction) || deviates(tr.shipyard) || deviates(tr.terraforming) ||
+                                  deviates(tr.pop_growth) || deviates(tr.troop_training);
+
+          if (has_species_text || has_species_numbers || has_traits) {
+            ImGui::Spacing();
+            ImGui::SeparatorText("Empire profile");
+            if (has_species_text) {
+              if (!sp.name.empty() && !sp.adjective.empty()) {
+                ImGui::Text("Species: %s (%s)", sp.name.c_str(), sp.adjective.c_str());
+              } else if (!sp.name.empty()) {
+                ImGui::Text("Species: %s", sp.name.c_str());
+              }
+              if (!sp.archetype.empty()) ImGui::Text("Archetype: %s", sp.archetype.c_str());
+              if (!sp.ethos.empty()) ImGui::Text("Ethos: %s", sp.ethos.c_str());
+              if (!sp.government.empty()) ImGui::Text("Government: %s", sp.government.c_str());
+            }
+            if (has_species_numbers) {
+              const double t = (sp.ideal_temp_k > 0.0) ? sp.ideal_temp_k : sim.cfg().habitability_ideal_temp_k;
+              const double a = (sp.ideal_atm > 0.0) ? sp.ideal_atm : sim.cfg().habitability_ideal_atm;
+              const double o = (sp.ideal_o2_atm > 0.0) ? sp.ideal_o2_atm : sim.cfg().habitability_ideal_o2_atm;
+              ImGui::Text("Ideal env: %.0f K, %.2f atm, %.2f O2 atm", t, a, o);
+            }
+            if (has_traits) {
+              auto trait_line = [&](const char* label, double v) {
+                if (!deviates(v)) return;
+                const double pct = (v - 1.0) * 100.0;
+                ImGui::BulletText("%s: %+.0f%%", label, pct);
+              };
+              ImGui::TextUnformatted("Traits:");
+              trait_line("Mining", tr.mining);
+              trait_line("Industry", tr.industry);
+              trait_line("Research", tr.research);
+              trait_line("Construction", tr.construction);
+              trait_line("Shipyard", tr.shipyard);
+              trait_line("Terraforming", tr.terraforming);
+              trait_line("Population growth", tr.pop_growth);
+              trait_line("Troop training", tr.troop_training);
+            }
+          }
+        }
 
         ImGui::Separator();
         ImGui::TextWrapped(

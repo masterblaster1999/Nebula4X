@@ -94,6 +94,7 @@ target_sources(nebula4x_core
     src/util/state_export.cpp
     src/util/strings.cpp
     src/util/save_diff.cpp
+    src/util/save_merge.cpp
     src/util/save_delta.cpp
     src/util/json_merge_patch.cpp
     src/util/json_pointer.cpp
@@ -440,6 +441,7 @@ if(NEBULA4X_BUILD_TESTS)
     tests/test_trace_events.cpp
     tests/test_state_validation.cpp
     tests/test_save_diff.cpp
+    tests/test_save_merge.cpp
     tests/test_save_delta.cpp
     tests/test_regression_tape.cpp
     tests/test_state_export.cpp

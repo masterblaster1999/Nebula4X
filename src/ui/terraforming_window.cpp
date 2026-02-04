@@ -138,7 +138,8 @@ void recompute_rows(Simulation& sim) {
 
   // Bodies are the canonical source of terraform targets.
   for (const auto& [bid, b] : sim.state().bodies) {
-    const bool has_target = (b.terraforming_target_temp_k > 0.0 || b.terraforming_target_atm > 0.0);
+    const bool has_target = (b.terraforming_target_temp_k > 0.0 || b.terraforming_target_atm > 0.0 ||
+                             b.terraforming_target_o2_atm > 0.0);
     if (!has_target) continue;
 
     if (s.only_owned_or_controlled) {
@@ -325,7 +326,7 @@ void draw_terraforming_window(Simulation& sim, UIState& ui, Id& selected_ship, I
 
   ImGui::TextDisabled("Projects: %d", (int)s.rows.size());
 
-  if (ImGui::BeginTable("terraforming_table", 11, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY,
+  if (ImGui::BeginTable("terraforming_table", 13, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY,
                         ImVec2(0, 0))) {
     ImGui::TableSetupScrollFreeze(0, 1);
     ImGui::TableSetupColumn("Body", ImGuiTableColumnFlags_WidthStretch);
@@ -336,6 +337,8 @@ void draw_terraforming_window(Simulation& sim, UIState& ui, Id& selected_ship, I
     ImGui::TableSetupColumn("Target K", ImGuiTableColumnFlags_WidthFixed, 80);
     ImGui::TableSetupColumn("Atm", ImGuiTableColumnFlags_WidthFixed, 70);
     ImGui::TableSetupColumn("Target Atm", ImGuiTableColumnFlags_WidthFixed, 90);
+    ImGui::TableSetupColumn("O2", ImGuiTableColumnFlags_WidthFixed, 70);
+    ImGui::TableSetupColumn("Target O2", ImGuiTableColumnFlags_WidthFixed, 90);
     ImGui::TableSetupColumn("ETA", ImGuiTableColumnFlags_WidthFixed, 120);
     ImGui::TableSetupColumn("Minerals", ImGuiTableColumnFlags_WidthFixed, 150);
     ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthFixed, 150);
@@ -386,6 +389,20 @@ void draw_terraforming_window(Simulation& sim, UIState& ui, Id& selected_ship, I
       ImGui::Text("%.3f", sc.target_atm);
 
       ImGui::TableSetColumnIndex(8);
+      if (sc.target_o2_atm > 0.0) {
+        ImGui::Text("%.3f", sc.start_o2_atm);
+      } else {
+        ImGui::TextUnformatted("—");
+      }
+
+      ImGui::TableSetColumnIndex(9);
+      if (sc.target_o2_atm > 0.0) {
+        ImGui::Text("%.3f", sc.target_o2_atm);
+      } else {
+        ImGui::TextUnformatted("—");
+      }
+
+      ImGui::TableSetColumnIndex(10);
       if (sc.complete && sc.days_to_complete <= 0) {
         ImGui::TextUnformatted("Done");
       } else if (sc.stalled) {
@@ -397,7 +414,7 @@ void draw_terraforming_window(Simulation& sim, UIState& ui, Id& selected_ship, I
         ImGui::TextUnformatted("?");
       }
 
-      ImGui::TableSetColumnIndex(9);
+      ImGui::TableSetColumnIndex(11);
       if (s.ignore_mineral_costs || (sc.duranium_per_point <= 0.0 && sc.neutronium_per_point <= 0.0)) {
         ImGui::TextUnformatted("(n/a)");
       } else {
@@ -412,7 +429,7 @@ void draw_terraforming_window(Simulation& sim, UIState& ui, Id& selected_ship, I
         }
       }
 
-      ImGui::TableSetColumnIndex(10);
+      ImGui::TableSetColumnIndex(12);
       {
         const std::string id = std::to_string((std::uint64_t)row.body_id);
         if (ImGui::SmallButton(("Focus##tf_focus_" + id).c_str())) {

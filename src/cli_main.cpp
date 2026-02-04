@@ -21,6 +21,7 @@
 #include "nebula4x/util/duel_tournament.h"
 #include "nebula4x/util/duel_swiss_tournament.h"
 #include "nebula4x/util/save_diff.h"
+#include "nebula4x/util/save_merge.h"
 #include "nebula4x/util/json_merge_patch.h"
 #include "nebula4x/util/save_delta.h"
 #include "nebula4x/util/regression_tape.h"
@@ -77,6 +78,19 @@ bool get_two_str_args(int argc, char** argv, const std::string& key, std::string
     if (argv[i] == key) {
       out_a = argv[i + 1];
       out_b = argv[i + 2];
+      return true;
+    }
+  }
+  return false;
+}
+
+bool get_three_str_args(int argc, char** argv, const std::string& key, std::string& out_a, std::string& out_b,
+                        std::string& out_c) {
+  for (int i = 1; i < argc - 3; ++i) {
+    if (argv[i] == key) {
+      out_a = argv[i + 1];
+      out_b = argv[i + 2];
+      out_c = argv[i + 3];
       return true;
     }
   }
@@ -405,11 +419,21 @@ void print_usage(const char* exe) {
   std::cout << "  --save PATH      Save state JSON after advancing\n";
   std::cout << "  --format-save    Load + re-save (canonicalize JSON) without advancing\n";
   std::cout << "  --fix-save       Attempt to repair common save integrity issues (requires --load and --save or --dump or --fix-save-mergepatch-out)\n";
-  std::cout << "    --fix-save-mergepatch-out PATH  (optional) Write an RFC 7386 JSON Merge Patch describing the fix (PATH can be '-' for stdout)\n";
+  std::cout << "    --fix-save-mergepatch-out PATH  (optional) Write an RFC 7396 JSON Merge Patch describing the fix (PATH can be '-' for stdout)\n";
   std::cout << "  --diff-saves A B Compare two save JSON files and print a structural diff\n";
   std::cout << "  --diff-saves-json PATH  (optional) Also emit a JSON diff report (PATH can be '-' for stdout)\n";
   std::cout << "  --diff-saves-jsonpatch PATH  (optional) Also emit an RFC 6902 JSON Patch (PATH can be '-' for stdout)\n";
-  std::cout << "  --diff-saves-jsonmergepatch PATH  (optional) Also emit an RFC 7386 JSON Merge Patch (PATH can be '-' for stdout)\n";
+  std::cout << "    --diff-saves-jsonpatch-tests  (optional) When emitting JSON Patch, include RFC 6902 test preconditions\n";
+  std::cout << "  --diff-saves-jsonmergepatch PATH  (optional) Also emit an RFC 7396 JSON Merge Patch (PATH can be '-' for stdout)\n";
+  std::cout << "  --merge-saves BASE LOCAL REMOTE  Three-way merge saves (BASE is common ancestor)\n";
+  std::cout << "    --merge-saves-out PATH     (optional) Output merged save (PATH can be '-' for stdout; default: -)\n";
+  std::cout << "    --merge-saves-report PATH  (optional) Output JSON conflict report (PATH can be '-' for stdout)\n";
+  std::cout << "    --merge-saves-strategy S   (optional) Conflict strategy: fail|prefer_local|prefer_remote|prefer_base (default: fail)\n";
+  std::cout << "    --merge-saves-no-array-merge  (optional) Treat arrays atomically (disable index-wise merge)\n";
+  std::cout << "    --merge-saves-no-key-merge    (optional) Disable key-wise array merging\n";
+  std::cout << "    --merge-saves-no-insertion-merge  (optional) Disable insertion-wise array merging (append weaving)\n";
+  std::cout << "    --merge-saves-no-auto-key-discovery (optional) Disable auto-discovery of array merge keys\n";
+  std::cout << "    --merge-saves-array-key KEY   (optional) Key for key-wise array merging (overrides candidates)\n";
   std::cout << "  --query-json FILE PATTERN  Query a JSON document with a JSON pointer glob pattern (FILE can be "-" for stdin)\n";
   std::cout << "    --query-json-out PATH    (optional) Output JSON report (PATH can be '-' for stdout)\n";
   std::cout << "    --query-json-jsonl PATH  (optional) Output matches as JSONL/NDJSON (PATH can be '-' for stdout)\n";
@@ -421,14 +445,18 @@ void print_usage(const char* exe) {
   std::cout << "    --complete-case-sensitive  Use case-sensitive prefix matching (default: case-insensitive)\n";
   std::cout << "  --apply-save-patch SAVE PATCH  Apply an RFC 6902 JSON Patch to SAVE\n";
   std::cout << "  --apply-save-patch-out PATH   (optional) Output path for the patched save (PATH can be '-' for stdout; default: -)\n";
-  std::cout << "  --apply-save-mergepatch SAVE PATCH  Apply an RFC 7386 JSON Merge Patch to SAVE\n";
+  std::cout << "  --apply-save-mergepatch SAVE PATCH  Apply an RFC 7396 JSON Merge Patch to SAVE\n";
   std::cout << "  --apply-save-mergepatch-out PATH   (optional) Output path for the patched save (PATH can be '-' for stdout; default: -)\n";
-  std::cout << "  --make-delta-save BASE SAVE   Create a delta-save file (base + RFC 7386 merge patch chain)\n";
+  std::cout << "  --make-delta-save BASE SAVE   Create a delta-save file (base + patch chain)\n";
   std::cout << "  --append-delta-save DELTA SAVE  Append SAVE to an existing delta-save file\n";
   std::cout << "  --reconstruct-delta-save DELTA  Reconstruct a save from a delta-save file\n";
   std::cout << "  --verify-delta-save DELTA   Verify a delta-save by replaying patches and checking recorded digests\n";
+  std::cout << "  --squash-delta-save DELTA   Squash a delta-save to a single patch (optionally rebase via --delta-save-index)\n";
+  std::cout << "  --convert-delta-save DELTA  Convert a delta-save between merge_patch and json_patch encodings\n";
+  std::cout << "  --delta-save-stats DELTA    Print patch chain size statistics for a delta-save file\n";
   std::cout << "    --delta-save-out PATH     Output path for delta-save/reconstructed save (PATH can be '-' for stdout; default: -)\n";
-  std::cout << "    --delta-save-index N      For reconstruct: apply first N patches (0=base, default: -1=all)\n";
+  std::cout << "    --delta-save-index N      For reconstruct: apply first N patches (0=base, default: -1=all). For squash: new base snapshot index (default: 0)\n";
+  std::cout << "    --delta-save-jsonpatch    For create/squash/convert: use RFC 6902 JSON Patch ops (writes v2; default: RFC 7396 merge patches)\n";
   std::cout << "  --make-regression-tape PATH   Generate a regression tape (timeline digests + metrics) and exit\n";
   std::cout << "    --tape-step-days N         Snapshot cadence for tape generation (default: 1)\n";
   std::cout << "  --verify-regression-tape PATH Verify a regression tape by re-running the simulation and comparing digests\n";
@@ -554,9 +582,21 @@ int main(int argc, char** argv) {
     const std::string diff_json_path = get_str_arg(argc, argv, "--diff-saves-json", "");
     const std::string diff_patch_path = get_str_arg(argc, argv, "--diff-saves-jsonpatch", "");
     const std::string diff_merge_patch_path = get_str_arg(argc, argv, "--diff-saves-jsonmergepatch", "");
+    const bool diff_patch_tests = has_flag(argc, argv, "--diff-saves-jsonpatch-tests");
 
     if (diff_flag && !diff_saves) {
       std::cerr << "--diff-saves requires two paths: --diff-saves A B\n\n";
+      print_usage(argv[0]);
+      return 2;
+    }
+
+    if (diff_patch_tests && !diff_flag) {
+      std::cerr << "--diff-saves-jsonpatch-tests requires --diff-saves\n\n";
+      print_usage(argv[0]);
+      return 2;
+    }
+    if (diff_patch_tests && diff_patch_path.empty()) {
+      std::cerr << "--diff-saves-jsonpatch-tests requires --diff-saves-jsonpatch PATH\n\n";
       print_usage(argv[0]);
       return 2;
     }
@@ -592,7 +632,11 @@ int main(int argc, char** argv) {
       }
 
       if (!diff_patch_path.empty()) {
-        const std::string patch = nebula4x::diff_saves_to_json_patch(a_canon, b_canon);
+        nebula4x::JsonPatchOptions jopt;
+        jopt.indent = 2;
+        jopt.emit_tests = diff_patch_tests;
+
+        const std::string patch = nebula4x::diff_saves_to_json_patch(a_canon, b_canon, jopt);
         if (diff_patch_path == "-") {
           std::cout << patch;
         } else {
@@ -619,6 +663,154 @@ int main(int argc, char** argv) {
         const bool machine_to_stdout = json_to_stdout || patch_to_stdout || merge_to_stdout;
         std::ostream& out = machine_to_stdout ? std::cerr : std::cout;
         out << nebula4x::diff_saves_to_text(a_canon, b_canon);
+      }
+      return 0;
+    }
+
+    // Three-way save merge utility:
+    //   --merge-saves BASE.json LOCAL.json REMOTE.json
+    //   --merge-saves BASE.json LOCAL.json REMOTE.json --merge-saves-out OUT.json
+    //   --merge-saves BASE.json LOCAL.json REMOTE.json --merge-saves-report OUT.report.json
+    //   --merge-saves BASE.json LOCAL.json REMOTE.json --merge-saves-strategy prefer_local
+    std::string merge_base_path;
+    std::string merge_local_path;
+    std::string merge_remote_path;
+    const bool merge_saves = get_three_str_args(argc, argv, "--merge-saves", merge_base_path, merge_local_path,
+                                                merge_remote_path);
+    const bool merge_saves_flag = has_flag(argc, argv, "--merge-saves");
+    const std::string merge_out_path = get_str_arg(argc, argv, "--merge-saves-out", "-");
+    const std::string merge_report_path = get_str_arg(argc, argv, "--merge-saves-report", "");
+    const std::string merge_strategy = get_str_arg(argc, argv, "--merge-saves-strategy", "fail");
+    const bool merge_no_array_merge = has_flag(argc, argv, "--merge-saves-no-array-merge");
+    const bool merge_no_key_merge = has_flag(argc, argv, "--merge-saves-no-key-merge");
+    const bool merge_no_insertion_merge = has_flag(argc, argv, "--merge-saves-no-insertion-merge");
+    const bool merge_no_auto_key_discovery = has_flag(argc, argv, "--merge-saves-no-auto-key-discovery");
+    const bool merge_array_key_flag_raw = has_flag(argc, argv, "--merge-saves-array-key");
+    const bool merge_array_key_flag = has_kv_arg(argc, argv, "--merge-saves-array-key");
+    const std::string merge_array_key = get_str_arg(argc, argv, "--merge-saves-array-key", "");
+
+    if (merge_saves_flag && !merge_saves) {
+      std::cerr << "--merge-saves requires three paths: --merge-saves BASE LOCAL REMOTE\n\n";
+      print_usage(argv[0]);
+      return 2;
+    }
+    if (!merge_report_path.empty() && !merge_saves_flag) {
+      std::cerr << "--merge-saves-report requires --merge-saves\n\n";
+      print_usage(argv[0]);
+      return 2;
+    }
+    if (has_kv_arg(argc, argv, "--merge-saves-strategy") && !merge_saves_flag) {
+      std::cerr << "--merge-saves-strategy requires --merge-saves\n\n";
+      print_usage(argv[0]);
+      return 2;
+    }
+    if (merge_no_array_merge && !merge_saves_flag) {
+      std::cerr << "--merge-saves-no-array-merge requires --merge-saves\n\n";
+      print_usage(argv[0]);
+      return 2;
+    }
+    if (merge_no_key_merge && !merge_saves_flag) {
+      std::cerr << "--merge-saves-no-key-merge requires --merge-saves\n\n";
+      print_usage(argv[0]);
+      return 2;
+    }
+    if (merge_no_insertion_merge && !merge_saves_flag) {
+      std::cerr << "--merge-saves-no-insertion-merge requires --merge-saves\n\n";
+      print_usage(argv[0]);
+      return 2;
+    }
+    if (merge_no_auto_key_discovery && !merge_saves_flag) {
+      std::cerr << "--merge-saves-no-auto-key-discovery requires --merge-saves\n\n";
+      print_usage(argv[0]);
+      return 2;
+    }
+    if (merge_array_key_flag_raw && !merge_array_key_flag) {
+      std::cerr << "--merge-saves-array-key requires a value: --merge-saves-array-key KEY\n\n";
+      print_usage(argv[0]);
+      return 2;
+    }
+    if (merge_array_key_flag_raw && !merge_saves_flag) {
+      std::cerr << "--merge-saves-array-key requires --merge-saves\n\n";
+      print_usage(argv[0]);
+      return 2;
+    }
+
+    if (merge_saves) {
+      if (merge_out_path == "-" && merge_report_path == "-") {
+        std::cerr << "--merge-saves-out and --merge-saves-report cannot both write to stdout ('-')\n";
+        return 2;
+      }
+
+      nebula4x::SaveMergeOptions mopt;
+      mopt.indent = 2;
+      mopt.merge_arrays_by_index = !merge_no_array_merge;
+      mopt.merge_arrays_by_key = !merge_no_key_merge;
+      mopt.merge_arrays_by_insertions = !merge_no_insertion_merge;
+      mopt.auto_discover_array_key = !merge_no_auto_key_discovery;
+      if (merge_array_key_flag) {
+        mopt.array_key_override = merge_array_key;
+      }
+      if (merge_strategy == "fail") {
+        mopt.on_conflict = nebula4x::MergeConflictResolution::kFail;
+      } else if (merge_strategy == "prefer_local") {
+        mopt.on_conflict = nebula4x::MergeConflictResolution::kPreferLocal;
+      } else if (merge_strategy == "prefer_remote") {
+        mopt.on_conflict = nebula4x::MergeConflictResolution::kPreferRemote;
+      } else if (merge_strategy == "prefer_base") {
+        mopt.on_conflict = nebula4x::MergeConflictResolution::kPreferBase;
+      } else {
+        std::cerr << "--merge-saves-strategy must be one of: fail|prefer_local|prefer_remote|prefer_base\n";
+        return 2;
+      }
+
+      const auto base_state = nebula4x::deserialize_game_from_json(nebula4x::read_text_file(merge_base_path));
+      const auto local_state = nebula4x::deserialize_game_from_json(nebula4x::read_text_file(merge_local_path));
+      const auto remote_state = nebula4x::deserialize_game_from_json(nebula4x::read_text_file(merge_remote_path));
+      const std::string base_canon = nebula4x::serialize_game_to_json(base_state);
+      const std::string local_canon = nebula4x::serialize_game_to_json(local_state);
+      const std::string remote_canon = nebula4x::serialize_game_to_json(remote_state);
+
+      const auto base_v = nebula4x::json::parse(base_canon);
+      const auto local_v = nebula4x::json::parse(local_canon);
+      const auto remote_v = nebula4x::json::parse(remote_canon);
+
+      auto res = nebula4x::merge_json_three_way(base_v, local_v, remote_v, mopt);
+
+      // Always emit a report if requested, or when there are conflicts.
+      if (!merge_report_path.empty() || !res.conflicts.empty()) {
+        const std::string report = nebula4x::merge_saves_three_way_report(base_canon, local_canon, remote_canon, mopt);
+        if (merge_report_path.empty()) {
+          if (!quiet) {
+            std::cerr << "merge-saves: conflicts=" << res.conflicts.size() << "\n";
+          }
+          std::cerr << report;
+        } else if (merge_report_path == "-") {
+          std::cout << report;
+        } else {
+          nebula4x::write_text_file(merge_report_path, report);
+          if (!quiet) {
+            std::cout << "Merge report written to " << merge_report_path << "\n";
+          }
+        }
+      }
+
+      if (mopt.on_conflict == nebula4x::MergeConflictResolution::kFail && !res.conflicts.empty()) {
+        // Do not emit a merged save unless the user picked a conflict strategy.
+        return 2;
+      }
+
+      // Validate + canonicalize the merged save by roundtripping through GameState.
+      const std::string merged_json = nebula4x::json::stringify(res.merged, /*indent=*/2);
+      const auto merged_state = nebula4x::deserialize_game_from_json(merged_json);
+      const std::string merged_canon = nebula4x::serialize_game_to_json(merged_state);
+
+      if (merge_out_path == "-") {
+        std::cout << merged_canon;
+      } else {
+        nebula4x::write_text_file(merge_out_path, merged_canon);
+        if (!quiet) {
+          std::cout << "Merged save written to " << merge_out_path << "\n";
+        }
       }
       return 0;
     }
@@ -914,7 +1106,7 @@ int main(int argc, char** argv) {
       return 0;
     }
 
-    // Save merge patch apply utility (RFC 7386):
+    // Save merge patch apply utility (RFC 7396):
     //   --apply-save-mergepatch SAVE.json PATCH.json
     //   --apply-save-mergepatch SAVE.json PATCH.json --apply-save-mergepatch-out OUT.json
     //   --apply-save-mergepatch SAVE.json PATCH.json --apply-save-mergepatch-out -  (save to stdout; info to stderr unless --quiet)
@@ -958,7 +1150,7 @@ int main(int argc, char** argv) {
       return 0;
     }
 
-    // Delta-save utilities (base save + RFC 7386 merge patch chain).
+    // Delta-save utilities (base save + patch chain).
     //
     // Examples:
     //   --make-delta-save BASE.json NEXT.json --delta-save-out OUT.delta.json
@@ -981,6 +1173,18 @@ int main(int argc, char** argv) {
 
     const std::string verify_delta_path = get_str_arg(argc, argv, "--verify-delta-save", "");
     const bool verify_delta_flag = has_flag(argc, argv, "--verify-delta-save");
+
+    const std::string squash_delta_path = get_str_arg(argc, argv, "--squash-delta-save", "");
+    const bool squash_delta_flag = has_flag(argc, argv, "--squash-delta-save");
+
+    const std::string convert_delta_path = get_str_arg(argc, argv, "--convert-delta-save", "");
+    const bool convert_delta_flag = has_flag(argc, argv, "--convert-delta-save");
+
+    const std::string delta_stats_path = get_str_arg(argc, argv, "--delta-save-stats", "");
+    const bool delta_stats_flag = has_flag(argc, argv, "--delta-save-stats");
+
+    // Creation flag: use RFC 6902 JSON Patch instead of RFC 7396 merge patch.
+    const bool delta_save_jsonpatch_flag = has_flag(argc, argv, "--delta-save-jsonpatch");
 
     const int delta_index_raw = get_int_arg(argc, argv, "--delta-save-index", -1);
     const int delta_index = (delta_index_raw < 0) ? -1 : delta_index_raw;
@@ -1011,13 +1215,32 @@ int main(int argc, char** argv) {
       print_usage(argv[0]);
       return 2;
     }
+    if (squash_delta_flag && squash_delta_path.empty()) {
+      std::cerr << "--squash-delta-save requires a path: --squash-delta-save DELTA\n\n";
+      print_usage(argv[0]);
+      return 2;
+    }
+    if (convert_delta_flag && convert_delta_path.empty()) {
+      std::cerr << "--convert-delta-save requires a path: --convert-delta-save DELTA\n\n";
+      print_usage(argv[0]);
+      return 2;
+    }
+    if (delta_stats_flag && delta_stats_path.empty()) {
+      std::cerr << "--delta-save-stats requires a path: --delta-save-stats DELTA\n\n";
+      print_usage(argv[0]);
+      return 2;
+    }
 
     const bool do_reconstruct_delta = reconstruct_delta_flag && !reconstruct_delta_path.empty();
     const bool do_verify_delta = verify_delta_flag && !verify_delta_path.empty();
+    const bool do_squash_delta = squash_delta_flag && !squash_delta_path.empty();
+    const bool do_convert_delta = convert_delta_flag && !convert_delta_path.empty();
+    const bool do_delta_stats = delta_stats_flag && !delta_stats_path.empty();
     const int delta_ops = (make_delta_save ? 1 : 0) + (append_delta_save ? 1 : 0) + (do_reconstruct_delta ? 1 : 0) +
-                          (do_verify_delta ? 1 : 0);
+                          (do_verify_delta ? 1 : 0) + (do_squash_delta ? 1 : 0) + (do_convert_delta ? 1 : 0) +
+                          (do_delta_stats ? 1 : 0);
     if (delta_ops > 1) {
-      std::cerr << "Only one of --make-delta-save / --append-delta-save / --reconstruct-delta-save / --verify-delta-save may be used at a time.\n\n";
+      std::cerr << "Only one of --make-delta-save / --append-delta-save / --reconstruct-delta-save / --verify-delta-save / --squash-delta-save / --convert-delta-save / --delta-save-stats may be used at a time.\n\n";
       print_usage(argv[0]);
       return 2;
     }
@@ -1037,7 +1260,9 @@ int main(int argc, char** argv) {
       const auto target_state = nebula4x::deserialize_game_from_json(nebula4x::read_text_file(delta_target_path));
       const std::string target_canon = nebula4x::serialize_game_to_json(target_state);
 
-      nebula4x::DeltaSaveFile ds = nebula4x::make_delta_save(base_canon, target_canon);
+      const nebula4x::DeltaSavePatchKind kind = delta_save_jsonpatch_flag ? nebula4x::DeltaSavePatchKind::JsonPatch
+                                                                          : nebula4x::DeltaSavePatchKind::MergePatch;
+      nebula4x::DeltaSaveFile ds = nebula4x::make_delta_save(base_canon, target_canon, kind);
       const std::string ds_json = nebula4x::stringify_delta_save_file(ds, /*indent=*/2);
 
       if (out_to_stdout) {
@@ -1047,6 +1272,7 @@ int main(int argc, char** argv) {
       }
 
       if (!quiet) {
+        info << "Patch kind:    " << nebula4x::delta_save_patch_kind_to_string(ds.patch_kind) << "\n";
         const std::size_t full_bytes = base_canon.size() + target_canon.size();
         const std::size_t delta_bytes = ds_json.size();
         const std::size_t patch_bytes = nebula4x::json::stringify(ds.patches.empty() ? nebula4x::json::Object{} : ds.patches[0].patch, 0).size();
@@ -1066,6 +1292,12 @@ int main(int argc, char** argv) {
       std::ostream& info = out_to_stdout ? std::cerr : std::cout;
 
       nebula4x::DeltaSaveFile ds = nebula4x::parse_delta_save_file(nebula4x::read_text_file(append_delta_path));
+
+      if (delta_save_jsonpatch_flag && ds.patch_kind != nebula4x::DeltaSavePatchKind::JsonPatch) {
+        std::cerr << "--delta-save-jsonpatch was provided but the delta-save file is merge_patch (v1).\n"
+                     "Convert with --convert-delta-save DELTA --delta-save-jsonpatch.\n";
+        return 2;
+      }
 
       const auto target_state =
           nebula4x::deserialize_game_from_json(nebula4x::read_text_file(append_delta_target_path));
@@ -1125,15 +1357,129 @@ int main(int argc, char** argv) {
       return 0;
     }
 
+    if (do_squash_delta) {
+      const bool out_to_stdout = (delta_out_path == "-");
+      std::ostream& info = out_to_stdout ? std::cerr : std::cout;
+
+      const nebula4x::DeltaSaveFile ds =
+          nebula4x::parse_delta_save_file(nebula4x::read_text_file(squash_delta_path));
+
+      const int base_index = (delta_index_raw < 0) ? 0 : delta_index_raw;
+      if (base_index < 0 || base_index > static_cast<int>(ds.patches.size())) {
+        std::cerr << "--delta-save-index " << base_index << " is out of range (patches=" << ds.patches.size()
+                  << ")\n";
+        return 2;
+      }
+
+      nebula4x::DeltaSavePatchKind out_kind = ds.patch_kind;
+      if (delta_save_jsonpatch_flag) out_kind = nebula4x::DeltaSavePatchKind::JsonPatch;
+
+      nebula4x::DeltaSaveFile out = nebula4x::squash_delta_save_as(ds, base_index, out_kind);
+      const std::string out_json = nebula4x::stringify_delta_save_file(out, /*indent=*/2);
+
+      if (out_to_stdout) {
+        std::cout << out_json;
+      } else {
+        nebula4x::write_text_file(delta_out_path, out_json);
+      }
+
+      if (!quiet) {
+        info << "Squash base index: " << base_index << "\n";
+        info << "Patch kind: " << nebula4x::delta_save_patch_kind_to_string(out.patch_kind) << "\n";
+        info << "Patches: " << ds.patches.size() << " -> " << out.patches.size() << "\n";
+        if (!out.base_state_digest_hex.empty()) info << "Base digest: " << out.base_state_digest_hex << "\n";
+        if (!out.patches.empty() && !out.patches[0].state_digest_hex.empty()) {
+          info << "Final digest: " << out.patches[0].state_digest_hex << "\n";
+        }
+        if (!out_to_stdout) info << "Delta-save written to " << delta_out_path << "\n";
+      }
+      return 0;
+    }
+
+    if (do_convert_delta) {
+      const bool out_to_stdout = (delta_out_path == "-");
+      std::ostream& info = out_to_stdout ? std::cerr : std::cout;
+
+      const nebula4x::DeltaSaveFile ds =
+          nebula4x::parse_delta_save_file(nebula4x::read_text_file(convert_delta_path));
+      const nebula4x::DeltaSavePatchKind in_kind =
+          (ds.format == nebula4x::kDeltaSaveFormatV1) ? nebula4x::DeltaSavePatchKind::MergePatch : ds.patch_kind;
+      const nebula4x::DeltaSavePatchKind out_kind =
+          delta_save_jsonpatch_flag ? nebula4x::DeltaSavePatchKind::JsonPatch : nebula4x::DeltaSavePatchKind::MergePatch;
+
+      nebula4x::DeltaSaveFile out = nebula4x::convert_delta_save_patch_kind(ds, out_kind);
+      const std::string out_json = nebula4x::stringify_delta_save_file(out, /*indent=*/2);
+
+      if (out_to_stdout) {
+        std::cout << out_json;
+      } else {
+        nebula4x::write_text_file(delta_out_path, out_json);
+      }
+
+      if (!quiet) {
+        info << "Converted patch kind: " << nebula4x::delta_save_patch_kind_to_string(in_kind) << " -> "
+             << nebula4x::delta_save_patch_kind_to_string(out.patch_kind) << "\n";
+        info << "Patches: " << ds.patches.size() << "\n";
+        if (!out.base_state_digest_hex.empty()) info << "Base digest: " << out.base_state_digest_hex << "\n";
+        if (!out.patches.empty() && !out.patches.back().state_digest_hex.empty()) {
+          info << "Final digest: " << out.patches.back().state_digest_hex << "\n";
+        }
+        if (!out_to_stdout) info << "Delta-save written to " << delta_out_path << "\n";
+      }
+      return 0;
+    }
+
+    if (do_delta_stats) {
+      const std::string text = nebula4x::read_text_file(delta_stats_path);
+      const nebula4x::DeltaSaveFile ds = nebula4x::parse_delta_save_file(text);
+      const nebula4x::DeltaSavePatchKind kind =
+          (ds.format == nebula4x::kDeltaSaveFormatV1) ? nebula4x::DeltaSavePatchKind::MergePatch : ds.patch_kind;
+
+      std::vector<std::size_t> patch_bytes;
+      patch_bytes.reserve(ds.patches.size());
+      std::size_t sum = 0;
+      for (const auto& p : ds.patches) {
+        const std::size_t n = nebula4x::json::stringify(p.patch, 0).size();
+        patch_bytes.push_back(n);
+        sum += n;
+      }
+
+      std::sort(patch_bytes.begin(), patch_bytes.end());
+      const std::size_t min_b = patch_bytes.empty() ? 0 : patch_bytes.front();
+      const std::size_t max_b = patch_bytes.empty() ? 0 : patch_bytes.back();
+      const std::size_t med_b =
+          patch_bytes.empty() ? 0 : patch_bytes[patch_bytes.size() / 2];
+      const double avg_b = patch_bytes.empty() ? 0.0 : (static_cast<double>(sum) / patch_bytes.size());
+
+      std::cout << "Format:   " << ds.format << "\n";
+      std::cout << "Kind:     " << nebula4x::delta_save_patch_kind_to_string(kind) << "\n";
+      std::cout << "Patches:  " << ds.patches.size() << "\n";
+      std::cout << "Bytes:    file=" << text.size() << ", base=" << nebula4x::json::stringify(ds.base, 0).size() << ", patches~=" << sum
+                << "\n";
+      std::cout << "Patch bytes: min=" << min_b << ", med=" << med_b << ", max=" << max_b
+                << ", avg=" << avg_b << "\n";
+
+      return 0;
+    }
+
     if (do_verify_delta) {
-      const nebula4x::DeltaSaveFile ds = nebula4x::parse_delta_save_file(nebula4x::read_text_file(verify_delta_path));
+      const nebula4x::DeltaSaveFile ds =
+          nebula4x::parse_delta_save_file(nebula4x::read_text_file(verify_delta_path));
+
+      const nebula4x::DeltaSavePatchKind kind =
+          (ds.format == nebula4x::kDeltaSaveFormatV1) ? nebula4x::DeltaSavePatchKind::MergePatch : ds.patch_kind;
+
+      auto digest_hex_for_value = [&](const nebula4x::json::Value& v) -> std::string {
+        return digest_hex_for_save(nebula4x::json::stringify(v, 2));
+      };
 
       int mismatches = 0;
 
+      nebula4x::json::Value st = ds.base;
+
       // Base.
       {
-        const std::string base_json = nebula4x::reconstruct_delta_save_json(ds, 0, /*indent=*/2);
-        const std::string got = digest_hex_for_save(base_json);
+        const std::string got = digest_hex_for_value(st);
         if (!quiet) {
           std::cout << "Base digest:   " << got;
           if (!ds.base_state_digest_hex.empty()) std::cout << " (file " << ds.base_state_digest_hex << ")";
@@ -1143,8 +1489,12 @@ int main(int argc, char** argv) {
       }
 
       for (std::size_t i = 0; i < ds.patches.size(); ++i) {
-        const std::string snap_json = nebula4x::reconstruct_delta_save_json(ds, static_cast<int>(i + 1), /*indent=*/2);
-        const std::string got = digest_hex_for_save(snap_json);
+        if (kind == nebula4x::DeltaSavePatchKind::MergePatch) {
+          nebula4x::apply_json_merge_patch(st, ds.patches[i].patch);
+        } else {
+          nebula4x::apply_json_patch(st, ds.patches[i].patch, nebula4x::JsonPatchApplyOptions{});
+        }
+        const std::string got = digest_hex_for_value(st);
         const std::string want = ds.patches[i].state_digest_hex;
         const bool ok = want.empty() || (got == want);
         if (!quiet) {

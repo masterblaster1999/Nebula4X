@@ -2477,12 +2477,30 @@ bool Simulation::clear_troop_training_queue(Id colony_id) {
   return true;
 }
 
-bool Simulation::set_terraforming_target(Id body_id, double target_temp_k, double target_atm) {
+bool Simulation::set_terraforming_target(Id body_id, double target_temp_k, double target_atm, double target_o2_atm) {
   auto* body = find_ptr(state_.bodies, body_id);
   if (!body) return false;
-  if (target_temp_k <= 0.0 && target_atm <= 0.0) return false;
-  body->terraforming_target_temp_k = std::max(0.0, target_temp_k);
-  body->terraforming_target_atm = std::max(0.0, target_atm);
+  if (target_temp_k <= 0.0 && target_atm <= 0.0 && target_o2_atm <= 0.0) return false;
+
+  const double tt = std::max(0.0, target_temp_k);
+  const double ta = std::max(0.0, target_atm);
+  const double to2 = std::max(0.0, target_o2_atm);
+
+  // Oxygen targets require a total-atmosphere target as well.
+  if (to2 > 0.0 && !(ta > 0.0)) return false;
+
+  // Sanity: O2 must not exceed total pressure.
+  if (to2 > ta + 1e-12) return false;
+
+  // Safety clamp: disallow oxygen targets above a configurable fraction of total pressure.
+  if (to2 > 0.0 && cfg_.terraforming_o2_max_fraction_of_atm > 0.0) {
+    const double max_o2 = ta * cfg_.terraforming_o2_max_fraction_of_atm;
+    if (to2 > max_o2 + 1e-12) return false;
+  }
+
+  body->terraforming_target_temp_k = tt;
+  body->terraforming_target_atm = ta;
+  body->terraforming_target_o2_atm = to2;
   body->terraforming_complete = false;
   return true;
 }
@@ -2492,8 +2510,28 @@ bool Simulation::clear_terraforming_target(Id body_id) {
   if (!body) return false;
   body->terraforming_target_temp_k = 0.0;
   body->terraforming_target_atm = 0.0;
+  body->terraforming_target_o2_atm = 0.0;
   body->terraforming_complete = false;
   return true;
+}
+
+bool Simulation::set_terraforming_axis_weights(Id body_id, double weight_temp, double weight_atm, double weight_o2) {
+  auto* body = find_ptr(state_.bodies, body_id);
+  if (!body) return false;
+
+  auto sanitize = [](double v) {
+    if (!std::isfinite(v) || v <= 0.0) return 0.0;
+    return v;
+  };
+
+  body->terraforming_weight_temp = sanitize(weight_temp);
+  body->terraforming_weight_atm = sanitize(weight_atm);
+  body->terraforming_weight_o2 = sanitize(weight_o2);
+  return true;
+}
+
+bool Simulation::clear_terraforming_axis_weights(Id body_id) {
+  return set_terraforming_axis_weights(body_id, 0.0, 0.0, 0.0);
 }
 
 double Simulation::terraforming_points_per_day(const Colony& c) const {

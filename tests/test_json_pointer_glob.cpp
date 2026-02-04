@@ -155,5 +155,14 @@ int test_json_pointer_glob() {
     N4X_ASSERT(has_path(matches, "/e/12"));
   }
 
+  // Leading zeros are rejected for array index tokens.
+  {
+    std::string err;
+    nebula4x::JsonPointerQueryStats st;
+    const auto matches = nebula4x::query_json_pointer_glob(doc, "/e/01", true, 64, 10000, &st, &err);
+    N4X_ASSERT(matches.empty());
+    N4X_ASSERT(err.empty());
+  }
+
   return 0;
 }

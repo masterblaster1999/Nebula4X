@@ -103,7 +103,7 @@ std::string format_include_cycle(const std::vector<fs::path>& stack, const fs::p
   return oss.str();
 }
 
-// NOTE: Merge patch semantics are implemented as a shared utility (RFC 7386).
+// NOTE: Merge patch semantics are implemented as a shared utility (RFC 7396).
 // Core data loaders use this to support layered content/tech overlays.
 
 void apply_string_list_patch(json::Object& merged,

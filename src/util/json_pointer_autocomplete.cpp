@@ -1,7 +1,9 @@
 #include "nebula4x/util/json_pointer_autocomplete.h"
 
 #include <algorithm>
+#include <charconv>
 #include <cctype>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -25,6 +27,26 @@ bool starts_with_ci(std::string_view s, std::string_view prefix) {
   for (std::size_t i = 0; i < prefix.size(); ++i) {
     if (to_lower_ascii(s[i]) != to_lower_ascii(prefix[i])) return false;
   }
+  return true;
+}
+
+bool is_digits(std::string_view s) {
+  if (s.empty()) return false;
+  for (char c : s) {
+    if (!std::isdigit(static_cast<unsigned char>(c))) return false;
+  }
+  return true;
+}
+
+bool parse_size_t(std::string_view s, std::size_t* out) {
+  if (!out) return false;
+  if (s.empty()) return false;
+  std::size_t v = 0;
+  const char* b = s.data();
+  const char* e = s.data() + s.size();
+  auto res = std::from_chars(b, e, v);
+  if (res.ec != std::errc() || res.ptr != e) return false;
+  *out = v;
   return true;
 }
 
@@ -120,17 +142,65 @@ std::vector<std::string> suggest_json_pointer_completions(const json::Value& doc
     if (!a) return out;
 
     const std::size_t n = a->size();
-    // Cap scanning effort for very large arrays.
-    const std::size_t scan_cap = std::min<std::size_t>(n, static_cast<std::size_t>(max_suggestions) * 200ull);
+    if (n == 0) return out;
 
-    for (std::size_t i = 0; i < scan_cap; ++i) {
-      const std::string idx = std::to_string(i);
-      if (!partial.empty()) {
+    // Common case: no partial token, just suggest the first indices.
+    if (partial.empty()) {
+      const std::size_t limit = std::min<std::size_t>(n, static_cast<std::size_t>(max_suggestions));
+      for (std::size_t i = 0; i < limit; ++i) {
+        out.push_back(json_pointer_join_index(prefix, i));
+      }
+      return out;
+    }
+
+    // Array indices are decimal. If the partial token isn't digits, it can't match anything.
+    if (!is_digits(partial)) return out;
+
+    // Leading zeros (except "0") are not valid in array index tokens.
+    if (partial.size() > 1 && partial[0] == '0') return out;
+
+    // Special-case "0": the only possible match is index 0.
+    if (partial == "0") {
+      out.push_back(json_pointer_join_index(prefix, 0));
+      return out;
+    }
+
+    std::size_t p = 0;
+    if (!parse_size_t(partial, &p)) return out;
+
+    // If the typed prefix already exceeds the array size, no index can match.
+    if (p >= n) return out;
+
+    // Smarter completion for large arrays:
+    // Generate indices whose decimal string begins with the given prefix without scanning
+    // a potentially huge array. Indices are emitted in ascending numeric order.
+    const std::size_t max_index = n - 1;
+    std::size_t pow10 = 1;
+    for (;;) {
+      // Compute start = p * pow10 with overflow guard.
+      if (p > std::numeric_limits<std::size_t>::max() / pow10) break;
+      const std::size_t start = p * pow10;
+      if (start > max_index) break;
+
+      // Compute end = (p+1)*pow10 - 1 with overflow guard.
+      std::size_t end = max_index;
+      if (p + 1 <= std::numeric_limits<std::size_t>::max() / pow10) {
+        const std::size_t end_candidate = (p + 1) * pow10 - 1;
+        end = std::min(end_candidate, max_index);
+      }
+
+      for (std::size_t i = start; i <= end; ++i) {
+        const std::string idx = std::to_string(i);
         const bool match = case_sensitive ? starts_with(idx, partial) : starts_with_ci(idx, partial);
         if (!match) continue;
+
+        out.push_back(json_pointer_join_index(prefix, i));
+        if ((int)out.size() >= max_suggestions) break;
       }
-      out.push_back(json_pointer_join_index(prefix, i));
+
       if ((int)out.size() >= max_suggestions) break;
+      if (pow10 > std::numeric_limits<std::size_t>::max() / 10) break;
+      pow10 *= 10;
     }
     return out;
   }

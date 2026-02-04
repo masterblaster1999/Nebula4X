@@ -1494,9 +1494,14 @@ json::Value serialize_game_to_json_value(const GameState& s) {
     if (b.radius_km > 0.0) o["radius_km"] = b.radius_km;
     if (b.surface_temp_k > 0.0) o["surface_temp_k"] = b.surface_temp_k;
     if (b.atmosphere_atm > 0.0) o["atmosphere_atm"] = b.atmosphere_atm;
+    if (b.oxygen_atm > 0.0) o["oxygen_atm"] = b.oxygen_atm;
     if (b.terraforming_target_temp_k > 0.0) o["terraforming_target_temp_k"] = b.terraforming_target_temp_k;
     if (b.terraforming_target_atm > 0.0) o["terraforming_target_atm"] = b.terraforming_target_atm;
+    if (b.terraforming_target_o2_atm > 0.0) o["terraforming_target_o2_atm"] = b.terraforming_target_o2_atm;
     if (b.terraforming_complete) o["terraforming_complete"] = true;
+    if (b.terraforming_weight_temp > 0.0) o["terraforming_weight_temp"] = b.terraforming_weight_temp;
+    if (b.terraforming_weight_atm > 0.0) o["terraforming_weight_atm"] = b.terraforming_weight_atm;
+    if (b.terraforming_weight_o2 > 0.0) o["terraforming_weight_o2"] = b.terraforming_weight_o2;
     o["orbit_radius_mkm"] = b.orbit_radius_mkm;
     o["orbit_period_days"] = b.orbit_period_days;
     o["orbit_phase_radians"] = b.orbit_phase_radians;
@@ -2059,6 +2064,51 @@ json::Value serialize_game_to_json_value(const GameState& s) {
       if (!cd.empty()) o["diplomacy_offer_cooldowns"] = cd;
     }
 
+    // Species profile (optional).
+    {
+      const SpeciesProfile& sp = f.species;
+      const bool has_text = !sp.name.empty() || !sp.adjective.empty() || !sp.archetype.empty() || !sp.ethos.empty() ||
+                            !sp.government.empty();
+      const bool has_env = (sp.ideal_temp_k > 0.0) || (sp.ideal_atm > 0.0) || (sp.ideal_o2_atm > 0.0) ||
+                           (sp.temp_tolerance_k > 0.0) || (sp.atm_tolerance > 0.0) || (sp.o2_tolerance_atm > 0.0);
+      if (has_text || has_env) {
+        Object so;
+        if (!sp.name.empty()) so["name"] = sp.name;
+        if (!sp.adjective.empty()) so["adjective"] = sp.adjective;
+        if (!sp.archetype.empty()) so["archetype"] = sp.archetype;
+        if (!sp.ethos.empty()) so["ethos"] = sp.ethos;
+        if (!sp.government.empty()) so["government"] = sp.government;
+        if (sp.ideal_temp_k > 0.0) so["ideal_temp_k"] = sp.ideal_temp_k;
+        if (sp.ideal_atm > 0.0) so["ideal_atm"] = sp.ideal_atm;
+        if (sp.ideal_o2_atm > 0.0) so["ideal_o2_atm"] = sp.ideal_o2_atm;
+        if (sp.temp_tolerance_k > 0.0) so["temp_tolerance_k"] = sp.temp_tolerance_k;
+        if (sp.atm_tolerance > 0.0) so["atm_tolerance"] = sp.atm_tolerance;
+        if (sp.o2_tolerance_atm > 0.0) so["o2_tolerance_atm"] = sp.o2_tolerance_atm;
+        if (!so.empty()) o["species"] = so;
+      }
+    }
+
+    // Innate trait multipliers (optional).
+    {
+      const FactionTraitMultipliers& tm = f.traits;
+      auto diff = [](double v) {
+        return std::isfinite(v) && (std::fabs(v - 1.0) > 1e-12);
+      };
+      if (diff(tm.mining) || diff(tm.industry) || diff(tm.research) || diff(tm.construction) || diff(tm.shipyard) ||
+          diff(tm.terraforming) || diff(tm.troop_training) || diff(tm.pop_growth)) {
+        Object to;
+        if (diff(tm.mining)) to["mining"] = tm.mining;
+        if (diff(tm.industry)) to["industry"] = tm.industry;
+        if (diff(tm.research)) to["research"] = tm.research;
+        if (diff(tm.construction)) to["construction"] = tm.construction;
+        if (diff(tm.shipyard)) to["shipyard"] = tm.shipyard;
+        if (diff(tm.terraforming)) to["terraforming"] = tm.terraforming;
+        if (diff(tm.troop_training)) to["troop_training"] = tm.troop_training;
+        if (diff(tm.pop_growth)) to["pop_growth"] = tm.pop_growth;
+        if (!to.empty()) o["traits"] = to;
+      }
+    }
+
     o["ship_contacts"] = contacts;
     factions.push_back(o);
   }
@@ -2516,14 +2566,30 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     if (auto it = o.find("radius_km"); it != o.end()) b.radius_km = it->second.number_value(0.0);
     if (auto it = o.find("surface_temp_k"); it != o.end()) b.surface_temp_k = it->second.number_value(0.0);
     if (auto it = o.find("atmosphere_atm"); it != o.end()) b.atmosphere_atm = it->second.number_value(0.0);
+    if (auto it = o.find("oxygen_atm"); it != o.end()) b.oxygen_atm = it->second.number_value(0.0);
     if (auto it = o.find("terraforming_target_temp_k"); it != o.end()) {
       b.terraforming_target_temp_k = it->second.number_value(0.0);
     }
     if (auto it = o.find("terraforming_target_atm"); it != o.end()) {
       b.terraforming_target_atm = it->second.number_value(0.0);
     }
+    if (auto it = o.find("terraforming_target_o2_atm"); it != o.end()) {
+      b.terraforming_target_o2_atm = it->second.number_value(0.0);
+    }
     if (auto it = o.find("terraforming_complete"); it != o.end()) {
       b.terraforming_complete = it->second.bool_value(false);
+    }
+    if (auto it = o.find("terraforming_weight_temp"); it != o.end()) {
+      const double v = it->second.number_value(0.0);
+      b.terraforming_weight_temp = (std::isfinite(v) && v > 0.0) ? v : 0.0;
+    }
+    if (auto it = o.find("terraforming_weight_atm"); it != o.end()) {
+      const double v = it->second.number_value(0.0);
+      b.terraforming_weight_atm = (std::isfinite(v) && v > 0.0) ? v : 0.0;
+    }
+    if (auto it = o.find("terraforming_weight_o2"); it != o.end()) {
+      const double v = it->second.number_value(0.0);
+      b.terraforming_weight_o2 = (std::isfinite(v) && v > 0.0) ? v : 0.0;
     }
     b.orbit_radius_mkm = o.at("orbit_radius_mkm").number_value();
     b.orbit_period_days = o.at("orbit_period_days").number_value();
@@ -3136,6 +3202,51 @@ GameState deserialize_game_from_json(const std::string& json_text) {
     }
     if (auto it = o.find("colony_founding_profile"); it != o.end()) {
       f.colony_founding_profile = colony_automation_profile_from_json_value(it->second);
+    }
+
+    // Species profile (optional).
+    if (auto it = o.find("species"); it != o.end() && it->second.is_object()) {
+      const auto& so = it->second.object();
+      SpeciesProfile sp;
+      sp.name = (so.find("name") != so.end()) ? so.at("name").string_value() : std::string();
+      sp.adjective = (so.find("adjective") != so.end()) ? so.at("adjective").string_value() : std::string();
+      sp.archetype = (so.find("archetype") != so.end()) ? so.at("archetype").string_value() : std::string();
+      sp.ethos = (so.find("ethos") != so.end()) ? so.at("ethos").string_value() : std::string();
+      sp.government = (so.find("government") != so.end()) ? so.at("government").string_value() : std::string();
+
+      auto read_pos = [](const json::Value& v) -> double {
+        const double x = v.number_value(0.0);
+        if (!std::isfinite(x) || x <= 0.0) return 0.0;
+        return x;
+      };
+      if (auto it2 = so.find("ideal_temp_k"); it2 != so.end()) sp.ideal_temp_k = read_pos(it2->second);
+      if (auto it2 = so.find("ideal_atm"); it2 != so.end()) sp.ideal_atm = read_pos(it2->second);
+      if (auto it2 = so.find("ideal_o2_atm"); it2 != so.end()) sp.ideal_o2_atm = read_pos(it2->second);
+      if (auto it2 = so.find("temp_tolerance_k"); it2 != so.end()) sp.temp_tolerance_k = read_pos(it2->second);
+      if (auto it2 = so.find("atm_tolerance"); it2 != so.end()) sp.atm_tolerance = read_pos(it2->second);
+      if (auto it2 = so.find("o2_tolerance_atm"); it2 != so.end()) sp.o2_tolerance_atm = read_pos(it2->second);
+
+      f.species = std::move(sp);
+    }
+
+    // Innate trait multipliers (optional).
+    if (auto it = o.find("traits"); it != o.end() && it->second.is_object()) {
+      const auto& to = it->second.object();
+
+      auto read_factor = [](const json::Value& v) -> double {
+        const double x = v.number_value(1.0);
+        if (!std::isfinite(x) || x < 0.0) return 1.0;
+        return x;
+      };
+
+      if (auto it2 = to.find("mining"); it2 != to.end()) f.traits.mining = read_factor(it2->second);
+      if (auto it2 = to.find("industry"); it2 != to.end()) f.traits.industry = read_factor(it2->second);
+      if (auto it2 = to.find("research"); it2 != to.end()) f.traits.research = read_factor(it2->second);
+      if (auto it2 = to.find("construction"); it2 != to.end()) f.traits.construction = read_factor(it2->second);
+      if (auto it2 = to.find("shipyard"); it2 != to.end()) f.traits.shipyard = read_factor(it2->second);
+      if (auto it2 = to.find("terraforming"); it2 != to.end()) f.traits.terraforming = read_factor(it2->second);
+      if (auto it2 = to.find("troop_training"); it2 != to.end()) f.traits.troop_training = read_factor(it2->second);
+      if (auto it2 = to.find("pop_growth"); it2 != to.end()) f.traits.pop_growth = read_factor(it2->second);
     }
 
     // Diplomatic relations (optional in saves; if missing, default stance is Hostile).

@@ -561,6 +561,10 @@ double Simulation::construction_points_per_day(const Colony& colony) const {
 }
 
 double Simulation::body_habitability(Id body_id) const {
+  return body_habitability_for_faction(body_id, kInvalidId);
+}
+
+double Simulation::body_habitability_for_faction(Id body_id, Id faction_id) const {
   if (!cfg_.enable_habitability) return 1.0;
 
   const auto* b = find_ptr(state_.bodies, body_id);
@@ -569,15 +573,41 @@ double Simulation::body_habitability(Id body_id) const {
   // If terraforming is marked complete, treat as fully habitable.
   if (b->terraforming_complete) return 1.0;
 
-  // Use terraforming targets as the "ideal" environment when present.
-  // This makes partial terraforming gradually improve habitability.
+  // Base ideal/tolerance from SimConfig, optionally overridden by the faction's
+  // SpeciesProfile.
   double ideal_t = cfg_.habitability_ideal_temp_k;
   double ideal_atm = cfg_.habitability_ideal_atm;
+  double ideal_o2 = cfg_.habitability_ideal_o2_atm;
+  double t_tol = cfg_.habitability_temp_tolerance_k;
+  double a_tol = cfg_.habitability_atm_tolerance;
+  double o2_tol = cfg_.habitability_o2_tolerance_atm;
+
+  if (faction_id != kInvalidId) {
+    if (const auto* fac = find_ptr(state_.factions, faction_id)) {
+      const SpeciesProfile& sp = fac->species;
+      if (sp.ideal_temp_k > 0.0) ideal_t = sp.ideal_temp_k;
+      if (sp.ideal_atm > 0.0) ideal_atm = sp.ideal_atm;
+      if (sp.ideal_o2_atm > 0.0) ideal_o2 = sp.ideal_o2_atm;
+      if (sp.temp_tolerance_k > 0.0) t_tol = sp.temp_tolerance_k;
+      if (sp.atm_tolerance > 0.0) a_tol = sp.atm_tolerance;
+      if (sp.o2_tolerance_atm > 0.0) o2_tol = sp.o2_tolerance_atm;
+    }
+  }
+
+  // Use terraforming targets as the "ideal" environment when present.
+  // This makes partial terraforming gradually improve habitability.
   if (b->terraforming_target_temp_k > 0.0) ideal_t = b->terraforming_target_temp_k;
   if (b->terraforming_target_atm > 0.0) ideal_atm = b->terraforming_target_atm;
+  if (b->terraforming_target_o2_atm > 0.0) ideal_o2 = b->terraforming_target_o2_atm;
 
   const double dt = std::fabs(b->surface_temp_k - ideal_t);
   const double da = std::fabs(b->atmosphere_atm - ideal_atm);
+
+  // Oxygen is optional: only incorporate it when the body has oxygen metadata
+  // or the user has set an explicit terraforming oxygen target.
+  const bool use_o2 = (b->terraforming_target_o2_atm > 0.0) || (b->oxygen_atm > 0.0);
+  const double o2 = std::clamp(b->oxygen_atm, 0.0, std::max(0.0, b->atmosphere_atm));
+  const double do2 = std::fabs(o2 - ideal_o2);
 
   auto factor_linear = [](double delta, double tol) {
     if (!(tol > 0.0)) return (delta <= 0.0) ? 1.0 : 0.0;
@@ -585,13 +615,24 @@ double Simulation::body_habitability(Id body_id) const {
     return std::clamp(x, 0.0, 1.0);
   };
 
-  const double t_tol = std::max(1e-9, cfg_.habitability_temp_tolerance_k);
-  const double a_tol = std::max(1e-9, cfg_.habitability_atm_tolerance);
+  t_tol = std::max(1e-9, t_tol);
+  a_tol = std::max(1e-9, a_tol);
+  o2_tol = std::max(1e-9, o2_tol);
 
   const double t_factor = factor_linear(dt, t_tol);
   const double a_factor = factor_linear(da, a_tol);
 
-  return std::clamp(t_factor * a_factor, 0.0, 1.0);
+  double o2_factor = 1.0;
+  if (use_o2) {
+    o2_factor = factor_linear(do2, o2_tol);
+    // Simple safety constraint: O2 fraction must not exceed a configurable limit.
+    if (b->atmosphere_atm > 1e-9) {
+      const double frac = o2 / b->atmosphere_atm;
+      if (frac > cfg_.habitability_o2_max_fraction_of_atm + 1e-12) o2_factor = 0.0;
+    }
+  }
+
+  return std::clamp(t_factor * a_factor * o2_factor, 0.0, 1.0);
 }
 
 double Simulation::habitation_capacity_millions(const Colony& colony) const {
@@ -612,7 +653,7 @@ double Simulation::required_habitation_capacity_millions(const Colony& colony) c
   const double pop = std::max(0.0, colony.population_millions);
   if (pop <= 0.0) return 0.0;
 
-  const double hab = body_habitability(colony.body_id);
+  const double hab = body_habitability_for_faction(colony.body_id, colony.faction_id);
   if (hab >= 0.999) return 0.0;
   return pop * std::clamp(1.0 - hab, 0.0, 1.0);
 }
@@ -2536,7 +2577,7 @@ ColonyStabilityStatus Simulation::colony_stability_status_for_colony(const Colon
 
   if (col.id == kInvalidId) return st;
 
-  st.habitability = std::clamp(body_habitability(col.body_id), 0.0, 1.0);
+  st.habitability = std::clamp(body_habitability_for_faction(col.body_id, col.faction_id), 0.0, 1.0);
 
   const double pop = std::max(0.0, col.population_millions);
   if (pop > 1e-9) {

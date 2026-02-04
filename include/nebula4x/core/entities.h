@@ -47,6 +47,46 @@ enum class FactionControl : std::uint8_t {
   AI_Pirate = 3,
 };
 
+// Optional procedural species profile.
+//
+// This is currently used by scenario generation + UI and can optionally
+// influence habitability calculations.
+struct SpeciesProfile {
+  std::string name;       // e.g. "Xelari"
+  std::string adjective;  // e.g. "Xelarian"
+
+  // Flavor metadata (UI only for now).
+  std::string archetype;  // e.g. "Insectoid", "Reptilian"
+  std::string ethos;      // e.g. "Militarist", "Pacifist"
+  std::string government; // e.g. "Republic", "Hegemony"
+
+  // Ideal environment preferences (used by habitability if present).
+  // If these are <= 0, the simulation falls back to SimConfig defaults.
+  double ideal_temp_k{0.0};
+  double ideal_atm{0.0};
+  double ideal_o2_atm{0.0};
+
+  // Tolerances around the ideal. If <= 0, SimConfig tolerances are used.
+  double temp_tolerance_k{0.0};
+  double atm_tolerance{0.0};
+  double o2_tolerance_atm{0.0};
+};
+
+// Optional innate, non-tech economic multipliers.
+//
+// These are applied on top of tech effects and treaties. They are primarily
+// intended for procedural AI empires in random scenarios.
+struct FactionTraitMultipliers {
+  double mining{1.0};
+  double industry{1.0};
+  double research{1.0};
+  double construction{1.0};
+  double shipyard{1.0};
+  double terraforming{1.0};
+  double troop_training{1.0};
+  double pop_growth{1.0};
+};
+
 // Diplomatic stance between factions.
 //
 // This is currently used as a simple Rules-of-Engagement / auto-targeting gate:
@@ -337,9 +377,30 @@ struct Body {
   // These values are primarily used by the terraforming prototype.
   // If terraforming_target_* are <= 0, terraforming is treated as "disabled".
   double atmosphere_atm{0.0};
+  // Oxygen partial pressure (atm). For now, this is a single breathable-gas axis
+  // used by terraforming and (optionally) habitability.
+  //
+  // In the current prototype, total atmosphere and oxygen are modeled
+  // independently but clamped so that 0 <= oxygen_atm <= atmosphere_atm.
+  double oxygen_atm{0.0};
   double terraforming_target_temp_k{0.0};
   double terraforming_target_atm{0.0};
+  double terraforming_target_o2_atm{0.0};
   bool terraforming_complete{false};
+
+  // Optional per-body terraforming axis weights (used when
+  // SimConfig::terraforming_split_points_between_axes is enabled).
+  //
+  // If all weights are <= 0, the simulation uses automatic allocation based on
+  // remaining deltas to the targets.
+  //
+  // Weights are treated as relative priorities (they do not need to sum to 1).
+  // Axes that are not currently active (no target, already within tolerance,
+  // or temporarily constrained) are ignored and the remaining weights are
+  // re-normalized.
+  double terraforming_weight_temp{0.0};
+  double terraforming_weight_atm{0.0};
+  double terraforming_weight_o2{0.0};
 
   // Cached position for current sim date (absolute, after applying parent orbits).
   Vec2 position_mkm{0.0, 0.0};
@@ -1611,6 +1672,13 @@ struct Faction {
   // This is used to prevent immediately re-spawning a base the day after it is
   // destroyed, giving the player a meaningful suppression window.
   std::unordered_map<Id, int> pirate_hideout_cooldown_until_day;
+
+  // --- Procedural identity (optional) ---
+  //
+  // Random scenarios can generate distinct alien species + empire profiles.
+  // These fields are safe to leave empty/default for hand-authored scenarios.
+  SpeciesProfile species;
+  FactionTraitMultipliers traits;
 };
 
 // A lightweight grouping of ships for UI / order-issuing convenience.

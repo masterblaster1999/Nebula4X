@@ -145,7 +145,7 @@ void Simulation::tick_colonies(double dt_days, bool emit_daily_events) {
       if (std::fabs(base_per_day) > 1e-12) {
         double growth_mult = 1.0;
         if (cfg_.enable_habitability) {
-          const double hab = body_habitability(colony.body_id);
+          const double hab = body_habitability_for_faction(colony.body_id, colony.faction_id);
           if (hab >= 0.999) {
             growth_mult = 1.0;
           } else {
@@ -153,12 +153,19 @@ void Simulation::tick_colonies(double dt_days, bool emit_daily_events) {
             growth_mult = std::max(0.0, cfg_.habitation_supported_growth_multiplier) * std::clamp(hab, 0.0, 1.0);
           }
         }
+        // Apply innate faction trait multiplier (procedural species/empires).
+        if (const auto* fac = find_ptr(state_.factions, colony.faction_id)) {
+          const double t = fac->traits.pop_growth;
+          if (std::isfinite(t) && t >= 0.0) {
+            growth_mult *= t;
+          }
+        }
         growth_mult *= cond_mult.pop_growth;
         pop *= (1.0 + base_per_day * growth_mult * dt_days);
       }
 
       if (cfg_.enable_habitability) {
-        const double hab = body_habitability(colony.body_id);
+        const double hab = body_habitability_for_faction(colony.body_id, colony.faction_id);
         if (hab < 0.999) {
           const double required = std::max(0.0, pop) * std::clamp(1.0 - hab, 0.0, 1.0);
           const double have = habitation_capacity_millions(colony);

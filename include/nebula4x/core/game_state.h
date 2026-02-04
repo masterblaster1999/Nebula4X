@@ -146,7 +146,7 @@ struct GameState {
   // Latest on-disk save version produced by this build.
   //
   // Serialization will still load older versions and backfill fields.
-  int save_version{57};
+  int save_version{58};
   Date date;
 
   // Hour-of-day within the current Date (0..23).

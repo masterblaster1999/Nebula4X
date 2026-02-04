@@ -56,6 +56,7 @@ int test_json_pointer_glob();
 int test_trace_events();
 int test_state_validation();
 int test_save_diff();
+int test_save_merge();
 int test_save_delta();
 int test_regression_tape();
 int test_state_export();
@@ -331,6 +332,7 @@ int main(int argc, char** argv) {
       {"trace_events", test_trace_events},
       {"state_validation", test_state_validation},
       {"save_diff", test_save_diff},
+      {"save_merge", test_save_merge},
       {"save_delta", test_save_delta},
       {"regression_tape", test_regression_tape},
       {"state_export", test_state_export},

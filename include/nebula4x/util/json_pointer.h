@@ -32,7 +32,8 @@ std::string json_pointer_join_index(const std::string& base, std::size_t idx);
 std::vector<std::string> split_json_pointer(const std::string& path, bool accept_root_slash = false);
 
 // Parse an array index token (non-negative integer). Returns false for invalid
-// tokens (including "-").
+// tokens (including "-", leading zeros other than "0", and values that don't
+// fit in std::size_t).
 bool parse_json_pointer_index(std::string_view tok, std::size_t& out);
 
 // Resolve a JSON Pointer against a parsed JSON document.

@@ -415,7 +415,7 @@ void draw_state_doctor_window(Simulation& sim, UIState& ui) {
       }
     }
 
-    if (ImGui::CollapsingHeader("Merge patch (RFC 7386)")) {
+    if (ImGui::CollapsingHeader("Merge patch (RFC 7396)")) {
       if (ImGui::Button("Copy merge patch")) {
         ImGui::SetClipboardText(s.preview_merge_patch_json.c_str());
         s.last_status = "Copied merge patch to clipboard.";
