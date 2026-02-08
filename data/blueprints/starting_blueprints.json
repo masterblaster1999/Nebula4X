@@ -222,7 +222,7 @@
       ]
     },
     {
-      "id": "escort_delta",
+      "id": "escort_delta_shielded",
       "name": "Escort Delta (Shielded)",
       "role": "combatant",
       "components": [
@@ -375,6 +375,43 @@
         "sensor_mk2",
         "stealth_coating_mk1",
         "ecm_suite_mk1",
+        "fuel_tank_mk1"
+      ]
+    },
+    {
+      "id": "salvage_tug_mk1",
+      "name": "Salvage Tug Mk.I",
+      "role": "freighter",
+      "components": [
+        "engine_chem_mk1",
+        "sensor_mk1",
+        "cargo_mk1",
+        "cargo_mk1",
+        "cargo_mk1",
+        "fuel_tank_mk1"
+      ]
+    },
+    {
+      "id": "fuel_tender_mk1",
+      "name": "Fuel Tender Mk.I",
+      "role": "freighter",
+      "components": [
+        "engine_chem_mk1",
+        "sensor_mk1",
+        "fuel_tank_mk1",
+        "fuel_tank_mk1",
+        "fuel_tank_mk1"
+      ]
+    },
+    {
+      "id": "miner_mk1",
+      "name": "Miner Mk.I",
+      "role": "freighter",
+      "components": [
+        "engine_chem_mk1",
+        "reactor_mk1",
+        "mining_laser_mk1",
+        "cargo_mk1",
         "fuel_tank_mk1"
       ]
     }

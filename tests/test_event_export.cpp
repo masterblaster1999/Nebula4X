@@ -73,6 +73,18 @@ int test_event_export() {
     ev.message = "He said \"ok\"";
     s.events.push_back(ev);
   }
+  {
+    nebula4x::SimEvent ev;
+    ev.seq = 7;
+    ev.day = 11; // 2200-01-12
+    ev.hour = 19;
+    ev.level = nebula4x::EventLevel::Info;
+    ev.category = nebula4x::EventCategory::Terraforming;
+    ev.faction_id = 1;
+    ev.colony_id = 7;
+    ev.message = "CO2 scrubbers online";
+    s.events.push_back(ev);
+  }
 
   std::vector<const nebula4x::SimEvent*> events;
   events.reserve(s.events.size());
@@ -86,6 +98,8 @@ int test_event_export() {
   N4X_ASSERT(csv.find("2200-01-11 06:00") != std::string::npos);
   N4X_ASSERT(csv.find("\"Test,comma\"") != std::string::npos);
   N4X_ASSERT(csv.find(R"("He said ""ok""")") != std::string::npos);
+  N4X_ASSERT(csv.find("TERRAFORMING") != std::string::npos);
+  N4X_ASSERT(csv.find("CO2 scrubbers online") != std::string::npos);
 
   // JSON: parseable and has expected fields.
   const std::string json_text = nebula4x::events_to_json(s, events);
@@ -93,7 +107,7 @@ int test_event_export() {
   const auto root = nebula4x::json::parse(json_text);
   const auto* arr = root.as_array();
   N4X_ASSERT(arr != nullptr);
-  N4X_ASSERT(arr->size() == 2);
+  N4X_ASSERT(arr->size() == 3);
 
   const auto* o0 = (*arr)[0].as_object();
   N4X_ASSERT(o0 != nullptr);
@@ -117,6 +131,14 @@ int test_event_export() {
   N4X_ASSERT(o1->at("datetime").string_value() == "2200-01-12 18:00");
   N4X_ASSERT(o1->at("message").string_value() == "He said \"ok\"");
 
+  const auto* o2 = (*arr)[2].as_object();
+  N4X_ASSERT(o2 != nullptr);
+  N4X_ASSERT(o2->at("seq").int_value() == 7);
+  N4X_ASSERT(o2->at("category").string_value() == "terraforming");
+  N4X_ASSERT(o2->at("colony").string_value() == "Earth");
+  N4X_ASSERT(o2->at("datetime").string_value() == "2200-01-12 19:00");
+  N4X_ASSERT(o2->at("message").string_value() == "CO2 scrubbers online");
+
   // JSONL: one object per line, parseable per-line.
   const std::string jsonl_text = nebula4x::events_to_jsonl(s, events);
   N4X_ASSERT(!jsonl_text.empty() && jsonl_text.back() == '\n');
@@ -131,7 +153,7 @@ int test_event_export() {
     }
     while (!lines.empty() && lines.back().empty()) lines.pop_back();
   }
-  N4X_ASSERT(lines.size() == 2);
+  N4X_ASSERT(lines.size() == 3);
   {
     const auto v = nebula4x::json::parse(lines[0]);
     const auto* o = v.as_object();
@@ -146,6 +168,14 @@ int test_event_export() {
     N4X_ASSERT(o->at("seq").int_value() == 6);
     N4X_ASSERT(o->at("message").string_value() == "He said \"ok\"");
   }
+  {
+    const auto v = nebula4x::json::parse(lines[2]);
+    const auto* o = v.as_object();
+    N4X_ASSERT(o != nullptr);
+    N4X_ASSERT(o->at("seq").int_value() == 7);
+    N4X_ASSERT(o->at("category").string_value() == "terraforming");
+    N4X_ASSERT(o->at("message").string_value() == "CO2 scrubbers online");
+  }
 
   // Summary JSON: parseable and has expected counts/range.
   const std::string summary_text = nebula4x::events_summary_to_json(events);
@@ -153,7 +183,7 @@ int test_event_export() {
   const auto sum_root = nebula4x::json::parse(summary_text);
   const auto* sum = sum_root.as_object();
   N4X_ASSERT(sum != nullptr);
-  N4X_ASSERT(sum->at("count").int_value() == 2);
+  N4X_ASSERT(sum->at("count").int_value() == 3);
 
   const auto* range = sum->at("range").as_object();
   N4X_ASSERT(range != nullptr);
@@ -162,13 +192,13 @@ int test_event_export() {
   N4X_ASSERT(range->at("day_max").int_value() == 11);
   N4X_ASSERT(range->at("date_max").string_value() == "2200-01-12");
   N4X_ASSERT(range->at("hour_min").int_value() == 6);
-  N4X_ASSERT(range->at("hour_max").int_value() == 18);
+  N4X_ASSERT(range->at("hour_max").int_value() == 19);
   N4X_ASSERT(range->at("datetime_min").string_value() == "2200-01-11 06:00");
-  N4X_ASSERT(range->at("datetime_max").string_value() == "2200-01-12 18:00");
+  N4X_ASSERT(range->at("datetime_max").string_value() == "2200-01-12 19:00");
 
   const auto* levels = sum->at("levels").as_object();
   N4X_ASSERT(levels != nullptr);
-  N4X_ASSERT(levels->at("info").int_value() == 1);
+  N4X_ASSERT(levels->at("info").int_value() == 2);
   N4X_ASSERT(levels->at("warn").int_value() == 1);
   N4X_ASSERT(levels->at("error").int_value() == 0);
 
@@ -176,15 +206,17 @@ int test_event_export() {
   N4X_ASSERT(cats != nullptr);
   N4X_ASSERT(cats->at("movement").int_value() == 1);
   N4X_ASSERT(cats->at("research").int_value() == 1);
+  N4X_ASSERT(cats->at("terraforming").int_value() == 1);
 
   // Summary CSV: header + expected counts/range.
   const std::string summary_csv = nebula4x::events_summary_to_csv(events);
   N4X_ASSERT(summary_csv.find("count,day_min,day_max,date_min,date_max,hour_min,hour_max,time_min,time_max,datetime_min,datetime_max") != std::string::npos);
+  N4X_ASSERT(summary_csv.find(",terraforming") != std::string::npos);
   N4X_ASSERT(summary_csv.find("2200-01-11") != std::string::npos);
   N4X_ASSERT(summary_csv.find("2200-01-12") != std::string::npos);
-  // count=2, info=1, warn=1, error=0
-  N4X_ASSERT(summary_csv.find("2,10,11") != std::string::npos);
-  N4X_ASSERT(summary_csv.find(",1,1,0,") != std::string::npos);
+  // count=3, info=2, warn=1, error=0
+  N4X_ASSERT(summary_csv.find("3,10,11") != std::string::npos);
+  N4X_ASSERT(summary_csv.find(",2,1,0,") != std::string::npos);
 
   return 0;
 }

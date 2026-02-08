@@ -1746,7 +1746,6 @@ void Simulation::tick_ships(double dt_days) {
 
     // Jump survey ops (stay at a jump point until it is surveyed).
     bool is_survey_jump_op = false;
-    SurveyJumpPoint* survey_jump_ord = nullptr;
     Id survey_jump_id = kInvalidId;
     bool survey_transit_when_done = false;
 
@@ -1873,7 +1872,6 @@ void Simulation::tick_ships(double dt_days) {
     } else if (std::holds_alternative<SurveyJumpPoint>(q.front())) {
       auto& ord = std::get<SurveyJumpPoint>(q.front());
       is_survey_jump_op = true;
-      survey_jump_ord = &ord;
       survey_jump_id = ord.jump_point_id;
       survey_transit_when_done = ord.transit_when_done;
 
