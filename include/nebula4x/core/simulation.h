@@ -294,7 +294,8 @@ struct SimConfig {
 
   // --- Blockades (economic disruption) ---
   // When enabled, hostile armed ships loitering near a colony's body can impose a
-  // "blockade" that reduces certain colony outputs (repairs, training, terraforming).
+  // "blockade" that reduces colony outputs (industry, research, construction, shipyards,
+  // repairs, training, terraforming).
   //
   // This is intentionally lightweight: blockade pressure is computed from nearby
   // hostile/defender combat presence (plus static defenses) and turned into an

@@ -687,11 +687,12 @@ ColonySchedule estimate_colony_schedule(const Simulation& sim, Id colony_id, con
 
   // Trade prosperity bonus mirrors Simulation tick for output projections.
   const double prosperity = sim.trade_prosperity_output_multiplier_for_colony(colony.id);
+  const double blockade = sim.cfg().enable_blockades ? sim.blockade_output_multiplier_for_colony(colony.id) : 1.0;
   FactionEconomyMultipliers eff_mult = my_mult;
-  eff_mult.industry *= prosperity * std::max(0.0, cond_mult.industry) * stability_mult;
-  eff_mult.research *= prosperity * std::max(0.0, cond_mult.research) * stability_mult;
-  eff_mult.construction *= prosperity * std::max(0.0, cond_mult.construction) * stability_mult;
-  eff_mult.shipyard *= prosperity * std::max(0.0, cond_mult.shipyard) * stability_mult;
+  eff_mult.industry *= prosperity * blockade * std::max(0.0, cond_mult.industry) * stability_mult;
+  eff_mult.research *= prosperity * blockade * std::max(0.0, cond_mult.research) * stability_mult;
+  eff_mult.construction *= prosperity * blockade * std::max(0.0, cond_mult.construction) * stability_mult;
+  eff_mult.shipyard *= prosperity * blockade * std::max(0.0, cond_mult.shipyard) * stability_mult;
 
   out.mining_multiplier = my_mult.mining * std::max(0.0, cond_mult.mining) * stability_mult;
   out.industry_multiplier = eff_mult.industry;

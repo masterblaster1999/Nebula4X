@@ -115,6 +115,7 @@ int test_attack_lead_pursuit();
 int test_lost_contact_search();
 int test_combat_doctrine();
 int test_advisor();
+int test_blockade_economy();
 
 namespace {
 
@@ -369,6 +370,7 @@ int main(int argc, char** argv) {
       {"crew_experience", test_crew_experience},
       {"electronic_warfare", test_electronic_warfare},
       {"faction_economy_modifiers", test_faction_economy_modifiers},
+      {"blockade_economy", test_blockade_economy},
       {"advisor", test_advisor},
   };
 

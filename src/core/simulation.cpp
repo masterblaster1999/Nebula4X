@@ -557,6 +557,9 @@ double Simulation::construction_points_per_day(const Colony& colony) const {
   // Colony stability output scaling (optional).
   total *= colony_stability_output_multiplier_for_colony(colony);
 
+  // Blockade output disruption.
+  if (cfg_.enable_blockades) total *= blockade_output_multiplier_for_colony(colony.id);
+
   return std::max(0.0, total);
 }
 

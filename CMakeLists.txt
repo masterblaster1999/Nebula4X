@@ -471,6 +471,7 @@ if(NEBULA4X_BUILD_TESTS)
   tests/test_crew_experience.cpp
   tests/test_electronic_warfare.cpp
     tests/test_advisor.cpp
+    tests/test_blockade_economy.cpp
   )
   target_link_libraries(nebula4x_tests PRIVATE nebula4x::core)
   target_include_directories(nebula4x_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

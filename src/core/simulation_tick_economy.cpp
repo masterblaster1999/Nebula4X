@@ -317,6 +317,7 @@ void Simulation::tick_colonies(double dt_days, bool emit_daily_events) {
     industry_mult *= trade_prosperity_output_multiplier_for_colony(colony.id);
     industry_mult *= cond_mult.industry;
     industry_mult *= stability_mult;
+    if (cfg_.enable_blockades) industry_mult *= blockade_output_multiplier_for_colony(colony.id);
 
     // Deterministic processing: installation iteration order of unordered_map is unspecified.
     std::vector<std::string> inst_ids;
@@ -994,6 +995,7 @@ void Simulation::tick_research(double dt_days) {
     rp_per_day *= trade_prosperity_output_multiplier_for_colony(col.id);
     rp_per_day *= colony_condition_multipliers(col).research;
     rp_per_day *= colony_stability_output_multiplier_for_colony(col);
+    if (cfg_.enable_blockades) rp_per_day *= blockade_output_multiplier_for_colony(col.id);
     if (rp_per_day <= 0.0) continue;
 
     auto fit = state_.factions.find(col.faction_id);
@@ -1395,7 +1397,8 @@ void Simulation::tick_shipyards(double dt_days) {
                                  colony_condition_multipliers(colony).shipyard *
                                  colony_stability_output_multiplier_for_colony(colony);
       const double prosperity = trade_prosperity_output_multiplier_for_colony(cid2);
-      const double rate = base_rate * static_cast<double>(yards) * shipyard_mult * prosperity;
+      const double blockade = cfg_.enable_blockades ? blockade_output_multiplier_for_colony(cid2) : 1.0;
+      const double rate = base_rate * static_cast<double>(yards) * shipyard_mult * prosperity * blockade;
       if (rate <= 1e-9) return std::numeric_limits<double>::infinity();
 
       double load_tons = 0.0;
@@ -1489,7 +1492,8 @@ void Simulation::tick_shipyards(double dt_days) {
                                  colony_condition_multipliers(colony).shipyard *
                                  colony_stability_output_multiplier_for_colony(colony);
     const double prosperity = trade_prosperity_output_multiplier_for_colony(colony.id);
-    const double per_team_capacity_tons = base_rate * shipyard_mult * prosperity * dt_days;
+    const double blockade = cfg_.enable_blockades ? blockade_output_multiplier_for_colony(colony.id) : 1.0;
+    const double per_team_capacity_tons = base_rate * shipyard_mult * prosperity * blockade * dt_days;
     if (per_team_capacity_tons <= 1e-9) continue;
 
     // Pre-clean invalid orders so they don't permanently stall shipyard progress.
