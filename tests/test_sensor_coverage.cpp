@@ -90,6 +90,7 @@ int test_sensor_coverage() {
   sensor_ship.position_mkm = Vec2{0.0, 0.0};
   sensor_ship.speed_km_s = 0.0;
   sensor_ship.hp = 10.0;
+  sensor_ship.power_policy.sensors_enabled = true;
   sensor_ship.sensor_mode = SensorMode::Normal;
   st.ships[sensor_ship.id] = sensor_ship;
 

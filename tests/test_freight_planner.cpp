@@ -76,6 +76,11 @@ int test_freight_planner() {
   sim.new_game();
 
   GameState st = sim.state();
+  st.systems.clear();
+  st.bodies.clear();
+  st.colonies.clear();
+  st.ships.clear();
+  st.ship_orders.clear();
   N4X_ASSERT(!st.factions.empty(), "new_game should create a faction");
   const Faction f = st.factions.begin()->second;
 

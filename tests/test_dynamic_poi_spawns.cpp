@@ -134,7 +134,7 @@ int test_dynamic_poi_spawns() {
     const auto& a = st.anomalies.begin()->second;
     N4X_ASSERT(a.system_id == sys_id);
     N4X_ASSERT(!a.resolved);
-    N4X_ASSERT(!a.kind.empty());
+    N4X_ASSERT(a.kind != AnomalyKind::Unknown);
     N4X_ASSERT(!a.name.empty());
     N4X_ASSERT(a.investigation_days >= 1 && a.investigation_days <= 18);
     N4X_ASSERT(a.research_reward >= 0.0);

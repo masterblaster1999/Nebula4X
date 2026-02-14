@@ -108,7 +108,7 @@ int test_anomalies() {
     a.system_id = sys_id;
     a.position_mkm = {0.0, 0.0};
     a.name = "Test Anomaly";
-    a.kind = "signal";
+    a.kind = AnomalyKind::Signal;
     a.investigation_days = 1;
     a.research_reward = 123.0;
     a.unlock_component_id = "anomaly_comp";

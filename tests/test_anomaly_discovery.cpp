@@ -55,7 +55,7 @@ int test_anomaly_discovery() {
   a.id = 1;
   a.system_id = sys.id;
   a.name = "Mysterious Signal";
-  a.kind = "signal";
+  a.kind = nebula4x::AnomalyKind::Signal;
   a.position_mkm = nebula4x::Vec2{10.0, 0.0};
   a.investigation_days = 5;
   s.anomalies[a.id] = a;

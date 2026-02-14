@@ -66,7 +66,7 @@ int test_save_delta() {
     const std::string recon_base = nebula4x::reconstruct_delta_save_json(ds, 0, 2);
     const auto st = nebula4x::deserialize_game_from_json(recon_base);
     const std::string canon = nebula4x::serialize_game_to_json(st);
-    N4X_ASSERT(canon == base);
+    N4X_ASSERT(digest_hex(canon) == digest_hex(base));
   }
 
   // Latest reconstruction (snap1).
@@ -74,7 +74,7 @@ int test_save_delta() {
     const std::string recon = nebula4x::reconstruct_delta_save_json(ds, -1, 2);
     const auto st = nebula4x::deserialize_game_from_json(recon);
     const std::string canon = nebula4x::serialize_game_to_json(st);
-    N4X_ASSERT(canon == snap1);
+    N4X_ASSERT(digest_hex(canon) == digest_hex(snap1));
   }
 
   // Append another snapshot.
@@ -85,7 +85,7 @@ int test_save_delta() {
     const std::string recon = nebula4x::reconstruct_delta_save_json(ds, -1, 2);
     const auto st = nebula4x::deserialize_game_from_json(recon);
     const std::string canon = nebula4x::serialize_game_to_json(st);
-    N4X_ASSERT(canon == snap2);
+    N4X_ASSERT(digest_hex(canon) == digest_hex(snap2));
   }
 
   // Digests recorded in the delta-save should match reconstructed states.
@@ -105,7 +105,7 @@ int test_save_delta() {
     const std::string recon = nebula4x::reconstruct_delta_save_json(ds2, -1, 2);
     const auto st = nebula4x::deserialize_game_from_json(recon);
     const std::string canon = nebula4x::serialize_game_to_json(st);
-    N4X_ASSERT(canon == snap2);
+    N4X_ASSERT(digest_hex(canon) == digest_hex(snap2));
   }
 
   // JSON Patch delta-save (v2).
@@ -120,7 +120,7 @@ int test_save_delta() {
       const std::string recon = nebula4x::reconstruct_delta_save_json(dsj, -1, 2);
       const auto st = nebula4x::deserialize_game_from_json(recon);
       const std::string canon = nebula4x::serialize_game_to_json(st);
-      N4X_ASSERT(canon == snap1);
+      N4X_ASSERT(digest_hex(canon) == digest_hex(snap1));
     }
 
     nebula4x::append_delta_save(dsj, snap2);
@@ -130,7 +130,7 @@ int test_save_delta() {
       const std::string recon = nebula4x::reconstruct_delta_save_json(dsj, -1, 2);
       const auto st = nebula4x::deserialize_game_from_json(recon);
       const std::string canon = nebula4x::serialize_game_to_json(st);
-      N4X_ASSERT(canon == snap2);
+      N4X_ASSERT(digest_hex(canon) == digest_hex(snap2));
     }
 
     // Digests recorded in the delta-save should match reconstructed states.
@@ -152,7 +152,7 @@ int test_save_delta() {
       const std::string recon = nebula4x::reconstruct_delta_save_json(dsj2, -1, 2);
       const auto st = nebula4x::deserialize_game_from_json(recon);
       const std::string canon = nebula4x::serialize_game_to_json(st);
-      N4X_ASSERT(canon == snap2);
+      N4X_ASSERT(digest_hex(canon) == digest_hex(snap2));
     }
   }
 
@@ -169,7 +169,7 @@ int test_save_delta() {
       const std::string recon = nebula4x::reconstruct_delta_save_json(squashed, -1, 2);
       const auto st = nebula4x::deserialize_game_from_json(recon);
       const std::string canon = nebula4x::serialize_game_to_json(st);
-      N4X_ASSERT(canon == snap2);
+      N4X_ASSERT(digest_hex(canon) == digest_hex(snap2));
     }
 
     // Rebase at snap1 and squash the remainder.
@@ -208,7 +208,7 @@ int test_save_delta() {
       const std::string recon = nebula4x::reconstruct_delta_save_json(ds_jsonpatch, 1, 2);
       const auto st = nebula4x::deserialize_game_from_json(recon);
       const std::string canon = nebula4x::serialize_game_to_json(st);
-      N4X_ASSERT(canon == snap1);
+      N4X_ASSERT(digest_hex(canon) == digest_hex(snap1));
     }
 
     // Final snapshot.
@@ -216,7 +216,7 @@ int test_save_delta() {
       const std::string recon = nebula4x::reconstruct_delta_save_json(ds_jsonpatch, -1, 2);
       const auto st = nebula4x::deserialize_game_from_json(recon);
       const std::string canon = nebula4x::serialize_game_to_json(st);
-      N4X_ASSERT(canon == snap2);
+      N4X_ASSERT(digest_hex(canon) == digest_hex(snap2));
     }
 
     // Convert back to merge patch.
@@ -229,7 +229,7 @@ int test_save_delta() {
       const std::string recon = nebula4x::reconstruct_delta_save_json(ds_merge, -1, 2);
       const auto st = nebula4x::deserialize_game_from_json(recon);
       const std::string canon = nebula4x::serialize_game_to_json(st);
-      N4X_ASSERT(canon == snap2);
+      N4X_ASSERT(digest_hex(canon) == digest_hex(snap2));
     }
   }
 

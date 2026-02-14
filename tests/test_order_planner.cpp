@@ -163,7 +163,7 @@ int test_order_planner() {
     Anomaly an;
     an.id = 300;
     an.name = "Test Anomaly";
-    an.kind = "test";
+    an.kind = AnomalyKind::Generic;
     an.system_id = 1;
     an.position_mkm = {200.0, 0.0};
     an.investigation_days = 5;
