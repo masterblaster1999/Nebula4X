@@ -529,6 +529,46 @@ double ship_maintenance_breakdown_subsystem_damage_max{0.20};
   double sensor_mode_passive_signature_multiplier{0.8};
   double sensor_mode_active_signature_multiplier{1.5};
 
+  // --- Command mesh / C3 (adaptive command-and-control) ---
+  //
+  // Aurora-style inspiration: fleets fight and maneuver better when linked into
+  // a command network (colonies + sensor relay ships), while experienced crews
+  // can keep operating effectively when command links are degraded.
+  //
+  // This mechanic is deterministic and continuous (no hard "on/off" cutoff):
+  // command quality falls off with distance to relay sources, is degraded by
+  // local sensor environment (nebula/storm interference), and is partially
+  // recovered by crew autonomy.
+  bool enable_command_mesh{true};
+
+  // Baseline in-system command uplink radius provided by a friendly colony body
+  // (million km).
+  double command_mesh_colony_base_range_mkm{120.0};
+
+  // Colony sensor installations add to command range:
+  //   added_range = best_colony_sensor_range_mkm * command_mesh_colony_sensor_scale
+  double command_mesh_colony_sensor_scale{0.75};
+
+  // Friendly sensor ships can relay command traffic. Their effective relay range
+  // is based on their raw sensor range multiplied by this value.
+  double command_mesh_ship_relay_sensor_scale{0.80};
+
+  // Signal falloff exponent with distance ratio x = distance / range:
+  //   quality_from_source = exp(-pow(x, exponent)).
+  double command_mesh_range_falloff_exponent{2.0};
+
+  // How strongly local sensor environment (nebula/storm) degrades command links.
+  // 0 = ignore environment, 1 = fully modulate by local environment multiplier.
+  double command_mesh_environment_jamming_strength{0.70};
+
+  // Blend factor for crew autonomy recovery when off-network.
+  // 0 = pure network coverage, 1 = max crew-autonomy contribution.
+  double command_mesh_autonomy_blend{0.65};
+
+  // Floor on operational efficiency when command quality is zero.
+  // Final efficiency = lerp(min_efficiency, 1.0, command_quality).
+  double command_mesh_min_efficiency_multiplier{0.80};
+
 
   // --- Nebula storms / environmental hazards ---
   //
@@ -1346,6 +1386,26 @@ double ship_maintenance_breakdown_subsystem_damage_max{0.20};
   // Example: an installation consumes 2 Duranium/day and the buffer is 30 days =>
   // desired stockpile is 60 Duranium.
   double auto_freight_industry_input_buffer_days{30.0};
+
+  // --- Scarcity-aware colony mining allocation ---
+  //
+  // When multiple colonies mine the same finite body deposit and demand exceeds
+  // supply, allocation can prioritize colonies with lower local mineral
+  // stockpiles (relative to their short-term mining throughput).
+  //
+  // This improves resilience of young/frontier colonies without removing
+  // determinism: allocation remains stable and tie-broken by colony id.
+  bool enable_mining_scarcity_priority{true};
+
+  // Target stockpile horizon used by scarcity weighting.
+  // Example: with 20 days and a colony requesting 10 tons/day, the "healthy"
+  // local buffer is 200 tons for weighting purposes.
+  double mining_scarcity_buffer_days{20.0};
+
+  // How strongly stockpile shortfall influences scarce-deposit allocation.
+  // 0.0 = proportional-by-request only (legacy behavior).
+  // 1.0 = up to 2x request weight for severely short colonies.
+  double mining_scarcity_need_boost{1.0};
 
 
   // --- Geological surveys (procedural mineral deposit discoveries) ---
@@ -2288,6 +2348,14 @@ class Simulation {
   double ship_subsystem_weapon_output_multiplier(const Ship& ship) const;
   double ship_subsystem_sensor_range_multiplier(const Ship& ship) const;
   double ship_subsystem_shield_multiplier(const Ship& ship) const;
+
+  // --- Command mesh / C3 query helpers ---
+  // Coverage quality from relay sources only (0..1).
+  double ship_command_mesh_coverage(const Ship& ship) const;
+  // Final command quality after crew autonomy blending (0..1).
+  double ship_command_mesh_quality(const Ship& ship) const;
+  // Operational multiplier derived from command quality.
+  double ship_command_efficiency_multiplier(const Ship& ship) const;
 
   GameState& state() { return state_; }
   const GameState& state() const { return state_; }
@@ -3255,6 +3323,12 @@ bool move_construction_order(Id colony_id, int from_index, int to_index);
   void ensure_trade_prosperity_cache_current() const;
   void invalidate_trade_prosperity_cache() const;
 
+  // --- Command mesh cache (performance) ---
+  // Command quality queries are used frequently by movement/sensor/combat paths.
+  // Cache per-ship relay coverage for the current day/hour.
+  void ensure_command_mesh_cache_current() const;
+  void invalidate_command_mesh_cache() const;
+
 // --- Jump route planning cache (performance) ---
 // Route planning can be called frequently from the UI (hover previews) and from AI logistics.
 // Cache successful plans for the current simulation day to avoid repeated Dijkstra runs.
@@ -3357,6 +3431,14 @@ struct TradeProsperitySystemInfo {
   double hub_score{0.0};
 };
 mutable std::unordered_map<Id, TradeProsperitySystemInfo> trade_prosperity_system_cache_;
+
+// --- Command mesh coverage cache ---
+mutable bool command_mesh_cache_valid_{false};
+mutable std::int64_t command_mesh_cache_day_{0};
+mutable int command_mesh_cache_hour_{0};
+mutable std::uint64_t command_mesh_cache_state_generation_{0};
+mutable std::uint64_t command_mesh_cache_content_generation_{0};
+mutable std::unordered_map<Id, double> command_mesh_coverage_cache_;
 
 
 

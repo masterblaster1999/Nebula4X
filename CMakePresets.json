@@ -8,46 +8,299 @@
   "configurePresets": [
     {
       "name": "core",
+      "displayName": "Nebula4X - Core + CLI (no UI, no tests)",
+      "description": "Fast build for the deterministic core library and CLI. UI and tests are disabled.",
+      "binaryDir": "${sourceDir}/out/build/core-cli",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "NEBULA4X_BUILD_UI": "OFF",
+        "NEBULA4X_BUILD_TESTS": "OFF",
+        "NEBULA4X_MSVC_PROGRESS_OUTPUT": "ON"
+      }
+    },
+    {
+      "name": "core-tests",
       "displayName": "Nebula4X - Core + tests (no UI)",
       "description": "Build the deterministic core library, CLI, and tests. UI is disabled.",
-      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "binaryDir": "${sourceDir}/out/build/core-tests-vs",
       "cacheVariables": {
         "NEBULA4X_BUILD_UI": "OFF",
-        "NEBULA4X_BUILD_TESTS": "ON"
+        "NEBULA4X_BUILD_TESTS": "ON",
+        "NEBULA4X_MSVC_PROGRESS_OUTPUT": "ON"
+      }
+    },
+    {
+      "name": "core-tests-headless",
+      "displayName": "Nebula4X - Core + tests (headless runner)",
+      "description": "Core test build in an isolated directory with an explicit VS/x64 generator for reliable compiler discovery.",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/out/build/core-tests-headless-vs",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "NEBULA4X_BUILD_UI": "OFF",
+        "NEBULA4X_BUILD_TESTS": "ON",
+        "NEBULA4X_MSVC_PROGRESS_OUTPUT": "ON"
+      }
+    },
+    {
+      "name": "ui-tests-only-headless",
+      "displayName": "Nebula4X - UI tests fast path (no UI target)",
+      "description": "Dedicated tests-only build dir used by ui-tests presets. Disables UI target/dependency probing for faster and more reliable test builds.",
+      "binaryDir": "${sourceDir}/out/build/ui-tests",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "NEBULA4X_BUILD_UI": "OFF",
+        "NEBULA4X_BUILD_TESTS": "ON",
+        "NEBULA4X_MSVC_PROGRESS_OUTPUT": "ON"
+      }
+    },
+    {
+      "name": "ui-tests-headless",
+      "displayName": "Nebula4X - UI tests fast path (alias)",
+      "description": "Alias of ui-tests-only-headless for tools that expect a single preset token for both configure and build.",
+      "binaryDir": "${sourceDir}/out/build/ui-tests",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "NEBULA4X_BUILD_UI": "OFF",
+        "NEBULA4X_BUILD_TESTS": "ON",
+        "NEBULA4X_MSVC_PROGRESS_OUTPUT": "ON"
       }
     },
     {
       "name": "ui",
       "displayName": "Nebula4X - UI + core + tests",
       "description": "Build the SDL2/ImGui UI executable along with the core + tests.",
-      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "binaryDir": "${sourceDir}/out/build/ui-vs",
       "cacheVariables": {
         "NEBULA4X_BUILD_UI": "ON",
-        "NEBULA4X_BUILD_TESTS": "ON"
+        "NEBULA4X_BUILD_TESTS": "ON",
+        "NEBULA4X_FETCH_DEPS": "ON",
+        "NEBULA4X_REQUIRE_UI_DEPS": "ON",
+        "NEBULA4X_IMGUI_DRAW_INDEX_BITS": "32",
+        "NEBULA4X_MSVC_PROGRESS_OUTPUT": "ON",
+        "FETCHCONTENT_UPDATES_DISCONNECTED": "ON",
+        "NEBULA4X_FETCH_PREFLIGHT_TIMEOUT_SECONDS": "12"
+      },
+      "environment": {
+        "GIT_TERMINAL_PROMPT": "0",
+        "GCM_INTERACTIVE": "Never"
+      }
+    },
+    {
+      "name": "ui-headless",
+      "displayName": "Nebula4X - UI + core + tests (headless runner)",
+      "description": "Same as ui, but uses an isolated non-VS build dir to avoid IDE background configure/build contention.",
+      "generator": "Ninja Multi-Config",
+      "binaryDir": "${sourceDir}/out/build/ui-headless",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "NEBULA4X_BUILD_UI": "ON",
+        "NEBULA4X_BUILD_TESTS": "ON",
+        "NEBULA4X_FETCH_DEPS": "ON",
+        "NEBULA4X_REQUIRE_UI_DEPS": "ON",
+        "NEBULA4X_IMGUI_DRAW_INDEX_BITS": "32",
+        "NEBULA4X_MSVC_PROGRESS_OUTPUT": "ON",
+        "FETCHCONTENT_UPDATES_DISCONNECTED": "ON",
+        "NEBULA4X_FETCH_PREFLIGHT_TIMEOUT_SECONDS": "12",
+        "FETCHCONTENT_BASE_DIR": "${sourceDir}/out/fetchcontent"
+      },
+      "environment": {
+        "GIT_TERMINAL_PROMPT": "0",
+        "GCM_INTERACTIVE": "Never"
+      }
+    },
+    {
+      "name": "ui-runtime-headless",
+      "displayName": "Nebula4X - UI runtime only (no tests, headless runner)",
+      "description": "Build only the game executable using Ninja Multi-Config in an isolated build dir to avoid IDE/MSBuild contention and long test compiles.",
+      "generator": "Ninja Multi-Config",
+      "binaryDir": "${sourceDir}/out/build/ui-runtime-headless",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "NEBULA4X_BUILD_UI": "ON",
+        "NEBULA4X_BUILD_TESTS": "OFF",
+        "NEBULA4X_FETCH_DEPS": "ON",
+        "NEBULA4X_REQUIRE_UI_DEPS": "ON",
+        "NEBULA4X_IMGUI_DRAW_INDEX_BITS": "32",
+        "NEBULA4X_MSVC_PROGRESS_OUTPUT": "ON",
+        "FETCHCONTENT_UPDATES_DISCONNECTED": "ON",
+        "NEBULA4X_FETCH_PREFLIGHT_TIMEOUT_SECONDS": "12"
+      },
+      "environment": {
+        "GIT_TERMINAL_PROMPT": "0",
+        "GCM_INTERACTIVE": "Never"
+      }
+    },
+    {
+      "name": "ui-runtime-fetchdeps",
+      "displayName": "Nebula4X - UI runtime only (fetch deps, strict UI)",
+      "description": "Build only the game executable, require real UI deps, and allow FetchContent for SDL2/ImGui.",
+      "binaryDir": "${sourceDir}/out/build/ui-runtime-fetch",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "NEBULA4X_BUILD_UI": "ON",
+        "NEBULA4X_BUILD_TESTS": "OFF",
+        "NEBULA4X_FETCH_DEPS": "ON",
+        "NEBULA4X_REQUIRE_UI_DEPS": "ON",
+        "NEBULA4X_IMGUI_DRAW_INDEX_BITS": "32",
+        "NEBULA4X_MSVC_PROGRESS_OUTPUT": "ON",
+        "FETCHCONTENT_UPDATES_DISCONNECTED": "ON",
+        "NEBULA4X_FETCH_PREFLIGHT_TIMEOUT_SECONDS": "12"
+      },
+      "environment": {
+        "GIT_TERMINAL_PROMPT": "0",
+        "GCM_INTERACTIVE": "Never"
       }
     }
   ],
   "buildPresets": [
     {
       "name": "core",
-      "configurePreset": "core"
+      "configurePreset": "core",
+      "targets": [
+        "nebula4x_cli"
+      ],
+      "jobs": 8,
+      "verbose": true
+    },
+    {
+      "name": "core-tests",
+      "configurePreset": "core-tests",
+      "jobs": 4,
+      "verbose": true
+    },
+    {
+      "name": "core-tests-headless",
+      "configurePreset": "core-tests-headless",
+      "configuration": "Release",
+      "targets": [
+        "nebula4x_tests"
+      ],
+      "jobs": 4,
+      "verbose": false
+    },
+    {
+      "name": "ui-tests-fast",
+      "configurePreset": "ui-tests-only-headless",
+      "configuration": "Release",
+      "targets": [
+        "nebula4x_tests"
+      ],
+      "jobs": 4,
+      "verbose": false
     },
     {
       "name": "ui",
-      "configurePreset": "ui"
+      "configurePreset": "ui",
+      "configuration": "Release",
+      "jobs": 2,
+      "verbose": true
+    },
+    {
+      "name": "ui-headless",
+      "configurePreset": "ui-headless",
+      "configuration": "Release",
+      "targets": [
+        "nebula4x_main_all"
+      ],
+      "jobs": 2,
+      "verbose": true
+    },
+    {
+      "name": "ui-main-all-headless",
+      "configurePreset": "ui-headless",
+      "configuration": "Release",
+      "targets": [
+        "nebula4x_main_all"
+      ],
+      "jobs": 2,
+      "verbose": true
+    },
+    {
+      "name": "ui-runtime-headless",
+      "configurePreset": "ui-runtime-headless",
+      "configuration": "Release",
+      "targets": [
+        "nebula4x_main_all"
+      ],
+      "jobs": 2,
+      "verbose": true
+    },
+    {
+      "name": "ui-runtime-fetchdeps",
+      "configurePreset": "ui-runtime-fetchdeps",
+      "configuration": "Release",
+      "targets": [
+        "nebula4x_main_all"
+      ],
+      "jobs": 4,
+      "verbose": true
+    },
+    {
+      "name": "ui-tests",
+      "configurePreset": "ui-tests-only-headless",
+      "configuration": "Release",
+      "targets": [
+        "nebula4x_tests"
+      ],
+      "jobs": 2,
+      "verbose": true
+    },
+    {
+      "name": "ui-tests-headless",
+      "configurePreset": "ui-tests-only-headless",
+      "configuration": "Release",
+      "targets": [
+        "nebula4x_tests"
+      ],
+      "jobs": 2,
+      "verbose": true
+    },
+    {
+      "name": "ui-suite-headless",
+      "configurePreset": "ui-headless",
+      "configuration": "Release",
+      "targets": [
+        "nebula4x_main_all"
+      ],
+      "jobs": 2,
+      "verbose": true
     }
   ],
   "testPresets": [
     {
       "name": "core",
-      "configurePreset": "core",
+      "configurePreset": "core-tests",
       "output": {
         "outputOnFailure": true
       }
     },
     {
       "name": "ui",
-      "configurePreset": "ui",
+      "configurePreset": "ui-headless",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "core-headless",
+      "configurePreset": "core-tests-headless",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "ui-headless",
+      "configurePreset": "ui-headless",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "ui-tests-headless",
+      "configurePreset": "ui-tests-only-headless",
       "output": {
         "outputOnFailure": true
       }

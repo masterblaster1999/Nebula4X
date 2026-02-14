@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -96,7 +97,7 @@ inline std::uint64_t anomaly_seed(const Anomaly& a) {
   std::uint64_t s = 0x6D0F27BD9C2B3F61ULL;
   s ^= static_cast<std::uint64_t>(a.id) * 0x9e3779b97f4a7c15ULL;
   s ^= static_cast<std::uint64_t>(a.system_id) * 0xbf58476d1ce4e5b9ULL;
-  s ^= fnv1a_64(a.kind) * 0x94d049bb133111ebULL;
+  s ^= static_cast<std::uint64_t>(a.kind) * 0x94d049bb133111ebULL;
   // If this is part of a lead chain, keep a coherent theme across the chain.
   if (a.origin_anomaly_id != kInvalidId) {
     s ^= static_cast<std::uint64_t>(a.origin_anomaly_id) * 0x2545f4914f6cdd1dULL;
@@ -262,6 +263,472 @@ inline const char* theme_domain_label(ThemeDomain d) {
   }
 }
 
+// Lightweight deterministic scan profile for anomaly triage.
+// This is a flavor mechanic: it provides a stable "readout" that can be used by
+// UI, logs and mission text to hint at risk/shape without storing extra state.
+enum class AnomalyResonanceBand : std::uint8_t {
+  Quiescent = 0,
+  Harmonic = 1,
+  Fractured = 2,
+  Chaotic = 3,
+  NullLocked = 4,
+};
+
+inline const char* anomaly_resonance_band_label(AnomalyResonanceBand b) {
+  switch (b) {
+    case AnomalyResonanceBand::Quiescent: return "Quiescent";
+    case AnomalyResonanceBand::Harmonic: return "Harmonic";
+    case AnomalyResonanceBand::Fractured: return "Fractured";
+    case AnomalyResonanceBand::Chaotic: return "Chaotic";
+    case AnomalyResonanceBand::NullLocked: return "Null-Locked";
+    default: return "Unknown";
+  }
+}
+
+struct AnomalyScanReadout {
+  AnomalyResonanceBand resonance{AnomalyResonanceBand::Quiescent};
+  ThemeDomain focus_domain{ThemeDomain::Sensors};
+  int coherence_pct{0};   // 0..100
+  int volatility_pct{0};  // 0..100
+  int hazard_pct{0};      // 0..100
+  bool spoof_risk{false};
+};
+
+inline AnomalyScanReadout anomaly_scan_readout(const Anomaly& a,
+                                               double nebula_density,
+                                               double ruins_density,
+                                               double pirate_risk_effective) {
+  const double neb = std::clamp(nebula_density, 0.0, 1.0);
+  const double ruins = std::clamp(ruins_density, 0.0, 1.0);
+  const double pir = std::clamp(pirate_risk_effective, 0.0, 1.0);
+
+  const std::uint64_t s = anomaly_seed(a) ^ 0x7C4A3BD152E6F901ULL;
+  auto urand = [&](std::uint64_t salt) {
+    return u01_from_u64(splitmix64(s ^ salt));
+  };
+
+  double coherence = 55.0 + (urand(0x1111111111111111ULL) - 0.5) * 30.0;
+  double volatility = 32.0 + (urand(0x2222222222222222ULL) - 0.5) * 36.0;
+  double hazard = 20.0 + (urand(0x3333333333333333ULL) - 0.5) * 22.0;
+
+  switch (a.kind) {
+    case AnomalyKind::Ruins:
+    case AnomalyKind::Artifact:
+      coherence += 12.0 + ruins * 18.0;
+      volatility += 3.0 + neb * 5.0;
+      hazard += 8.0;
+      break;
+    case AnomalyKind::Xenoarchaeology:
+      coherence += 14.0 + ruins * 16.0;
+      volatility += 8.0 + neb * 9.0;
+      hazard += 14.0;
+      break;
+    case AnomalyKind::Distress:
+      coherence -= 4.0 + pir * 20.0;
+      volatility += 14.0 + pir * 18.0;
+      hazard += 10.0 + pir * 22.0;
+      break;
+    case AnomalyKind::Phenomenon:
+      coherence -= 6.0 + neb * 16.0;
+      volatility += 22.0 + neb * 20.0;
+      hazard += 16.0 + neb * 18.0;
+      break;
+    case AnomalyKind::Distortion:
+      coherence -= 12.0 + neb * 18.0;
+      volatility += 30.0 + neb * 22.0;
+      hazard += 22.0 + pir * 12.0;
+      break;
+    case AnomalyKind::Signal:
+    default:
+      coherence += 3.0 - neb * 5.0;
+      volatility += 9.0 + neb * 10.0;
+      hazard += 6.0;
+      break;
+  }
+
+  coherence = std::clamp(coherence, 2.0, 98.0);
+  volatility = std::clamp(volatility, 1.0, 99.0);
+  hazard += pir * 24.0 + neb * 10.0 - ruins * 6.0 + volatility * 0.20 - coherence * 0.08;
+  hazard = std::clamp(hazard, 1.0, 99.0);
+
+  AnomalyScanReadout out;
+  out.coherence_pct = static_cast<int>(std::lround(coherence));
+  out.volatility_pct = static_cast<int>(std::lround(volatility));
+  out.hazard_pct = static_cast<int>(std::lround(hazard));
+  out.focus_domain = anomaly_theme_domain(a);
+  out.spoof_risk =
+      (a.kind == AnomalyKind::Distress && (pir > 0.35 || out.volatility_pct >= 62)) ||
+      (a.kind == AnomalyKind::Signal && pir > 0.65 && out.coherence_pct < 45);
+
+  if (out.coherence_pct >= 72 && out.volatility_pct <= 35) {
+    out.resonance = AnomalyResonanceBand::Harmonic;
+  } else if (out.volatility_pct >= 78) {
+    out.resonance = AnomalyResonanceBand::Chaotic;
+  } else if (out.coherence_pct <= 28) {
+    out.resonance = AnomalyResonanceBand::NullLocked;
+  } else if (out.volatility_pct >= 55) {
+    out.resonance = AnomalyResonanceBand::Fractured;
+  } else {
+    out.resonance = AnomalyResonanceBand::Quiescent;
+  }
+
+  return out;
+}
+
+inline std::string anomaly_scan_brief(const AnomalyScanReadout& r) {
+  std::string out;
+  out.reserve(96);
+  out += anomaly_resonance_band_label(r.resonance);
+  out += " / ";
+  out += theme_domain_label(r.focus_domain);
+  out += " | C";
+  out += std::to_string(r.coherence_pct);
+  out += " V";
+  out += std::to_string(r.volatility_pct);
+  out += " H";
+  out += std::to_string(r.hazard_pct);
+  if (r.spoof_risk) out += " | spoof-risk";
+  return out;
+}
+
+inline std::string anomaly_scan_brief(const Anomaly& a,
+                                      double nebula_density,
+                                      double ruins_density,
+                                      double pirate_risk_effective) {
+  return anomaly_scan_brief(anomaly_scan_readout(a, nebula_density, ruins_density, pirate_risk_effective));
+}
+
+// --- anomaly site profiles (procedural risk/reward archetypes) ------------------
+//
+// A deterministic "site profile" adds gameplay variation without new save fields.
+// It is generated from anomaly identity + local environment and can tune
+// investigation depth, reward pressure and hazard pressure in a coherent way.
+enum class AnomalySiteArchetype : std::uint8_t {
+  QuietDrift = 0,
+  SignalLattice = 1,
+  RelicVault = 2,
+  FractureNest = 3,
+  TurbulencePocket = 4,
+  DecoyWeb = 5,
+};
+
+inline const char* anomaly_site_archetype_label(AnomalySiteArchetype a) {
+  switch (a) {
+    case AnomalySiteArchetype::QuietDrift: return "Quiet Drift";
+    case AnomalySiteArchetype::SignalLattice: return "Signal Lattice";
+    case AnomalySiteArchetype::RelicVault: return "Relic Vault";
+    case AnomalySiteArchetype::FractureNest: return "Fracture Nest";
+    case AnomalySiteArchetype::TurbulencePocket: return "Turbulence Pocket";
+    case AnomalySiteArchetype::DecoyWeb: return "Decoy Web";
+    default: return "Unknown";
+  }
+}
+
+struct AnomalySiteProfile {
+  AnomalySiteArchetype archetype{AnomalySiteArchetype::QuietDrift};
+  double investigation_mult{1.0};
+  int investigation_add_days{0};
+  double research_mult{1.0};
+  double mineral_mult{1.0};
+  double hazard_chance_mult{1.0};
+  double hazard_damage_mult{1.0};
+  double unlock_bonus{0.0};
+  double cache_bonus{0.0};
+};
+
+inline std::uint64_t anomaly_env_seed_bits(double nebula_density,
+                                           double ruins_density,
+                                           double pirate_risk_effective,
+                                           double gradient01) {
+  const auto q01 = [](double v, int max_q) -> std::uint64_t {
+    const double x = std::clamp(v, 0.0, 1.0);
+    const int q = static_cast<int>(std::lround(x * static_cast<double>(std::max(1, max_q))));
+    return static_cast<std::uint64_t>(std::clamp(q, 0, std::max(1, max_q)));
+  };
+
+  std::uint64_t h = 0x6A09E667F3BCC909ULL;
+  h ^= q01(nebula_density, 1023) * 0x9E3779B97F4A7C15ULL;
+  h ^= q01(ruins_density, 1023) * 0xD6E8FEB86659FD93ULL;
+  h ^= q01(pirate_risk_effective, 1023) * 0x94D049BB133111EBULL;
+  h ^= q01(gradient01, 1023) * 0xA24BAED4963EE407ULL;
+  return splitmix64(h);
+}
+
+inline AnomalySiteProfile anomaly_site_profile(const Anomaly& a,
+                                               double nebula_density,
+                                               double ruins_density,
+                                               double pirate_risk_effective,
+                                               double gradient01) {
+  const double neb = std::clamp(nebula_density, 0.0, 1.0);
+  const double ruins = std::clamp(ruins_density, 0.0, 1.0);
+  const double pir = std::clamp(pirate_risk_effective, 0.0, 1.0);
+  const double grad = std::clamp(gradient01, 0.0, 1.0);
+
+  const std::uint64_t seed = splitmix64(anomaly_seed(a) ^ anomaly_env_seed_bits(neb, ruins, pir, grad) ^
+                                        0xF1357AEA2E62A9C5ULL);
+  auto urand = [&](std::uint64_t salt) { return u01_from_u64(splitmix64(seed ^ salt)); };
+
+  const double is_signal = (a.kind == AnomalyKind::Signal || a.kind == AnomalyKind::Echo) ? 1.0 : 0.0;
+  const double is_distress = (a.kind == AnomalyKind::Distress) ? 1.0 : 0.0;
+  const double is_ruin =
+      (a.kind == AnomalyKind::Ruins || a.kind == AnomalyKind::Artifact || a.kind == AnomalyKind::Xenoarchaeology)
+          ? 1.0
+          : 0.0;
+  const double is_turb = (a.kind == AnomalyKind::Phenomenon || a.kind == AnomalyKind::Distortion) ? 1.0 : 0.0;
+
+  // Weighted archetype selection.
+  double w_quiet = 0.35 + 0.55 * (1.0 - neb) * (1.0 - grad) + 0.15 * (1.0 - pir);
+  double w_signal = 0.20 + 0.90 * is_signal + 0.45 * (1.0 - neb) + 0.20 * (1.0 - pir);
+  double w_relic = 0.20 + 1.10 * is_ruin + 1.05 * ruins + 0.15 * (1.0 - pir);
+  double w_fracture = 0.14 + 0.90 * grad + 0.50 * is_turb + 0.20 * ruins;
+  double w_turb = 0.12 + 0.85 * neb + 0.62 * is_turb + 0.35 * grad;
+  double w_decoy = 0.08 + 0.95 * pir + 0.50 * is_distress + 0.30 * is_signal;
+
+  w_quiet = std::max(0.01, w_quiet);
+  w_signal = std::max(0.01, w_signal);
+  w_relic = std::max(0.01, w_relic);
+  w_fracture = std::max(0.01, w_fracture);
+  w_turb = std::max(0.01, w_turb);
+  w_decoy = std::max(0.01, w_decoy);
+
+  const double wsum = w_quiet + w_signal + w_relic + w_fracture + w_turb + w_decoy;
+  const double u = urand(0x1111111111111111ULL) * wsum;
+
+  AnomalySiteProfile out;
+  if (u < w_quiet) {
+    out.archetype = AnomalySiteArchetype::QuietDrift;
+    out.investigation_mult = 0.93;
+    out.investigation_add_days = -1;
+    out.research_mult = 0.96;
+    out.mineral_mult = 0.92;
+    out.hazard_chance_mult = 0.72;
+    out.hazard_damage_mult = 0.78;
+    out.unlock_bonus = 0.02;
+    out.cache_bonus = -0.03;
+  } else if (u < w_quiet + w_signal) {
+    out.archetype = AnomalySiteArchetype::SignalLattice;
+    out.investigation_mult = 0.99;
+    out.investigation_add_days = 0;
+    out.research_mult = 1.10;
+    out.mineral_mult = 0.96;
+    out.hazard_chance_mult = 0.95;
+    out.hazard_damage_mult = 0.95;
+    out.unlock_bonus = 0.09;
+    out.cache_bonus = -0.01;
+  } else if (u < w_quiet + w_signal + w_relic) {
+    out.archetype = AnomalySiteArchetype::RelicVault;
+    out.investigation_mult = 1.10;
+    out.investigation_add_days = 2;
+    out.research_mult = 1.17;
+    out.mineral_mult = 1.22;
+    out.hazard_chance_mult = 1.05;
+    out.hazard_damage_mult = 1.06;
+    out.unlock_bonus = 0.07;
+    out.cache_bonus = 0.09;
+  } else if (u < w_quiet + w_signal + w_relic + w_fracture) {
+    out.archetype = AnomalySiteArchetype::FractureNest;
+    out.investigation_mult = 1.05;
+    out.investigation_add_days = 1;
+    out.research_mult = 1.12;
+    out.mineral_mult = 1.08;
+    out.hazard_chance_mult = 1.22;
+    out.hazard_damage_mult = 1.18;
+    out.unlock_bonus = 0.02;
+    out.cache_bonus = 0.03;
+  } else if (u < w_quiet + w_signal + w_relic + w_fracture + w_turb) {
+    out.archetype = AnomalySiteArchetype::TurbulencePocket;
+    out.investigation_mult = 1.03;
+    out.investigation_add_days = 0;
+    out.research_mult = 1.06;
+    out.mineral_mult = 1.04;
+    out.hazard_chance_mult = 1.26;
+    out.hazard_damage_mult = 1.20;
+    out.unlock_bonus = 0.01;
+    out.cache_bonus = 0.03;
+  } else {
+    out.archetype = AnomalySiteArchetype::DecoyWeb;
+    out.investigation_mult = 0.98;
+    out.investigation_add_days = 0;
+    out.research_mult = 0.93;
+    out.mineral_mult = 0.90;
+    out.hazard_chance_mult = 1.20;
+    out.hazard_damage_mult = 1.08;
+    out.unlock_bonus = -0.04;
+    out.cache_bonus = -0.02;
+  }
+
+  // Small deterministic jitter so profiles are not perfectly discrete buckets.
+  const double jitter = (urand(0x2222222222222222ULL) - 0.5) * 0.08;
+  const double jitter_h = (urand(0x3333333333333333ULL) - 0.5) * 0.10;
+  out.investigation_mult = std::clamp(out.investigation_mult * (1.0 + jitter), 0.80, 1.35);
+  out.research_mult = std::clamp(out.research_mult * (1.0 + jitter), 0.75, 1.50);
+  out.mineral_mult = std::clamp(out.mineral_mult * (1.0 + jitter * 0.9), 0.70, 1.60);
+  out.hazard_chance_mult = std::clamp(out.hazard_chance_mult * (1.0 + jitter_h), 0.50, 1.75);
+  out.hazard_damage_mult = std::clamp(out.hazard_damage_mult * (1.0 + jitter_h), 0.60, 1.85);
+
+  // Kind-local nudges.
+  if (a.kind == AnomalyKind::Xenoarchaeology || a.kind == AnomalyKind::Artifact) {
+    out.research_mult = std::clamp(out.research_mult + 0.04, 0.75, 1.50);
+    out.mineral_mult = std::clamp(out.mineral_mult + 0.06, 0.70, 1.60);
+  }
+  if (a.kind == AnomalyKind::Distress && out.archetype == AnomalySiteArchetype::DecoyWeb) {
+    out.hazard_chance_mult = std::clamp(out.hazard_chance_mult + 0.12, 0.50, 1.75);
+  }
+
+  return out;
+}
+
+inline std::string anomaly_site_profile_brief(const AnomalySiteProfile& p) {
+  std::string out;
+  out.reserve(72);
+  out += anomaly_site_archetype_label(p.archetype);
+  out += " | RPx";
+  out += std::to_string(static_cast<int>(std::lround(p.research_mult * 100.0)));
+  out += "% Hx";
+  out += std::to_string(static_cast<int>(std::lround(p.hazard_chance_mult * 100.0)));
+  out += "%";
+  return out;
+}
+
+inline std::string anomaly_site_profile_brief(const Anomaly& a,
+                                              double nebula_density,
+                                              double ruins_density,
+                                              double pirate_risk_effective,
+                                              double gradient01) {
+  return anomaly_site_profile_brief(
+      anomaly_site_profile(a, nebula_density, ruins_density, pirate_risk_effective, gradient01));
+}
+
+// --- convergence weave (emergent cross-system between procgen layers) ----------
+//
+// Convergence Weave combines:
+// - scan readout (coherence/volatility/hazard),
+// - site archetype (risk/reward archetypes),
+// - local environmental pressure (nebula/ruins/pirate/gradient),
+// to determine how strongly a newly generated anomaly should "snap" into an
+// existing local anomaly chain.
+struct AnomalyConvergenceProfile {
+  double link_chance{0.0};        // chance to attach to a nearby unresolved site
+  double link_radius_mkm{36.0};   // search radius for potential parent anomalies
+  int extra_investigation_days{0};
+  double research_mult{1.0};
+  double mineral_mult{1.0};
+  double hazard_mult{1.0};
+  double cache_bonus{0.0};        // additive cache spawn chance bonus
+};
+
+inline AnomalyConvergenceProfile anomaly_convergence_profile(const Anomaly& a,
+                                                             const AnomalyScanReadout& scan,
+                                                             const AnomalySiteProfile& site,
+                                                             double nebula_density,
+                                                             double ruins_density,
+                                                             double pirate_risk_effective,
+                                                             double gradient01) {
+  const double neb = std::clamp(nebula_density, 0.0, 1.0);
+  const double ruins = std::clamp(ruins_density, 0.0, 1.0);
+  const double pir = std::clamp(pirate_risk_effective, 0.0, 1.0);
+  const double grad = std::clamp(gradient01, 0.0, 1.0);
+
+  double link = 0.04 + 0.12 * ruins + 0.10 * neb + 0.10 * grad + 0.06 * pir;
+  double radius = 28.0 + 44.0 * grad + 18.0 * ruins + 10.0 * neb;
+  double rp_mult = 1.00 + 0.0012 * static_cast<double>(scan.coherence_pct) + 0.08 * ruins;
+  double mineral_mult = 1.00 + 0.15 * ruins + 0.05 * neb;
+  double hazard_mult = 1.00 + 0.0018 * static_cast<double>(scan.volatility_pct) + 0.12 * grad;
+  double cache_bonus = 0.02 + 0.10 * ruins + 0.04 * neb;
+  int extra_days = (scan.volatility_pct >= 62) ? 1 : 0;
+
+  switch (scan.resonance) {
+    case AnomalyResonanceBand::Harmonic:
+      link += 0.08;
+      radius += 10.0;
+      rp_mult += 0.06;
+      break;
+    case AnomalyResonanceBand::Fractured:
+      link += 0.10;
+      radius += 14.0;
+      rp_mult += 0.08;
+      hazard_mult += 0.12;
+      extra_days += 1;
+      break;
+    case AnomalyResonanceBand::Chaotic:
+      link += 0.16;
+      radius += 18.0;
+      rp_mult += 0.10;
+      hazard_mult += 0.24;
+      extra_days += 1;
+      break;
+    case AnomalyResonanceBand::NullLocked:
+      link += 0.05;
+      radius += 6.0;
+      rp_mult -= 0.04;
+      break;
+    case AnomalyResonanceBand::Quiescent:
+    default:
+      break;
+  }
+
+  switch (site.archetype) {
+    case AnomalySiteArchetype::RelicVault:
+      link += 0.08;
+      rp_mult += 0.07;
+      mineral_mult += 0.16;
+      cache_bonus += 0.09;
+      extra_days += 1;
+      break;
+    case AnomalySiteArchetype::FractureNest:
+      link += 0.10;
+      hazard_mult += 0.16;
+      rp_mult += 0.05;
+      extra_days += 1;
+      break;
+    case AnomalySiteArchetype::TurbulencePocket:
+      link += 0.07;
+      hazard_mult += 0.12;
+      break;
+    case AnomalySiteArchetype::SignalLattice:
+      link += 0.06;
+      rp_mult += 0.05;
+      break;
+    case AnomalySiteArchetype::DecoyWeb:
+      link += 0.04;
+      hazard_mult += 0.10;
+      rp_mult -= 0.03;
+      cache_bonus -= 0.03;
+      break;
+    case AnomalySiteArchetype::QuietDrift:
+    default:
+      break;
+  }
+
+  if (a.kind == AnomalyKind::Distortion || a.kind == AnomalyKind::Phenomenon) {
+    link += 0.07;
+    hazard_mult += 0.14;
+  } else if (a.kind == AnomalyKind::Xenoarchaeology || a.kind == AnomalyKind::Artifact) {
+    link += 0.09;
+    rp_mult += 0.08;
+    mineral_mult += 0.12;
+  } else if (a.kind == AnomalyKind::Distress && scan.spoof_risk) {
+    link += 0.03;
+    hazard_mult += 0.10;
+    cache_bonus -= 0.04;
+  }
+
+  // Blend in site-level multipliers so the weave reacts to the existing profile.
+  rp_mult *= std::clamp(site.research_mult, 0.70, 1.60);
+  mineral_mult *= std::clamp(site.mineral_mult, 0.70, 1.70);
+  hazard_mult *= std::clamp(site.hazard_chance_mult * 0.5 + site.hazard_damage_mult * 0.5, 0.60, 1.90);
+
+  AnomalyConvergenceProfile out;
+  out.link_chance = std::clamp(link, 0.0, 0.88);
+  out.link_radius_mkm = std::clamp(radius, 20.0, 140.0);
+  out.extra_investigation_days = std::clamp(extra_days, 0, 4);
+  out.research_mult = std::clamp(rp_mult, 0.70, 1.90);
+  out.mineral_mult = std::clamp(mineral_mult, 0.65, 2.10);
+  out.hazard_mult = std::clamp(hazard_mult, 0.70, 2.30);
+  out.cache_bonus = std::clamp(cache_bonus, -0.20, 0.35);
+  return out;
+}
+
 inline std::string generate_anomaly_name(const Anomaly& a) {
   const std::uint64_t s = anomaly_seed(a);
   HashRng rng(s ^ 0x1B03738712F44E3DULL);
@@ -290,6 +757,15 @@ inline std::string generate_anomaly_name(const Anomaly& a) {
       "Beacon", "Mayday", "SOS", "Lifepod Ping", "Blackbox", "Emergency Burst",
       "Rescue Code", "Distress Loop", "Wreck Ping", "Autopilot Plea", "Hull Tap", "Last Call",
   };
+  static constexpr std::array<const char*, 12> kDistortion = {
+      "Shear Gate",   "Null Choir",    "Curvature Knot",  "Warped Mirror", "Fissure Choir", "Fractured Lens",
+      "Bent Halo",    "Temporal Fold", "Signal Scar",     "Gravity Veil",  "Phase Fold",    "Clockwork Rift",
+  };
+  static constexpr std::array<const char*, 12> kXeno = {
+      "Silent Vault", "Buried Temple", "Precursor Spire", "Ancestral Engine", "Monolith Choir",
+      "Obscure Archive", "Shard Shrine", "Lost Reliquary", "Glyph Tomb", "Stellar Mosaics",
+      "Cold Vault", "Void Catacomb",
+  };
 
   const int fmt = rng.range_int(0, 3);
 
@@ -299,7 +775,7 @@ inline std::string generate_anomaly_name(const Anomaly& a) {
     return std::string("[") + code + "]";
   };
 
-  if (a.kind == "distress") {
+  if (a.kind == AnomalyKind::Distress) {
     const char* head = pick_from(kDistress, rng);
     // Callsign-like suffix.
     const std::string call = hex_n(rng.next_u64() ^ s, 4);
@@ -308,9 +784,16 @@ inline std::string generate_anomaly_name(const Anomaly& a) {
     return std::string(head) + ": " + call;
   }
 
-  const bool is_ruins = (a.kind == "ruins" || a.kind == "artifact");
-  const bool is_phen = (a.kind == "phenomenon");
-  const char* node = is_ruins ? pick_from(kRuins, rng) : (is_phen ? pick_from(kPhenom, rng) : pick_from(kSignal, rng));
+  const bool is_ruins = (a.kind == AnomalyKind::Ruins || a.kind == AnomalyKind::Artifact);
+  const bool is_phen = (a.kind == AnomalyKind::Phenomenon);
+  const bool is_dist = (a.kind == AnomalyKind::Distortion);
+  const bool is_xeno = (a.kind == AnomalyKind::Xenoarchaeology);
+  const char* node = nullptr;
+  if (is_dist) node = pick_from(kDistortion, rng);
+  else if (is_ruins) node = pick_from(kRuins, rng);
+  else if (is_phen) node = pick_from(kPhenom, rng);
+  else if (is_xeno) node = pick_from(kXeno, rng);
+  else node = pick_from(kSignal, rng);
 
   // A few formats so lists don't look like clones.
   if (fmt == 0) {
@@ -408,20 +891,50 @@ inline std::string anomaly_lore_line(const Anomaly& a,
       "changes when approached", "drops packets in nebula haze", "carries spoofed timestamps", "matches pirate bait profiles",
       "disagrees with stellar ephemeris", "collides with sensor ghosts",
   };
+  static constexpr std::array<const char*, 12> kDistortionA = {
+      "A local spacetime seam", "A null-locked wake", "An unstable warp braid", "A curved lens path",
+      "A drifting harmonic knot", "A warped sensor horizon", "A fractured horizon line", "A filament-shredded pocket",
+      "A gravitational pinch", "A phase-shifted cloud", "A silent fold", "A mirrored beacon echo",
+  };
+  static constexpr std::array<const char*, 12> kDistortionB = {
+      "shifts position when not observed", "inverts microfield gradients", "distorts range with every approach",
+      "hums at half the expected frequency", "shows impossible parallax", "bends dust flow into rings",
+      "changes under repeated scanning", "synchronizes with high-throttle maneuvers", "drifts without inertia",
+      "scrambles long-baseline telemetry", "flickers between frames", "reacts to gravitic load",
+  };
+  static constexpr std::array<const char*, 12> kXenoA = {
+      "An intact alloy gate", "An old survey beacon", "A buried transit vault", "A sealed reactor chamber",
+      "A fractured star-map", "A ceremonial datacore", "A buried sensor lattice", "A long-dead habitat ring",
+      "A relic of synthetic architecture", "A fossilized jump anchor", "A silent maintenance spine", "A buried field tower",
+  };
+  static constexpr std::array<const char*, 12> kXenoB = {
+      "still runs predictive maintenance", "hides layered indexing marks", "stores preserved civic records",
+      "carries non-human fabrication marks", "matches no known standards", "reacts to cargo drones",
+      "contains sealed specimen racks", "shows periodic thermal pulses", "responds to synchronized scans",
+      "emits a low static harmonic", "appears to predate the cluster", "maps into recursive vectors",
+  };
 
   std::string line;
   line.reserve(160);
 
   // Kind-specific sentence.
-  if (a.kind == "ruins" || a.kind == "artifact") {
+  if (a.kind == AnomalyKind::Ruins || a.kind == AnomalyKind::Artifact) {
     line = std::string(pick_from(kRuinsA, rng)) + " " + pick_from(kRuinsB, rng);
     if (ruins > 0.55) line += "; the site feels intentionally concealed";
-  } else if (a.kind == "phenomenon") {
+  } else if (a.kind == AnomalyKind::Phenomenon) {
     line = std::string(pick_from(kPhenomA, rng)) + " " + pick_from(kPhenomB, rng);
     if (neb > 0.60) line += "; nebular ions amplify the effect";
-  } else if (a.kind == "distress") {
+  } else if (a.kind == AnomalyKind::Distress) {
     line = std::string(pick_from(kDistA, rng)) + " " + pick_from(kDistB, rng);
     if (pir > 0.55) line += "; analysts warn of pirate spoofing";
+  } else if (a.kind == AnomalyKind::Distortion) {
+    line = std::string(pick_from(kDistortionA, rng)) + " " + pick_from(kDistortionB, rng);
+    if (neb > 0.65) line += "; distortion effects are strongest across dense dust filaments";
+    if (pir > 0.45) line += "; navigational data drift suggests remote interference";
+  } else if (a.kind == AnomalyKind::Xenoarchaeology) {
+    line = std::string(pick_from(kXenoA, rng)) + " " + pick_from(kXenoB, rng);
+    if (pir > 0.20) line += "; non-localized thermal drift complicates extraction";
+    if (ruins > 0.55) line += "; relic architecture looks intentionally hidden";
   } else {
     line = std::string(pick_from(kSignalA, rng)) + " " + pick_from(kSignalB, rng);
     if (neb > 0.50) line += "; signal is smeared by nebula haze";
@@ -431,6 +944,21 @@ inline std::string anomaly_lore_line(const Anomaly& a,
   if (!theme.empty()) {
     line += ". Theme tag: " + theme;
   }
+  const AnomalyScanReadout scan = anomaly_scan_readout(a, neb, ruins, pir);
+  line += ". Scan profile: ";
+  line += anomaly_resonance_band_label(scan.resonance);
+  line += " / ";
+  line += theme_domain_label(scan.focus_domain);
+  line += " (C";
+  line += std::to_string(scan.coherence_pct);
+  line += ", V";
+  line += std::to_string(scan.volatility_pct);
+  line += ", H";
+  line += std::to_string(scan.hazard_pct);
+  if (scan.spoof_risk) {
+    line += ", spoof risk elevated";
+  }
+  line += ")";
   line += ". Signature: " + sig + ".";
   return line;
 }

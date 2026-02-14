@@ -156,14 +156,91 @@ cmake --build build --config Release
 If you have a recent CMake, you can use the included `CMakePresets.json`:
 
 ```bash
-# Core + tests (no UI)
+# Core + tests (no UI, isolated/headless build dir to avoid IDE contention)
+cmake --preset core-tests-headless
+cmake --build --preset core-tests-headless --config Release
+ctest --preset core-headless -C Release
+# Note: in Visual Studio debugger, some tests intentionally trigger and catch
+# exceptions (first-chance). If `nebula4x_tests.exe` exits with code 0, tests passed.
+# Windows helper with isolated per-test execution + timeout guard:
+powershell -ExecutionPolicy Bypass -File .\tools\run_tests.ps1 -BuildFirst -PerTestTimeoutSeconds 180
+# (`run_tests.ps1` stops stale `nebula4x_tests.exe`, runs tests one-by-one, and kills timed out tests)
+# It also stops orphaned cmake/ninja/msbuild processes older than 90s by default.
+# Build/test scripts now run without a mutex by default to avoid lock-wait stalls.
+# Enable mutex when needed: -UseBuildMutex
+# Enforce lock acquisition (fail instead of continue): -BuildLockRequired
+# Optional hard cap for total script runtime: -MaxTotalSeconds N
+# Default test runtime log level is `error` to keep output clean; override with:
+# powershell -ExecutionPolicy Bypass -File .\tools\run_tests.ps1 -BuildFirst -LogLevel warn
+# Quick help (returns immediately; does not require built test binaries):
+# powershell -ExecutionPolicy Bypass -File .\tools\run_tests.ps1 -?
+# Disable orphan-process cleanup if you're running another build in parallel:
+# powershell -ExecutionPolicy Bypass -File .\tools\run_tests.ps1 -BuildFirst -KillOrphanedBuildTools:$false
+# Optional: stop at first failing test (faster triage)
+powershell -ExecutionPolicy Bypass -File .\tools\run_tests.ps1 -ContinueOnFailure 0
+# Optional: machine-readable report
+powershell -ExecutionPolicy Bypass -File .\tools\run_tests.ps1 -BuildFirst -JunitPath out\test-results\nebula4x_tests.xml
+# If PowerShell execution policy blocks scripts:
+.\tools\run_tests.cmd --filter simulation
+# (`run_tests.cmd` invokes the same isolated/timeout-safe runner path)
+
+# Fast core + CLI only (no UI, no tests)
 cmake --preset core
 cmake --build --preset core --config Release
-ctest --preset core -C Release
+# (build preset `core` targets only `nebula4x_cli` for fast feedback)
+# (MSVC builds print per-file timing/progress by default)
 
-# UI + core + tests
-cmake --preset ui
-cmake --build --preset ui --config Release
+# Windows helper (watchdog + mutex + stale-process cleanup; optional clean retry via -RetryCleanOnFailure)
+powershell -ExecutionPolicy Bypass -File .\tools\build_core.ps1 -Configure
+# Quick help (returns immediately; does not start configure/build):
+# powershell -ExecutionPolicy Bypass -File .\tools\build_core.ps1 -?
+# (`build_core.ps1` also stops a running target process by default to avoid LNK1104 file-lock errors)
+# It also stops orphaned cmake/ninja/msbuild processes older than 90s by default.
+# Build/test scripts run without a mutex by default; enable when needed with -UseBuildMutex.
+# If mutex is enabled, require lock acquisition with -BuildLockRequired.
+# Optional hard cap for whole script runtime: -MaxTotalSeconds N
+# Optional watchdog tuning for slow/fragile systems:
+# powershell -ExecutionPolicy Bypass -File .\tools\build_core.ps1 -Configure -BuildTimeoutSeconds 3600 -ConfigureTimeoutSeconds 900
+# Disable orphan-process cleanup if you're running another build in parallel:
+# powershell -ExecutionPolicy Bypass -File .\tools\build_core.ps1 -Configure -KillOrphanedBuildTools:$false
+# Convenience wrapper with sane defaults for core-tests target:
+# .\tools\build_core.cmd
+# If you still need nested PowerShell -Command, use safe quoting:
+# C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -Command "& { powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\build_core.ps1 -Preset core-tests-headless -Target nebula4x_tests -Config Release -Configure -BuildTimeoutSeconds 600 -WatchdogSeconds 15 -KillOrphanedBuildTools -OrphanedToolMinAgeSeconds 1 -EmitScriptRc }"
+
+# UI + core + tests (isolated/headless build dir)
+cmake --preset ui-headless
+cmake --build --preset ui-headless --config Release
+
+# Main executable dependency wiring check (single target):
+# - always builds nebula4x
+# - also builds nebula4x_tests when tests are enabled in the preset
+cmake --preset ui-headless
+cmake --build --preset ui-main-all-headless --config Release
+
+# UI runtime only (no tests; fastest/stablest way to build nebula4x.exe)
+cmake --preset ui-runtime-headless
+cmake --build --preset ui-runtime-headless --config Release
+# Windows convenience wrapper:
+# .\tools\build_game.cmd
+# (default target is nebula4x_main_all for dependency wiring sanity checks)
+# (fast-path: skips rebuild when nebula4x.exe already exists and no forwarded build args are provided)
+# (use -ForceBuild to force rebuild; use -MaxTotalSeconds N for a hard wrapper timeout)
+
+# Real UI runtime build with dependency fetch (requires network access):
+cmake --preset ui-runtime-fetchdeps
+cmake --build --preset ui-runtime-fetchdeps --config Release
+# Wrapper equivalent:
+# .\tools\build_game.cmd -FullUI -ForceBuild
+# (in FullUI mode, wrapper runs a quick preflight and exits 125 if neither
+# local SDL2 config nor github.com:443 connectivity is available)
+
+# UI-configured test target only (safer/faster than building every UI target)
+cmake --preset ui-tests-only-headless
+cmake --build --preset ui-tests-headless --config Release
+
+# Windows watchdog wrapper for UI-configured tests (kills stale cmake/ninja/msbuild)
+powershell -ExecutionPolicy Bypass -File .\tools\run_tests.ps1 -Preset ui-tests-headless -BuildFirst -PerTestTimeoutSeconds 180
 ```
 
 Run:
@@ -171,9 +248,12 @@ Run:
 ```bash
 # UI
 ./build/nebula4x
+# If UI deps are unavailable, the fallback launcher prints a clear reason and exits with code 0.
+# Use `./build/nebula4x --require-ui` to force a non-zero exit when UI is required.
 
 # CLI (Sol scenario)
 ./build/nebula4x_cli --days 30
+# (`nebula4x_cli` is batch/non-interactive and exits when finished; exit code 0 means success)
 
 # CLI (random scenario)
 ./build/nebula4x_cli --scenario random --seed 42 --systems 12 --days 30
@@ -247,6 +327,10 @@ Run:
 
 # tests
 ctest --test-dir build
+# direct test runner with per-test output + heartbeat for long-running tests
+out/build/core-tests-vs/Release/nebula4x_tests.exe --verbose --heartbeat-seconds 10
+# direct test runner for one exact test name
+out/build/core-tests-vs/Release/nebula4x_tests.exe --verbose --exact simulation --heartbeat-seconds 10
 ```
 
 ### Windows tips

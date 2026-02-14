@@ -994,16 +994,31 @@ struct Wreck {
 // investigated by ships for rewards (research points, optional unlocks, etc).
 //
 // This is intentionally lightweight and content/mod-friendly:
-// - kind is an arbitrary tag ("signal", "ruins", "phenomenon", ...).
+// - kind is a typed category (signal/ruins/phenomenon/...).
 // - investigation_days is the time required on-station to resolve the anomaly.
 // - research_reward is an amount of research points to award on completion.
 // - unlock_component_id is an optional component id to unlock for the faction.
 //
 // Resolution metadata is stored to support event logs / analytics.
+enum class AnomalyKind : std::uint8_t {
+  Unknown = 0,
+  Signal = 1,
+  Distress = 2,
+  Ruins = 3,
+  Artifact = 4,
+  Phenomenon = 5,
+  Distortion = 6,
+  Xenoarchaeology = 7,
+  CodexEcho = 8,
+  Echo = 9,
+  Cache = 10,
+  Generic = 11,
+};
+
 struct Anomaly {
   Id id{kInvalidId};
   std::string name;
-  std::string kind;
+  AnomalyKind kind{AnomalyKind::Unknown};
 
   Id system_id{kInvalidId};
   Vec2 position_mkm{0.0, 0.0};

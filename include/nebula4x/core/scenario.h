@@ -109,6 +109,34 @@ struct RandomScenarioConfig {
   // 2.0 => very dense (many alternate routes)
   double jump_density{1.0};
 
+  // Global mineral abundance multiplier for procedural deposits and exploration
+  // loot.
+  //
+  // 0.5 => scarce economy
+  // 1.0 => default
+  // 2.0 => rich economy
+  double resource_abundance{1.0};
+
+  // How strongly risk/reward content trends toward the frontier (farther from
+  // home).
+  //
+  // 0.5 => flatter/easier progression
+  // 1.0 => default
+  // 2.0 => strong frontier escalation
+  double frontier_intensity{1.0};
+
+  // Xenoarchaeology anomaly pressure by progression band.
+  //
+  // These are applied when selecting random anomaly kinds:
+  // - early uses inner/core systems (near player start)
+  // - late uses frontier/deep systems
+  //
+  // 1.0 => default pressure
+  // <1.0 => fewer xenoarchaeology sites
+  // >1.0 => more xenoarchaeology sites
+  double xenoarchaeology_spawn_pressure_early{1.0};
+  double xenoarchaeology_spawn_pressure_late{1.0};
+
 
   // If true, generate Voronoi-like galaxy regions ("sectors") and assign each
   // system to a region. Regions carry environment / content modifiers (minerals,

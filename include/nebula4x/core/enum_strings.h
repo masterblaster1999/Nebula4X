@@ -17,4 +17,8 @@ BodyType body_type_from_string(const std::string& s);
 std::string wreck_kind_to_string(WreckKind k);
 WreckKind wreck_kind_from_string(const std::string& s);
 
+std::string anomaly_kind_to_string(AnomalyKind k);
+AnomalyKind anomaly_kind_from_string(const std::string& s);
+const char* anomaly_kind_label(AnomalyKind k);
+
 } // namespace nebula4x

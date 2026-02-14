@@ -235,6 +235,23 @@ struct BombardColony {
   // Accumulated time spent bombarding (in days).
   // Used to make duration_days behave consistently under sub-day turn ticks.
   double progress_days{0.0};
+
+  // Fractional installation damage carry-over.
+  //
+  // Bombardment can run on sub-day combat ticks. Installation destruction is
+  // quantized by per-installation HP, so we accumulate leftover damage here to
+  // preserve deterministic "damage per day" semantics across tick sizes.
+  double installation_damage_carry{0.0};
+
+  // Optional: if set, installation damage prioritizes this installation id
+  // before normal military/fortification/sensor priorities.
+  std::string priority_installation_id;
+
+  // Optional safety doctrine:
+  // - true  => automatically stop bombardment once defender ground forces
+  //            reach zero (no further installation/population damage).
+  // - false => continue bombardment according to duration_days.
+  bool stop_when_ground_forces_neutralized{false};
 };
 
 // Salvage minerals from a wreck into this ship's cargo.
