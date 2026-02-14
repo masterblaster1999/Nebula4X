@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <chrono>
-#include <cctype>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -121,33 +120,26 @@ static inline std::uint64_t hash_combine_u64(std::uint64_t h, std::uint64_t v) {
   return h;
 }
 
-static inline std::uint16_t base_variant_from_kind(std::string_view kind, std::uint32_t seed) {
-  // Heuristics first (human-readable), else stable hash.
-  const auto find_ci = [&](std::string_view needle) -> bool {
-    if (needle.empty()) return false;
-    // Very small case-insensitive search (ASCII only).
-    for (std::size_t i = 0; i + needle.size() <= kind.size(); ++i) {
-      bool ok = true;
-      for (std::size_t j = 0; j < needle.size(); ++j) {
-        const char a = static_cast<char>(std::tolower(static_cast<unsigned char>(kind[i + j])));
-        const char b = static_cast<char>(std::tolower(static_cast<unsigned char>(needle[j])));
-        if (a != b) {
-          ok = false;
-          break;
-        }
-      }
-      if (ok) return true;
-    }
-    return false;
-  };
-
-  if (find_ci("signal") || find_ci("beacon") || find_ci("echo")) return 0;     // Radar / rings
-  if (find_ci("ruin") || find_ci("artifact") || find_ci("derelict")) return 1; // Geometric / runic
-  if (find_ci("rift") || find_ci("storm") || find_ci("vortex") || find_ci("phenom")) return 2; // Swirl
-  if (find_ci("cache") || find_ci("vault") || find_ci("crystal")) return 3;    // Facets
-
-  const std::uint64_t hk = nebula4x::procgen_obscure::fnv1a_64(kind);
-  return static_cast<std::uint16_t>(hash_u32(static_cast<std::uint32_t>(hk) ^ seed) % 4u);
+static inline std::uint16_t base_variant_from_kind(nebula4x::AnomalyKind kind, std::uint32_t seed) {
+  switch (kind) {
+    case nebula4x::AnomalyKind::Signal:
+    case nebula4x::AnomalyKind::Distress:
+    case nebula4x::AnomalyKind::Echo:
+    case nebula4x::AnomalyKind::CodexEcho:
+      return 0; // Radar / rings
+    case nebula4x::AnomalyKind::Xenoarchaeology:
+    case nebula4x::AnomalyKind::Ruins:
+    case nebula4x::AnomalyKind::Artifact:
+      return 1; // Geometric / runic
+    case nebula4x::AnomalyKind::Distortion:
+    case nebula4x::AnomalyKind::Phenomenon:
+      return 2; // Swirl
+    case nebula4x::AnomalyKind::Cache:
+      return 3; // Facets
+    default:
+      break;
+  }
+  return static_cast<std::uint16_t>(hash_u32(static_cast<std::uint32_t>(kind) ^ seed) % 4u);
 }
 
 static inline ImU32 modulate_alpha(ImU32 col, float a_mul) {
@@ -246,7 +238,7 @@ ProcAnomalyPhenomenaSpriteEngine::SpriteInfo ProcAnomalyPhenomenaSpriteEngine::g
   idh = hash_combine_u64(idh, static_cast<std::uint64_t>(a.id));
   idh = hash_combine_u64(idh, static_cast<std::uint64_t>(a.system_id));
   idh = hash_combine_u64(idh, static_cast<std::uint64_t>(a.origin_anomaly_id));
-  idh = hash_combine_u64(idh, nebula4x::procgen_obscure::fnv1a_64(a.kind));
+  idh = hash_combine_u64(idh, static_cast<std::uint64_t>(a.kind));
   // Quantize position so tiny floating drift doesn't explode cache.
   idh = hash_combine_u64(idh, float_to_u64_quant(static_cast<float>(a.position_mkm.x), 10.0f));
   idh = hash_combine_u64(idh, float_to_u64_quant(static_cast<float>(a.position_mkm.y), 10.0f));

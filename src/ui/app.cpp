@@ -104,6 +104,8 @@ namespace {
 constexpr float kDefaultBaseFontSizePx = 13.0f;
 constexpr float kMinUiScale = 0.65f;
 constexpr float kMaxUiScale = 2.5f;
+constexpr float kUiScaleStep = 0.05f;
+constexpr float kUiScaleLargeStep = 0.10f;
 constexpr int kMinAtlasFontPx = 8;
 constexpr int kMaxAtlasFontPx = 64;
 
@@ -524,6 +526,21 @@ void App::frame() {
     // the Hotkeys editor is capturing a new chord.
     if (ui_.hotkeys_enabled && !ui_.hotkeys_capture_active && !io.WantTextInput) {
       auto hk = [&](const char* id) { return hotkey_pressed(ui_, id, io); };
+      auto adjust_ui_scale = [&](float delta) {
+        const float prev = ui_.ui_scale;
+        ui_.ui_scale = std::clamp(ui_.ui_scale + delta, kMinUiScale, kMaxUiScale);
+        if (std::fabs(ui_.ui_scale - prev) > 1e-4f) {
+          // Keep spacing/geometry in sync immediately; font atlas scaling updates in pre_frame().
+          apply_imgui_style_overrides();
+        }
+      };
+      auto reset_ui_scale = [&]() {
+        const float prev = ui_.ui_scale;
+        ui_.ui_scale = 1.0f;
+        if (std::fabs(ui_.ui_scale - prev) > 1e-4f) {
+          apply_imgui_style_overrides();
+        }
+      };
 
       // Command palette / help.
       if (hk("ui.command_console")) ui_.show_command_palette = true;
@@ -582,6 +599,18 @@ void App::frame() {
       if (hk("ui.toggle.focus_mode")) toggle_focus_mode(ui_);
       if (hk("ui.toggle.ui_forge")) ui_.show_ui_forge_window = !ui_.show_ui_forge_window;
       if (hk("ui.toggle.context_forge")) ui_.show_context_forge_window = !ui_.show_context_forge_window;
+
+      // UI ergonomics.
+      const float ui_scale_step = io.KeyShift ? kUiScaleLargeStep : kUiScaleStep;
+      if (hk("ui.scale_up") || (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_KeypadAdd, false))) {
+        adjust_ui_scale(ui_scale_step);
+      }
+      if (hk("ui.scale_down") || (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_KeypadSubtract, false))) {
+        adjust_ui_scale(-ui_scale_step);
+      }
+      if (hk("ui.scale_reset") || (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Keypad0, false))) {
+        reset_ui_scale();
+      }
 
       // Screen reader / narration.
       if (hk("accessibility.toggle_screen_reader")) {
@@ -966,6 +995,11 @@ void App::frame() {
 
   // Keep Context Forge panel synced (selection-following / pinned entity).
   update_context_forge(sim_, ui_, selected_ship_, selected_colony_, selected_body_);
+
+  // Base-game integration: seed starter procedural panels once per session.
+  if (!ui_forge_base_panels_initialized_) {
+    ui_forge_base_panels_initialized_ = ensure_ui_forge_base_panels(sim_, ui_);
+  }
 
   // UI Forge: user-defined procedural panels (custom dashboards).
   draw_ui_forge_panel_windows(sim_, ui_);
@@ -1375,7 +1409,7 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       }
       if (auto it = obj->find("new_game_random_num_systems"); it != obj->end()) {
         ui_.new_game_random_num_systems = static_cast<int>(it->second.number_value(ui_.new_game_random_num_systems));
-        ui_.new_game_random_num_systems = std::clamp(ui_.new_game_random_num_systems, 1, 64);
+        ui_.new_game_random_num_systems = std::clamp(ui_.new_game_random_num_systems, 1, 300);
       }
       if (auto it = obj->find("new_game_random_galaxy_shape"); it != obj->end()) {
         ui_.new_game_random_galaxy_shape = static_cast<int>(it->second.number_value(ui_.new_game_random_galaxy_shape));
@@ -1396,6 +1430,26 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       if (auto it = obj->find("new_game_random_jump_density"); it != obj->end()) {
         ui_.new_game_random_jump_density = static_cast<float>(it->second.number_value(ui_.new_game_random_jump_density));
         ui_.new_game_random_jump_density = std::clamp(ui_.new_game_random_jump_density, 0.0f, 2.0f);
+      }
+      if (auto it = obj->find("new_game_random_resource_abundance"); it != obj->end()) {
+        ui_.new_game_random_resource_abundance =
+            static_cast<float>(it->second.number_value(ui_.new_game_random_resource_abundance));
+        ui_.new_game_random_resource_abundance = std::clamp(ui_.new_game_random_resource_abundance, 0.5f, 2.0f);
+      }
+      if (auto it = obj->find("new_game_random_frontier_intensity"); it != obj->end()) {
+        ui_.new_game_random_frontier_intensity =
+            static_cast<float>(it->second.number_value(ui_.new_game_random_frontier_intensity));
+        ui_.new_game_random_frontier_intensity = std::clamp(ui_.new_game_random_frontier_intensity, 0.5f, 2.0f);
+      }
+      if (auto it = obj->find("new_game_random_xeno_spawn_pressure_early"); it != obj->end()) {
+        ui_.new_game_random_xeno_spawn_pressure_early =
+            static_cast<float>(it->second.number_value(ui_.new_game_random_xeno_spawn_pressure_early));
+        ui_.new_game_random_xeno_spawn_pressure_early = std::clamp(ui_.new_game_random_xeno_spawn_pressure_early, 0.25f, 3.0f);
+      }
+      if (auto it = obj->find("new_game_random_xeno_spawn_pressure_late"); it != obj->end()) {
+        ui_.new_game_random_xeno_spawn_pressure_late =
+            static_cast<float>(it->second.number_value(ui_.new_game_random_xeno_spawn_pressure_late));
+        ui_.new_game_random_xeno_spawn_pressure_late = std::clamp(ui_.new_game_random_xeno_spawn_pressure_late, 0.25f, 3.0f);
       }
       if (auto it = obj->find("new_game_random_enable_regions"); it != obj->end()) {
         ui_.new_game_random_enable_regions = it->second.bool_value(ui_.new_game_random_enable_regions);
@@ -1449,7 +1503,7 @@ bool App::load_ui_prefs(const char* path, std::string* error) {
       // Seed explorer defaults.
       if (auto it = obj->find("new_game_seed_search_objective"); it != obj->end()) {
         ui_.new_game_seed_search_objective = static_cast<int>(it->second.number_value(ui_.new_game_seed_search_objective));
-        ui_.new_game_seed_search_objective = std::clamp(ui_.new_game_seed_search_objective, 0, 3);
+        ui_.new_game_seed_search_objective = std::clamp(ui_.new_game_seed_search_objective, 0, 4);
       }
       if (auto it = obj->find("new_game_seed_search_tries"); it != obj->end()) {
         ui_.new_game_seed_search_tries = static_cast<int>(it->second.number_value(ui_.new_game_seed_search_tries));
@@ -3718,6 +3772,10 @@ bool App::save_ui_prefs(const char* path, std::string* error) const {
     o["new_game_random_placement_quality"] = static_cast<double>(ui_.new_game_random_placement_quality);
     o["new_game_random_jump_network_style"] = static_cast<double>(ui_.new_game_random_jump_network_style);
     o["new_game_random_jump_density"] = static_cast<double>(ui_.new_game_random_jump_density);
+    o["new_game_random_resource_abundance"] = static_cast<double>(ui_.new_game_random_resource_abundance);
+    o["new_game_random_frontier_intensity"] = static_cast<double>(ui_.new_game_random_frontier_intensity);
+    o["new_game_random_xeno_spawn_pressure_early"] = static_cast<double>(ui_.new_game_random_xeno_spawn_pressure_early);
+    o["new_game_random_xeno_spawn_pressure_late"] = static_cast<double>(ui_.new_game_random_xeno_spawn_pressure_late);
     o["new_game_random_enable_regions"] = ui_.new_game_random_enable_regions;
     o["new_game_random_num_regions"] = static_cast<double>(ui_.new_game_random_num_regions);
     o["new_game_random_ai_empires"] = static_cast<double>(ui_.new_game_random_ai_empires);
@@ -4583,9 +4641,9 @@ void App::reset_ui_theme_defaults() {
   ui_.map_route_opacity = 1.0f;
 
   // Ray-marched SDF nebula (experimental).
-  ui_.map_raymarch_nebula = false;
-  ui_.map_raymarch_nebula_alpha = 0.18f;
-  ui_.map_raymarch_nebula_parallax = 0.06f;
+  ui_.map_raymarch_nebula = true;
+  ui_.map_raymarch_nebula_alpha = 0.12f;
+  ui_.map_raymarch_nebula_parallax = 0.08f;
   ui_.map_raymarch_nebula_max_depth = 6;
   ui_.map_raymarch_nebula_error_threshold = 0.05f;
   ui_.map_raymarch_nebula_spp = 1;
@@ -4595,22 +4653,22 @@ void App::reset_ui_theme_defaults() {
   ui_.map_raymarch_nebula_debug = false;
 
   // Procedural background engine (tile raster).
-  ui_.map_proc_render_engine = false;
+  ui_.map_proc_render_engine = true;
   ui_.map_proc_render_tile_px = 256;
-  ui_.map_proc_render_cache_tiles = 96;
+  ui_.map_proc_render_cache_tiles = 128;
   ui_.map_proc_render_nebula_enable = true;
-  ui_.map_proc_render_nebula_strength = 0.35f;
-  ui_.map_proc_render_nebula_scale = 1.0f;
-  ui_.map_proc_render_nebula_warp = 0.70f;
+  ui_.map_proc_render_nebula_strength = 0.42f;
+  ui_.map_proc_render_nebula_scale = 1.10f;
+  ui_.map_proc_render_nebula_warp = 0.85f;
   ui_.map_proc_render_debug_tiles = false;
 
   // Galaxy procedural territory overlay (political map).
-  ui_.galaxy_map_territory_overlay = false;
+  ui_.galaxy_map_territory_overlay = true;
   ui_.galaxy_map_territory_fill = true;
   ui_.galaxy_map_territory_boundaries = true;
-  ui_.galaxy_map_territory_fill_opacity = 0.16f;
-  ui_.galaxy_map_territory_boundary_opacity = 0.42f;
-  ui_.galaxy_map_territory_boundary_thickness_px = 1.6f;
+  ui_.galaxy_map_territory_fill_opacity = 0.14f;
+  ui_.galaxy_map_territory_boundary_opacity = 0.34f;
+  ui_.galaxy_map_territory_boundary_thickness_px = 1.4f;
   ui_.galaxy_map_territory_tile_px = 420;
   ui_.galaxy_map_territory_cache_tiles = 220;
   ui_.galaxy_map_territory_samples_per_tile = 28;
@@ -4668,14 +4726,14 @@ void App::reset_ui_theme_defaults() {
   ui_.system_map_jump_phenomena_debug_bounds = false;
 
   // Procedural motion trails (system map).
-  ui_.system_map_motion_trails = false;
+  ui_.system_map_motion_trails = true;
   ui_.system_map_motion_trails_all_ships = false;
   ui_.system_map_motion_trails_missiles = false;
-  ui_.system_map_motion_trails_max_age_days = 7.0f;
-  ui_.system_map_motion_trails_sample_hours = 2.0f;
+  ui_.system_map_motion_trails_max_age_days = 6.0f;
+  ui_.system_map_motion_trails_sample_hours = 1.5f;
   ui_.system_map_motion_trails_min_seg_px = 4.0f;
-  ui_.system_map_motion_trails_thickness_px = 2.0f;
-  ui_.system_map_motion_trails_alpha = 0.55f;
+  ui_.system_map_motion_trails_thickness_px = 2.2f;
+  ui_.system_map_motion_trails_alpha = 0.50f;
   ui_.system_map_motion_trails_speed_brighten = true;
 
   // Procedural flow field (space weather).
@@ -4698,9 +4756,9 @@ void App::reset_ui_theme_defaults() {
   ui_.system_map_flow_field_steps_per_line = 48;
 
   // Procedural gravity contours (system map).
-  ui_.system_map_gravity_contours_overlay = false;
+  ui_.system_map_gravity_contours_overlay = true;
   ui_.system_map_gravity_contours_debug_tiles = false;
-  ui_.system_map_gravity_contours_opacity = 0.22f;
+  ui_.system_map_gravity_contours_opacity = 0.18f;
   ui_.system_map_gravity_contours_thickness_px = 1.15f;
   ui_.system_map_gravity_contours_tile_px = 420;
   ui_.system_map_gravity_contours_cache_tiles = 160;
@@ -4713,7 +4771,7 @@ void App::reset_ui_theme_defaults() {
 
   ui_.ui_scale = 1.0f;
   ui_.ui_scale_style = true;
-  ui_.ui_style_preset = 0;
+  ui_.ui_style_preset = 3; // Nebula
   ui_.ui_density = 0;
 
   // Procedural theme defaults.
@@ -4818,39 +4876,115 @@ void App::apply_imgui_style_overrides() {
   static int last_density = -1;
   static ImGuiStyle base_style;
 
+  auto apply_layout_polish = [](ImGuiStyle& s) {
+    // Shared spacing/geometry polish so all presets feel consistent.
+    s.WindowPadding = ImVec2(11.0f, 9.0f);
+    s.FramePadding = ImVec2(8.0f, 5.0f);
+    s.CellPadding = ImVec2(8.0f, 6.0f);
+    s.ItemSpacing = ImVec2(8.0f, 6.0f);
+    s.ItemInnerSpacing = ImVec2(6.0f, 5.0f);
+    s.IndentSpacing = 20.0f;
+    s.ScrollbarSize = 14.0f;
+    s.GrabMinSize = 10.0f;
+    s.WindowBorderSize = 1.0f;
+    s.ChildBorderSize = 1.0f;
+    s.PopupBorderSize = 1.0f;
+    s.FrameBorderSize = 1.0f;
+    s.TabBorderSize = 0.0f;
+
+    // Rendering quality/perf balance for geometry-heavy map overlays:
+    // keep anti-aliasing on, but relax circle tessellation slightly to reduce
+    // vertex pressure in large procedurally generated scenes.
+    s.AntiAliasedLines = true;
+    s.AntiAliasedLinesUseTex = true;
+    s.AntiAliasedFill = true;
+    s.CurveTessellationTol = 1.15f;
+    s.CircleTessellationMaxError = 0.65f;
+  };
+
+  auto apply_dark_chrome = [](ImGuiStyle& s) {
+    // Richer default dark surfaces than stock ImGui, with clearer hierarchy.
+    ImVec4* c = s.Colors;
+    c[ImGuiCol_Text] = ImVec4(0.93f, 0.95f, 0.98f, 1.00f);
+    c[ImGuiCol_TextDisabled] = ImVec4(0.57f, 0.63f, 0.71f, 1.00f);
+    c[ImGuiCol_WindowBg] = ImVec4(0.06f, 0.07f, 0.09f, 0.96f);
+    c[ImGuiCol_ChildBg] = ImVec4(0.07f, 0.08f, 0.11f, 0.85f);
+    c[ImGuiCol_PopupBg] = ImVec4(0.08f, 0.09f, 0.12f, 0.98f);
+    c[ImGuiCol_Border] = ImVec4(0.27f, 0.33f, 0.40f, 0.40f);
+    c[ImGuiCol_BorderShadow] = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
+    c[ImGuiCol_FrameBg] = ImVec4(0.12f, 0.14f, 0.18f, 0.72f);
+    c[ImGuiCol_FrameBgHovered] = ImVec4(0.18f, 0.21f, 0.27f, 0.78f);
+    c[ImGuiCol_FrameBgActive] = ImVec4(0.23f, 0.26f, 0.33f, 0.88f);
+    c[ImGuiCol_TitleBg] = ImVec4(0.08f, 0.09f, 0.12f, 1.00f);
+    c[ImGuiCol_TitleBgActive] = ImVec4(0.11f, 0.13f, 0.18f, 1.00f);
+    c[ImGuiCol_MenuBarBg] = ImVec4(0.09f, 0.11f, 0.14f, 0.98f);
+    c[ImGuiCol_Button] = ImVec4(0.18f, 0.22f, 0.30f, 0.62f);
+    c[ImGuiCol_ButtonHovered] = ImVec4(0.24f, 0.30f, 0.40f, 0.82f);
+    c[ImGuiCol_ButtonActive] = ImVec4(0.30f, 0.36f, 0.47f, 0.92f);
+    c[ImGuiCol_Header] = ImVec4(0.16f, 0.20f, 0.28f, 0.62f);
+    c[ImGuiCol_HeaderHovered] = ImVec4(0.23f, 0.29f, 0.39f, 0.84f);
+    c[ImGuiCol_HeaderActive] = ImVec4(0.28f, 0.35f, 0.47f, 0.92f);
+    c[ImGuiCol_Tab] = ImVec4(0.12f, 0.16f, 0.22f, 0.88f);
+    c[ImGuiCol_TabHovered] = ImVec4(0.22f, 0.29f, 0.39f, 0.86f);
+    c[ImGuiCol_TabActive] = ImVec4(0.20f, 0.27f, 0.37f, 0.98f);
+    c[ImGuiCol_TabUnfocused] = ImVec4(0.09f, 0.12f, 0.17f, 0.85f);
+    c[ImGuiCol_TabUnfocusedActive] = ImVec4(0.14f, 0.18f, 0.25f, 0.93f);
+    c[ImGuiCol_TableHeaderBg] = ImVec4(0.12f, 0.14f, 0.18f, 1.00f);
+    c[ImGuiCol_TableBorderStrong] = ImVec4(0.34f, 0.40f, 0.48f, 0.60f);
+    c[ImGuiCol_TableBorderLight] = ImVec4(0.26f, 0.31f, 0.38f, 0.32f);
+    c[ImGuiCol_TableRowBgAlt] = ImVec4(0.17f, 0.20f, 0.27f, 0.20f);
+    c[ImGuiCol_Separator] = ImVec4(0.28f, 0.34f, 0.41f, 0.52f);
+    c[ImGuiCol_SeparatorHovered] = ImVec4(0.45f, 0.62f, 0.81f, 0.78f);
+    c[ImGuiCol_SeparatorActive] = ImVec4(0.54f, 0.72f, 0.92f, 0.88f);
+    c[ImGuiCol_CheckMark] = ImVec4(0.53f, 0.74f, 0.98f, 1.00f);
+    c[ImGuiCol_SliderGrab] = ImVec4(0.45f, 0.66f, 0.96f, 0.76f);
+    c[ImGuiCol_SliderGrabActive] = ImVec4(0.53f, 0.74f, 0.98f, 1.00f);
+    c[ImGuiCol_NavHighlight] = ImVec4(0.53f, 0.74f, 0.98f, 0.60f);
+    c[ImGuiCol_TextSelectedBg] = ImVec4(0.53f, 0.74f, 0.98f, 0.33f);
+    c[ImGuiCol_DockingPreview] = ImVec4(0.53f, 0.74f, 0.98f, 0.46f);
+  };
+
   auto apply_nebula_overrides = [](ImGuiStyle& s) {
-    // Sci-fi friendly "Nebula" preset: starts from ImGui Dark and shifts accent
-    // colors toward cyan/teal, with slightly rounder widgets.
-    s.WindowRounding = 6.0f;
-    s.ChildRounding = 6.0f;
-    s.FrameRounding = 4.0f;
-    s.PopupRounding = 6.0f;
-    s.ScrollbarRounding = 6.0f;
-    s.GrabRounding = 4.0f;
-    s.TabRounding = 4.0f;
+    // Sci-fi "Nebula": stronger cyan chrome and softer card geometry.
+    s.WindowRounding = 8.0f;
+    s.ChildRounding = 8.0f;
+    s.FrameRounding = 6.0f;
+    s.PopupRounding = 8.0f;
+    s.ScrollbarRounding = 8.0f;
+    s.GrabRounding = 6.0f;
+    s.TabRounding = 6.0f;
 
     ImVec4* c = s.Colors;
-    const ImVec4 accent(0.00f, 0.78f, 0.90f, 1.00f);
+    const ImVec4 accent(0.11f, 0.83f, 0.95f, 1.00f);
 
+    c[ImGuiCol_WindowBg] = ImVec4(0.04f, 0.06f, 0.09f, 0.96f);
+    c[ImGuiCol_ChildBg] = ImVec4(0.05f, 0.08f, 0.12f, 0.86f);
+    c[ImGuiCol_PopupBg] = ImVec4(0.05f, 0.09f, 0.13f, 0.98f);
+    c[ImGuiCol_Border] = ImVec4(0.19f, 0.45f, 0.56f, 0.42f);
+    c[ImGuiCol_FrameBg] = ImVec4(0.07f, 0.12f, 0.17f, 0.78f);
+    c[ImGuiCol_FrameBgHovered] = ImVec4(0.11f, 0.20f, 0.27f, 0.86f);
+    c[ImGuiCol_FrameBgActive] = ImVec4(0.15f, 0.27f, 0.35f, 0.95f);
+    c[ImGuiCol_Button] = ImVec4(0.10f, 0.20f, 0.27f, 0.70f);
+    c[ImGuiCol_ButtonHovered] = ImVec4(accent.x, accent.y, accent.z, 0.24f);
+    c[ImGuiCol_ButtonActive] = ImVec4(accent.x, accent.y, accent.z, 0.38f);
+    c[ImGuiCol_Header] = ImVec4(0.10f, 0.21f, 0.29f, 0.62f);
+    c[ImGuiCol_HeaderHovered] = ImVec4(accent.x, accent.y, accent.z, 0.22f);
+    c[ImGuiCol_HeaderActive] = ImVec4(accent.x, accent.y, accent.z, 0.36f);
+    c[ImGuiCol_Tab] = ImVec4(0.08f, 0.15f, 0.21f, 0.92f);
+    c[ImGuiCol_TabHovered] = ImVec4(accent.x, accent.y, accent.z, 0.20f);
+    c[ImGuiCol_TabActive] = ImVec4(accent.x, accent.y, accent.z, 0.30f);
+    c[ImGuiCol_TableHeaderBg] = ImVec4(0.08f, 0.14f, 0.20f, 1.00f);
+    c[ImGuiCol_TableBorderStrong] = ImVec4(0.22f, 0.48f, 0.60f, 0.62f);
+    c[ImGuiCol_TableBorderLight] = ImVec4(0.17f, 0.34f, 0.44f, 0.32f);
+    c[ImGuiCol_TableRowBgAlt] = ImVec4(0.13f, 0.22f, 0.30f, 0.20f);
+    c[ImGuiCol_SeparatorHovered] = ImVec4(accent.x, accent.y, accent.z, 0.44f);
+    c[ImGuiCol_SeparatorActive] = ImVec4(accent.x, accent.y, accent.z, 0.62f);
     c[ImGuiCol_CheckMark] = accent;
-    c[ImGuiCol_SliderGrab] = ImVec4(accent.x, accent.y, accent.z, 0.75f);
+    c[ImGuiCol_SliderGrab] = ImVec4(accent.x, accent.y, accent.z, 0.82f);
     c[ImGuiCol_SliderGrabActive] = accent;
-
-    c[ImGuiCol_ButtonHovered] = ImVec4(accent.x, accent.y, accent.z, 0.22f);
-    c[ImGuiCol_ButtonActive] = ImVec4(accent.x, accent.y, accent.z, 0.35f);
-
-    c[ImGuiCol_HeaderHovered] = ImVec4(accent.x, accent.y, accent.z, 0.20f);
-    c[ImGuiCol_HeaderActive] = ImVec4(accent.x, accent.y, accent.z, 0.30f);
-
-    c[ImGuiCol_SeparatorHovered] = ImVec4(accent.x, accent.y, accent.z, 0.35f);
-    c[ImGuiCol_SeparatorActive] = ImVec4(accent.x, accent.y, accent.z, 0.55f);
-
-    c[ImGuiCol_TabHovered] = ImVec4(accent.x, accent.y, accent.z, 0.18f);
-    c[ImGuiCol_TabActive] = ImVec4(accent.x, accent.y, accent.z, 0.28f);
-
-    c[ImGuiCol_NavHighlight] = ImVec4(accent.x, accent.y, accent.z, 0.55f);
-    c[ImGuiCol_TextSelectedBg] = ImVec4(accent.x, accent.y, accent.z, 0.28f);
-    c[ImGuiCol_DockingPreview] = ImVec4(accent.x, accent.y, accent.z, 0.45f);
+    c[ImGuiCol_NavHighlight] = ImVec4(accent.x, accent.y, accent.z, 0.66f);
+    c[ImGuiCol_TextSelectedBg] = ImVec4(accent.x, accent.y, accent.z, 0.34f);
+    c[ImGuiCol_DockingPreview] = ImVec4(accent.x, accent.y, accent.z, 0.52f);
   };
 
   auto apply_high_contrast_overrides = [](ImGuiStyle& s) {
@@ -4897,7 +5031,7 @@ void App::apply_imgui_style_overrides() {
   auto density_scale = [](int density) {
     // 0=Comfortable, 1=Compact, 2=Spacious.
     if (density == 1) return 0.85f;
-    if (density == 2) return 1.15f;
+    if (density == 2) return 1.12f;
     return 1.0f;
   };
 
@@ -4914,23 +5048,31 @@ void App::apply_imgui_style_overrides() {
     switch (ui_.ui_style_preset) {
       case 0: // Dark (default)
         ImGui::StyleColorsDark(&s);
+        apply_layout_polish(s);
+        apply_dark_chrome(s);
         break;
       case 1: // Light
         ImGui::StyleColorsLight(&s);
+        apply_layout_polish(s);
         break;
       case 2: // Classic
         ImGui::StyleColorsClassic(&s);
+        apply_layout_polish(s);
         break;
       case 3: // Nebula
         ImGui::StyleColorsDark(&s);
+        apply_layout_polish(s);
+        apply_dark_chrome(s);
         apply_nebula_overrides(s);
         break;
       case 4: // High contrast
         ImGui::StyleColorsDark(&s);
+        apply_layout_polish(s);
         apply_high_contrast_overrides(s);
         break;
       case 5: { // Procedural
         ImGui::StyleColorsDark(&s);
+        apply_layout_polish(s);
 
         ProceduralThemeParams p;
         p.seed = ui_.ui_procedural_theme_seed;
@@ -4956,6 +5098,8 @@ void App::apply_imgui_style_overrides() {
       } break;
       default:
         ImGui::StyleColorsDark(&s);
+        apply_layout_polish(s);
+        apply_dark_chrome(s);
         break;
     }
 

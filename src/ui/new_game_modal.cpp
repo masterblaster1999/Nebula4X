@@ -6,6 +6,8 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <exception>
+#include <future>
 #include <string>
 #include <unordered_set>
 #include <unordered_map>
@@ -22,6 +24,28 @@ namespace {
 
 constexpr int kScenarioSol = 0;
 constexpr int kScenarioRandom = 1;
+constexpr int kMaxRandomSystems = 300;
+
+// Responsiveness guardrails for large procedural previews/searches.
+constexpr int kAutoPreviewProxySystemCap = 180;
+constexpr int kMetricParallelMinSystems = 140;
+constexpr double kSeedSearchFrameBudgetMs = 14.0;
+constexpr double kSeedSearchSessionBudgetBaseMs = 5000.0;
+constexpr double kSeedSearchSessionBudgetPerTryMs = 18.0;
+constexpr double kSeedSearchSessionBudgetPerSystemMs = 4.0;
+constexpr double kSeedSearchPerCandidateHardMs = 1800.0;
+constexpr int kSeedSearchProxySystems = 160;
+constexpr int kSeedSearchProxyActivateAtSystems = 220;
+constexpr int kStarPlacementExactNodeCap = 180;
+constexpr int kJumpStatsExactNodeCap = 170;
+constexpr int kJumpStatsExactEdgeCap = 420;
+constexpr std::size_t kJumpCrossingSamplePairs = 60000;
+constexpr int kJumpDiameterApproxSeedCount = 6;
+
+double elapsed_ms(const std::chrono::steady_clock::time_point start,
+                  const std::chrono::steady_clock::time_point end) {
+  return std::chrono::duration<double, std::milli>(end - start).count();
+}
 
 std::uint32_t time_seed_u32() {
   using namespace std::chrono;
@@ -67,6 +91,10 @@ std::uint64_t config_signature_no_seed(const nebula4x::RandomScenarioConfig& cfg
   add(static_cast<std::uint64_t>(cfg.placement_quality));
   add(static_cast<std::uint64_t>(static_cast<int>(cfg.jump_network_style)));
   add(static_cast<std::uint64_t>(std::llround(cfg.jump_density * 1000.0)));
+  add(static_cast<std::uint64_t>(std::llround(cfg.resource_abundance * 1000.0)));
+  add(static_cast<std::uint64_t>(std::llround(cfg.frontier_intensity * 1000.0)));
+  add(static_cast<std::uint64_t>(std::llround(cfg.xenoarchaeology_spawn_pressure_early * 1000.0)));
+  add(static_cast<std::uint64_t>(std::llround(cfg.xenoarchaeology_spawn_pressure_late * 1000.0)));
 
   add(static_cast<std::uint64_t>(cfg.enable_regions ? 1 : 0));
   add(static_cast<std::uint64_t>(cfg.num_regions + 100));
@@ -81,15 +109,83 @@ std::uint64_t config_signature_no_seed(const nebula4x::RandomScenarioConfig& cfg
   return h;
 }
 
+nebula4x::RandomScenarioConfig sanitize_random_config(nebula4x::RandomScenarioConfig cfg) {
+  cfg.num_systems = std::clamp(cfg.num_systems, 1, kMaxRandomSystems);
+  cfg.galaxy_shape =
+      static_cast<nebula4x::RandomGalaxyShape>(std::clamp(static_cast<int>(cfg.galaxy_shape), 0, 5));
+  cfg.placement_style =
+      static_cast<nebula4x::RandomPlacementStyle>(std::clamp(static_cast<int>(cfg.placement_style), 0, 1));
+  cfg.placement_quality = std::clamp(cfg.placement_quality, 4, 96);
+
+  cfg.jump_network_style = static_cast<nebula4x::RandomJumpNetworkStyle>(
+      std::clamp(static_cast<int>(cfg.jump_network_style), 0, 6));
+  if (!std::isfinite(cfg.jump_density)) cfg.jump_density = 1.0;
+  cfg.jump_density = std::clamp(cfg.jump_density, 0.0, 2.0);
+  if (!std::isfinite(cfg.resource_abundance)) cfg.resource_abundance = 1.0;
+  cfg.resource_abundance = std::clamp(cfg.resource_abundance, 0.5, 2.0);
+  if (!std::isfinite(cfg.frontier_intensity)) cfg.frontier_intensity = 1.0;
+  cfg.frontier_intensity = std::clamp(cfg.frontier_intensity, 0.5, 2.0);
+  if (!std::isfinite(cfg.xenoarchaeology_spawn_pressure_early)) cfg.xenoarchaeology_spawn_pressure_early = 1.0;
+  if (!std::isfinite(cfg.xenoarchaeology_spawn_pressure_late)) cfg.xenoarchaeology_spawn_pressure_late = 1.0;
+  cfg.xenoarchaeology_spawn_pressure_early = std::clamp(cfg.xenoarchaeology_spawn_pressure_early, 0.25, 3.0);
+  cfg.xenoarchaeology_spawn_pressure_late = std::clamp(cfg.xenoarchaeology_spawn_pressure_late, 0.25, 3.0);
+
+  cfg.num_regions = std::clamp(cfg.num_regions, -1, 12);
+  cfg.num_ai_empires = std::clamp(cfg.num_ai_empires, -1, 12);
+
+  if (!std::isfinite(cfg.pirate_strength)) cfg.pirate_strength = 1.0;
+  cfg.pirate_strength = std::clamp(cfg.pirate_strength, 0.0, 5.0);
+
+  cfg.num_independent_outposts = std::clamp(cfg.num_independent_outposts, -1, 64);
+  return cfg;
+}
+
+nebula4x::RandomScenarioConfig random_config_from_ui(const UIState& ui) {
+  nebula4x::RandomScenarioConfig cfg;
+  cfg.seed = ui.new_game_random_seed;
+  cfg.num_systems = ui.new_game_random_num_systems;
+  cfg.galaxy_shape =
+      static_cast<nebula4x::RandomGalaxyShape>(std::clamp(ui.new_game_random_galaxy_shape, 0, 5));
+  cfg.placement_style =
+      static_cast<nebula4x::RandomPlacementStyle>(std::clamp(ui.new_game_random_placement_style, 0, 1));
+  cfg.placement_quality = std::clamp(ui.new_game_random_placement_quality, 4, 96);
+  cfg.jump_network_style =
+      static_cast<nebula4x::RandomJumpNetworkStyle>(std::clamp(ui.new_game_random_jump_network_style, 0, 6));
+  cfg.jump_density = static_cast<double>(ui.new_game_random_jump_density);
+  cfg.resource_abundance = static_cast<double>(ui.new_game_random_resource_abundance);
+  cfg.frontier_intensity = static_cast<double>(ui.new_game_random_frontier_intensity);
+  cfg.xenoarchaeology_spawn_pressure_early = static_cast<double>(ui.new_game_random_xeno_spawn_pressure_early);
+  cfg.xenoarchaeology_spawn_pressure_late = static_cast<double>(ui.new_game_random_xeno_spawn_pressure_late);
+
+  cfg.enable_regions = ui.new_game_random_enable_regions;
+  cfg.num_regions = ui.new_game_random_num_regions;
+
+  cfg.num_ai_empires = ui.new_game_random_ai_empires;
+  cfg.enable_pirates = ui.new_game_random_enable_pirates;
+  cfg.pirate_strength = static_cast<double>(ui.new_game_random_pirate_strength);
+
+  cfg.enable_independents = ui.new_game_random_enable_independents;
+  cfg.num_independent_outposts = ui.new_game_random_num_independent_outposts;
+  cfg.ensure_clear_home = ui.new_game_random_ensure_clear_home;
+  return sanitize_random_config(cfg);
+}
+
 struct RandomPreviewCache {
   bool valid{false};
   std::uint32_t seed{0};
   int num_systems{0};
+  int generated_systems{0};
+  bool used_fast_proxy{false};
+  double generation_ms{0.0};
   int galaxy_shape{0};
   int placement_style{0};
   int placement_quality{24};
   int jump_style{0};
   int jump_density_pct{100};
+  int resource_abundance_pct{100};
+  int frontier_intensity_pct{100};
+  int xeno_spawn_pressure_early_pct{100};
+  int xeno_spawn_pressure_late_pct{100};
   int ai_empires{0};
   bool enable_pirates{true};
   int pirate_strength_pct{100};
@@ -102,23 +198,12 @@ struct RandomPreviewCache {
   std::string error;
 };
 
-void ensure_preview(RandomPreviewCache& cache, const nebula4x::RandomScenarioConfig& cfg_in) {
-  nebula4x::RandomScenarioConfig cfg = cfg_in;
-  cfg.num_systems = std::clamp(cfg.num_systems, 1, 64);
-  cfg.galaxy_shape = static_cast<nebula4x::RandomGalaxyShape>(
-      std::clamp(static_cast<int>(cfg.galaxy_shape), 0, 5));
-  cfg.placement_style = static_cast<nebula4x::RandomPlacementStyle>(
-      std::clamp(static_cast<int>(cfg.placement_style), 0, 1));
-  cfg.placement_quality = std::clamp(cfg.placement_quality, 4, 96);
-  cfg.num_ai_empires = std::clamp(cfg.num_ai_empires, -1, 12);
-  cfg.num_regions = std::clamp(cfg.num_regions, -1, 12);
-  cfg.pirate_strength = std::clamp(cfg.pirate_strength, 0.0, 5.0);
-
-  cfg.jump_network_style = static_cast<nebula4x::RandomJumpNetworkStyle>(
-      std::clamp(static_cast<int>(cfg.jump_network_style), 0, 6));
-  cfg.jump_density = std::clamp(cfg.jump_density, 0.0, 2.0);
-
-  cfg.num_independent_outposts = std::clamp(cfg.num_independent_outposts, -1, 64);
+void ensure_preview(RandomPreviewCache& cache, const nebula4x::RandomScenarioConfig& cfg_in, bool force_full_preview) {
+  nebula4x::RandomScenarioConfig cfg = sanitize_random_config(cfg_in);
+  nebula4x::RandomScenarioConfig gen_cfg = cfg;
+  if (!force_full_preview && gen_cfg.num_systems > kAutoPreviewProxySystemCap) {
+    gen_cfg.num_systems = kAutoPreviewProxySystemCap;
+  }
 
   const int shape_i = std::clamp(static_cast<int>(cfg.galaxy_shape), 0, 5);
   const int placement_style_i = std::clamp(static_cast<int>(cfg.placement_style), 0, 1);
@@ -126,25 +211,41 @@ void ensure_preview(RandomPreviewCache& cache, const nebula4x::RandomScenarioCon
   const int jump_style_i = std::clamp(static_cast<int>(cfg.jump_network_style), 0, 6);
   const int strength_pct = static_cast<int>(std::llround(cfg.pirate_strength * 100.0));
   const int jump_density_pct = static_cast<int>(std::llround(cfg.jump_density * 100.0));
+  const int resource_abundance_pct = static_cast<int>(std::llround(cfg.resource_abundance * 100.0));
+  const int frontier_intensity_pct = static_cast<int>(std::llround(cfg.frontier_intensity * 100.0));
+  const int xeno_spawn_pressure_early_pct = static_cast<int>(std::llround(cfg.xenoarchaeology_spawn_pressure_early * 100.0));
+  const int xeno_spawn_pressure_late_pct = static_cast<int>(std::llround(cfg.xenoarchaeology_spawn_pressure_late * 100.0));
 
   if (cache.valid && cache.seed == cfg.seed && cache.num_systems == cfg.num_systems && cache.galaxy_shape == shape_i &&
       cache.placement_style == placement_style_i && cache.placement_quality == placement_quality_i &&
       cache.jump_style == jump_style_i && cache.jump_density_pct == jump_density_pct &&
+      cache.resource_abundance_pct == resource_abundance_pct &&
+      cache.frontier_intensity_pct == frontier_intensity_pct &&
+      cache.xeno_spawn_pressure_early_pct == xeno_spawn_pressure_early_pct &&
+      cache.xeno_spawn_pressure_late_pct == xeno_spawn_pressure_late_pct &&
       cache.ai_empires == cfg.num_ai_empires && cache.enable_pirates == cfg.enable_pirates &&
       cache.enable_regions == cfg.enable_regions && cache.num_regions == cfg.num_regions &&
       cache.pirate_strength_pct == strength_pct && cache.enable_independents == cfg.enable_independents &&
-      cache.num_independent_outposts == cfg.num_independent_outposts && cache.ensure_clear_home == cfg.ensure_clear_home) {
+      cache.num_independent_outposts == cfg.num_independent_outposts && cache.ensure_clear_home == cfg.ensure_clear_home &&
+      !(force_full_preview && cache.used_fast_proxy)) {
     return;
   }
 
   cache.valid = false;
   cache.seed = cfg.seed;
   cache.num_systems = cfg.num_systems;
+  cache.generated_systems = 0;
+  cache.used_fast_proxy = (gen_cfg.num_systems != cfg.num_systems);
+  cache.generation_ms = 0.0;
   cache.galaxy_shape = shape_i;
   cache.placement_style = placement_style_i;
   cache.placement_quality = placement_quality_i;
   cache.jump_style = jump_style_i;
   cache.jump_density_pct = jump_density_pct;
+  cache.resource_abundance_pct = resource_abundance_pct;
+  cache.frontier_intensity_pct = frontier_intensity_pct;
+  cache.xeno_spawn_pressure_early_pct = xeno_spawn_pressure_early_pct;
+  cache.xeno_spawn_pressure_late_pct = xeno_spawn_pressure_late_pct;
   cache.ai_empires = cfg.num_ai_empires;
   cache.enable_pirates = cfg.enable_pirates;
   cache.pirate_strength_pct = strength_pct;
@@ -155,11 +256,17 @@ void ensure_preview(RandomPreviewCache& cache, const nebula4x::RandomScenarioCon
   cache.ensure_clear_home = cfg.ensure_clear_home;
   cache.error.clear();
 
+  const auto t0 = std::chrono::steady_clock::now();
   try {
-    cache.state = nebula4x::make_random_scenario(cfg);
+    cache.state = nebula4x::make_random_scenario(gen_cfg);
+    const auto t1 = std::chrono::steady_clock::now();
+    cache.generation_ms = elapsed_ms(t0, t1);
+    cache.generated_systems = static_cast<int>(cache.state.systems.size());
     cache.valid = true;
   } catch (const std::exception& e) {
     cache.error = e.what();
+    const auto t1 = std::chrono::steady_clock::now();
+    cache.generation_ms = elapsed_ms(t0, t1);
   }
 }
 
@@ -205,8 +312,21 @@ StarPlacementStats compute_star_placement_stats(const GameState& s) {
   double min_nn = std::numeric_limits<double>::infinity();
   double sum = 0.0;
   double sum2 = 0.0;
+  std::vector<std::size_t> sample_i;
+  sample_i.reserve(pos.size());
 
-  for (std::size_t i = 0; i < pos.size(); ++i) {
+  if (st.nodes > kStarPlacementExactNodeCap) {
+    const std::size_t step =
+        std::max<std::size_t>(1, (pos.size() + static_cast<std::size_t>(kStarPlacementExactNodeCap) - 1) /
+                                     static_cast<std::size_t>(kStarPlacementExactNodeCap));
+    for (std::size_t i = 0; i < pos.size(); i += step) sample_i.push_back(i);
+    if (!sample_i.empty() && sample_i.back() != (pos.size() - 1)) sample_i.push_back(pos.size() - 1);
+  } else {
+    sample_i.resize(pos.size());
+    for (std::size_t i = 0; i < pos.size(); ++i) sample_i[i] = i;
+  }
+
+  for (std::size_t i : sample_i) {
     double best = std::numeric_limits<double>::infinity();
     for (std::size_t j = 0; j < pos.size(); ++j) {
       if (i == j) continue;
@@ -219,7 +339,7 @@ StarPlacementStats compute_star_placement_stats(const GameState& s) {
     sum2 += best * best;
   }
 
-  const double m = static_cast<double>(pos.size());
+  const double m = static_cast<double>(sample_i.size());
   st.min_nearest_neighbor = std::isfinite(min_nn) ? min_nn : 0.0;
   st.avg_nearest_neighbor = sum / std::max(1e-9, m);
   const double var = std::max(0.0, (sum2 / std::max(1e-9, m)) - st.avg_nearest_neighbor * st.avg_nearest_neighbor);
@@ -331,21 +451,84 @@ JumpGraphStats compute_jump_graph_stats(const GameState& s) {
       return (o1 * o2 < 0.0) && (o3 * o4 < 0.0);
     };
 
-    int crossings = 0;
-    for (std::size_t i = 0; i < edge_list.size(); ++i) {
+    auto edges_share_endpoint = [&](std::size_t i, std::size_t j) {
       const auto [a, b] = edge_list[i];
+      const auto [c, d] = edge_list[j];
+      return (a == c || a == d || b == c || b == d);
+    };
+
+    auto pair_crosses = [&](std::size_t i, std::size_t j) {
+      const auto [a, b] = edge_list[i];
+      const auto [c, d] = edge_list[j];
       const Vec2 pa = pos[static_cast<std::size_t>(a)];
       const Vec2 pb = pos[static_cast<std::size_t>(b)];
-      for (std::size_t j = i + 1; j < edge_list.size(); ++j) {
-        const auto [c, d] = edge_list[j];
-        // Shared endpoint isn't a crossing.
-        if (a == c || a == d || b == c || b == d) continue;
-        const Vec2 pc = pos[static_cast<std::size_t>(c)];
-        const Vec2 pd = pos[static_cast<std::size_t>(d)];
-        if (proper_intersect(pa, pb, pc, pd)) ++crossings;
+      const Vec2 pc = pos[static_cast<std::size_t>(c)];
+      const Vec2 pd = pos[static_cast<std::size_t>(d)];
+      return proper_intersect(pa, pb, pc, pd);
+    };
+
+    const std::size_t e = edge_list.size();
+    const std::size_t total_pairs = (e >= 2) ? (e * (e - 1) / 2) : 0;
+    std::size_t shared_pairs = 0;
+    for (const auto& nbrs : adj) {
+      const std::size_t d = nbrs.size();
+      if (d >= 2) shared_pairs += d * (d - 1) / 2;
+    }
+    const std::size_t candidate_pairs = (total_pairs > shared_pairs) ? (total_pairs - shared_pairs) : 0;
+    const bool exact_crossings = (candidate_pairs <= kJumpCrossingSamplePairs);
+
+    if (exact_crossings) {
+      int crossings = 0;
+      for (std::size_t i = 0; i < e; ++i) {
+        for (std::size_t j = i + 1; j < e; ++j) {
+          if (edges_share_endpoint(i, j)) continue;
+          if (pair_crosses(i, j)) ++crossings;
+        }
+      }
+      st.edge_crossings = crossings;
+    } else {
+      // Deterministic pair sampling for large dense networks.
+      std::uint64_t x = static_cast<std::uint64_t>(e) * 0x9E3779B97F4A7C15ULL + 0xD1B54A32D192ED03ULL;
+      auto next_u64 = [&]() {
+        x ^= (x >> 12);
+        x ^= (x << 25);
+        x ^= (x >> 27);
+        return x * 0x2545F4914F6CDD1DULL;
+      };
+
+      const std::size_t sample_cap = kJumpCrossingSamplePairs;
+      std::size_t sampled = 0;
+      std::size_t valid = 0;
+      std::size_t crossings = 0;
+      std::size_t attempts = 0;
+
+      std::unordered_set<std::uint64_t> used_pairs;
+      used_pairs.reserve(sample_cap * 2 + 16);
+
+      while (sampled < sample_cap && attempts < sample_cap * 8) {
+        ++attempts;
+        const std::size_t i = static_cast<std::size_t>(next_u64() % std::max<std::size_t>(1, e));
+        const std::size_t j = static_cast<std::size_t>(next_u64() % std::max<std::size_t>(1, e));
+        if (i == j) continue;
+
+        const std::size_t lo = std::min(i, j);
+        const std::size_t hi = std::max(i, j);
+        const std::uint64_t key = (static_cast<std::uint64_t>(lo) << 32) | static_cast<std::uint64_t>(hi);
+        if (!used_pairs.insert(key).second) continue;
+
+        ++sampled;
+        if (edges_share_endpoint(lo, hi)) continue;
+        ++valid;
+        if (pair_crosses(lo, hi)) ++crossings;
+      }
+
+      if (valid == 0 || candidate_pairs == 0) {
+        st.edge_crossings = 0;
+      } else {
+        const double ratio = static_cast<double>(crossings) / static_cast<double>(valid);
+        st.edge_crossings = static_cast<int>(std::llround(ratio * static_cast<double>(candidate_pairs)));
       }
     }
-    st.edge_crossings = crossings;
   }
 
   int sum_deg = 0;
@@ -381,13 +564,11 @@ JumpGraphStats compute_jump_graph_stats(const GameState& s) {
     st.connected = (st.components == 1);
 
     // Diameter: max shortest-path distance within components.
-    int diameter = 0;
-    for (int src = 0; src < st.nodes; ++src) {
-      std::vector<int> d(static_cast<std::size_t>(st.nodes), -1);
+    auto bfs_all_dist = [&](int src, std::vector<int>& d) {
+      std::fill(d.begin(), d.end(), -1);
       std::queue<int> qq;
       d[static_cast<std::size_t>(src)] = 0;
       qq.push(src);
-
       while (!qq.empty()) {
         const int u = qq.front();
         qq.pop();
@@ -397,10 +578,63 @@ JumpGraphStats compute_jump_graph_stats(const GameState& s) {
           qq.push(v);
         }
       }
+    };
 
-      for (int dd : d) diameter = std::max(diameter, dd);
+    auto bfs_farthest = [&](int src, std::vector<int>& d) {
+      bfs_all_dist(src, d);
+      int far_node = src;
+      int far_dist = 0;
+      const int src_comp = st.component_of_node[static_cast<std::size_t>(src)];
+      for (int i = 0; i < st.nodes; ++i) {
+        if (st.component_of_node[static_cast<std::size_t>(i)] != src_comp) continue;
+        const int di = d[static_cast<std::size_t>(i)];
+        if (di > far_dist) {
+          far_dist = di;
+          far_node = i;
+        }
+      }
+      return std::pair<int, int>{far_node, far_dist};
+    };
+
+    int diameter = 0;
+    const bool exact_diameter = (st.nodes <= kJumpStatsExactNodeCap && st.undirected_edges <= kJumpStatsExactEdgeCap);
+    std::vector<int> d(static_cast<std::size_t>(st.nodes), -1);
+
+    if (exact_diameter) {
+      for (int src = 0; src < st.nodes; ++src) {
+        bfs_all_dist(src, d);
+        for (int dd : d) diameter = std::max(diameter, dd);
+      }
+    } else {
+      std::vector<int> seeds;
+      seeds.reserve(std::min(st.nodes, kJumpDiameterApproxSeedCount * 2));
+      seeds.push_back(0);
+      seeds.push_back(st.nodes / 2);
+      seeds.push_back(st.nodes - 1);
+
+      // Add one representative per component (up to budget).
+      std::vector<char> seen_comp(static_cast<std::size_t>(st.components), 0);
+      for (int i = 0; i < st.nodes && static_cast<int>(seeds.size()) < kJumpDiameterApproxSeedCount; ++i) {
+        const int cidx = st.component_of_node[static_cast<std::size_t>(i)];
+        if (cidx < 0 || cidx >= st.components) continue;
+        if (seen_comp[static_cast<std::size_t>(cidx)]) continue;
+        seen_comp[static_cast<std::size_t>(cidx)] = 1;
+        seeds.push_back(i);
+      }
+
+      std::sort(seeds.begin(), seeds.end());
+      seeds.erase(std::unique(seeds.begin(), seeds.end()), seeds.end());
+
+      for (int seed : seeds) {
+        if (seed < 0 || seed >= st.nodes) continue;
+        const auto far1_pair = bfs_farthest(seed, d);
+        const int far1 = far1_pair.first;
+        const auto far2_pair = bfs_farthest(far1, d);
+        const int d2 = far2_pair.second;
+        diameter = std::max(diameter, d2);
+      }
     }
-    st.diameter_hops = diameter;
+    st.diameter_hops = std::max(0, diameter);
   }
 
   // Articulation points ("chokepoints") via DFS lowlink (Tarjan).
@@ -552,12 +786,128 @@ NebulaStats compute_nebula_stats(const GameState& s) {
   return st;
 }
 
+struct FrontierStats {
+  int anomalies{0};
+  int wrecks{0};
+  double anomaly_avg_dist_norm{0.0};
+  double wreck_avg_dist_norm{0.0};
+  double avg_hazard{0.0};
+  double inner_region_risk{0.0};
+  double outer_region_risk{0.0};
+  double risk_gradient{0.0};
+};
+
+FrontierStats compute_frontier_stats(const GameState& s) {
+  FrontierStats st;
+  if (s.systems.empty()) return st;
+
+  const Id home_id = (s.selected_system != kInvalidId && find_ptr(s.systems, s.selected_system) != nullptr)
+                         ? s.selected_system
+                         : s.systems.begin()->first;
+  const auto* home = find_ptr(s.systems, home_id);
+  if (!home) return st;
+  const Vec2 home_pos = home->galaxy_pos;
+
+  std::unordered_map<Id, double> dist_norm;
+  dist_norm.reserve(s.systems.size() * 2);
+
+  double max_d = 1e-6;
+  for (const auto& [sid, sys] : s.systems) {
+    const double d = (sys.galaxy_pos - home_pos).length();
+    max_d = std::max(max_d, d);
+    dist_norm[sid] = d;
+  }
+  for (auto& [sid, d] : dist_norm) {
+    (void)sid;
+    d = std::clamp(d / max_d, 0.0, 1.0);
+  }
+
+  double an_sum = 0.0;
+  double hz_sum = 0.0;
+  for (const auto& [_, a] : s.anomalies) {
+    const auto it = dist_norm.find(a.system_id);
+    if (it == dist_norm.end()) continue;
+    an_sum += it->second;
+    hz_sum += std::max(0.0, a.hazard_chance) * std::max(0.0, a.hazard_damage);
+    ++st.anomalies;
+  }
+  if (st.anomalies > 0) {
+    st.anomaly_avg_dist_norm = an_sum / static_cast<double>(st.anomalies);
+    st.avg_hazard = hz_sum / static_cast<double>(st.anomalies);
+  }
+
+  double wr_sum = 0.0;
+  for (const auto& [_, w] : s.wrecks) {
+    const auto it = dist_norm.find(w.system_id);
+    if (it == dist_norm.end()) continue;
+    wr_sum += it->second;
+    ++st.wrecks;
+  }
+  if (st.wrecks > 0) st.wreck_avg_dist_norm = wr_sum / static_cast<double>(st.wrecks);
+
+  double inner_sum = 0.0;
+  int inner_n = 0;
+  double outer_sum = 0.0;
+  int outer_n = 0;
+  for (const auto& [sid, sys] : s.systems) {
+    const auto it = dist_norm.find(sid);
+    if (it == dist_norm.end()) continue;
+    const double dn = it->second;
+    double risk = 0.20;
+    if (const auto* reg = find_ptr(s.regions, sys.region_id)) risk = std::clamp(reg->pirate_risk, 0.0, 1.0);
+    if (dn <= 0.45) {
+      inner_sum += risk;
+      ++inner_n;
+    } else if (dn >= 0.70) {
+      outer_sum += risk;
+      ++outer_n;
+    }
+  }
+  st.inner_region_risk = (inner_n > 0) ? (inner_sum / static_cast<double>(inner_n)) : 0.0;
+  st.outer_region_risk = (outer_n > 0) ? (outer_sum / static_cast<double>(outer_n)) : 0.0;
+  st.risk_gradient = st.outer_region_risk - st.inner_region_risk;
+  return st;
+}
+
+struct CandidateMetrics {
+  StarPlacementStats ps;
+  JumpGraphStats gs;
+  RegionStats rs;
+  NebulaStats ns;
+  FrontierStats fs;
+};
+
+CandidateMetrics compute_candidate_metrics(const GameState& s, bool parallel) {
+  CandidateMetrics out;
+  if (!parallel) {
+    out.ps = compute_star_placement_stats(s);
+    out.gs = compute_jump_graph_stats(s);
+    out.rs = compute_region_stats(s);
+    out.ns = compute_nebula_stats(s);
+    out.fs = compute_frontier_stats(s);
+    return out;
+  }
+
+  // Parallelize the heavier graph/spacing/frontier passes on large maps.
+  auto ps_future = std::async(std::launch::async, [&s]() { return compute_star_placement_stats(s); });
+  auto gs_future = std::async(std::launch::async, [&s]() { return compute_jump_graph_stats(s); });
+  auto fs_future = std::async(std::launch::async, [&s]() { return compute_frontier_stats(s); });
+
+  out.rs = compute_region_stats(s);
+  out.ns = compute_nebula_stats(s);
+  out.ps = ps_future.get();
+  out.gs = gs_future.get();
+  out.fs = fs_future.get();
+  return out;
+}
+
 
 double score_seed_candidate(int objective,
                             const JumpGraphStats& gs,
                             const StarPlacementStats& ps,
                             const NebulaStats& ns,
-                            const RegionStats& rs) {
+                            const RegionStats& rs,
+                            const FrontierStats& fs) {
   (void)rs;
   if (!gs.connected) return -1e30;
 
@@ -576,6 +926,7 @@ double score_seed_candidate(int objective,
   // 1 = Readable (few crossings + nice spacing)
   // 2 = Chokepoints (high articulation)
   // 3 = Webby (redundant routes)
+  // 4 = Frontier drama (risk/reward gradient toward the rim)
   switch (objective) {
     case 1: {
       // Prefer low crossings and a reasonable minimum nearest-neighbor distance.
@@ -606,6 +957,16 @@ double score_seed_candidate(int objective,
       score -= 2.5 * aps;
       score -= 0.9 * diam;
       score -= 0.15 * crossings;
+      return score;
+    }
+    case 4: {
+      double score = 0.0;
+      score += 8.0 * fs.risk_gradient;
+      score += 4.5 * fs.anomaly_avg_dist_norm;
+      score += 3.0 * fs.wreck_avg_dist_norm;
+      score += 0.8 * fs.avg_hazard;
+      score += 0.25 * aps;
+      score -= 0.40 * crossings;
       return score;
     }
     case 0:
@@ -887,6 +1248,22 @@ void draw_new_game_modal(Simulation& sim, UIState& ui) {
     ImGui::Separator();
 
     static RandomPreviewCache preview;
+    static std::string start_error;
+
+    struct PreviewMetricsCache {
+      bool valid{false};
+      std::uint32_t seed{0};
+      int requested_systems{0};
+      int generated_systems{0};
+      JumpGraphStats gs;
+      StarPlacementStats ps;
+      NebulaStats ns;
+      RegionStats rs;
+      FrontierStats fs;
+      double compute_ms{0.0};
+    };
+
+    static PreviewMetricsCache preview_metrics;
 
     struct SeedSearchRuntime {
       bool active{false};
@@ -899,12 +1276,19 @@ void draw_new_game_modal(Simulation& sim, UIState& ui) {
       std::uint32_t base_seed{0};
       std::uint32_t best_seed{0};
       double best_score{-1e30};
+      bool best_applied{false};
+      bool used_proxy{false};
+      int proxy_systems{0};
+      double avg_candidate_ms{0.0};
+      double last_candidate_ms{0.0};
+      std::chrono::steady_clock::time_point started_at{};
 
       // Best candidate metrics (for UI feedback).
       JumpGraphStats best_gs;
       StarPlacementStats best_ps;
       NebulaStats best_ns;
       RegionStats best_rs;
+      FrontierStats best_fs;
 
       std::string last_error;
 
@@ -917,15 +1301,27 @@ void draw_new_game_modal(Simulation& sim, UIState& ui) {
         base_seed = 0;
         best_seed = 0;
         best_score = -1e30;
+        best_applied = false;
+        used_proxy = false;
+        proxy_systems = 0;
+        avg_candidate_ms = 0.0;
+        last_candidate_ms = 0.0;
+        started_at = std::chrono::steady_clock::time_point{};
         best_gs = JumpGraphStats{};
         best_ps = StarPlacementStats{};
         best_ns = NebulaStats{};
         best_rs = RegionStats{};
+        best_fs = FrontierStats{};
         last_error.clear();
       }
     };
 
     static SeedSearchRuntime seed_search;
+
+    if (ImGui::IsWindowAppearing()) {
+      start_error.clear();
+      preview_metrics.valid = false;
+    }
 
     if (ui.new_game_scenario == kScenarioSol) {
       ImGui::TextWrapped(
@@ -933,7 +1329,7 @@ void draw_new_game_modal(Simulation& sim, UIState& ui) {
 
     } else {
       // --- Random scenario settings ---
-      ui.new_game_random_num_systems = std::clamp(ui.new_game_random_num_systems, 1, 64);
+      ui.new_game_random_num_systems = std::clamp(ui.new_game_random_num_systems, 1, kMaxRandomSystems);
 
       ImGui::Text("Random galaxy settings");
 
@@ -955,8 +1351,8 @@ void draw_new_game_modal(Simulation& sim, UIState& ui) {
       {
         int n = ui.new_game_random_num_systems;
         ImGui::SetNextItemWidth(180.0f);
-        ImGui::SliderInt("Systems", &n, 1, 64);
-        ui.new_game_random_num_systems = std::clamp(n, 1, 64);
+        ImGui::SliderInt("Systems", &n, 1, kMaxRandomSystems);
+        ui.new_game_random_num_systems = std::clamp(n, 1, kMaxRandomSystems);
       }
 
       // Galaxy archetype.
@@ -1001,6 +1397,91 @@ void draw_new_game_modal(Simulation& sim, UIState& ui) {
         ImGui::SetNextItemWidth(180.0f);
         ImGui::SliderFloat("Jump density", &dens, 0.0f, 2.0f, "%.2fx");
         ui.new_game_random_jump_density = std::clamp(dens, 0.0f, 2.0f);
+      }
+
+      // Macro knobs for progression and economy tuning.
+      {
+        float abundance = ui.new_game_random_resource_abundance;
+        ImGui::SetNextItemWidth(180.0f);
+        ImGui::SliderFloat("Resource abundance", &abundance, 0.5f, 2.0f, "%.2fx");
+        ui.new_game_random_resource_abundance = std::clamp(abundance, 0.5f, 2.0f);
+
+        float frontier = ui.new_game_random_frontier_intensity;
+        ImGui::SetNextItemWidth(180.0f);
+        ImGui::SliderFloat("Frontier intensity", &frontier, 0.5f, 2.0f, "%.2fx");
+        ui.new_game_random_frontier_intensity = std::clamp(frontier, 0.5f, 2.0f);
+
+        float xeno_early = ui.new_game_random_xeno_spawn_pressure_early;
+        ImGui::SetNextItemWidth(180.0f);
+        ImGui::SliderFloat("Xeno pressure (early)", &xeno_early, 0.25f, 3.0f, "%.2fx");
+        ui.new_game_random_xeno_spawn_pressure_early = std::clamp(xeno_early, 0.25f, 3.0f);
+
+        float xeno_late = ui.new_game_random_xeno_spawn_pressure_late;
+        ImGui::SetNextItemWidth(180.0f);
+        ImGui::SliderFloat("Xeno pressure (late)", &xeno_late, 0.25f, 3.0f, "%.2fx");
+        ui.new_game_random_xeno_spawn_pressure_late = std::clamp(xeno_late, 0.25f, 3.0f);
+
+        ImGui::TextDisabled("Xeno pressure presets");
+        if (ImGui::Button("Balanced##xeno_preset")) {
+          ui.new_game_random_xeno_spawn_pressure_early = 1.00f;
+          ui.new_game_random_xeno_spawn_pressure_late = 1.00f;
+          preview.valid = false;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Early surge##xeno_preset")) {
+          ui.new_game_random_xeno_spawn_pressure_early = 1.70f;
+          ui.new_game_random_xeno_spawn_pressure_late = 0.80f;
+          preview.valid = false;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Late surge##xeno_preset")) {
+          ui.new_game_random_xeno_spawn_pressure_early = 0.80f;
+          ui.new_game_random_xeno_spawn_pressure_late = 1.70f;
+          preview.valid = false;
+        }
+      }
+
+      {
+        ImGui::TextDisabled("Quick presets");
+        if (ImGui::Button("Frontier Rush")) {
+          ui.new_game_random_jump_network_style = 2; // Sparse lanes
+          ui.new_game_random_jump_density = 0.90f;
+          ui.new_game_random_resource_abundance = 1.10f;
+          ui.new_game_random_frontier_intensity = 1.80f;
+          ui.new_game_random_xeno_spawn_pressure_early = 0.90f;
+          ui.new_game_random_xeno_spawn_pressure_late = 1.45f;
+          ui.new_game_random_enable_pirates = true;
+          ui.new_game_random_pirate_strength = 1.35f;
+          ui.new_game_random_enable_regions = true;
+          preview.valid = false;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Core Stability")) {
+          ui.new_game_random_jump_network_style = 1; // Dense web
+          ui.new_game_random_jump_density = 1.20f;
+          ui.new_game_random_resource_abundance = 1.00f;
+          ui.new_game_random_frontier_intensity = 0.70f;
+          ui.new_game_random_xeno_spawn_pressure_early = 0.75f;
+          ui.new_game_random_xeno_spawn_pressure_late = 0.95f;
+          ui.new_game_random_enable_pirates = true;
+          ui.new_game_random_pirate_strength = 0.80f;
+          ui.new_game_random_ensure_clear_home = true;
+          preview.valid = false;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Relic Hunt")) {
+          ui.new_game_random_galaxy_shape = 4; // Filaments
+          ui.new_game_random_jump_network_style = 6; // Subspace rivers
+          ui.new_game_random_jump_density = 1.05f;
+          ui.new_game_random_resource_abundance = 1.35f;
+          ui.new_game_random_frontier_intensity = 1.45f;
+          ui.new_game_random_xeno_spawn_pressure_early = 1.10f;
+          ui.new_game_random_xeno_spawn_pressure_late = 2.00f;
+          ui.new_game_random_enable_regions = true;
+          ui.new_game_random_enable_pirates = true;
+          ui.new_game_random_pirate_strength = 1.10f;
+          preview.valid = false;
+        }
       }
 
       // Additional AI empires (besides the player and pirates).
@@ -1061,31 +1542,13 @@ void draw_new_game_modal(Simulation& sim, UIState& ui) {
         ImGui::Checkbox("Ensure clear home system", &ui.new_game_random_ensure_clear_home);
       }
 
-      // Build the generator config.
-      nebula4x::RandomScenarioConfig cfg;
-      cfg.seed = ui.new_game_random_seed;
-      cfg.num_systems = ui.new_game_random_num_systems;
-      cfg.galaxy_shape = static_cast<nebula4x::RandomGalaxyShape>(std::clamp(ui.new_game_random_galaxy_shape, 0, 5));
-      cfg.placement_style = static_cast<nebula4x::RandomPlacementStyle>(
-          std::clamp(ui.new_game_random_placement_style, 0, 1));
-      cfg.placement_quality = std::clamp(ui.new_game_random_placement_quality, 4, 96);
-      cfg.jump_network_style = static_cast<nebula4x::RandomJumpNetworkStyle>(
-          std::clamp(ui.new_game_random_jump_network_style, 0, 6));
-      cfg.jump_density = static_cast<double>(ui.new_game_random_jump_density);
-      cfg.enable_regions = ui.new_game_random_enable_regions;
-      cfg.num_regions = ui.new_game_random_num_regions;
-      cfg.num_ai_empires = ui.new_game_random_ai_empires;
-      cfg.enable_pirates = ui.new_game_random_enable_pirates;
-      cfg.pirate_strength = static_cast<double>(ui.new_game_random_pirate_strength);
-
-      cfg.enable_independents = ui.new_game_random_enable_independents;
-      cfg.num_independent_outposts = ui.new_game_random_num_independent_outposts;
-      cfg.ensure_clear_home = ui.new_game_random_ensure_clear_home;
+      // Build and sanitize the generator config.
+      const nebula4x::RandomScenarioConfig cfg = random_config_from_ui(ui);
 
       // --- Seed explorer ---
       const std::uint64_t cfg_sig = config_signature_no_seed(cfg);
       if (seed_search.active) {
-        const int ui_obj = std::clamp(ui.new_game_seed_search_objective, 0, 3);
+        const int ui_obj = std::clamp(ui.new_game_seed_search_objective, 0, 4);
         const int ui_tries = std::clamp(ui.new_game_seed_search_tries, 1, 2000);
         if (seed_search.cfg_sig != cfg_sig ||
             seed_search.base_seed != ui.new_game_random_seed ||
@@ -1097,11 +1560,11 @@ void draw_new_game_modal(Simulation& sim, UIState& ui) {
       }
 
       if (ImGui::CollapsingHeader("Seed explorer")) {
-        static const char* kObjectives = "Balanced\0Readable\0Chokepoints\0Webby\0";
-        int obj = std::clamp(ui.new_game_seed_search_objective, 0, 3);
+        static const char* kObjectives = "Balanced\0Readable\0Chokepoints\0Webby\0Frontier drama\0";
+        int obj = std::clamp(ui.new_game_seed_search_objective, 0, 4);
         ImGui::SetNextItemWidth(180.0f);
         ImGui::Combo("Objective", &obj, kObjectives);
-        ui.new_game_seed_search_objective = std::clamp(obj, 0, 3);
+        ui.new_game_seed_search_objective = std::clamp(obj, 0, 4);
 
         int tries = std::clamp(ui.new_game_seed_search_tries, 1, 2000);
         ImGui::SetNextItemWidth(180.0f);
@@ -1124,6 +1587,8 @@ void draw_new_game_modal(Simulation& sim, UIState& ui) {
             seed_search.base_seed = ui.new_game_random_seed;
             seed_search.best_seed = ui.new_game_random_seed;
             seed_search.best_score = -1e30;
+            seed_search.best_applied = false;
+            seed_search.started_at = std::chrono::steady_clock::now();
             seed_search.last_error.clear();
           }
         } else {
@@ -1143,6 +1608,12 @@ void draw_new_game_modal(Simulation& sim, UIState& ui) {
         }
 
         if (seed_search.tried > 0) {
+          ImGui::TextDisabled("Timing: last %.1f ms  avg %.1f ms/candidate",
+                              seed_search.last_candidate_ms,
+                              seed_search.avg_candidate_ms);
+          if (seed_search.used_proxy && seed_search.proxy_systems > 0) {
+            ImGui::TextDisabled("Search proxy mode: scoring on %d systems for responsiveness.", seed_search.proxy_systems);
+          }
           ImGui::TextDisabled("Best seed: %u  score: %.2f", seed_search.best_seed, seed_search.best_score);
           ImGui::TextDisabled("Best graph: deg %.2f  dia %d  ap %d  xings %d",
                               seed_search.best_gs.avg_degree,
@@ -1156,53 +1627,146 @@ void draw_new_game_modal(Simulation& sim, UIState& ui) {
                               seed_search.best_ns.avg_density * 100.0,
                               seed_search.best_ns.dense_systems,
                               seed_search.best_ns.systems);
+          ImGui::TextDisabled("Best frontier: anomaly rim %.0f%%  wreck rim %.0f%%  risk \xce\x94 %.2f",
+                              seed_search.best_fs.anomaly_avg_dist_norm * 100.0,
+                              seed_search.best_fs.wreck_avg_dist_norm * 100.0,
+                              seed_search.best_fs.risk_gradient);
         }
       }
 
       // Run the seed search incrementally (prevents the UI from freezing when
       // tries is high).
       if (seed_search.active) {
-        const int steps = std::clamp(ui.new_game_seed_search_steps_per_frame, 1, 200);
-        for (int step = 0; step < steps && seed_search.tried < seed_search.total_tries; ++step) {
+        const auto frame_start = std::chrono::steady_clock::now();
+        const auto frame_budget = std::chrono::duration<double, std::milli>(kSeedSearchFrameBudgetMs);
+
+        const double session_budget_ms =
+            std::clamp(kSeedSearchSessionBudgetBaseMs +
+                           static_cast<double>(seed_search.total_tries) * kSeedSearchSessionBudgetPerTryMs +
+                           static_cast<double>(cfg.num_systems) * kSeedSearchSessionBudgetPerSystemMs,
+                       2500.0, 60000.0);
+        if (seed_search.started_at == std::chrono::steady_clock::time_point{}) {
+          seed_search.started_at = frame_start;
+        }
+
+        auto apply_best_seed_once = [&]() {
+          if (seed_search.best_applied) return;
+          if (seed_search.tried <= 0) return;
+          seed_search.best_applied = true;
+          ui.new_game_random_seed = seed_search.best_seed;
+          preview.valid = false;
+          preview_metrics.valid = false;
+          nebula4x::log::info(std::string("Seed explorer: selected seed ") + std::to_string(seed_search.best_seed));
+        };
+
+        const int user_steps = std::clamp(ui.new_game_seed_search_steps_per_frame, 1, 200);
+        int steps = user_steps;
+        if (seed_search.avg_candidate_ms > 0.1) {
+          const int budget_steps = static_cast<int>(std::floor(kSeedSearchFrameBudgetMs / seed_search.avg_candidate_ms));
+          steps = std::clamp(budget_steps, 1, user_steps);
+        }
+
+        for (int step = 0; step < steps && seed_search.active && seed_search.tried < seed_search.total_tries; ++step) {
+          const auto now = std::chrono::steady_clock::now();
+          if ((now - frame_start) >= frame_budget) break;
+
+          const double session_elapsed_ms = elapsed_ms(seed_search.started_at, now);
+          if (session_elapsed_ms >= session_budget_ms) {
+            seed_search.active = false;
+            seed_search.last_error =
+                "Seed explorer stopped after reaching time budget (" +
+                std::to_string(static_cast<int>(std::llround(session_budget_ms))) + " ms).";
+            break;
+          }
+
           nebula4x::RandomScenarioConfig probe = cfg;
           const std::uint64_t i = static_cast<std::uint64_t>(seed_search.tried);
           const std::uint32_t cand_seed = (seed_search.tried == 0) ? seed_search.base_seed : mix_seed(seed_search.base_seed, i);
           probe.seed = cand_seed;
 
+          if (probe.num_systems >= kSeedSearchProxyActivateAtSystems && seed_search.total_tries >= 96) {
+            if (probe.num_systems > kSeedSearchProxySystems) {
+              probe.num_systems = kSeedSearchProxySystems;
+              seed_search.used_proxy = true;
+              seed_search.proxy_systems = probe.num_systems;
+            }
+          }
+
+          const auto t0 = std::chrono::steady_clock::now();
           try {
             const GameState st = nebula4x::make_random_scenario(probe);
-            const StarPlacementStats ps = compute_star_placement_stats(st);
-            const JumpGraphStats gs = compute_jump_graph_stats(st);
-            const RegionStats rs = compute_region_stats(st);
-            const NebulaStats ns = compute_nebula_stats(st);
-            const double score = score_seed_candidate(seed_search.objective, gs, ps, ns, rs);
+            const bool parallel_metrics =
+                static_cast<int>(st.systems.size()) >= kMetricParallelMinSystems && seed_search.total_tries <= 256;
+            const CandidateMetrics m = compute_candidate_metrics(st, parallel_metrics);
+            const double score = score_seed_candidate(seed_search.objective, m.gs, m.ps, m.ns, m.rs, m.fs);
             if (score > seed_search.best_score) {
               seed_search.best_score = score;
               seed_search.best_seed = cand_seed;
-              seed_search.best_ps = ps;
-              seed_search.best_gs = gs;
-              seed_search.best_rs = rs;
-              seed_search.best_ns = ns;
+              seed_search.best_ps = m.ps;
+              seed_search.best_gs = m.gs;
+              seed_search.best_rs = m.rs;
+              seed_search.best_ns = m.ns;
+              seed_search.best_fs = m.fs;
             }
           } catch (const std::exception& e) {
             seed_search.last_error = e.what();
           }
+          const auto t1 = std::chrono::steady_clock::now();
+
+          seed_search.last_candidate_ms = elapsed_ms(t0, t1);
+          if (seed_search.avg_candidate_ms <= 0.0) {
+            seed_search.avg_candidate_ms = seed_search.last_candidate_ms;
+          } else {
+            seed_search.avg_candidate_ms = seed_search.avg_candidate_ms * 0.85 + seed_search.last_candidate_ms * 0.15;
+          }
 
           ++seed_search.tried;
+
+          if (seed_search.last_candidate_ms > kSeedSearchPerCandidateHardMs) {
+            seed_search.active = false;
+            seed_search.last_error =
+                "Seed explorer stopped: single candidate exceeded time budget (" +
+                std::to_string(static_cast<int>(std::llround(seed_search.last_candidate_ms))) + " ms).";
+            break;
+          }
         }
 
         if (seed_search.tried >= seed_search.total_tries) {
           seed_search.active = false;
           seed_search.cfg_sig = 0;
 
-          // Apply best seed immediately and regenerate preview.
-          ui.new_game_random_seed = seed_search.best_seed;
-          preview.valid = false;
-          nebula4x::log::info(std::string("Seed explorer: selected seed ") + std::to_string(seed_search.best_seed));
+          // If proxy scoring was used for speed, refresh best metrics with one full-fidelity pass.
+          if (seed_search.used_proxy) {
+            try {
+              nebula4x::RandomScenarioConfig full_probe = cfg;
+              full_probe.seed = seed_search.best_seed;
+              const GameState st = nebula4x::make_random_scenario(full_probe);
+              const bool parallel_metrics = static_cast<int>(st.systems.size()) >= kMetricParallelMinSystems;
+              const CandidateMetrics m = compute_candidate_metrics(st, parallel_metrics);
+              seed_search.best_ps = m.ps;
+              seed_search.best_gs = m.gs;
+              seed_search.best_rs = m.rs;
+              seed_search.best_ns = m.ns;
+              seed_search.best_fs = m.fs;
+              seed_search.best_score = score_seed_candidate(seed_search.objective, m.gs, m.ps, m.ns, m.rs, m.fs);
+            } catch (const std::exception& e) {
+              if (seed_search.last_error.empty()) seed_search.last_error = e.what();
+            }
+          }
+
+          apply_best_seed_once();
+        } else if (!seed_search.active) {
+          seed_search.cfg_sig = 0;
+          apply_best_seed_once();
         }
       }
 
       const bool manual = ImGui::Button("Generate preview");
+      if (cfg.num_systems > kAutoPreviewProxySystemCap) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("Auto preview uses %d-system fast mode; button forces full %d-system preview.",
+                            kAutoPreviewProxySystemCap, cfg.num_systems);
+      }
 
       // Auto-preview when the user isn't actively editing inputs.
       const int strength_pct = static_cast<int>(std::llround(cfg.pirate_strength * 100.0));
@@ -1210,11 +1774,19 @@ void draw_new_game_modal(Simulation& sim, UIState& ui) {
       const int placement_quality_i = std::clamp(ui.new_game_random_placement_quality, 4, 96);
       const int jump_style_i = std::clamp(ui.new_game_random_jump_network_style, 0, 6);
       const int jump_density_pct = static_cast<int>(std::llround(cfg.jump_density * 100.0));
+      const int resource_abundance_pct = static_cast<int>(std::llround(cfg.resource_abundance * 100.0));
+      const int frontier_intensity_pct = static_cast<int>(std::llround(cfg.frontier_intensity * 100.0));
+      const int xeno_spawn_pressure_early_pct = static_cast<int>(std::llround(cfg.xenoarchaeology_spawn_pressure_early * 100.0));
+      const int xeno_spawn_pressure_late_pct = static_cast<int>(std::llround(cfg.xenoarchaeology_spawn_pressure_late * 100.0));
       const bool config_changed = (!preview.valid) || preview.seed != cfg.seed || preview.num_systems != cfg.num_systems ||
                                   preview.galaxy_shape != static_cast<int>(cfg.galaxy_shape) ||
                                   preview.placement_style != placement_style_i ||
                                   preview.placement_quality != placement_quality_i ||
                                   preview.jump_style != jump_style_i || preview.jump_density_pct != jump_density_pct ||
+                                  preview.resource_abundance_pct != resource_abundance_pct ||
+                                  preview.frontier_intensity_pct != frontier_intensity_pct ||
+                                  preview.xeno_spawn_pressure_early_pct != xeno_spawn_pressure_early_pct ||
+                                  preview.xeno_spawn_pressure_late_pct != xeno_spawn_pressure_late_pct ||
                                   preview.ai_empires != cfg.num_ai_empires ||
                                   preview.enable_regions != cfg.enable_regions || preview.num_regions != cfg.num_regions ||
                                   preview.enable_pirates != cfg.enable_pirates ||
@@ -1227,7 +1799,8 @@ void draw_new_game_modal(Simulation& sim, UIState& ui) {
       if (manual || auto_trigger || config_changed) {
         // Debounce: only regenerate when inputs aren't active, unless explicitly requested.
         if (manual || !ImGui::IsAnyItemActive()) {
-          ensure_preview(preview, cfg);
+          ensure_preview(preview, cfg, manual);
+          preview_metrics.valid = false;
         }
       }
 
@@ -1237,6 +1810,27 @@ void draw_new_game_modal(Simulation& sim, UIState& ui) {
 
       if (preview.valid) {
         const GameState& s = preview.state;
+
+        const bool metrics_stale = !preview_metrics.valid ||
+                                   preview_metrics.seed != preview.seed ||
+                                   preview_metrics.requested_systems != preview.num_systems ||
+                                   preview_metrics.generated_systems != preview.generated_systems;
+        if (metrics_stale) {
+          const auto m0 = std::chrono::steady_clock::now();
+          const bool parallel_metrics = static_cast<int>(s.systems.size()) >= kMetricParallelMinSystems;
+          const CandidateMetrics m = compute_candidate_metrics(s, parallel_metrics);
+          const auto m1 = std::chrono::steady_clock::now();
+          preview_metrics.valid = true;
+          preview_metrics.seed = preview.seed;
+          preview_metrics.requested_systems = preview.num_systems;
+          preview_metrics.generated_systems = preview.generated_systems;
+          preview_metrics.ps = m.ps;
+          preview_metrics.gs = m.gs;
+          preview_metrics.rs = m.rs;
+          preview_metrics.ns = m.ns;
+          preview_metrics.fs = m.fs;
+          preview_metrics.compute_ms = elapsed_ms(m0, m1);
+        }
 
         ImGui::Separator();
         ImGui::Text("Preview");
@@ -1250,13 +1844,21 @@ void draw_new_game_modal(Simulation& sim, UIState& ui) {
         ImGui::TextDisabled("Ships: %d", static_cast<int>(s.ships.size()));
         ImGui::SameLine();
         ImGui::TextDisabled("Factions: %d", static_cast<int>(s.factions.size()));
+        if (preview.used_fast_proxy && preview.num_systems > preview.generated_systems) {
+          ImGui::TextDisabled("Fast proxy preview: generated %d of requested %d systems (full on manual Generate).",
+                              preview.generated_systems, preview.num_systems);
+        }
+        ImGui::TextDisabled("Preview generation: %.0f ms  metrics: %.0f ms",
+                            preview.generation_ms,
+                            preview_metrics.compute_ms);
 
         static const char* kJumpNames[] = {"Balanced", "Dense web", "Sparse lanes", "Cluster bridges", "Hub & spoke",
                                            "Planar proximity", "Subspace rivers"};
         static const char* kPlaceNames[] = {"Classic", "Blue noise"};
-        const StarPlacementStats ps = compute_star_placement_stats(s);
-        const JumpGraphStats gs = compute_jump_graph_stats(s);
-        const NebulaStats ns = compute_nebula_stats(s);
+        const StarPlacementStats& ps = preview_metrics.ps;
+        const JumpGraphStats& gs = preview_metrics.gs;
+        const NebulaStats& ns = preview_metrics.ns;
+        const FrontierStats& fs = preview_metrics.fs;
 
         ImGui::TextDisabled("Placement: %s", kPlaceNames[std::clamp(placement_style_i, 0, 1)]);
         if (placement_style_i == 1) {
@@ -1269,6 +1871,12 @@ void draw_new_game_modal(Simulation& sim, UIState& ui) {
         }
 
         ImGui::TextDisabled("Network: %s  Density: %.2fx", kJumpNames[std::clamp(jump_style_i, 0, 6)], cfg.jump_density);
+        ImGui::SameLine();
+        ImGui::TextDisabled("Resources: %.2fx  Frontier: %.2fx  Xeno E/L: %.2fx / %.2fx",
+                            cfg.resource_abundance,
+                            cfg.frontier_intensity,
+                            cfg.xenoarchaeology_spawn_pressure_early,
+                            cfg.xenoarchaeology_spawn_pressure_late);
         ImGui::TextDisabled("Edges: %d", gs.undirected_edges);
         ImGui::SameLine();
         ImGui::TextDisabled("Avg deg: %.2f", gs.avg_degree);
@@ -1285,8 +1893,16 @@ void draw_new_game_modal(Simulation& sim, UIState& ui) {
                             ns.density_std * 100.0,
                             ns.dense_systems,
                             ns.systems);
+        ImGui::TextDisabled("Frontier: anomaly rim %.0f%%  wreck rim %.0f%%  avg hazard %.2f",
+                            fs.anomaly_avg_dist_norm * 100.0,
+                            fs.wreck_avg_dist_norm * 100.0,
+                            fs.avg_hazard);
+        ImGui::TextDisabled("Risk gradient: inner %.0f%%  outer %.0f%%  \xce\x94 %.0f%%",
+                            fs.inner_region_risk * 100.0,
+                            fs.outer_region_risk * 100.0,
+                            fs.risk_gradient * 100.0);
 
-        const RegionStats rs = compute_region_stats(s);
+        const RegionStats& rs = preview_metrics.rs;
         if (rs.regions > 0) {
           ImGui::TextDisabled("Regions: %d  size %d-%d (avg %.1f)", rs.regions, rs.min_systems, rs.max_systems, rs.avg_systems);
           if (!rs.themes.empty()) {
@@ -1331,44 +1947,46 @@ void draw_new_game_modal(Simulation& sim, UIState& ui) {
 
     // Buttons.
     const float bw = 140.0f;
+    if (!start_error.empty()) {
+      ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "Start failed: %s", start_error.c_str());
+    }
     if (ImGui::Button("Start", ImVec2(bw, 0.0f))) {
-      if (ui.new_game_scenario == kScenarioSol) {
-        sim.new_game();
-        ui.request_map_tab = MapTab::System;
-        nebula4x::log::info("New game: Sol scenario");
-      } else {
-        nebula4x::RandomScenarioConfig cfg;
-        cfg.seed = ui.new_game_random_seed;
-        cfg.num_systems = ui.new_game_random_num_systems;
-        cfg.galaxy_shape = static_cast<nebula4x::RandomGalaxyShape>(std::clamp(ui.new_game_random_galaxy_shape, 0, 5));
-        cfg.placement_style = static_cast<nebula4x::RandomPlacementStyle>(
-            std::clamp(ui.new_game_random_placement_style, 0, 1));
-        cfg.placement_quality = std::clamp(ui.new_game_random_placement_quality, 4, 96);
-        cfg.jump_network_style = static_cast<nebula4x::RandomJumpNetworkStyle>(
-            std::clamp(ui.new_game_random_jump_network_style, 0, 6));
-        cfg.jump_density = static_cast<double>(ui.new_game_random_jump_density);
-        cfg.enable_regions = ui.new_game_random_enable_regions;
-        cfg.num_regions = ui.new_game_random_num_regions;
-        cfg.num_ai_empires = ui.new_game_random_ai_empires;
-        cfg.enable_pirates = ui.new_game_random_enable_pirates;
-        cfg.pirate_strength = static_cast<double>(ui.new_game_random_pirate_strength);
+      start_error.clear();
+      bool started = false;
 
-        cfg.enable_independents = ui.new_game_random_enable_independents;
-        cfg.num_independent_outposts = ui.new_game_random_num_independent_outposts;
-        cfg.ensure_clear_home = ui.new_game_random_ensure_clear_home;
-
-        sim.load_game(nebula4x::make_random_scenario(cfg));
-        ui.request_map_tab = MapTab::Galaxy;
-        nebula4x::log::info("New game: random galaxy (seed=" + std::to_string(ui.new_game_random_seed) +
-                           ", systems=" + std::to_string(ui.new_game_random_num_systems) +
-                           ", ai=" + std::to_string(ui.new_game_random_ai_empires) +
-                           ", jump=" + std::to_string(ui.new_game_random_jump_network_style) +
-                           ", density=" + std::to_string(ui.new_game_random_jump_density) +
-                           ", pirates=" + std::string(ui.new_game_random_enable_pirates ? "on" : "off") + ")");
+      try {
+        if (ui.new_game_scenario == kScenarioSol) {
+          sim.new_game();
+          ui.request_map_tab = MapTab::System;
+          nebula4x::log::info("New game: Sol scenario");
+        } else {
+          const nebula4x::RandomScenarioConfig cfg = random_config_from_ui(ui);
+          sim.load_game(nebula4x::make_random_scenario(cfg));
+          ui.request_map_tab = MapTab::Galaxy;
+          nebula4x::log::info("New game: random galaxy (seed=" + std::to_string(cfg.seed) +
+                             ", systems=" + std::to_string(cfg.num_systems) +
+                             ", ai=" + std::to_string(cfg.num_ai_empires) +
+                             ", jump=" + std::to_string(static_cast<int>(cfg.jump_network_style)) +
+                             ", density=" + std::to_string(cfg.jump_density) +
+                             ", resources=" + std::to_string(cfg.resource_abundance) +
+                             ", frontier=" + std::to_string(cfg.frontier_intensity) +
+                             ", pirates=" + std::string(cfg.enable_pirates ? "on" : "off") + ")");
+        }
+        started = true;
+      } catch (const std::exception& e) {
+        start_error = e.what();
+      } catch (...) {
+        start_error = "unknown error while creating new game";
       }
 
-      ui.show_new_game_modal = false;
-      ImGui::CloseCurrentPopup();
+      if (!start_error.empty()) {
+        nebula4x::log::error("New game start failed: " + start_error);
+      }
+
+      if (started) {
+        ui.show_new_game_modal = false;
+        ImGui::CloseCurrentPopup();
+      }
     }
 
     ImGui::SameLine();

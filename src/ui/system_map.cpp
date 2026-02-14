@@ -35,14 +35,15 @@
 #include <imgui.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
-#include <cstdint>
 #include <cstdint>
 #include <cmath>
 #include <cstring>
 #include <limits>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <unordered_set>
 #include <unordered_map>
@@ -52,7 +53,49 @@
 namespace nebula4x::ui {
 namespace {
 
+constexpr double kPi = 3.14159265358979323846;
 constexpr double kTwoPi = 6.283185307179586;
+constexpr double kKmSToMkmPerDay = 0.0864;
+constexpr float kIconShadowOffsetPx = 1.0f;
+constexpr ImU32 kIconShadowColor = IM_COL32(0, 0, 0, 140);
+constexpr int kImDrawList16BitVertexLimit = (1 << 16) - 1;
+constexpr int kImDrawListVertexSafetyReserve = 2048;
+
+int drawlist_remaining_vertices(const ImDrawList* draw) {
+  if (!draw) return 0;
+  if constexpr (sizeof(ImDrawIdx) > 2) {
+    return std::numeric_limits<int>::max();
+  }
+  const int soft_limit = std::max(0, kImDrawList16BitVertexLimit - kImDrawListVertexSafetyReserve);
+  return std::max(0, soft_limit - draw->VtxBuffer.Size);
+}
+
+bool drawlist_can_add_vertices(const ImDrawList* draw, int vtx_count) {
+  if (!draw) return false;
+  if (vtx_count <= 0) return true;
+  if constexpr (sizeof(ImDrawIdx) > 2) return true;
+  const int soft_limit = std::max(0, kImDrawList16BitVertexLimit - kImDrawListVertexSafetyReserve);
+  if (draw->VtxBuffer.Size >= soft_limit) return false;
+  return draw->VtxBuffer.Size <= (soft_limit - vtx_count);
+}
+
+int raster_cell_stride_for_vertex_budget(const ImDrawList* draw, int cells_x, int cells_y, int verts_per_cell) {
+  if (cells_x <= 0 || cells_y <= 0) return 1;
+  const long long total_cells = static_cast<long long>(cells_x) * static_cast<long long>(cells_y);
+  if (total_cells <= 0) return 1;
+  if (verts_per_cell <= 0) verts_per_cell = 6;
+
+  const int remaining = drawlist_remaining_vertices(draw);
+  if (remaining == std::numeric_limits<int>::max()) return 1;
+  if (remaining <= 0) return std::max(cells_x, cells_y);
+
+  const long long max_cells = std::max<long long>(1, static_cast<long long>(remaining / verts_per_cell));
+  if (total_cells <= max_cells) return 1;
+
+  const double ratio = static_cast<double>(total_cells) / static_cast<double>(max_cells);
+  const int step = std::max(1, static_cast<int>(std::ceil(std::sqrt(ratio))));
+  return std::min(step, std::max(cells_x, cells_y));
+}
 
 ImU32 color_body(BodyType t) {
   switch (t) {
@@ -119,6 +162,148 @@ Vec2 to_world(const ImVec2& screen_px, const ImVec2& center_px, double scale_px_
   return Vec2{x, y};
 }
 
+bool point_in_rect_expanded(const ImVec2& p, const ImVec2& p0, const ImVec2& p1, float pad_px) {
+  const float pad = std::max(0.0f, pad_px);
+  return p.x >= (p0.x - pad) && p.x <= (p1.x + pad) && p.y >= (p0.y - pad) && p.y <= (p1.y + pad);
+}
+
+bool circle_intersects_rect(const ImVec2& c, float r, const ImVec2& p0, const ImVec2& p1) {
+  const float rr = std::max(0.0f, r);
+  const float nx = std::clamp(c.x, p0.x, p1.x);
+  const float ny = std::clamp(c.y, p0.y, p1.y);
+  const float dx = c.x - nx;
+  const float dy = c.y - ny;
+  return (dx * dx + dy * dy) <= (rr * rr);
+}
+
+bool segment_bbox_intersects_rect(const ImVec2& a, const ImVec2& b, const ImVec2& p0, const ImVec2& p1,
+                                  float pad_px) {
+  const float pad = std::max(0.0f, pad_px);
+  const float min_x = std::min(a.x, b.x);
+  const float max_x = std::max(a.x, b.x);
+  const float min_y = std::min(a.y, b.y);
+  const float max_y = std::max(a.y, b.y);
+  return !(max_x < p0.x - pad || min_x > p1.x + pad || max_y < p0.y - pad || min_y > p1.y + pad);
+}
+
+int ring_segments_for_radius_px(float radius_px) {
+  const float r = std::max(0.0f, radius_px);
+  if (r < 20.0f) return 20;
+  if (r < 50.0f) return 28;
+  if (r < 110.0f) return 40;
+  if (r < 220.0f) return 52;
+  return 64;
+}
+
+int ring_vertex_estimate(int segments, bool filled) {
+  const int seg = std::clamp(segments, 8, 128);
+  // Conservative estimate for anti-aliased stroke/fill paths in ImGui.
+  const int stroke = seg * 4 + 16;
+  if (!filled) return stroke;
+  const int fill = seg * 3 + 16;
+  return stroke + fill;
+}
+
+bool contains_icase(std::string_view haystack, std::string_view needle) {
+  if (needle.empty()) return true;
+  if (needle.size() > haystack.size()) return false;
+
+  auto lower = [](unsigned char c) { return static_cast<char>(std::tolower(c)); };
+  for (size_t i = 0; i + needle.size() <= haystack.size(); ++i) {
+    bool ok = true;
+    for (size_t j = 0; j < needle.size(); ++j) {
+      if (lower(static_cast<unsigned char>(haystack[i + j])) !=
+          lower(static_cast<unsigned char>(needle[j]))) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok) return true;
+  }
+  return false;
+}
+
+float seeded_angle_rad(std::uint32_t seed) {
+  return static_cast<float>((seed % 360u) * (kPi / 180.0));
+}
+
+double design_speed_km_s(const ShipDesign* d) {
+  if (!d) return 0.0;
+  if (!std::isfinite(d->speed_km_s) || d->speed_km_s <= 0.0) return 0.0;
+  return d->speed_km_s;
+}
+
+void draw_icon_with_shadow(ImDrawList* draw,
+                           ImTextureID tex_id,
+                           const ImVec2& center,
+                           float size_px,
+                           float angle_rad,
+                           ImU32 tint) {
+  if (!draw || tex_id == ImTextureID{}) return;
+  if (!std::isfinite(size_px) || size_px <= 0.0f) return;
+
+  const ImVec2 shadow_center{center.x + kIconShadowOffsetPx, center.y + kIconShadowOffsetPx};
+  ProcIconSpriteEngine::draw_icon_rotated(draw, tex_id, shadow_center, size_px, angle_rad, kIconShadowColor);
+  ProcIconSpriteEngine::draw_icon_rotated(draw, tex_id, center, size_px, angle_rad, tint);
+}
+
+void draw_kinetic_wake(ImDrawList* draw,
+                       const ImVec2& head,
+                       float heading_rad,
+                       float speed01,
+                       float base_len_px,
+                       ImU32 col,
+                       std::uint32_t seed) {
+  if (!draw) return;
+  if (!(speed01 > 0.02f)) return;
+
+  const float len = std::max(4.0f, base_len_px * (0.35f + 0.90f * speed01));
+  const float time_s = static_cast<float>(ImGui::GetTime());
+  const float phase = static_cast<float>(hash_u32(seed) & 0x03FFu) / 1023.0f * static_cast<float>(kTwoPi);
+  const float ux = std::cos(heading_rad);
+  const float uy = std::sin(heading_rad);
+  const float px = -uy;
+  const float py = ux;
+
+  for (int i = 0; i < 3; ++i) {
+    const float seg_t0 = 0.18f + 0.24f * static_cast<float>(i);
+    const float seg_t1 = seg_t0 + 0.26f;
+    const float wobble0 = std::sin(time_s * (3.8f + 0.5f * static_cast<float>(i)) + phase + 1.7f * static_cast<float>(i));
+    const float wobble1 = std::sin(time_s * (4.2f + 0.4f * static_cast<float>(i)) + phase + 2.3f * static_cast<float>(i));
+    const float lateral0 = wobble0 * (0.7f + 0.6f * static_cast<float>(i));
+    const float lateral1 = wobble1 * (0.9f + 0.7f * static_cast<float>(i));
+
+    const ImVec2 p0{
+        head.x - ux * (len * seg_t0) + px * lateral0,
+        head.y - uy * (len * seg_t0) + py * lateral0,
+    };
+    const ImVec2 p1{
+        head.x - ux * (len * seg_t1) + px * lateral1,
+        head.y - uy * (len * seg_t1) + py * lateral1,
+    };
+
+    const float fade = std::max(0.0f, 1.0f - 0.25f * static_cast<float>(i));
+    if (!drawlist_can_add_vertices(draw, 18)) return;
+    draw->AddLine(p0, p1, modulate_alpha(col, (0.20f + 0.30f * speed01) * fade), 1.0f + 0.3f * speed01);
+    draw->AddCircleFilled(p1, 0.8f + 0.5f * speed01, modulate_alpha(col, (0.12f + 0.20f * speed01) * fade), 8);
+  }
+}
+
+ImU32 habitability_ring_color(float hab01, float alpha) {
+  hab01 = std::clamp(hab01, 0.0f, 1.0f);
+  alpha = std::clamp(alpha, 0.0f, 1.0f);
+  // 0 -> red, 1 -> green.
+  const float hue = std::clamp(0.02f + 0.31f * hab01, 0.0f, 0.33f);
+  const ImVec4 c = ImColor::HSV(hue, 0.86f, 0.96f, alpha);
+  return ImGui::ColorConvertFloat4ToU32(c);
+}
+
+double missile_progress01(const MissileSalvo& ms) {
+  const double total = std::max(1e-9, ms.eta_days_total);
+  const double rem = std::clamp(ms.eta_days_remaining, 0.0, total);
+  return std::clamp(1.0 - rem / total, 0.0, 1.0);
+}
+
 
 struct HeatmapSource {
   Vec2 pos_mkm{0.0, 0.0};
@@ -145,19 +330,23 @@ void draw_heatmap(ImDrawList* draw,
 
   const float cw = avail.x / static_cast<float>(cells_x);
   const float ch = avail.y / static_cast<float>(cells_y);
+  const int cell_step = raster_cell_stride_for_vertex_budget(draw, cells_x, cells_y, /*verts_per_cell=*/6);
+  if (drawlist_remaining_vertices(draw) <= 0) return;
 
   const ImVec2 clip_p1(origin.x + avail.x, origin.y + avail.y);
   ImGui::PushClipRect(origin, clip_p1, true);
 
-  for (int y = 0; y < cells_y; ++y) {
+  for (int y = 0; y < cells_y; y += cell_step) {
+    const int y_block = std::min(cell_step, cells_y - y);
     const float y0 = origin.y + static_cast<float>(y) * ch;
-    const float y1 = y0 + ch + 0.5f; // slight overlap to avoid gaps
-    const float cy = y0 + ch * 0.5f;
+    const float y1 = y0 + ch * static_cast<float>(y_block) + 0.5f; // slight overlap to avoid gaps
+    const float cy = y0 + ch * static_cast<float>(y_block) * 0.5f;
 
-    for (int x = 0; x < cells_x; ++x) {
+    for (int x = 0; x < cells_x; x += cell_step) {
+      const int x_block = std::min(cell_step, cells_x - x);
       const float x0 = origin.x + static_cast<float>(x) * cw;
-      const float x1 = x0 + cw + 0.5f;
-      const float cx = x0 + cw * 0.5f;
+      const float x1 = x0 + cw * static_cast<float>(x_block) + 0.5f;
+      const float cx = x0 + cw * static_cast<float>(x_block) * 0.5f;
 
       const Vec2 w = to_world(ImVec2(cx, cy), center_px, scale_px_per_mkm, zoom, pan_mkm);
 
@@ -186,6 +375,10 @@ void draw_heatmap(ImDrawList* draw,
       const float a = std::clamp(opacity * best, 0.0f, 1.0f);
       if (a <= 0.001f) continue;
 
+      if (!drawlist_can_add_vertices(draw, 6)) {
+        ImGui::PopClipRect();
+        return;
+      }
       draw->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), modulate_alpha(base_col, a));
     }
   }
@@ -217,19 +410,23 @@ void draw_nebula_microfield_overlay(ImDrawList* draw,
 
   const float cw = avail.x / static_cast<float>(cells_x);
   const float ch = avail.y / static_cast<float>(cells_y);
+  const int cell_step = raster_cell_stride_for_vertex_budget(draw, cells_x, cells_y, /*verts_per_cell=*/6);
+  if (drawlist_remaining_vertices(draw) <= 0) return;
 
   const ImVec2 clip_p1(origin.x + avail.x, origin.y + avail.y);
   ImGui::PushClipRect(origin, clip_p1, true);
 
-  for (int y = 0; y < cells_y; ++y) {
+  for (int y = 0; y < cells_y; y += cell_step) {
+    const int y_block = std::min(cell_step, cells_y - y);
     const float y0 = origin.y + static_cast<float>(y) * ch;
-    const float y1 = y0 + ch + 0.5f;
-    const float cy = y0 + ch * 0.5f;
+    const float y1 = y0 + ch * static_cast<float>(y_block) + 0.5f;
+    const float cy = y0 + ch * static_cast<float>(y_block) * 0.5f;
 
-    for (int x = 0; x < cells_x; ++x) {
+    for (int x = 0; x < cells_x; x += cell_step) {
+      const int x_block = std::min(cell_step, cells_x - x);
       const float x0 = origin.x + static_cast<float>(x) * cw;
-      const float x1 = x0 + cw + 0.5f;
-      const float cx = x0 + cw * 0.5f;
+      const float x1 = x0 + cw * static_cast<float>(x_block) + 0.5f;
+      const float cx = x0 + cw * static_cast<float>(x_block) * 0.5f;
 
       const Vec2 w = to_world(ImVec2(cx, cy), center_px, scale_px_per_mkm, zoom, pan_mkm);
       const double d = sim.system_nebula_density_at(system_id, w);
@@ -239,6 +436,10 @@ void draw_nebula_microfield_overlay(ImDrawList* draw,
       const float a = opacity * static_cast<float>(std::pow(std::clamp(d, 0.0, 1.0), 1.35));
       if (a <= 0.003f) continue;
 
+      if (!drawlist_can_add_vertices(draw, 6)) {
+        ImGui::PopClipRect();
+        return;
+      }
       draw->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), modulate_alpha(base_col, a));
     }
   }
@@ -269,19 +470,23 @@ void draw_nebula_storm_cell_overlay(ImDrawList* draw,
 
   const float cw = avail.x / static_cast<float>(cells_x);
   const float ch = avail.y / static_cast<float>(cells_y);
+  const int cell_step = raster_cell_stride_for_vertex_budget(draw, cells_x, cells_y, /*verts_per_cell=*/6);
+  if (drawlist_remaining_vertices(draw) <= 0) return;
 
   const ImVec2 clip_p1(origin.x + avail.x, origin.y + avail.y);
   ImGui::PushClipRect(origin, clip_p1, true);
 
-  for (int y = 0; y < cells_y; ++y) {
+  for (int y = 0; y < cells_y; y += cell_step) {
+    const int y_block = std::min(cell_step, cells_y - y);
     const float y0 = origin.y + static_cast<float>(y) * ch;
-    const float y1 = y0 + ch + 0.5f;
-    const float cy = y0 + ch * 0.5f;
+    const float y1 = y0 + ch * static_cast<float>(y_block) + 0.5f;
+    const float cy = y0 + ch * static_cast<float>(y_block) * 0.5f;
 
-    for (int x = 0; x < cells_x; ++x) {
+    for (int x = 0; x < cells_x; x += cell_step) {
+      const int x_block = std::min(cell_step, cells_x - x);
       const float x0 = origin.x + static_cast<float>(x) * cw;
-      const float x1 = x0 + cw + 0.5f;
-      const float cx = x0 + cw * 0.5f;
+      const float x1 = x0 + cw * static_cast<float>(x_block) + 0.5f;
+      const float cx = x0 + cw * static_cast<float>(x_block) * 0.5f;
 
       const Vec2 w = to_world(ImVec2(cx, cy), center_px, scale_px_per_mkm, zoom, pan_mkm);
       const double st = sim.system_storm_intensity_at(system_id, w);
@@ -291,6 +496,10 @@ void draw_nebula_storm_cell_overlay(ImDrawList* draw,
       const float a = opacity * static_cast<float>(std::pow(std::clamp(st, 0.0, 1.0), 1.25));
       if (a <= 0.003f) continue;
 
+      if (!drawlist_can_add_vertices(draw, 6)) {
+        ImGui::PopClipRect();
+        return;
+      }
       draw->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), modulate_alpha(base_col, a));
     }
   }
@@ -300,7 +509,7 @@ void draw_nebula_storm_cell_overlay(ImDrawList* draw,
 
 
 
-double sim_time_days(const GameState& s) {
+double sim_time_days_from_state(const GameState& s) {
   const double day = static_cast<double>(s.date.days_since_epoch());
   const double frac = static_cast<double>(std::clamp(s.hour_of_day, 0, 23)) / 24.0;
   return day + frac;
@@ -462,6 +671,10 @@ Vec2 snap_ruler_point(const Simulation& sim,
 }
 
 } // namespace
+
+double sim_time_days(const GameState& s) {
+  return sim_time_days_from_state(s);
+}
 
 void draw_system_map(Simulation& sim,
                      UIState& ui,
@@ -911,6 +1124,7 @@ void draw_system_map(Simulation& sim,
   }
 
   auto* draw = ImGui::GetWindowDrawList();
+  bool vertex_budget_guard_triggered = false;
   const ImU32 bg = ImGui::ColorConvertFloat4ToU32(ImVec4(ui.system_map_bg[0], ui.system_map_bg[1], ui.system_map_bg[2],
                                                          ui.system_map_bg[3]));
   draw->AddRectFilled(origin, ImVec2(origin.x + avail.x, origin.y + avail.y), bg);
@@ -1152,13 +1366,14 @@ void draw_system_map(Simulation& sim,
         gcfg.debug_tile_bounds = ui.system_map_gravity_contours_debug_tiles;
 
         const ImU32 contour_col = ImGui::GetColorU32(ImGuiCol_PlotLines);
-        gravity_engine->draw_contours(draw, sim, sys->id, origin, avail, center, scale, zoom, pan,
-                                      chrome_seed ^ 0xDEC0ADDEu, gcfg, contour_col);
+        gravity_engine->draw_contours(
+            draw, origin, avail, center, scale, zoom, pan, sim, sys->id, chrome_seed ^ 0xDEC0ADDEu, gcfg, contour_col);
 
-        ui.system_map_gravity_contours_stats_cache_tiles = gravity_engine->stats().cache_tiles;
-        ui.system_map_gravity_contours_stats_tiles_used = gravity_engine->stats().tiles_used;
-        ui.system_map_gravity_contours_stats_tiles_generated = gravity_engine->stats().tiles_generated;
-        ui.system_map_gravity_contours_stats_segments_drawn = gravity_engine->stats().segments_drawn;
+        const auto gc_stats = gravity_engine->stats();
+        ui.system_map_gravity_contours_stats_cache_tiles = gc_stats.cache_tiles;
+        ui.system_map_gravity_contours_stats_tiles_used = gc_stats.tiles_used_this_frame;
+        ui.system_map_gravity_contours_stats_tiles_generated = gc_stats.tiles_generated_this_frame;
+        ui.system_map_gravity_contours_stats_segments_drawn = gc_stats.segments_drawn;
       }
     }
 
@@ -1379,42 +1594,75 @@ void draw_system_map(Simulation& sim,
 
       const double a = b->orbit_radius_mkm;
       const double e = std::clamp(std::abs(b->orbit_eccentricity), 0.0, 0.999999);
+      const ImVec2 orbit_center_px = to_screen(orbit_center_mkm, center, scale, zoom, pan);
 
       if (e < 1e-4) {
-        const ImVec2 orbit_center_px = to_screen(orbit_center_mkm, center, scale, zoom, pan);
-        draw->AddCircle(orbit_center_px, static_cast<float>(a * scale * zoom), IM_COL32(35, 35, 35, 255), 0, 1.0f);
+        const float radius_px = static_cast<float>(a * scale * zoom);
+        if (radius_px > 0.6f && circle_intersects_rect(orbit_center_px, radius_px + 2.0f, view_p0, view_p1)) {
+          int seg = std::clamp(static_cast<int>(std::ceil(radius_px * 0.16f)), 18, 128);
+          const int remaining = drawlist_remaining_vertices(draw);
+          if (remaining != std::numeric_limits<int>::max()) {
+            seg = std::min(seg, std::max(0, remaining / 3));
+          }
+          if (seg >= 12 && drawlist_can_add_vertices(draw, seg * 2)) {
+            draw->AddCircle(orbit_center_px, radius_px, IM_COL32(35, 35, 35, 255), seg, 1.0f);
+          } else {
+            vertex_budget_guard_triggered = true;
+          }
+        }
       } else {
         // Ellipse sampled in eccentric anomaly (focus at orbit_center_mkm).
         const double bsemi = a * std::sqrt(std::max(0.0, 1.0 - e * e));
         const double w = b->orbit_arg_periapsis_radians;
         const double cw = std::cos(w);
         const double sw = std::sin(w);
+        const float approx_radius_px = static_cast<float>(a * (1.0 + e) * scale * zoom);
+        if (approx_radius_px > 0.6f &&
+            circle_intersects_rect(orbit_center_px, approx_radius_px + 2.0f, view_p0, view_p1)) {
+          int seg = std::clamp(static_cast<int>(std::ceil(approx_radius_px * 0.19f)), 28, 220);
+          const int remaining = drawlist_remaining_vertices(draw);
+          if (remaining != std::numeric_limits<int>::max()) {
+            seg = std::min(seg, std::max(0, remaining / 3));
+          }
+          if (seg >= 16 && drawlist_can_add_vertices(draw, seg * 2 + 4)) {
+            ImVec2 first{};
+            ImVec2 prev{};
+            bool have_first = false;
+            for (int i = 0; i <= seg; ++i) {
+              const double E = (kTwoPi * static_cast<double>(i)) / static_cast<double>(seg);
+              const double cE = std::cos(E);
+              const double sE = std::sin(E);
 
-        const int kSegments = std::clamp(static_cast<int>(96.0 * std::sqrt(std::max(1.0, zoom))), 64, 320);
-        ImVec2 first{};
-        ImVec2 prev{};
-        for (int i = 0; i <= kSegments; ++i) {
-          const double E = (kTwoPi * static_cast<double>(i)) / static_cast<double>(kSegments);
-          const double cE = std::cos(E);
-          const double sE = std::sin(E);
+              const double x = a * (cE - e);
+              const double y = bsemi * sE;
+              const double rx = x * cw - y * sw;
+              const double ry = x * sw + y * cw;
 
-          const double x = a * (cE - e);
-          const double y = bsemi * sE;
-          const double rx = x * cw - y * sw;
-          const double ry = x * sw + y * cw;
+              const Vec2 world = orbit_center_mkm + Vec2{rx, ry};
+              const ImVec2 pt = to_screen(world, center, scale, zoom, pan);
 
-          const Vec2 world = orbit_center_mkm + Vec2{rx, ry};
-          const ImVec2 pt = to_screen(world, center, scale, zoom, pan);
-
-          if (i == 0) {
-            first = pt;
-            prev = pt;
+              if (!have_first) {
+                first = pt;
+                prev = pt;
+                have_first = true;
+              } else {
+                if (!drawlist_can_add_vertices(draw, 2)) {
+                  vertex_budget_guard_triggered = true;
+                  break;
+                }
+                draw->AddLine(prev, pt, IM_COL32(35, 35, 35, 255), 1.0f);
+                prev = pt;
+              }
+            }
+            if (have_first && drawlist_can_add_vertices(draw, 2)) {
+              draw->AddLine(prev, first, IM_COL32(35, 35, 35, 255), 1.0f);
+            } else if (have_first) {
+              vertex_budget_guard_triggered = true;
+            }
           } else {
-            draw->AddLine(prev, pt, IM_COL32(35, 35, 35, 255), 1.0f);
-            prev = pt;
+            vertex_budget_guard_triggered = true;
           }
         }
-        draw->AddLine(prev, first, IM_COL32(35, 35, 35, 255), 1.0f);
       }
     }
 
@@ -1428,6 +1676,11 @@ void draw_system_map(Simulation& sim,
       case BodyType::Asteroid: r = 2.5f; break;
       case BodyType::Comet: r = 3.0f; break;
       default: r = 5.0f; break;
+    }
+
+    const bool body_in_view = point_in_rect_expanded(p, view_p0, view_p1, std::max(10.0f, r * 4.0f));
+    if (!body_in_view && selected_body != bid) {
+      continue;
     }
 
     // Time preview overlay (planning): future orbital position + swept trail.
@@ -1537,6 +1790,21 @@ void draw_system_map(Simulation& sim,
       draw->AddCircle(p, r + 1.0f, IM_COL32(255, 240, 180, 160), 0, 1.25f);
     }
 
+    // Habitability ring (faction-aware when a viewer faction is active).
+    if (b->type != BodyType::Star && b->type != BodyType::Asteroid && b->type != BodyType::Comet) {
+      double hab = (viewer_faction_id != kInvalidId) ? sim.body_habitability_for_faction(bid, viewer_faction_id)
+                                                      : sim.body_habitability(bid);
+      hab = std::clamp(hab, 0.0, 1.0);
+      if (hab > 0.05) {
+        const float habf = static_cast<float>(hab);
+        const float alpha = 0.12f + 0.42f * habf;
+        draw->AddCircle(p, r + 3.2f, habitability_ring_color(habf, alpha), 0, 1.3f);
+        if (hab > 0.70) {
+          draw->AddCircle(p, r + 5.0f, habitability_ring_color(habf, alpha * 0.55f), 0, 1.0f);
+        }
+      }
+    }
+
     // Highlight colonized bodies.
     if (colonized_bodies.count(bid)) {
       draw->AddCircle(p, r + 4.0f, IM_COL32(0, 255, 140, 180), 0, 1.5f);
@@ -1604,6 +1872,7 @@ void draw_system_map(Simulation& sim,
     if (!jp) continue;
 
     const ImVec2 p = to_screen(jp->position_mkm, center, scale, zoom, pan);
+    if (!point_in_rect_expanded(p, view_p0, view_p1, 30.0f)) continue;
     const float r = 6.0f;
     const bool surveyed =
         (!ui.fog_of_war) || (viewer_faction_id != kInvalidId && sim.is_jump_point_surveyed_by_faction(viewer_faction_id, jid));
@@ -1658,7 +1927,8 @@ void draw_system_map(Simulation& sim,
       // Optional vector filaments (low-cost, time-animated) for high shear.
       if (jump_cfg.filaments) {
         const float radius_px = r * jump_cfg.size_mult;
-        ProcJumpPhenomenaSpriteEngine::draw_filaments(draw, p, radius_px, ph, tint, t_anim_days, jump_cfg);
+        ProcJumpPhenomenaSpriteEngine::draw_filaments(
+            draw, p, radius_px, seed, shear, turbulence, t_anim_days, tint, jump_cfg);
       }
     }
 
@@ -1802,9 +2072,9 @@ void draw_system_map(Simulation& sim,
           const ShipDesign* pd = sim.find_design(sh->design_id);
           const double fuel_cap = pd ? std::max(0.0, pd->fuel_capacity_tons) : 0.0;
 
-          const ImVec2 mouse = ImGui::GetMousePos();
+          const ImVec2 mouse_pos = ImGui::GetMousePos();
           const float hover_r2 = 11.0f * 11.0f;
-          int hovered = -1;
+          int hovered_idx = -1;
           float hovered_d2 = 1e30f;
 
           for (std::size_t i = 0; i < plan.steps.size() && i < q.size(); ++i) {
@@ -1830,24 +2100,24 @@ void draw_system_map(Simulation& sim,
               draw->AddCircle(next, 9.0f, col_warn, 0, 2.0f);
             }
 
-            const float mx = mouse.x - next.x;
-            const float my = mouse.y - next.y;
+            const float mx = mouse_pos.x - next.x;
+            const float my = mouse_pos.y - next.y;
             const float md2 = mx * mx + my * my;
             if (md2 <= hover_r2 && md2 < hovered_d2) {
-              hovered = static_cast<int>(i);
+              hovered_idx = static_cast<int>(i);
               hovered_d2 = md2;
             }
 
             prev = next;
           }
 
-          if (hovered >= 0) {
-            const PlannedOrderStep& stp = plan.steps[static_cast<std::size_t>(hovered)];
+          if (hovered_idx >= 0) {
+            const PlannedOrderStep& stp = plan.steps[static_cast<std::size_t>(hovered_idx)];
             const std::string ord_str = order_to_ui_string(
-                sim, q[static_cast<std::size_t>(hovered)], ui.viewer_faction_id, ui.fog_of_war);
+                sim, q[static_cast<std::size_t>(hovered_idx)], ui.viewer_faction_id, ui.fog_of_war);
 
             ImGui::BeginTooltip();
-            ImGui::Text("Order %d: %s", hovered + 1, ord_str.c_str());
+            ImGui::Text("Order %d: %s", hovered_idx + 1, ord_str.c_str());
 
             if (!stp.feasible) {
               ImGui::TextDisabled("Status: infeasible");
@@ -1918,11 +2188,20 @@ void draw_system_map(Simulation& sim,
       }
       const float r_px = static_cast<float>(r_mkm * scale * zoom);
       const ImVec2 p = to_screen(src.pos_mkm, center, scale, zoom, pan);
+      if (!circle_intersects_rect(p, r_px + 2.0f, view_p0, view_p1)) {
+        continue;
+      }
+      const int seg = ring_segments_for_radius_px(r_px);
+      const int need_vtx = ring_vertex_estimate(seg, ui.faction_sensor_coverage_fill);
+      if (!drawlist_can_add_vertices(draw, need_vtx)) {
+        vertex_budget_guard_triggered = true;
+        break;
+      }
 
       if (ui.faction_sensor_coverage_fill) {
-        draw->AddCircleFilled(p, r_px, col_fill, 0);
+        draw->AddCircleFilled(p, r_px, col_fill, seg);
       }
-      draw->AddCircle(p, r_px, col_outline, 0, 1.0f);
+      draw->AddCircle(p, r_px, col_outline, seg, 1.0f);
 
       sensor_sources_drawn += 1;
       if (sensor_sources_drawn >= max_draw) {
@@ -1972,10 +2251,10 @@ void draw_system_map(Simulation& sim,
           if (ms.system_id != sys->id) continue;
 
           if (ui.fog_of_war && viewer_faction_id != kInvalidId) {
-            if (ms.attacker_id != kInvalidId) {
-              const Ship* attacker = find_ptr(s.ships, ms.attacker_id);
+            if (ms.attacker_ship_id != kInvalidId) {
+              const Ship* attacker = find_ptr(s.ships, ms.attacker_ship_id);
               if (attacker && attacker->faction_id != viewer_faction_id) {
-                if (!sim.is_ship_detected_by_faction(viewer_faction_id, ms.attacker_id)) {
+                if (!sim.is_ship_detected_by_faction(viewer_faction_id, ms.attacker_ship_id)) {
                   continue;
                 }
               }
@@ -2042,7 +2321,7 @@ void draw_system_map(Simulation& sim,
         float speed_mul = 1.0f;
         if (ui.system_map_motion_trails_speed_brighten) {
           const ShipDesign* d = sim.find_design(sh->design_id);
-          const double vmax = d ? std::max(1e-9, d->max_speed_kms) : 0.0;
+          const double vmax = std::max(1e-9, design_speed_km_s(d));
           if (vmax > 0.0) {
             const double v_km_s = (sh->velocity_mkm_per_day.length() * 1e6) / 86400.0;
             const double frac = std::clamp(v_km_s / vmax, 0.0, 1.0);
@@ -2080,7 +2359,14 @@ void draw_system_map(Simulation& sim,
 
           const ImVec2 p0 = to_screen(a.pos_mkm, center, scale, zoom, pan);
           const ImVec2 p1 = to_screen(b.pos_mkm, center, scale, zoom, pan);
+          if (!segment_bbox_intersects_rect(p0, p1, view_p0, view_p1, 6.0f)) {
+            continue;
+          }
 
+          if (!drawlist_can_add_vertices(draw, 6)) {
+            vertex_budget_guard_triggered = true;
+            break;
+          }
           draw->AddLine(p0, p1, col, base_thickness);
         }
       }
@@ -2099,6 +2385,8 @@ void draw_system_map(Simulation& sim,
   for (Id sid : sys->ships) {
     const auto* sh = find_ptr(s.ships, sid);
     if (!sh) continue;
+    const bool is_selected = (selected_ship == sid);
+    const bool is_fleet_member = (!selected_fleet_members.empty() && selected_fleet_members.count(sid));
 
     // Fog-of-war: show friendly ships and detected hostiles (view faction is the selected ship's faction).
     if (ui.fog_of_war && viewer_faction_id != kInvalidId) {
@@ -2108,6 +2396,8 @@ void draw_system_map(Simulation& sim,
     }
 
     const ImVec2 p = to_screen(sh->position_mkm, center, scale, zoom, pan);
+    const bool ship_in_view = point_in_rect_expanded(p, view_p0, view_p1, 28.0f);
+    if (!ship_in_view && !is_selected && !is_fleet_member) continue;
 
     const auto* d = sim.find_design(sh->design_id);
 
@@ -2116,8 +2406,6 @@ void draw_system_map(Simulation& sim,
       ds = sim.diplomatic_status(viewer_faction_id, sh->faction_id);
     }
 
-    const bool is_selected = (selected_ship == sid);
-    const bool is_fleet_member = (!selected_fleet_members.empty() && selected_fleet_members.count(sid));
     const bool is_hostile = (viewer_faction_id != kInvalidId && ds == DiplomacyStatus::Hostile);
 
     // Time preview overlay (planning): inertial projection (based on current velocity).
@@ -2172,15 +2460,24 @@ void draw_system_map(Simulation& sim,
     if (d && d->weapon_range_mkm > 0.0) {
       const float rpx = static_cast<float>(d->weapon_range_mkm * scale * zoom);
       const float alpha = std::clamp(ui.map_route_opacity, 0.0f, 1.0f);
+      const bool in_view = circle_intersects_rect(p, rpx + 2.0f, view_p0, view_p1);
+      const bool need_any_ring =
+          ((ui.show_hostile_weapon_ranges && is_hostile) || (ui.show_fleet_weapon_ranges && is_fleet_member) ||
+           (ui.show_selected_weapon_range && is_selected));
+      const int seg = ring_segments_for_radius_px(rpx);
+      const int ring_vtx = ring_vertex_estimate(seg, false);
+      if (need_any_ring && in_view && !drawlist_can_add_vertices(draw, ring_vtx)) {
+        vertex_budget_guard_triggered = true;
+      }
 
-      if (ui.show_hostile_weapon_ranges && is_hostile) {
-        draw->AddCircle(p, rpx, modulate_alpha(IM_COL32(255, 90, 90, 255), 0.18f * alpha), 0, 1.0f);
+      if (ui.show_hostile_weapon_ranges && is_hostile && in_view && drawlist_can_add_vertices(draw, ring_vtx)) {
+        draw->AddCircle(p, rpx, modulate_alpha(IM_COL32(255, 90, 90, 255), 0.18f * alpha), seg, 1.0f);
       }
-      if (ui.show_fleet_weapon_ranges && is_fleet_member) {
-        draw->AddCircle(p, rpx, modulate_alpha(IM_COL32(255, 170, 90, 255), 0.22f * alpha), 0, 1.0f);
+      if (ui.show_fleet_weapon_ranges && is_fleet_member && in_view && drawlist_can_add_vertices(draw, ring_vtx)) {
+        draw->AddCircle(p, rpx, modulate_alpha(IM_COL32(255, 170, 90, 255), 0.22f * alpha), seg, 1.0f);
       }
-      if (ui.show_selected_weapon_range && is_selected) {
-        draw->AddCircle(p, rpx, modulate_alpha(IM_COL32(255, 200, 120, 255), 0.32f * alpha), 0, 1.25f);
+      if (ui.show_selected_weapon_range && is_selected && in_view && drawlist_can_add_vertices(draw, ring_vtx)) {
+        draw->AddCircle(p, rpx, modulate_alpha(IM_COL32(255, 200, 120, 255), 0.32f * alpha), seg, 1.25f);
       }
     }
 
@@ -2199,7 +2496,16 @@ void draw_system_map(Simulation& sim,
         else if (sh->sensor_mode == SensorMode::Active) mult = sim.cfg().sensor_mode_active_range_multiplier;
         if (!std::isfinite(mult) || mult < 0.0) mult = 0.0;
         const double r_mkm = std::max(0.0, d->sensor_range_mkm) * mult;
-        draw->AddCircle(p, static_cast<float>(r_mkm * scale * zoom), col, 0, 1.0f);
+        const float sensor_rpx = static_cast<float>(r_mkm * scale * zoom);
+        if (circle_intersects_rect(p, sensor_rpx + 2.0f, view_p0, view_p1)) {
+          const int seg = ring_segments_for_radius_px(sensor_rpx);
+          const int ring_vtx = ring_vertex_estimate(seg, false);
+          if (drawlist_can_add_vertices(draw, ring_vtx)) {
+            draw->AddCircle(p, sensor_rpx, col, seg, 1.0f);
+          } else {
+            vertex_budget_guard_triggered = true;
+          }
+        }
       }
     }
 
@@ -2225,8 +2531,9 @@ void draw_system_map(Simulation& sim,
       if (speed_mkm_day > 1e-10) {
         angle = static_cast<float>(std::atan2(v.y, v.x));
         speed01 = 1.0f;
-        if (d && d->max_speed_kms > 0.0) {
-          const double max_mkm_day = d->max_speed_kms * 0.0864; // 1 km/s = 0.0864 mkm/day
+        const double max_speed_km_s = design_speed_km_s(d);
+        if (max_speed_km_s > 0.0) {
+          const double max_mkm_day = max_speed_km_s * kKmSToMkmPerDay; // 1 km/s = 0.0864 mkm/day
           if (max_mkm_day > 1e-12) {
             speed01 = static_cast<float>(std::clamp(speed_mkm_day / max_mkm_day, 0.0, 1.0));
           }
@@ -2236,15 +2543,37 @@ void draw_system_map(Simulation& sim,
       float sz = icon_cfg.ship_icon_size_px;
       if (is_selected) sz *= 1.15f;
 
-      // Thruster plume (drawn behind the sprite).
-      if (icon_cfg.ship_thrusters && speed01 > 0.05f) {
-        icon_sprites->draw_ship_thruster(draw, p, sz, angle, speed01, icon_cfg);
+      // Additional procedural wake so movement stays legible even at low zoom.
+      if (speed_mkm_day > 1e-10) {
+        const float wake_len = std::max(10.0f, sz * 1.35f) * (is_selected ? 1.25f : (is_fleet_member ? 1.10f : 1.0f));
+        draw_kinetic_wake(draw, p, angle, speed01, wake_len, ship_col, ship_seed ^ 0x5A11A9u);
       }
 
-      // Subtle drop shadow to make icons pop over the background.
-      ProcIconSpriteEngine::add_image_rotated(draw, sprite.tex_id, ImVec2(p.x + 1.0f, p.y + 1.0f), sz, angle,
-                                              IM_COL32(0, 0, 0, 140));
-      ProcIconSpriteEngine::add_image_rotated(draw, sprite.tex_id, p, sz, angle, ship_col);
+      // Thruster plume (drawn behind the sprite).
+      if (icon_cfg.ship_thrusters && speed01 > 0.05f) {
+        ProcIconSpriteEngine::draw_thruster_plume(draw, p, angle, speed01, ship_col, icon_cfg);
+      }
+
+      if (sprite.tex_id) {
+        draw_icon_with_shadow(draw, sprite.tex_id, p, sz, angle, ship_col);
+      } else {
+        // Rare fallback when icon texture generation/upload fails.
+        const float r = (selected_ship == sid) ? 5.0f : 4.0f;
+        draw->AddCircleFilled(ImVec2(p.x + 1.0f, p.y + 1.0f), r, kIconShadowColor);
+        draw->AddCircleFilled(p, r, ship_col);
+      }
+
+      // Feature: heading vector for selected ship(s) to make current motion intent obvious.
+      if ((is_selected || is_fleet_member) && speed_mkm_day > 1e-10) {
+        const float heading_len = std::clamp(12.0f + 26.0f * speed01, 12.0f, 38.0f);
+        const ImVec2 tip{
+            p.x + std::cos(angle) * heading_len,
+            p.y + std::sin(angle) * heading_len,
+        };
+        const ImU32 vec_col = modulate_alpha(ship_col, is_selected ? 0.90f : 0.68f);
+        draw->AddLine(p, tip, vec_col, is_selected ? 2.0f : 1.3f);
+        add_arrowhead(draw, p, tip, vec_col, is_selected ? 6.0f : 4.5f);
+      }
 
       if (is_selected) {
         const float halo = sz * 0.60f + 2.0f;
@@ -2266,6 +2595,23 @@ void draw_system_map(Simulation& sim,
       // Highlight selected fleet members.
       if (!selected_fleet_members.empty() && selected_fleet_members.count(sid)) {
         draw->AddCircle(p, 13.0f, IM_COL32(0, 160, 255, 200), 0, 1.5f);
+      }
+
+      // Fallback marker path still gets a small kinetic wake for motion readability.
+      const Vec2 v = sh->velocity_mkm_per_day;
+      const double speed_mkm_day = v.length();
+      if (speed_mkm_day > 1e-10) {
+        const float angle = static_cast<float>(std::atan2(v.y, v.x));
+        float speed01 = 1.0f;
+        if (d) {
+          const double vmax_km_s = design_speed_km_s(d);
+          if (vmax_km_s > 0.0) {
+            const double vmax_mkm_day = vmax_km_s * kKmSToMkmPerDay;
+            if (vmax_mkm_day > 1e-12) speed01 = static_cast<float>(std::clamp(speed_mkm_day / vmax_mkm_day, 0.0, 1.0));
+          }
+        }
+        draw_kinetic_wake(draw, p, angle, speed01, 12.0f, ship_col,
+                          hash_u32(static_cast<std::uint32_t>(sid) ^ 0x4D4F5645u));
       }
     }
   }
@@ -2302,12 +2648,22 @@ void draw_system_map(Simulation& sim,
 
       const ImVec2 p = to_screen(pos_mkm, center, scale, zoom, pan);
       const ImVec2 t = to_screen(target_pos_mkm, center, scale, zoom, pan);
+      if (!point_in_rect_expanded(p, view_p0, view_p1, 40.0f) &&
+          !point_in_rect_expanded(t, view_p0, view_p1, 40.0f)) {
+        continue;
+      }
 
       const ImU32 base = modulate_alpha(color_faction(ms.attacker_faction_id), 0.85f);
       const ImU32 trail = modulate_alpha(base, 0.22f);
 
       // Trail to show direction.
       draw->AddLine(p, t, trail, 1.0f);
+      {
+        const std::uint32_t wake_seed = hash_u32(static_cast<std::uint32_t>(mid) ^ 0x771F00Du);
+        const float ang = std::atan2(t.y - p.y, t.x - p.x);
+        draw_kinetic_wake(draw, p, ang, 0.95f, std::max(8.0f, icon_cfg.missile_icon_size_px * 1.6f),
+                          modulate_alpha(base, 0.85f), wake_seed);
+      }
 
       // Marker.
       if (use_contact_icons) {
@@ -2315,12 +2671,26 @@ void draw_system_map(Simulation& sim,
         const auto sprite = icon_sprites->get_missile_icon(seed, icon_cfg);
         const float angle = std::atan2(t.y - p.y, t.x - p.x);
         const float sz = std::max(6.0f, icon_cfg.missile_icon_size_px);
-        ProcIconSpriteEngine::add_image_rotated(draw, sprite.tex_id, ImVec2(p.x + 1.0f, p.y + 1.0f), sz, angle,
-                                                IM_COL32(0, 0, 0, 140));
-        ProcIconSpriteEngine::add_image_rotated(draw, sprite.tex_id, p, sz, angle, base);
+        if (sprite.tex_id) {
+          draw_icon_with_shadow(draw, sprite.tex_id, p, sz, angle, base);
+        } else {
+          draw->AddCircleFilled(ImVec2(p.x + 1.0f, p.y + 1.0f), 2.7f, kIconShadowColor);
+          draw->AddCircleFilled(p, 2.7f, base);
+        }
       } else {
-        draw->AddCircleFilled(ImVec2(p.x + 1.0f, p.y + 1.0f), 2.7f, IM_COL32(0, 0, 0, 140));
+        draw->AddCircleFilled(ImVec2(p.x + 1.0f, p.y + 1.0f), 2.7f, kIconShadowColor);
         draw->AddCircleFilled(p, 2.7f, base);
+      }
+
+      // Feature: progress arc around the salvo marker for quick ETA-at-a-glance.
+      const float progress01 = static_cast<float>(missile_progress01(ms));
+      if (progress01 > 1e-3f) {
+        const float r_prog = std::max(4.0f, icon_cfg.missile_icon_size_px * 0.62f);
+        const float a0 = -static_cast<float>(kPi * 0.5);
+        const float a1 = a0 + progress01 * static_cast<float>(kTwoPi);
+        draw->PathClear();
+        draw->PathArcTo(p, r_prog, a0, a1, 18);
+        draw->PathStroke(modulate_alpha(base, 0.90f), 0, 1.6f);
       }
     }
   }
@@ -2329,18 +2699,23 @@ void draw_system_map(Simulation& sim,
   for (const auto& [wid, w] : s.wrecks) {
     if (w.system_id != sys->id) continue;
     const ImVec2 p = to_screen(w.position_mkm, center, scale, zoom, pan);
+    if (!point_in_rect_expanded(p, view_p0, view_p1, 22.0f)) continue;
     if (use_contact_icons) {
       const std::uint32_t seed = hash_u32(static_cast<std::uint32_t>(wid) ^ body_sprite_seed_base ^ 0xD00DF00Du);
       const auto sprite = icon_sprites->get_wreck_icon(w, seed, icon_cfg);
 
       // Deterministic rotation for variety.
-      const float angle = static_cast<float>((seed % 360u) * (kPi / 180.0));
+      const float angle = seeded_angle_rad(seed);
       const float sz = std::max(8.0f, icon_cfg.wreck_icon_size_px);
       const ImU32 col = IM_COL32(160, 160, 160, 220);
 
-      ProcIconSpriteEngine::add_image_rotated(draw, sprite.tex_id, ImVec2(p.x + 1.0f, p.y + 1.0f), sz, angle,
-                                              IM_COL32(0, 0, 0, 140));
-      ProcIconSpriteEngine::add_image_rotated(draw, sprite.tex_id, p, sz, angle, col);
+      if (sprite.tex_id) {
+        draw_icon_with_shadow(draw, sprite.tex_id, p, sz, angle, col);
+      } else {
+        const float r = 5.0f;
+        draw->AddLine(ImVec2(p.x - r, p.y - r), ImVec2(p.x + r, p.y + r), col, 2.0f);
+        draw->AddLine(ImVec2(p.x - r, p.y + r), ImVec2(p.x + r, p.y - r), col, 2.0f);
+      }
     } else {
       const float r = 5.0f;
       const ImU32 c = IM_COL32(160, 160, 160, 200);
@@ -2359,10 +2734,11 @@ void draw_system_map(Simulation& sim,
     }
 
     const ImVec2 p = to_screen(a.position_mkm, center, scale, zoom, pan);
+    if (!point_in_rect_expanded(p, view_p0, view_p1, 26.0f)) continue;
 
     // Procedural color: anomalies get a stable tint derived from their kind, with
     // hazard/reward slightly influencing saturation/value.
-    const std::uint64_t kind_h = nebula4x::procgen_obscure::fnv1a_64(a.kind);
+    const std::uint64_t kind_h = 0x9e3779b97f4a7c15ULL * (1ULL + static_cast<std::uint64_t>(a.kind));
     const float kind_hue = static_cast<float>(kind_h % 360ull) / 360.0f;
     const float hz = (a.hazard_chance > 1e-9 && a.hazard_damage > 1e-9)
                          ? std::clamp(static_cast<float>(a.hazard_chance * std::clamp(a.hazard_damage / 20.0, 0.0, 1.0)),
@@ -2391,7 +2767,7 @@ void draw_system_map(Simulation& sim,
       const float fx_sz = std::max(10.0f, base_sz) * anomaly_cfg.size_mult;
 
       const double t_anim_days = t_now_days + (ImGui::GetTime() / 86400.0);
-      const float base_rot = static_cast<float>((seed % 360u) * (kPi / 180.0));
+      const float base_rot = seeded_angle_rad(seed);
       const float angle = anomaly_cfg.animate
                               ? (base_rot + static_cast<float>(t_anim_days * anomaly_cfg.animate_speed_cycles_per_day * kTwoPi))
                               : base_rot;
@@ -2405,10 +2781,13 @@ void draw_system_map(Simulation& sim,
       const ImU32 fx_tint = modulate_alpha(col, anomaly_cfg.opacity * pulse_mul);
 
       // Soft shadow first.
-      ProcAnomalyPhenomenaSpriteEngine::draw_sprite_rotated(draw, sprite, ImVec2(p.x + 1.0f, p.y + 1.0f), fx_sz, angle,
-                                                           IM_COL32(0, 0, 0, 110));
-      // Then the sprite + filament overlays.
-      ProcAnomalyPhenomenaSpriteEngine::draw_sprite_rotated(draw, sprite, p, fx_sz, angle, fx_tint);
+      if (sprite.tex_id) {
+        ProcAnomalyPhenomenaSpriteEngine::draw_sprite_rotated(
+            draw, sprite.tex_id, ImVec2(p.x + 1.0f, p.y + 1.0f), fx_sz, angle, IM_COL32(0, 0, 0, 110));
+        // Then the sprite.
+        ProcAnomalyPhenomenaSpriteEngine::draw_sprite_rotated(draw, sprite.tex_id, p, fx_sz, angle, fx_tint);
+      }
+      // Then filament overlays.
       ProcAnomalyPhenomenaSpriteEngine::draw_filaments(draw, p, fx_sz * 0.95f, a, seed, t_anim_days, fx_tint, anomaly_cfg);
     }
 
@@ -2417,15 +2796,20 @@ void draw_system_map(Simulation& sim,
       const auto icon_sprite = icon_sprites->get_anomaly_icon(a, seed, icon_cfg);
 
       // Deterministic rotation for variety (icons are symmetric so this is subtle).
-      const float angle = static_cast<float>((seed % 360u) * (kPi / 180.0));
+      const float angle = seeded_angle_rad(seed);
       const float sz = std::max(8.0f, icon_cfg.anomaly_icon_size_px);
 
-      ProcIconSpriteEngine::add_image_rotated(draw, icon_sprite.tex_id, ImVec2(p.x + 1.0f, p.y + 1.0f), sz, angle,
-                                              IM_COL32(0, 0, 0, 140));
-      ProcIconSpriteEngine::add_image_rotated(draw, icon_sprite.tex_id, p, sz, angle, col);
+      if (icon_sprite.tex_id) {
+        draw_icon_with_shadow(draw, icon_sprite.tex_id, p, sz, angle, col);
+      } else {
+        draw->AddCircleFilled(ImVec2(p.x + 1.0f, p.y + 1.0f), 7.0f, kIconShadowColor);
+        draw->AddText(ImVec2(p.x - 3.5f, p.y - 8.0f), col, "?");
+      }
 
       if (icon_cfg.anomaly_pulse && !use_anomaly_fx) {
-        icon_sprites->draw_anomaly_pulse(draw, p, sz, static_cast<float>(ImGui::GetTime()), col, icon_cfg);
+        const float t = static_cast<float>(ImGui::GetTime());
+        const float pulse = 0.70f + 0.30f * std::sin(t * 2.2f + static_cast<float>(aid % 113));
+        draw->AddCircle(p, sz * (0.55f + 0.20f * pulse), modulate_alpha(col, 0.45f), 0, 1.5f);
       }
     } else {
       // Subtle shadow + question-mark glyph (simple + recognizable).
@@ -3097,6 +3481,22 @@ void draw_system_map(Simulation& sim,
           const Ship* attacker = find_ptr(s.ships, ms->attacker_ship_id);
           const Ship* target = find_ptr(s.ships, ms->target_ship_id);
 
+          Vec2 cur_pos_mkm = ms->pos_mkm;
+          if (cur_pos_mkm.length() <= 1e-12) {
+            // Legacy fallback for pre-homing salvo state.
+            const double total = std::max(1e-6, ms->eta_days_total);
+            const double rem = std::max(0.0, ms->eta_days_remaining);
+            const double frac = std::clamp(1.0 - rem / total, 0.0, 1.0);
+            cur_pos_mkm = ms->launch_pos_mkm + (ms->target_pos_mkm - ms->launch_pos_mkm) * frac;
+          }
+
+          Vec2 target_pos_mkm = ms->target_pos_mkm;
+          if (target && target->system_id == sys->id) {
+            target_pos_mkm = target->position_mkm;
+          }
+          const double dist_to_target_mkm = (target_pos_mkm - cur_pos_mkm).length();
+          const double progress01 = missile_progress01(*ms);
+
           if (attacker) {
             ImGui::TextDisabled("Attacker: %s", attacker->name.c_str());
           } else {
@@ -3109,8 +3509,19 @@ void draw_system_map(Simulation& sim,
           }
 
           ImGui::TextDisabled("ETA: %s", format_duration_days(std::max(0.0, ms->eta_days_remaining)).c_str());
+          ImGui::ProgressBar(
+              static_cast<float>(progress01), ImVec2(160.0f, 0.0f), "Flight progress");
+          ImGui::SameLine();
+          ImGui::TextDisabled("%.0f%%", progress01 * 100.0);
           if (ms->speed_mkm_per_day > 1e-9) {
             ImGui::TextDisabled("Speed: %.1f mkm/day", ms->speed_mkm_per_day);
+          }
+          if (std::isfinite(dist_to_target_mkm) && dist_to_target_mkm >= 0.0) {
+            ImGui::TextDisabled("Distance to target: %.2f mkm", dist_to_target_mkm);
+            if (ms->speed_mkm_per_day > 1e-9) {
+              const double eta_geom_days = dist_to_target_mkm / ms->speed_mkm_per_day;
+              ImGui::TextDisabled("ETA (geometry): %s", format_duration_days(eta_geom_days).c_str());
+            }
           }
           if (ms->range_remaining_mkm > 1e-9) {
             ImGui::TextDisabled("Range remaining: %.1f mkm", ms->range_remaining_mkm);
@@ -3138,6 +3549,11 @@ void draw_system_map(Simulation& sim,
               ui.system_map_follow_selected = false;
             }
           }
+          ImGui::SameLine();
+          if (ImGui::SmallButton("Center salvo")) {
+            pan = Vec2{-cur_pos_mkm.x, -cur_pos_mkm.y};
+            ui.system_map_follow_selected = false;
+          }
         }
       } else if (kind == HoverKind::Anomaly) {
         const auto* a = find_ptr(s.anomalies, hovered_id);
@@ -3147,7 +3563,8 @@ void draw_system_map(Simulation& sim,
                                      : a->name;
 
           ImGui::TextUnformatted(nm.c_str());
-          if (!a->kind.empty()) ImGui::TextDisabled("Kind: %s", a->kind.c_str());
+          if (a->kind != AnomalyKind::Unknown) ImGui::TextDisabled("Kind: %s", anomaly_kind_label(a->kind));
+          if (a->kind == AnomalyKind::Xenoarchaeology) ImGui::TextDisabled("Tag: Xenoarchaeology");
           ImGui::TextDisabled("Investigation: %d days", std::max(1, a->investigation_days));
 
           // Microfield-aware context: anomalies hidden in dense pockets are harder to spot.
@@ -3207,7 +3624,7 @@ void draw_system_map(Simulation& sim,
               const std::uint32_t seed = hash_u32(static_cast<std::uint32_t>(a->id) ^ body_sprite_seed_base ^ 0xA1100A1Du);
 
               // Same tint logic as the on-map render.
-              const std::uint64_t kind_h = nebula4x::procgen_obscure::fnv1a_64(a->kind);
+              const std::uint64_t kind_h = 0x9e3779b97f4a7c15ULL * (1ULL + static_cast<std::uint64_t>(a->kind));
               const float kind_hue = static_cast<float>(kind_h % 360ull) / 360.0f;
               const float hz = (a->hazard_chance > 1e-9 && a->hazard_damage > 1e-9)
                                    ? std::clamp(static_cast<float>(a->hazard_chance *
@@ -3295,6 +3712,24 @@ void draw_system_map(Simulation& sim,
           ImGui::Text("%s", b->name.c_str());
           ImGui::TextDisabled("Type: %s", body_type_to_string(b->type).c_str());
           ImGui::TextDisabled("Orbit: %.1f mkm", b->orbit_radius_mkm);
+          if (b->surface_temp_k > 1e-6) {
+            ImGui::TextDisabled("Surface temp: %.1f K", b->surface_temp_k);
+          }
+          if (b->atmosphere_atm > 1e-6 || b->oxygen_atm > 1e-6) {
+            ImGui::TextDisabled("Atmosphere: %.3f atm (O2 %.3f atm)", b->atmosphere_atm, b->oxygen_atm);
+          }
+          if (b->type != BodyType::Star && b->type != BodyType::Asteroid && b->type != BodyType::Comet) {
+            const double hab = (viewer_faction_id != kInvalidId) ? sim.body_habitability_for_faction(hovered_id, viewer_faction_id)
+                                                                  : sim.body_habitability(hovered_id);
+            if (std::isfinite(hab)) {
+              const double h = std::clamp(hab, 0.0, 1.0);
+              const char* label = (h >= 0.85) ? "Excellent"
+                                  : (h >= 0.60) ? "Good"
+                                  : (h >= 0.35) ? "Marginal"
+                                                : "Hostile";
+              ImGui::TextDisabled("Habitability: %.0f%% (%s)", h * 100.0, label);
+            }
+          }
 
           // Colony summary (if any).
           for (const auto& [cid, c] : s.colonies) {
@@ -3736,6 +4171,48 @@ void draw_system_map(Simulation& sim,
   ImGui::BulletText("Jump points are purple rings");
   ImGui::BulletText("Alt + click a jump point to Survey it (no transit)");
 
+  ImGui::SeparatorText("Visual presets");
+  if (ImGui::SmallButton("Tactical##sys_preset")) {
+    ui.system_map_grid = true;
+    ui.system_map_order_paths = true;
+    ui.system_map_missile_salvos = true;
+    ui.show_selected_weapon_range = true;
+    ui.show_fleet_weapon_ranges = true;
+    ui.show_hostile_weapon_ranges = true;
+    ui.system_map_threat_heatmap = true;
+    ui.system_map_sensor_heatmap = false;
+    ui.system_map_follow_selected = false;
+    ui.system_map_time_preview = false;
+  }
+  ImGui::SameLine();
+  if (ImGui::SmallButton("Navigation##sys_preset")) {
+    ui.system_map_grid = false;
+    ui.system_map_order_paths = true;
+    ui.system_map_follow_selected = true;
+    ui.system_map_jump_phenomena = true;
+    ui.system_map_anomaly_phenomena = true;
+    ui.system_map_flow_field_overlay = true;
+    ui.system_map_nebula_microfield_overlay = true;
+    ui.system_map_storm_cell_overlay = true;
+    ui.show_contact_labels = true;
+    ui.show_minor_body_labels = true;
+  }
+  ImGui::SameLine();
+  if (ImGui::SmallButton("Cinematic##sys_preset")) {
+    ui.system_map_starfield = true;
+    ui.system_map_particle_field = true;
+    ui.map_proc_render_engine = true;
+    ui.system_map_grid = false;
+    ui.system_map_order_paths = false;
+    ui.system_map_missile_salvos = true;
+    ui.system_map_flow_field_overlay = true;
+    ui.system_map_jump_phenomena = true;
+    ui.system_map_anomaly_phenomena = true;
+    ui.show_contact_labels = false;
+    ui.system_map_time_preview = true;
+    ui.system_map_time_preview_trails = true;
+  }
+
   ImGui::SeparatorText("Map overlays");
   ImGui::Checkbox("Starfield", &ui.system_map_starfield);
   ImGui::SameLine();
@@ -4133,6 +4610,123 @@ void draw_system_map(Simulation& sim,
     ImGui::Unindent();
   }
 
+  ImGui::SeparatorText("Find");
+  static char map_find_buf[96] = "";
+  static int map_find_scope = 0; // 0=all, 1=bodies, 2=ships, 3=jumps
+  static std::string map_find_prev;
+  static int map_find_prev_scope = -1;
+  static int map_find_index = 0;
+
+  ImGui::SetNextItemWidth(210.0f);
+  ImGui::InputTextWithHint("##system_map_find", "Find ship/body/jump", map_find_buf, IM_ARRAYSIZE(map_find_buf));
+  ImGui::SameLine();
+  ImGui::SetNextItemWidth(120.0f);
+  ImGui::Combo("##system_map_find_scope", &map_find_scope, "All\0Bodies\0Ships\0Jumps\0");
+
+  std::string_view find_query(map_find_buf);
+  while (!find_query.empty() && std::isspace(static_cast<unsigned char>(find_query.front()))) find_query.remove_prefix(1);
+  while (!find_query.empty() && std::isspace(static_cast<unsigned char>(find_query.back()))) find_query.remove_suffix(1);
+
+  struct MapFindHit {
+    int kind{0}; // 0=body, 1=ship, 2=jump
+    Id id{kInvalidId};
+    Vec2 pos_mkm{0.0, 0.0};
+    std::string label;
+  };
+  std::vector<MapFindHit> find_hits;
+  find_hits.reserve(64);
+
+  auto add_find_hit = [&](int kind, Id id, const Vec2& pos_mkm, const std::string& label) {
+    if (find_hits.size() >= 512) return;
+    MapFindHit h;
+    h.kind = kind;
+    h.id = id;
+    h.pos_mkm = pos_mkm;
+    h.label = label;
+    find_hits.push_back(std::move(h));
+  };
+
+  if (!find_query.empty()) {
+    if (map_find_scope == 0 || map_find_scope == 1) {
+      for (Id bid : sys->bodies) {
+        const Body* b = find_ptr(s.bodies, bid);
+        if (!b) continue;
+        if (!contains_icase(b->name, find_query)) continue;
+        add_find_hit(0, bid, b->position_mkm, "Body: " + b->name);
+      }
+    }
+
+    if (map_find_scope == 0 || map_find_scope == 2) {
+      for (Id sid : sys->ships) {
+        const Ship* sh = find_ptr(s.ships, sid);
+        if (!sh) continue;
+
+        if (ui.fog_of_war && viewer_faction_id != kInvalidId && sh->faction_id != viewer_faction_id) {
+          if (std::find(detected_hostiles.begin(), detected_hostiles.end(), sid) == detected_hostiles.end()) continue;
+        }
+
+        if (!contains_icase(sh->name, find_query)) continue;
+        add_find_hit(1, sid, sh->position_mkm, "Ship: " + sh->name);
+      }
+    }
+
+    if (map_find_scope == 0 || map_find_scope == 3) {
+      for (Id jid : sys->jump_points) {
+        const JumpPoint* jp = find_ptr(s.jump_points, jid);
+        if (!jp) continue;
+
+        const std::string jp_name = !jp->name.empty() ? jp->name : ("Jump " + std::to_string(static_cast<unsigned long long>(jid)));
+        if (!contains_icase(jp_name, find_query)) continue;
+        add_find_hit(2, jid, jp->position_mkm, "Jump: " + jp_name);
+      }
+    }
+  }
+
+  if (map_find_prev != map_find_buf || map_find_prev_scope != map_find_scope) {
+    map_find_index = 0;
+    map_find_prev = map_find_buf;
+    map_find_prev_scope = map_find_scope;
+  }
+
+  if (!find_hits.empty()) {
+    map_find_index = std::clamp(map_find_index, 0, static_cast<int>(find_hits.size()) - 1);
+    auto focus_hit = [&](const MapFindHit& h) {
+      pan = Vec2{-h.pos_mkm.x, -h.pos_mkm.y};
+      ui.system_map_follow_selected = false;
+      zoom = std::max(zoom, 1.0);
+
+      if (h.kind == 0) {
+        selected_body = h.id;
+        for (const auto& [cid, c] : s.colonies) {
+          if (c.body_id == h.id) {
+            selected_colony = cid;
+            break;
+          }
+        }
+      } else if (h.kind == 1) {
+        selected_ship = h.id;
+        ui.selected_fleet_id = sim.fleet_for_ship(h.id);
+      }
+    };
+
+    if (ImGui::ArrowButton("##system_map_find_prev", ImGuiDir_Left)) {
+      map_find_index = (map_find_index + static_cast<int>(find_hits.size()) - 1) % static_cast<int>(find_hits.size());
+    }
+    ImGui::SameLine();
+    if (ImGui::ArrowButton("##system_map_find_next", ImGuiDir_Right)) {
+      map_find_index = (map_find_index + 1) % static_cast<int>(find_hits.size());
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Focus")) {
+      focus_hit(find_hits[static_cast<size_t>(map_find_index)]);
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("%d / %d", map_find_index + 1, static_cast<int>(find_hits.size()));
+    ImGui::TextDisabled("%s", find_hits[static_cast<size_t>(map_find_index)].label.c_str());
+  } else if (!find_query.empty()) {
+    ImGui::TextDisabled("No matches in this system.");
+  }
+
   ImGui::Checkbox("Minimap (M)", &ui.system_map_show_minimap);
   ImGui::Checkbox("Order paths", &ui.system_map_order_paths);
   ImGui::SameLine();
@@ -4170,6 +4764,10 @@ void draw_system_map(Simulation& sim,
         }
       }
     }
+  }
+  if (vertex_budget_guard_triggered) {
+    ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.35f, 1.0f),
+                       "Render guard active: reduced detail to prevent draw-list overflow.");
   }
 
   ImGui::SeparatorText("Time preview (T)");

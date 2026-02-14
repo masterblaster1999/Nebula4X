@@ -376,7 +376,9 @@ ProcIconSpriteEngine::SpriteInfo ProcIconSpriteEngine::get_wreck_icon(const nebu
 ProcIconSpriteEngine::SpriteInfo ProcIconSpriteEngine::get_anomaly_icon(const nebula4x::Anomaly& anomaly,
                                                                         std::uint32_t seed,
                                                                         const ProcIconSpriteConfig& cfg) {
-  const std::uint64_t kind_hash = anomaly.kind.empty() ? hash_string_fnv1a(anomaly.name) : hash_string_fnv1a(anomaly.kind);
+  const std::uint64_t kind_hash = (anomaly.kind == nebula4x::AnomalyKind::Unknown)
+                                      ? hash_string_fnv1a(anomaly.name)
+                                      : static_cast<std::uint64_t>(hash_u32(static_cast<std::uint32_t>(anomaly.kind)));
   IconKey key;
   key.kind = ProcIconKind::Anomaly;
   key.id_hash = static_cast<std::uint64_t>(anomaly.id) ^ (kind_hash << 1);
@@ -540,7 +542,7 @@ void ProcIconSpriteEngine::raster_ship(std::vector<std::uint8_t>& rgba,
                                       std::uint64_t design_hash,
                                       std::uint16_t /*variant*/,
                                       const nebula4x::ShipDesign* design) {
-  rgba.assign(static_cast<std::size_t>(w * h * 4), 0);
+  rgba.assign(static_cast<std::size_t>(w * h * 4), std::uint8_t{0});
   std::uint32_t s = hash_u32(seed ^ static_cast<std::uint32_t>(design_hash) ^ 0xBADC0DEu);
 
   // Derived / normalized scale from mass.
@@ -690,7 +692,7 @@ void ProcIconSpriteEngine::raster_missile(std::vector<std::uint8_t>& rgba,
                                          int h,
                                          std::uint32_t seed,
                                          std::uint16_t /*variant*/) {
-  rgba.assign(static_cast<std::size_t>(w * h * 4), 0);
+  rgba.assign(static_cast<std::size_t>(w * h * 4), std::uint8_t{0});
   std::uint32_t s = hash_u32(seed ^ 0xDEADBEEFu);
 
   const float inv = 1.0f / static_cast<float>(w);
@@ -746,7 +748,7 @@ void ProcIconSpriteEngine::raster_wreck(std::vector<std::uint8_t>& rgba,
                                        std::uint64_t id_hash,
                                        std::uint16_t /*variant*/,
                                        const nebula4x::Wreck* wreck) {
-  rgba.assign(static_cast<std::size_t>(w * h * 4), 0);
+  rgba.assign(static_cast<std::size_t>(w * h * 4), std::uint8_t{0});
   std::uint32_t s = hash_u32(seed ^ static_cast<std::uint32_t>(id_hash) ^ 0xA11CEu);
   const float inv = 1.0f / static_cast<float>(w);
   const float aa = 2.0f * inv;
@@ -808,7 +810,7 @@ void ProcIconSpriteEngine::raster_anomaly(std::vector<std::uint8_t>& rgba,
                                          std::uint64_t kind_hash,
                                          std::uint16_t /*variant*/,
                                          const nebula4x::Anomaly* anomaly) {
-  rgba.assign(static_cast<std::size_t>(w * h * 4), 0);
+  rgba.assign(static_cast<std::size_t>(w * h * 4), std::uint8_t{0});
   std::uint32_t s = hash_u32(seed ^ static_cast<std::uint32_t>(kind_hash) ^ 0xB00B135u);
   const float inv = 1.0f / static_cast<float>(w);
   const float aa = 2.0f * inv;
@@ -859,7 +861,7 @@ void ProcIconSpriteEngine::raster_anomaly(std::vector<std::uint8_t>& rgba,
   }
 
   // Optional: encode a tiny hint of kind by cutting a notch.
-  if (anomaly && !anomaly->kind.empty()) {
+  if (anomaly && anomaly->kind != nebula4x::AnomalyKind::Unknown) {
     const float notch_ang = (static_cast<float>(hash_u32(static_cast<std::uint32_t>(kind_hash)) & 0xFFFFu) / 65535.0f) *
                             2.0f * 3.1415926f;
     const float c = std::cos(notch_ang);

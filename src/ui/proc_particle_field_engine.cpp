@@ -145,8 +145,10 @@ void ProcParticleFieldEngine::draw_particles(ImDrawList* draw,
 
   const int layers = std::clamp(cfg.layers, 1, 3);
 
-  // Precompute RGB and base alpha.
-  const ImU32 rgb = tint_color & 0x00FFFFFFu;
+  // Precompute base tint channels.
+  const int base_r = static_cast<int>(tint_color & 0xFFu);
+  const int base_g = static_cast<int>((tint_color >> 8) & 0xFFu);
+  const int base_b = static_cast<int>((tint_color >> 16) & 0xFFu);
   const int base_a = static_cast<int>((tint_color >> 24) & 0xFFu);
 
   const float t_real = static_cast<float>(realtime_seconds_ * static_cast<double>(cfg.twinkle_speed));
@@ -248,15 +250,40 @@ void ProcParticleFieldEngine::draw_particles(ImDrawList* draw,
           }
 
           float a = cfg.opacity * layer_alpha_scale * tw;
+          const float edge_soft_px = 14.0f + radius * 5.0f;
+          const float edge_dist = std::min(
+              std::min(px - viewport_x0, viewport_x1 - px), std::min(py - viewport_y0, viewport_y1 - py));
+          const float edge_fade = clampf(edge_dist / edge_soft_px, 0.0f, 1.0f);
+          a *= edge_fade;
           a = clampf(a, 0.0f, 1.0f);
           if (a <= 0.001f) continue;
 
           const int aa = static_cast<int>(std::round(static_cast<float>(base_a) * a));
           if (aa <= 0) continue;
-          const ImU32 col = (static_cast<ImU32>(aa) << 24) | rgb;
 
-          // Dust particle: small quad.
-          draw->AddRectFilled(ImVec2(px - radius, py - radius), ImVec2(px + radius, py + radius), col);
+          const float shift = (r2 - 0.5f) * 0.30f + (layer_t - 0.5f) * 0.10f;
+          const float cr = clampf(1.0f + 0.60f * shift, 0.65f, 1.35f);
+          const float cg = clampf(1.0f + 0.15f * shift, 0.65f, 1.35f);
+          const float cb = clampf(1.0f - 0.62f * shift, 0.65f, 1.35f);
+          const int rr = std::clamp(static_cast<int>(std::round(static_cast<float>(base_r) * cr)), 0, 255);
+          const int gg = std::clamp(static_cast<int>(std::round(static_cast<float>(base_g) * cg)), 0, 255);
+          const int bb = std::clamp(static_cast<int>(std::round(static_cast<float>(base_b) * cb)), 0, 255);
+          const ImU32 col = (static_cast<ImU32>(aa) << 24) | (static_cast<ImU32>(bb) << 16) |
+                            (static_cast<ImU32>(gg) << 8) | static_cast<ImU32>(rr);
+
+          // Dust particle: tiny ones stay as quads for speed, larger ones get a soft round core.
+          if (radius <= 1.15f) {
+            draw->AddRectFilled(ImVec2(px - radius, py - radius), ImVec2(px + radius, py + radius), col);
+          } else {
+            const int segs = (radius < 1.8f) ? 6 : 8;
+            const int halo_a = static_cast<int>(std::round(static_cast<float>(aa) * 0.32f));
+            if (halo_a > 0) {
+              const ImU32 halo_col = (static_cast<ImU32>(halo_a) << 24) | (static_cast<ImU32>(bb) << 16) |
+                                     (static_cast<ImU32>(gg) << 8) | static_cast<ImU32>(rr);
+              draw->AddCircleFilled(ImVec2(px, py), radius * 1.75f, halo_col, segs);
+            }
+            draw->AddCircleFilled(ImVec2(px, py), radius, col, segs);
+          }
           stats_.particles_drawn++;
 
           // Optional sparkle cross.
@@ -264,7 +291,8 @@ void ProcParticleFieldEngine::draw_particles(ImDrawList* draw,
             const float len = (cfg.sparkle_length_px * (0.75f + 0.85f * r1)) * (0.75f + 0.65f * layer_t);
             const float a2 = clampf(a * 1.8f, 0.0f, 1.0f);
             const int aa2 = static_cast<int>(std::round(static_cast<float>(base_a) * a2));
-            const ImU32 col2 = (static_cast<ImU32>(aa2) << 24) | rgb;
+            const ImU32 col2 = (static_cast<ImU32>(aa2) << 24) | (static_cast<ImU32>(bb) << 16) |
+                               (static_cast<ImU32>(gg) << 8) | static_cast<ImU32>(rr);
 
             // Horizontal + vertical.
             draw->AddLine(ImVec2(px - len, py), ImVec2(px + len, py), col2, 1.0f);

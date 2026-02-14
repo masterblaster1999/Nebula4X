@@ -1131,6 +1131,12 @@ void draw_status_bar(Simulation& sim, UIState& ui, HUDState& /*hud*/, Id& select
       nebula4x::log::error(std::string("Save failed: ") + e.what());
     }
   }
+  if (ImGui::IsItemHovered()) {
+    std::string tip = "Save game (Ctrl+S)";
+    tip += "\nPath: ";
+    tip += (save_path && save_path[0] != '\0') ? std::string(save_path) : std::string("(unset)");
+    ImGui::SetTooltip("%s", tip.c_str());
+  }
   ImGui::SameLine();
   if (ImGui::SmallButton("Load")) {
     try {
@@ -1142,6 +1148,12 @@ void draw_status_bar(Simulation& sim, UIState& ui, HUDState& /*hud*/, Id& select
     } catch (const std::exception& e) {
       nebula4x::log::error(std::string("Load failed: ") + e.what());
     }
+  }
+  if (ImGui::IsItemHovered()) {
+    std::string tip = "Load game (Ctrl+O)";
+    tip += "\nPath: ";
+    tip += (load_path && load_path[0] != '\0') ? std::string(load_path) : std::string("(unset)");
+    ImGui::SetTooltip("%s", tip.c_str());
   }
 
   ImGui::SameLine();
@@ -1206,6 +1218,9 @@ void draw_status_bar(Simulation& sim, UIState& ui, HUDState& /*hud*/, Id& select
   }
   ImGui::SameLine();
   if (ImGui::SmallButton("Settings")) ui.show_settings_window = true;
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip("Open Settings (Ctrl+,)");
+  }
 
   ImGui::SameLine();
   if (ImGui::SmallButton("Nav")) ui.show_navigator_window = true;
@@ -1236,6 +1251,78 @@ void draw_status_bar(Simulation& sim, UIState& ui, HUDState& /*hud*/, Id& select
       ImGui::SameLine();
       ImGui::TextDisabled(" | Colony: %s", c->name.c_str());
     }
+  } else if (selected_body != kInvalidId) {
+    if (const auto* b = find_ptr(s.bodies, selected_body)) {
+      ImGui::SameLine();
+      ImGui::TextDisabled(" | Body: %s", b->name.c_str());
+    }
+  }
+
+  VerticalSeparator();
+  if (ImGui::SmallButton("<")) {
+    nav_history_back(sim, ui, selected_ship, selected_colony, selected_body, ui.nav_open_windows_on_jump);
+  }
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip("Selection history back (Alt+Left)");
+  }
+  ImGui::SameLine();
+  if (ImGui::SmallButton(">")) {
+    nav_history_forward(sim, ui, selected_ship, selected_colony, selected_body, ui.nav_open_windows_on_jump);
+  }
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip("Selection history forward (Alt+Right)");
+  }
+  ImGui::SameLine();
+  if (ImGui::SmallButton("Pin")) {
+    nav_bookmark_toggle_current(sim, ui, selected_ship, selected_colony, selected_body);
+  }
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip("Bookmark/unbookmark current selection");
+  }
+
+  Id locate_system_id = kInvalidId;
+  bool follow_selected_ship = false;
+  if (selected_ship != kInvalidId) {
+    if (const auto* sh = find_ptr(s.ships, selected_ship)) {
+      locate_system_id = sh->system_id;
+      follow_selected_ship = true;
+    }
+  } else if (selected_colony != kInvalidId) {
+    if (const auto* c = find_ptr(s.colonies, selected_colony)) {
+      if (const auto* b = find_ptr(s.bodies, c->body_id)) locate_system_id = b->system_id;
+    }
+  } else if (selected_body != kInvalidId) {
+    if (const auto* b = find_ptr(s.bodies, selected_body)) locate_system_id = b->system_id;
+  }
+  if (locate_system_id != kInvalidId) {
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Locate")) {
+      s.selected_system = locate_system_id;
+      ui.show_map_window = true;
+      ui.request_map_tab = MapTab::System;
+      if (follow_selected_ship) ui.system_map_follow_selected = true;
+    }
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip("Focus the map on selected entity");
+    }
+  }
+
+  {
+    Id vf = ui.viewer_faction_id;
+    if (selected_ship != kInvalidId) {
+      if (const auto* sh = find_ptr(s.ships, selected_ship)) vf = sh->faction_id;
+    }
+    const Faction* fac = (vf != kInvalidId) ? find_ptr(s.factions, vf) : nullptr;
+    if (fac) {
+      const int discovered = static_cast<int>(fac->discovered_systems.size());
+      const int total_systems = static_cast<int>(s.systems.size());
+      const int surveyed_jumps = static_cast<int>(fac->surveyed_jump_points.size());
+      ImGui::SameLine();
+      ImGui::TextDisabled(" | Intel %d/%d sys, %d jp", discovered, total_systems, surveyed_jumps);
+      if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Exploration visibility for current viewer faction");
+      }
+    }
   }
 
   // Fog-of-war indicator (clickable).
@@ -1243,25 +1330,51 @@ void draw_status_bar(Simulation& sim, UIState& ui, HUDState& /*hud*/, Id& select
   if (ImGui::Checkbox("FoW", &ui.fog_of_war)) {
     // no-op
   }
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip("Toggle fog-of-war rendering");
+  }
 
   // Unread events indicator.
   const std::uint64_t newest_seq = (s.next_event_seq > 0) ? (s.next_event_seq - 1) : 0;
   if (ui.last_seen_event_seq > newest_seq) ui.last_seen_event_seq = 0;
 
   int unread = 0;
+  int unread_warn = 0;
+  int unread_err = 0;
   for (const auto& ev : s.events) {
-    if (ev.seq > ui.last_seen_event_seq) ++unread;
+    if (ev.seq <= ui.last_seen_event_seq) continue;
+    ++unread;
+    if (ev.level == EventLevel::Warn) ++unread_warn;
+    else if (ev.level == EventLevel::Error) ++unread_err;
   }
 
+  ImGui::SameLine();
+  VerticalSeparator();
+  ImGui::SameLine();
+  std::string b = "Log";
   if (unread > 0) {
-    ImGui::SameLine();
-    VerticalSeparator();
-    ImGui::SameLine();
-    std::string b = "Log (" + std::to_string(unread) + ")";
-    if (ImGui::SmallButton(b.c_str())) {
-      ui.show_details_window = true;
-      ui.request_details_tab = DetailsTab::Log;
+    b += " (" + std::to_string(unread);
+    if (unread_warn > 0 || unread_err > 0) {
+      b += " W" + std::to_string(unread_warn) + " E" + std::to_string(unread_err);
     }
+    b += ")";
+  }
+  if (ImGui::SmallButton(b.c_str())) {
+    ui.show_details_window = true;
+    ui.request_details_tab = DetailsTab::Log;
+  }
+  if (ImGui::IsItemHovered()) {
+    std::string tip = "Open Event Log";
+    if (unread > 0) {
+      const int unread_info = std::max(0, unread - unread_warn - unread_err);
+      tip += "\nUnread: " + std::to_string(unread);
+      tip += " (info " + std::to_string(unread_info) +
+             ", warn " + std::to_string(unread_warn) +
+             ", error " + std::to_string(unread_err) + ")";
+    } else {
+      tip += "\nNo unread events";
+    }
+    ImGui::SetTooltip("%s", tip.c_str());
   }
 
   // Notifications inbox indicator.
@@ -1294,7 +1407,7 @@ void draw_status_bar(Simulation& sim, UIState& ui, HUDState& /*hud*/, Id& select
       ImGui::SameLine();
       VerticalSeparator();
       ImGui::SameLine();
-      std::string b = (pinned > 0) ? ("Notebook (★" + std::to_string(pinned) + ")") : "Notebook";
+      std::string b = (pinned > 0) ? ("Notebook (*" + std::to_string(pinned) + ")") : "Notebook";
       if (ImGui::SmallButton(b.c_str())) ui.show_intel_notebook_window = true;
       if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("Open Intel Notebook (system notes + journal)\nShortcut: Ctrl+Shift+I");

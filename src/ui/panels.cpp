@@ -19,6 +19,7 @@
 #include <utility>
 
 #include "nebula4x/core/serialization.h"
+#include "nebula4x/core/enum_strings.h"
 #include "nebula4x/core/procgen_obscure.h"
 #include "nebula4x/core/procgen_surface.h"
 #include "nebula4x/core/procgen_design_forge.h"
@@ -1467,6 +1468,22 @@ if (sim.cfg().enable_ship_maintenance) {
             }
             if (!sim.cfg().enable_crew_casualties) {
               ImGui::TextDisabled("Crew casualties disabled in SimConfig");
+            }
+          }
+
+          // Adaptive command-and-control (Command Mesh / C3).
+          {
+            if (sim.cfg().enable_command_mesh) {
+              const double cov = std::clamp(sim.ship_command_mesh_coverage(*sh), 0.0, 1.0);
+              const double qual = std::clamp(sim.ship_command_mesh_quality(*sh), 0.0, 1.0);
+              const double eff = std::clamp(sim.ship_command_efficiency_multiplier(*sh), 0.0, 1.0);
+              ImGui::Text("Command mesh: coverage %.0f%%, quality %.0f%% (ops x%.2f)",
+                          cov * 100.0, qual * 100.0, eff);
+              if (qual < 0.55) {
+                ImGui::TextDisabled("Low-link regime: crew autonomy is compensating for relay gaps.");
+              }
+            } else {
+              ImGui::TextDisabled("Command mesh: disabled in SimConfig");
             }
           }
 
@@ -3437,12 +3454,12 @@ auto set_queue_and_refresh = [&](const std::vector<Order>& new_q) {
               std::vector<std::pair<std::string, Id>> to_items;
               to_items.reserve(s.systems.size());
               for (const auto& kv : s.systems) {
-                const auto& sys = kv.second;
-                if (!allow_system(sys.id)) continue;
-                const std::string nm = sys.name.empty()
-                                           ? ("System #" + std::to_string(static_cast<unsigned long long>(sys.id)))
-                                           : sys.name;
-                to_items.push_back({nm, sys.id});
+                const auto& sys_entry = kv.second;
+                if (!allow_system(sys_entry.id)) continue;
+                const std::string nm = sys_entry.name.empty()
+                                           ? ("System #" + std::to_string(static_cast<unsigned long long>(sys_entry.id)))
+                                           : sys_entry.name;
+                to_items.push_back({nm, sys_entry.id});
               }
               std::sort(to_items.begin(), to_items.end(),
                         [](const auto& a, const auto& b) { return a.first < b.first; });
@@ -3674,13 +3691,13 @@ auto set_queue_and_refresh = [&](const std::vector<Order>& new_q) {
 
                     // Prefer same faction.
                     if (rt.macro_prefer_same_faction_colonies) {
-                      std::vector<Id> fac;
+                      std::vector<Id> same_fac_candidates;
                       for (Id cid : body_cands) {
                         const auto* c2 = find_ptr(s.colonies, cid);
-                        if (c2 && c2->faction_id == c->faction_id) fac.push_back(cid);
+                        if (c2 && c2->faction_id == c->faction_id) same_fac_candidates.push_back(cid);
                       }
-                      if (fac.size() == 1) target = fac.front();
-                      if (fac.size() > 1) body_cands = std::move(fac);
+                      if (same_fac_candidates.size() == 1) target = same_fac_candidates.front();
+                      if (same_fac_candidates.size() > 1) body_cands = std::move(same_fac_candidates);
                     }
 
                     if (target == kInvalidId) {
@@ -3765,8 +3782,10 @@ auto set_queue_and_refresh = [&](const std::vector<Order>& new_q) {
                   std::string src_dest;
                   if (jp->linked_jump_id != kInvalidId) {
                     if (const auto* other = find_ptr(s.jump_points, jp->linked_jump_id)) {
-                      const auto* sys = find_ptr(s.systems, other->system_id);
-                      if (sys && allow_system(sys->id) && !sys->name.empty()) src_dest = norm_key(sys->name);
+                      const auto* linked_sys = find_ptr(s.systems, other->system_id);
+                      if (linked_sys && allow_system(linked_sys->id) && !linked_sys->name.empty()) {
+                        src_dest = norm_key(linked_sys->name);
+                      }
                     }
                   }
 
@@ -3779,8 +3798,10 @@ auto set_queue_and_refresh = [&](const std::vector<Order>& new_q) {
                       std::string dst_dest;
                       if (djp->linked_jump_id != kInvalidId) {
                         if (const auto* other = find_ptr(s.jump_points, djp->linked_jump_id)) {
-                          const auto* sys = find_ptr(s.systems, other->system_id);
-                          if (sys && allow_system(sys->id) && !sys->name.empty()) dst_dest = norm_key(sys->name);
+                          const auto* linked_dst_sys = find_ptr(s.systems, other->system_id);
+                          if (linked_dst_sys && allow_system(linked_dst_sys->id) && !linked_dst_sys->name.empty()) {
+                            dst_dest = norm_key(linked_dst_sys->name);
+                          }
                         }
                       }
                       if (!dst_dest.empty() && dst_dest == src_dest) {
@@ -4069,9 +4090,9 @@ auto set_queue_and_refresh = [&](const std::vector<Order>& new_q) {
         if (!ship_counts.empty()) {
           ship_cands.reserve(s.ships.size());
           for (const auto& kv : s.ships) {
-            const auto& sh = kv.second;
-            if (!allow_ship(sh.id)) continue;
-            ship_cands.push_back({sh.id, ship_label(sh.id)});
+            const auto& ship_entry = kv.second;
+            if (!allow_ship(ship_entry.id)) continue;
+            ship_cands.push_back({ship_entry.id, ship_label(ship_entry.id)});
           }
           std::sort(ship_cands.begin(), ship_cands.end(),
                     [](const auto& a, const auto& b) { return a.label < b.label; });
@@ -4105,12 +4126,12 @@ auto set_queue_and_refresh = [&](const std::vector<Order>& new_q) {
         if (!system_counts.empty()) {
           system_cands.reserve(s.systems.size());
           for (const auto& kv : s.systems) {
-            const auto& sys = kv.second;
-            if (!allow_system(sys.id)) continue;
-            const std::string nm = sys.name.empty()
-                                       ? ("System #" + std::to_string(static_cast<unsigned long long>(sys.id)))
-                                       : sys.name;
-            system_cands.push_back({sys.id, nm});
+            const auto& sys_entry = kv.second;
+            if (!allow_system(sys_entry.id)) continue;
+            const std::string nm = sys_entry.name.empty()
+                                       ? ("System #" + std::to_string(static_cast<unsigned long long>(sys_entry.id)))
+                                       : sys_entry.name;
+            system_cands.push_back({sys_entry.id, nm});
           }
           std::sort(system_cands.begin(), system_cands.end(),
                     [](const auto& a, const auto& b) { return a.label < b.label; });
@@ -7532,24 +7553,24 @@ if (move_from >= 0 && move_to >= 0) {
                 ImGui::SeparatorText("Assault Advisor");
 
                 // Use the fleet leader for ETA estimates (fallback to first ship).
-                const Ship* leader = nullptr;
+                const Ship* fleet_leader = nullptr;
                 if (selected_fleet != nullptr) {
-                  leader = find_ptr(s.ships, selected_fleet->leader_ship_id);
-                  if (leader == nullptr && !selected_fleet->ship_ids.empty()) {
-                    leader = find_ptr(s.ships, selected_fleet->ship_ids.front());
+                  fleet_leader = find_ptr(s.ships, selected_fleet->leader_ship_id);
+                  if (fleet_leader == nullptr && !selected_fleet->ship_ids.empty()) {
+                    fleet_leader = find_ptr(s.ships, selected_fleet->ship_ids.front());
                   }
                 }
 
                 Id start_system_id = kInvalidId;
                 Vec2 start_pos_mkm{0.0, 0.0};
                 double planning_speed_km_s = 0.0;
-                if (leader != nullptr) {
-                  start_system_id = leader->system_id;
-                  start_pos_mkm = leader->position_mkm;
-                  if (const ShipDesign* d = sim.find_design(leader->design_id)) {
+                if (fleet_leader != nullptr) {
+                  start_system_id = fleet_leader->system_id;
+                  start_pos_mkm = fleet_leader->position_mkm;
+                  if (const ShipDesign* d = sim.find_design(fleet_leader->design_id)) {
                     planning_speed_km_s = d->speed_km_s;
                   } else {
-                    planning_speed_km_s = leader->speed_km_s;
+                    planning_speed_km_s = fleet_leader->speed_km_s;
                   }
                 }
 
@@ -7591,36 +7612,29 @@ if (move_from >= 0 && move_to >= 0) {
                 if (!analysis.ok) {
                   ImGui::TextDisabled("Advisor: %s", analysis.message.c_str());
                 } else {
-                  const auto winner_label = [](GroundBattleWinner w) -> const char* {
-                    switch (w) {
-                      case GroundBattleWinner::Attacker:
-                        return "Attacker";
-                      case GroundBattleWinner::Defender:
-                        return "Defender";
-                      case GroundBattleWinner::Tie:
-                        return "Tie";
-                    }
-                    return "?";
-                  };
-
                   const auto draw_forecast = [&](const char* label, const GroundBattleForecast& fc) {
                     if (!fc.ok) {
                       ImGui::Text("%s: (invalid forecast)", label);
                       return;
                     }
 
-                    ImGui::Text("%s: %s wins in %.1f d", label, winner_label(fc.winner), fc.time_to_resolution_days);
+                    ImGui::Text(
+                        "%s: %s wins in %d d", label, nebula4x::ground_battle_winner_label(fc.winner), fc.days_to_resolve);
                     ImGui::TextDisabled(
                         "A: %.0f -> %.0f (loss %.0f) | D: %.0f -> %.0f (loss %.0f)",
-                        fc.attacker_strength_start,
-                        fc.attacker_strength_end,
-                        fc.attacker_strength_start - fc.attacker_strength_end,
-                        fc.defender_strength_start,
-                        fc.defender_strength_end,
-                        fc.defender_strength_start - fc.defender_strength_end);
+                        fc.attacker_start,
+                        fc.attacker_end,
+                        fc.attacker_start - fc.attacker_end,
+                        fc.defender_start,
+                        fc.defender_end,
+                        fc.defender_start - fc.defender_end);
 
-                    if (std::isfinite(fc.time_to_fort_depletion_days)) {
-                      ImGui::TextDisabled("Forts depleted in %.1f d", fc.time_to_fort_depletion_days);
+                    if (fc.truncated) {
+                      if (!fc.truncated_reason.empty()) {
+                        ImGui::TextDisabled("Forecast truncated: %s", fc.truncated_reason.c_str());
+                      } else {
+                        ImGui::TextDisabled("Forecast truncated");
+                      }
                     }
                   };
 
@@ -7695,14 +7709,21 @@ if (move_from >= 0 && move_to >= 0) {
                   if (!analysis.staging_options.empty()) {
                     ImGui::SeparatorText("Suggested staging colonies");
 
+                    const Id best_stage_id = analysis.staging_options.front().colony_id;
+                    const bool best_already_selected = (fleet_mut->mission.assault_staging_colony_id == best_stage_id);
+                    if (best_already_selected) ImGui::BeginDisabled();
                     if (ImGui::SmallButton("Use best staging")) {
-                      fleet_mut->mission.assault_staging_colony_id = analysis.staging_options.front().colony_id;
+                      fleet_mut->mission.assault_staging_colony_id = best_stage_id;
                     }
+                    if (best_already_selected) ImGui::EndDisabled();
                     ImGui::SameLine();
                     ImGui::TextDisabled("(based on surplus vs ETA)");
+                    if (ImGui::IsItemHovered()) {
+                      ImGui::SetTooltip("Ranking score balances available troops and travel time.");
+                    }
 
-                    for (const auto& opt : analysis.staging_options) {
-                      const Colony* c = find_ptr(s.colonies, opt.colony_id);
+                    for (const auto& stage_opt : analysis.staging_options) {
+                      const Colony* c = find_ptr(s.colonies, stage_opt.colony_id);
                       if (c == nullptr) {
                         continue;
                       }
@@ -7710,16 +7731,34 @@ if (move_from >= 0 && move_to >= 0) {
                       ImGui::BulletText(
                           "%s: avail %.0f (surplus %.0f) | ETA %.1f d (to stage %.1f, stage->tgt %.1f)",
                           c->name.c_str(),
-                          opt.take_cap_strength,
-                          opt.surplus_strength,
-                          opt.eta_total_days,
-                          opt.eta_start_to_stage_days,
-                          opt.eta_stage_to_target_days);
+                          stage_opt.take_cap_strength,
+                          stage_opt.surplus_strength,
+                          stage_opt.eta_total_days,
+                          stage_opt.eta_start_to_stage_days,
+                          stage_opt.eta_stage_to_target_days);
 
                       ImGui::SameLine();
-                      const std::string btn = "Use##assault_stage_" + std::to_string(opt.colony_id);
+                      const bool is_selected_stage = (fleet_mut->mission.assault_staging_colony_id == stage_opt.colony_id);
+                      if (is_selected_stage) ImGui::BeginDisabled();
+                      const std::string btn = "Use##assault_stage_" + std::to_string(stage_opt.colony_id);
                       if (ImGui::SmallButton(btn.c_str())) {
-                        fleet_mut->mission.assault_staging_colony_id = opt.colony_id;
+                        fleet_mut->mission.assault_staging_colony_id = stage_opt.colony_id;
+                      }
+                      if (is_selected_stage) ImGui::EndDisabled();
+                      if (ImGui::IsItemHovered()) {
+                        const double projected_strength = embarked + std::max(0.0, stage_opt.take_cap_strength);
+                        const double projected_shortfall =
+                            std::max(0.0, analysis.target.required_attacker_strength - projected_strength);
+                        ImGui::SetTooltip(
+                            "Set staging colony to %s\nProjected embarked troops: %.0f\nProjected shortfall: %.0f\nScore: %.2f",
+                            c->name.c_str(),
+                            projected_strength,
+                            projected_shortfall,
+                            stage_opt.score);
+                      }
+                      if (is_selected_stage) {
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("Selected");
                       }
                     }
                   }
@@ -13165,6 +13204,142 @@ void draw_settings_window(UIState& ui, char* ui_prefs_path, UIPrefActions& actio
     ImGui::SliderFloat("Starfield parallax", &ui.map_starfield_parallax, 0.0f, 1.0f, "%.2f");
     ui.map_starfield_parallax = std::clamp(ui.map_starfield_parallax, 0.0f, 1.0f);
 
+    ImGui::SeparatorText("Procedural visual profiles");
+    if (ImGui::Button("Apply Balanced profile")) {
+      ui.galaxy_map_particle_field = true;
+      ui.system_map_particle_field = true;
+      ui.map_particle_layers = 2;
+      ui.map_particle_opacity = 0.20f;
+      ui.map_particle_particles_per_tile = 64;
+      ui.map_particle_sparkles = true;
+      ui.map_particle_sparkle_chance = 0.06f;
+
+      ui.map_proc_render_engine = true;
+      ui.map_proc_render_tile_px = 256;
+      ui.map_proc_render_cache_tiles = 128;
+      ui.map_proc_render_nebula_enable = true;
+      ui.map_proc_render_nebula_strength = 0.42f;
+      ui.map_proc_render_nebula_scale = 1.10f;
+      ui.map_proc_render_nebula_warp = 0.85f;
+
+      ui.map_raymarch_nebula = true;
+      ui.map_raymarch_nebula_alpha = 0.12f;
+      ui.map_raymarch_nebula_parallax = 0.08f;
+      ui.map_raymarch_nebula_max_depth = 6;
+      ui.map_raymarch_nebula_spp = 1;
+      ui.map_raymarch_nebula_max_steps = 48;
+      ui.map_raymarch_nebula_animate = true;
+      ui.map_raymarch_nebula_time_scale = 0.20f;
+
+      ui.galaxy_map_territory_overlay = true;
+      ui.galaxy_map_territory_fill = true;
+      ui.galaxy_map_territory_boundaries = true;
+      ui.galaxy_map_territory_fill_opacity = 0.14f;
+      ui.galaxy_map_territory_boundary_opacity = 0.34f;
+      ui.galaxy_map_territory_boundary_thickness_px = 1.4f;
+
+      ui.system_map_body_sprites = true;
+      ui.system_map_contact_icons = true;
+      ui.system_map_jump_phenomena = true;
+      ui.system_map_anomaly_phenomena = true;
+
+      ui.system_map_motion_trails = true;
+      ui.system_map_motion_trails_all_ships = false;
+      ui.system_map_motion_trails_missiles = false;
+      ui.system_map_motion_trails_max_age_days = 6.0f;
+      ui.system_map_motion_trails_sample_hours = 1.5f;
+      ui.system_map_motion_trails_thickness_px = 2.2f;
+      ui.system_map_motion_trails_alpha = 0.50f;
+
+      ui.system_map_flow_field_overlay = true;
+      ui.system_map_flow_field_opacity = 0.38f;
+      ui.system_map_flow_field_thickness_px = 1.35f;
+      ui.system_map_flow_field_lines_per_tile = 11;
+      ui.system_map_flow_field_steps_per_line = 48;
+
+      ui.system_map_gravity_contours_overlay = true;
+      ui.system_map_gravity_contours_opacity = 0.18f;
+      ui.system_map_gravity_contours_thickness_px = 1.15f;
+      ui.system_map_gravity_contours_levels = 10;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Apply Cinematic profile")) {
+      ui.galaxy_map_particle_field = true;
+      ui.system_map_particle_field = true;
+      ui.map_particle_layers = 3;
+      ui.map_particle_opacity = 0.26f;
+      ui.map_particle_particles_per_tile = 80;
+      ui.map_particle_sparkles = true;
+      ui.map_particle_sparkle_chance = 0.09f;
+      ui.map_particle_sparkle_length_px = 8.0f;
+
+      ui.map_proc_render_engine = true;
+      ui.map_proc_render_tile_px = 256;
+      ui.map_proc_render_cache_tiles = 192;
+      ui.map_proc_render_nebula_enable = true;
+      ui.map_proc_render_nebula_strength = 0.55f;
+      ui.map_proc_render_nebula_scale = 1.20f;
+      ui.map_proc_render_nebula_warp = 1.10f;
+
+      ui.map_raymarch_nebula = true;
+      ui.map_raymarch_nebula_alpha = 0.18f;
+      ui.map_raymarch_nebula_parallax = 0.10f;
+      ui.map_raymarch_nebula_max_depth = 7;
+      ui.map_raymarch_nebula_spp = 2;
+      ui.map_raymarch_nebula_max_steps = 72;
+      ui.map_raymarch_nebula_animate = true;
+      ui.map_raymarch_nebula_time_scale = 0.24f;
+
+      ui.galaxy_map_territory_overlay = true;
+      ui.galaxy_map_territory_fill = true;
+      ui.galaxy_map_territory_boundaries = true;
+      ui.galaxy_map_territory_fill_opacity = 0.20f;
+      ui.galaxy_map_territory_boundary_opacity = 0.50f;
+      ui.galaxy_map_territory_boundary_thickness_px = 1.8f;
+
+      ui.system_map_body_sprites = true;
+      ui.system_map_body_sprite_px = 128;
+      ui.system_map_body_sprite_light_steps = 48;
+      ui.system_map_body_sprite_specular = 0.50f;
+      ui.system_map_body_sprite_specular_power = 36.0f;
+
+      ui.system_map_contact_icons = true;
+      ui.system_map_ship_icon_size_px = 20.0f;
+      ui.system_map_missile_icon_size_px = 11.0f;
+      ui.system_map_anomaly_icon_size_px = 18.0f;
+
+      ui.system_map_jump_phenomena = true;
+      ui.system_map_jump_phenomena_opacity = 0.70f;
+      ui.system_map_jump_phenomena_filaments = true;
+      ui.system_map_jump_phenomena_filaments_max = 10;
+
+      ui.system_map_anomaly_phenomena = true;
+      ui.system_map_anomaly_phenomena_opacity = 0.70f;
+      ui.system_map_anomaly_phenomena_filaments = true;
+      ui.system_map_anomaly_phenomena_filaments_max = 10;
+      ui.system_map_anomaly_phenomena_glyph_strength = 0.75f;
+
+      ui.system_map_motion_trails = true;
+      ui.system_map_motion_trails_all_ships = true;
+      ui.system_map_motion_trails_missiles = true;
+      ui.system_map_motion_trails_max_age_days = 10.0f;
+      ui.system_map_motion_trails_sample_hours = 1.0f;
+      ui.system_map_motion_trails_thickness_px = 2.6f;
+      ui.system_map_motion_trails_alpha = 0.62f;
+
+      ui.system_map_flow_field_overlay = true;
+      ui.system_map_flow_field_opacity = 0.50f;
+      ui.system_map_flow_field_thickness_px = 1.5f;
+      ui.system_map_flow_field_lines_per_tile = 14;
+      ui.system_map_flow_field_steps_per_line = 60;
+
+      ui.system_map_gravity_contours_overlay = true;
+      ui.system_map_gravity_contours_opacity = 0.28f;
+      ui.system_map_gravity_contours_thickness_px = 1.35f;
+      ui.system_map_gravity_contours_levels = 12;
+    }
+    ImGui::TextDisabled("Profiles integrate and tune procedural visuals for normal play. You can tweak each section below.");
+
     ImGui::SeparatorText("Procedural particle field (dust)");
     ImGui::Checkbox("Enable on galaxy map", &ui.galaxy_map_particle_field);
     ImGui::SameLine();
@@ -13362,7 +13537,7 @@ void draw_settings_window(UIState& ui, char* ui_prefs_path, UIPrefActions& actio
       ImGui::SliderInt("Cache limit", &ui.system_map_jump_phenomena_cache, 8, 2048);
       ui.system_map_jump_phenomena_cache = std::clamp(ui.system_map_jump_phenomena_cache, 8, 2048);
 
-      ImGui::SliderFloat("Size (× glyph)", &ui.system_map_jump_phenomena_size_mult, 1.0f, 16.0f, "%.2f");
+      ImGui::SliderFloat("Size (x glyph)", &ui.system_map_jump_phenomena_size_mult, 1.0f, 16.0f, "%.2f");
       ui.system_map_jump_phenomena_size_mult = std::clamp(ui.system_map_jump_phenomena_size_mult, 1.0f, 16.0f);
       ImGui::SliderFloat("Opacity", &ui.system_map_jump_phenomena_opacity, 0.0f, 1.0f, "%.2f");
       ui.system_map_jump_phenomena_opacity = std::clamp(ui.system_map_jump_phenomena_opacity, 0.0f, 1.0f);
@@ -13616,6 +13791,13 @@ void draw_settings_window(UIState& ui, char* ui_prefs_path, UIPrefActions& actio
     ImGui::SeparatorText("HUD & Accessibility");
     ImGui::SliderFloat("UI scale", &ui.ui_scale, 0.65f, 2.5f, "%.2fx");
     ui.ui_scale = std::clamp(ui.ui_scale, 0.65f, 2.5f);
+    ImGui::SameLine();
+    if (ImGui::SmallButton("A-##ui_scale_nudge_down")) ui.ui_scale = std::max(0.65f, ui.ui_scale - 0.05f);
+    ImGui::SameLine();
+    if (ImGui::SmallButton("100%##ui_scale_reset")) ui.ui_scale = 1.0f;
+    ImGui::SameLine();
+    if (ImGui::SmallButton("A+##ui_scale_nudge_up")) ui.ui_scale = std::min(2.5f, ui.ui_scale + 0.05f);
+    ImGui::TextDisabled("Hotkeys: Ctrl+= / Ctrl+- / Ctrl+Shift+0 (Shift = larger step)");
 
     ImGui::Checkbox("Status bar", &ui.show_status_bar);
     ImGui::Checkbox("Event toasts (warn/error)", &ui.show_event_toasts);
@@ -15301,7 +15483,7 @@ void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& 
 
     struct AnomAssignment {
       Id ship_id{kInvalidId};
-      int progress_days{0};
+      double progress_days{0.0};
       int duration_days{0};
       bool active{false};
     };
@@ -15324,7 +15506,8 @@ void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& 
       const StarSystem* sys = find_ptr(s.systems, a.system_id);
 
       const std::string nm = a.name.empty() ? (std::string("Anomaly ") + std::to_string((int)aid)) : a.name;
-      const std::string kind = a.kind.empty() ? std::string("-") : a.kind;
+      const std::string kind =
+          (a.kind == AnomalyKind::Unknown) ? std::string("-") : std::string(anomaly_kind_label(a.kind));
       const std::string sys_name = sys ? sys->name : "?";
 
       bool mineral_match = false;
@@ -15494,10 +15677,31 @@ void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& 
 
               const std::string sig = procgen_obscure::anomaly_signature_code(*a);
               const std::string glyph = procgen_obscure::anomaly_signature_glyph(*a);
+              const procgen_obscure::AnomalyScanReadout scan =
+                  procgen_obscure::anomaly_scan_readout(*a, neb, ruins, pir);
+              const double site_grad = std::clamp(0.18 + 0.62 * neb, 0.0, 1.0);
+              const procgen_obscure::AnomalySiteProfile site_profile =
+                  procgen_obscure::anomaly_site_profile(*a, neb, ruins, pir, site_grad);
+              const std::string scan_brief = procgen_obscure::anomaly_scan_brief(scan);
+              const std::string site_brief = procgen_obscure::anomaly_site_profile_brief(site_profile);
               const std::string lore = procgen_obscure::anomaly_lore_line(*a, neb, ruins, pir);
 
               ImGui::BeginTooltip();
+              if (a->kind == AnomalyKind::Xenoarchaeology) {
+                ImGui::TextUnformatted("Tag: Xenoarchaeology");
+                ImGui::Separator();
+              }
               ImGui::TextUnformatted((std::string("Signature: ") + sig).c_str());
+              ImGui::TextUnformatted((std::string("Scan: ") + scan_brief).c_str());
+              ImGui::TextUnformatted((std::string("Site profile: ") + site_brief).c_str());
+              if (a->origin_anomaly_id != kInvalidId) {
+                const Id root = procgen_obscure::anomaly_chain_root_id(s.anomalies, a->id);
+                const Id root_show = (root != kInvalidId) ? root : a->origin_anomaly_id;
+                ImGui::Text("Convergence weave: root #%d depth %d", (int)root_show, std::max(0, a->lead_depth));
+              }
+              if (scan.spoof_risk) {
+                ImGui::TextDisabled("Advisory: possible spoofed origin");
+              }
               ImGui::Separator();
               ImGui::TextUnformatted(glyph.c_str());
               ImGui::Separator();
@@ -15600,7 +15804,7 @@ void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& 
                 const auto* sh = find_ptr(s.ships, as.ship_id);
                 const std::string ship_name = sh ? sh->name : (std::string("Ship ") + std::to_string((int)as.ship_id));
                 const int dur = std::max(1, as.duration_days);
-                const int prog = std::clamp(as.progress_days, 0, dur);
+                const int prog = std::clamp(static_cast<int>(std::floor(as.progress_days)), 0, dur);
                 const std::string st = (any_active ? "Investigating: " : "Queued: ") + ship_name +
                                       " (" + std::to_string(prog) + "/" + std::to_string(dur) + ")";
                 ImGui::TextUnformatted(st.c_str());
@@ -15615,7 +15819,7 @@ void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& 
                   const auto* sh = find_ptr(s.ships, as.ship_id);
                   const std::string ship_name = sh ? sh->name : (std::string("Ship ") + std::to_string((int)as.ship_id));
                   const int dur = std::max(1, as.duration_days);
-                  const int prog = std::clamp(as.progress_days, 0, dur);
+                  const int prog = std::clamp(static_cast<int>(std::floor(as.progress_days)), 0, dur);
                   ImGui::BulletText("%s%s (%d/%d)", ship_name.c_str(), as.active ? " *" : "", prog, dur);
                 }
                 ImGui::TextDisabled("* = currently executing");
@@ -15715,7 +15919,7 @@ void draw_directory_window(Simulation& sim, UIState& ui, Id& selected_ship, Id& 
                                                                : sh->name)
                                             : (std::string("Ship ") + std::to_string((int)as.ship_id));
           const int dur = std::max(1, as.duration_days);
-          const int prog = std::clamp(as.progress_days, 0, dur);
+          const int prog = std::clamp(static_cast<int>(std::floor(as.progress_days)), 0, dur);
           ImGui::BulletText("%s%s (%d/%d)", ship_name.c_str(), as.active ? " *" : "", prog, dur);
         }
         ImGui::TextDisabled("* = currently executing");

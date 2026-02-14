@@ -970,7 +970,7 @@ struct UIState {
 
   // UI style preset (ImGui colors + rounding + chrome).
   // 0 = Dark (default), 1 = Light, 2 = Classic, 3 = Nebula, 4 = High Contrast, 5 = Procedural
-  int ui_style_preset{0};
+  int ui_style_preset{3};
 
   // --- Procedural theme (ui_style_preset = 5) ---
   // The procedural theme generates a full accent palette from a small set of parameters
@@ -1262,9 +1262,9 @@ struct UIState {
   // A signed-distance-field (SDF) raymarch renderer used as subtle background
   // chrome. It uses adaptive subdivision and deterministic stochastic sampling
   // so it stays stable while panning/zooming.
-  bool map_raymarch_nebula{false};
-  float map_raymarch_nebula_alpha{0.18f};
-  float map_raymarch_nebula_parallax{0.06f};
+  bool map_raymarch_nebula{true};
+  float map_raymarch_nebula_alpha{0.12f};
+  float map_raymarch_nebula_parallax{0.08f};
   int map_raymarch_nebula_max_depth{6};
   float map_raymarch_nebula_error_threshold{0.05f};
   int map_raymarch_nebula_spp{1};
@@ -1281,13 +1281,13 @@ struct UIState {
   //
   // This dramatically reduces per-frame CPU work when panning/zooming vs.
   // drawing thousands of primitives each frame.
-  bool map_proc_render_engine{false};
+  bool map_proc_render_engine{true};
   int map_proc_render_tile_px{256};
-  int map_proc_render_cache_tiles{96};
+  int map_proc_render_cache_tiles{128};
   bool map_proc_render_nebula_enable{true};
-  float map_proc_render_nebula_strength{0.35f};
-  float map_proc_render_nebula_scale{1.0f};
-  float map_proc_render_nebula_warp{0.70f};
+  float map_proc_render_nebula_strength{0.42f};
+  float map_proc_render_nebula_scale{1.10f};
+  float map_proc_render_nebula_warp{0.85f};
   bool map_proc_render_debug_tiles{false};
   bool map_proc_render_clear_cache_requested{false};
 
@@ -1304,12 +1304,12 @@ struct UIState {
   // UI-only: approximates faction influence using colonies and renders a
   // translucent "political map" overlay (a weighted Voronoi / power diagram)
   // on the galaxy map.
-  bool galaxy_map_territory_overlay{false};
+  bool galaxy_map_territory_overlay{true};
   bool galaxy_map_territory_fill{true};
   bool galaxy_map_territory_boundaries{true};
-  float galaxy_map_territory_fill_opacity{0.16f};
-  float galaxy_map_territory_boundary_opacity{0.42f};
-  float galaxy_map_territory_boundary_thickness_px{1.6f};
+  float galaxy_map_territory_fill_opacity{0.14f};
+  float galaxy_map_territory_boundary_opacity{0.34f};
+  float galaxy_map_territory_boundary_thickness_px{1.4f};
   int galaxy_map_territory_tile_px{420};
   int galaxy_map_territory_cache_tiles{220};
   int galaxy_map_territory_samples_per_tile{28};
@@ -1437,14 +1437,14 @@ struct UIState {
   //
   // Note: the engine itself is runtime-only (not serialized). These values are
   // persisted UI prefs.
-  bool system_map_motion_trails{false};
+  bool system_map_motion_trails{true};
   bool system_map_motion_trails_all_ships{false};
   bool system_map_motion_trails_missiles{false};
-  float system_map_motion_trails_max_age_days{7.0f};
-  float system_map_motion_trails_sample_hours{2.0f};
+  float system_map_motion_trails_max_age_days{6.0f};
+  float system_map_motion_trails_sample_hours{1.5f};
   float system_map_motion_trails_min_seg_px{4.0f};
-  float system_map_motion_trails_thickness_px{2.0f};
-  float system_map_motion_trails_alpha{0.55f};
+  float system_map_motion_trails_thickness_px{2.2f};
+  float system_map_motion_trails_alpha{0.50f};
   bool system_map_motion_trails_speed_brighten{true};
   bool system_map_motion_trails_clear_requested{false};
 
@@ -1496,10 +1496,10 @@ struct UIState {
   // gravitational potential field derived from system body masses.
   //
   // Note: the engine cache is runtime-only. These values are persisted UI prefs.
-  bool system_map_gravity_contours_overlay{false};
+  bool system_map_gravity_contours_overlay{true};
   bool system_map_gravity_contours_debug_tiles{false};
 
-  float system_map_gravity_contours_opacity{0.22f};
+  float system_map_gravity_contours_opacity{0.18f};
   float system_map_gravity_contours_thickness_px{1.25f};
 
   int system_map_gravity_contours_tile_px{420};
@@ -1557,6 +1557,10 @@ struct UIState {
   int new_game_random_placement_quality{24};
   int new_game_random_jump_network_style{0}; // see RandomJumpNetworkStyle
   float new_game_random_jump_density{1.0f};
+  float new_game_random_resource_abundance{1.0f};
+  float new_game_random_frontier_intensity{1.0f};
+  float new_game_random_xeno_spawn_pressure_early{1.0f};
+  float new_game_random_xeno_spawn_pressure_late{1.0f};
 
   bool new_game_random_enable_regions{true};
   int new_game_random_num_regions{-1}; // -1 = auto
@@ -1581,7 +1585,7 @@ struct UIState {
   bool new_game_preview_show_chokepoints{false};
 
   // --- Seed explorer (New Game modal) ---
-  // 0=Balanced, 1=Readable (few crossings), 2=Chokepoints, 3=Webby (redundant routes).
+  // 0=Balanced, 1=Readable (few crossings), 2=Chokepoints, 3=Webby (redundant routes), 4=Frontier drama.
   int new_game_seed_search_objective{0};
   int new_game_seed_search_tries{64};
   int new_game_seed_search_steps_per_frame{8};

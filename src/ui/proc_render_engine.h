@@ -47,6 +47,11 @@ struct ProcRenderConfig {
 
   // Debug visuals.
   bool debug_show_tile_bounds = false;
+
+  // Safety budgets to avoid frame hitches during aggressive pan/zoom.
+  // Set to <=0 to disable a given budget.
+  int max_new_tiles_per_frame = 8;
+  float max_new_tile_ms_per_frame = 3.0f;
 };
 
 struct ProcRenderStats {
@@ -143,6 +148,7 @@ class ProcRenderEngine {
   SDL_Renderer* sdl_renderer_{nullptr};
 
   std::unordered_map<TileKey, TileEntry, TileKeyHash> cache_;
+  std::vector<std::uint8_t> scratch_rgba_;
   std::uint64_t frame_index_{0};
   ProcRenderStats stats_{};
 };

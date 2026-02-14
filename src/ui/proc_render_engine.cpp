@@ -195,9 +195,10 @@ static void stamp_star(std::vector<std::uint8_t>& rgba,
   }
 }
 
-static std::array<float, 3> hue_to_rgb(float hue01) {
+static std::array<float, 3> hue_to_rgb(float hue01, float sat01, float val01) {
   float r, g, b;
-  ImGui::ColorConvertHSVtoRGB(std::fmod(hue01, 1.0f), 0.65f, 1.0f, r, g, b);
+  ImGui::ColorConvertHSVtoRGB(
+      std::fmod(hue01, 1.0f), std::clamp(sat01, 0.0f, 1.0f), std::clamp(val01, 0.0f, 1.0f), r, g, b);
   return {r, g, b};
 }
 
@@ -413,15 +414,31 @@ ImTextureID ProcRenderEngine::get_or_create_tile(const TileKey& key, const ProcR
     return it->second.tex_id;
   }
 
+  const int max_new_tiles = std::max(0, cfg.max_new_tiles_per_frame);
+  if (max_new_tiles > 0 && stats_.generated_this_frame >= max_new_tiles) {
+    return imgui_null_texture_id();
+  }
+
+  const double max_new_tile_ms = static_cast<double>(cfg.max_new_tile_ms_per_frame);
+  if (max_new_tile_ms > 0.0) {
+    const double frame_tile_ms = stats_.gen_ms_this_frame + stats_.upload_ms_this_frame;
+    if (frame_tile_ms >= max_new_tile_ms) {
+      return imgui_null_texture_id();
+    }
+  }
+
   // Generate + upload.
   const auto t0 = Clock::now();
-  std::vector<std::uint8_t> rgba;
-  rgba.resize(static_cast<std::size_t>(key.tile_px) * static_cast<std::size_t>(key.tile_px) * 4);
-  generate_tile_rgba(rgba, key.tile_px, key.tile_px, key.layer, key.tx, key.ty, key.seed, cfg);
+  const std::size_t rgba_bytes =
+      static_cast<std::size_t>(key.tile_px) * static_cast<std::size_t>(key.tile_px) * 4;
+  if (scratch_rgba_.size() < rgba_bytes) {
+    scratch_rgba_.resize(rgba_bytes);
+  }
+  generate_tile_rgba(scratch_rgba_, key.tile_px, key.tile_px, key.layer, key.tx, key.ty, key.seed, cfg);
   stats_.gen_ms_this_frame += ms_since(t0);
 
   const auto t1 = Clock::now();
-  ImTextureID tex_id = upload_rgba_tile(rgba.data(), key.tile_px, key.tile_px);
+  ImTextureID tex_id = upload_rgba_tile(scratch_rgba_.data(), key.tile_px, key.tile_px);
   stats_.upload_ms_this_frame += ms_since(t1);
 
   if (!imgui_texture_id_is_valid(tex_id)) return imgui_null_texture_id();
@@ -459,6 +476,28 @@ void ProcRenderEngine::draw_background(ImDrawList* draw,
   const int tiles_x = static_cast<int>(std::ceil(size.x / static_cast<float>(tile_px))) + 1;
   const int tiles_y = static_cast<int>(std::ceil(size.y / static_cast<float>(tile_px))) + 1;
 
+  struct TileCoord {
+    int i = 0;
+    int j = 0;
+    float dist2 = 0.0f;
+  };
+  std::vector<TileCoord> draw_order;
+  draw_order.reserve(static_cast<std::size_t>(tiles_x) * static_cast<std::size_t>(tiles_y));
+  const float center_i = static_cast<float>(tiles_x - 1) * 0.5f;
+  const float center_j = static_cast<float>(tiles_y - 1) * 0.5f;
+  for (int j = 0; j < tiles_y; ++j) {
+    for (int i = 0; i < tiles_x; ++i) {
+      const float dx = static_cast<float>(i) - center_i;
+      const float dy = static_cast<float>(j) - center_j;
+      draw_order.push_back(TileCoord{i, j, dx * dx + dy * dy});
+    }
+  }
+  std::sort(draw_order.begin(), draw_order.end(), [](const TileCoord& a, const TileCoord& b) {
+    if (a.dist2 != b.dist2) return a.dist2 < b.dist2;
+    if (a.j != b.j) return a.j < b.j;
+    return a.i < b.i;
+  });
+
   // The background is a stack of layers to create depth.
   struct LayerDesc {
     int layer;
@@ -475,39 +514,69 @@ void ProcRenderEngine::draw_background(ImDrawList* draw,
   };
 
   const ImVec4 tint_f = ImGui::ColorConvertU32ToFloat4(tint);
-
+  struct ActiveLayer {
+    int layer = 0;
+    ScrollTiles scroll;
+    ImU32 tint_u32 = 0;
+    ImU32 fallback_u32 = 0;
+  };
+  std::array<ActiveLayer, 3> active_layers{};
+  std::size_t active_count = 0;
   for (const auto& layer : layers) {
     if (!layer.enabled) continue;
-    const ScrollTiles s = compute_scroll_tiles(offset_px_x, offset_px_y, layer.parallax, tile_px);
+    if (active_count >= active_layers.size()) break;
 
     ImVec4 layer_tint = tint_f;
     layer_tint.w *= std::clamp(layer.alpha, 0.0f, 1.0f);
-    const ImU32 layer_tint_u32 = ImGui::ColorConvertFloat4ToU32(layer_tint);
 
-    for (int j = 0; j < tiles_y; ++j) {
-      for (int i = 0; i < tiles_x; ++i) {
-        const int tx = s.tile_x0 + i;
-        const int ty = s.tile_y0 + j;
+    ActiveLayer& dst = active_layers[active_count++];
+    dst.layer = layer.layer;
+    dst.scroll = compute_scroll_tiles(offset_px_x, offset_px_y, layer.parallax, tile_px);
+    dst.tint_u32 = ImGui::ColorConvertFloat4ToU32(layer_tint);
 
-        TileKey key;
-        key.layer = layer.layer;
-        key.tx = tx;
-        key.ty = ty;
-        key.tile_px = tile_px;
-        key.seed = seed;
-        key.style_hash = style_hash;
+    ImVec4 fallback_tint = tint_f;
+    fallback_tint.w *= std::clamp(layer.alpha * 0.08f, 0.0f, 1.0f);
+    dst.fallback_u32 = ImGui::ColorConvertFloat4ToU32(fallback_tint);
+  }
 
-        ImTextureID tile_id = get_or_create_tile(key, cfg);
-        if (!tile_id) continue;
+  const float uv_inset = 0.5f / static_cast<float>(tile_px);
+  const ImVec2 uv0(uv_inset, uv_inset);
+  const ImVec2 uv1(1.0f - uv_inset, 1.0f - uv_inset);
+  const float tile_overlap_px = 0.60f;
 
-        const ImVec2 p0(origin.x + static_cast<float>(i * tile_px) - s.frac_x,
-                        origin.y + static_cast<float>(j * tile_px) - s.frac_y);
-        const ImVec2 p1(p0.x + static_cast<float>(tile_px), p0.y + static_cast<float>(tile_px));
-        draw->AddImage(tile_id, p0, p1, ImVec2(0, 0), ImVec2(1, 1), layer_tint_u32);
+  for (const TileCoord& tc : draw_order) {
+    const int i = tc.i;
+    const int j = tc.j;
+    for (std::size_t li = 0; li < active_count; ++li) {
+      const ActiveLayer& layer = active_layers[li];
+      const int tx = layer.scroll.tile_x0 + i;
+      const int ty = layer.scroll.tile_y0 + j;
 
-        if (cfg.debug_show_tile_bounds) {
-          draw->AddRect(p0, p1, IM_COL32(255, 0, 255, 120));
-        }
+      TileKey key;
+      key.layer = layer.layer;
+      key.tx = tx;
+      key.ty = ty;
+      key.tile_px = tile_px;
+      key.seed = seed;
+      key.style_hash = style_hash;
+
+      const ImVec2 p0(origin.x + static_cast<float>(i * tile_px) - layer.scroll.frac_x,
+                      origin.y + static_cast<float>(j * tile_px) - layer.scroll.frac_y);
+      const ImVec2 p1(p0.x + static_cast<float>(tile_px), p0.y + static_cast<float>(tile_px));
+      ImTextureID tile_id = get_or_create_tile(key, cfg);
+      if (imgui_texture_id_is_valid(tile_id)) {
+        draw->AddImage(tile_id,
+                       ImVec2(p0.x - tile_overlap_px, p0.y - tile_overlap_px),
+                       ImVec2(p1.x + tile_overlap_px, p1.y + tile_overlap_px),
+                       uv0,
+                       uv1,
+                       layer.tint_u32);
+      } else if ((layer.fallback_u32 >> 24) != 0u) {
+        draw->AddRectFilled(p0, p1, layer.fallback_u32);
+      }
+
+      if (cfg.debug_show_tile_bounds) {
+        draw->AddRect(p0, p1, IM_COL32(255, 0, 255, 120));
       }
     }
   }
@@ -527,7 +596,7 @@ void ProcRenderEngine::generate_tile_rgba(std::vector<std::uint8_t>& out_rgba,
   if (static_cast<int>(out_rgba.size()) < w * h * 4) return;
 
   // Clear to transparent.
-  std::fill(out_rgba.begin(), out_rgba.end(), 0);
+  std::fill(out_rgba.begin(), out_rgba.end(), std::uint8_t{0});
 
   const float base_x = static_cast<float>(tile_x * w);
   const float base_y = static_cast<float>(tile_y * h);
@@ -577,7 +646,9 @@ void ProcRenderEngine::generate_tile_rgba(std::vector<std::uint8_t>& out_rgba,
         if (alpha <= 0.002f) continue;
 
         const float hue = fbm(nx * 0.6f, ny * 0.6f, seed ^ 0x7f4a7c15u, 2, 2.0f, 0.5f);
-        const auto rgb = hue_to_rgb(hue);
+        const float sat = std::clamp(0.35f + 0.45f * d, 0.0f, 1.0f);
+        const float val = std::clamp(0.45f + 0.55f * d, 0.0f, 1.0f);
+        const auto rgb = hue_to_rgb(hue, sat, val);
 
         const int add_a = static_cast<int>(alpha * 255.0f);
         const int add_r = static_cast<int>(rgb[0] * alpha * 255.0f);
@@ -598,20 +669,34 @@ void ProcRenderEngine::generate_tile_rgba(std::vector<std::uint8_t>& out_rgba,
   const bool near_layer = (layer == 2);
   const float cell_base = near_layer ? 46.0f : 18.0f;
   const float cell = std::clamp(cell_base / std::sqrt(std::max(0.15f, density)), 8.0f, 128.0f);
-  const int nx = std::max(1, static_cast<int>(std::ceil(static_cast<float>(w) / cell)));
-  const int ny = std::max(1, static_cast<int>(std::ceil(static_cast<float>(h) / cell)));
   const float prob = std::clamp((near_layer ? 0.16f : 0.55f) * density, 0.0f, 1.0f);
 
-  for (int cy = 0; cy < ny; ++cy) {
-    for (int cx = 0; cx < nx; ++cx) {
-      const std::uint32_t h0 =
-          hash_2d_i32(tile_x * 8192 + cx, tile_y * 8192 + cy, seed ^ (near_layer ? 0x02u : 0x01u));
+  const float world_x0 = base_x;
+  const float world_y0 = base_y;
+  const float world_x1 = world_x0 + static_cast<float>(w);
+  const float world_y1 = world_y0 + static_cast<float>(h);
+
+  // Include neighboring cells so stars crossing tile edges remain seamless.
+  const float max_star_radius = near_layer ? 8.0f : 4.0f;
+  const int gcx0 = static_cast<int>(std::floor((world_x0 - max_star_radius) / cell));
+  const int gcy0 = static_cast<int>(std::floor((world_y0 - max_star_radius) / cell));
+  const int gcx1 = static_cast<int>(std::floor((world_x1 + max_star_radius) / cell));
+  const int gcy1 = static_cast<int>(std::floor((world_y1 + max_star_radius) / cell));
+
+  for (int gcy = gcy0; gcy <= gcy1; ++gcy) {
+    for (int gcx = gcx0; gcx <= gcx1; ++gcx) {
+      const std::uint32_t h0 = hash_2d_i32(gcx, gcy, seed ^ (near_layer ? 0x02u : 0x01u));
       Rng rng(h0);
       if (rng.next_f01() > prob) continue;
 
-      const float px = (static_cast<float>(cx) + rng.next_f01()) * cell;
-      const float py = (static_cast<float>(cy) + rng.next_f01()) * cell;
-      if (px < 0.0f || py < 0.0f || px >= static_cast<float>(w) || py >= static_cast<float>(h)) continue;
+      const float px_world = (static_cast<float>(gcx) + rng.next_f01()) * cell;
+      const float py_world = (static_cast<float>(gcy) + rng.next_f01()) * cell;
+      const float px = px_world - world_x0;
+      const float py = py_world - world_y0;
+      if (px < -max_star_radius || py < -max_star_radius || px > static_cast<float>(w) + max_star_radius ||
+          py > static_cast<float>(h) + max_star_radius) {
+        continue;
+      }
 
       // Brightness distribution: many dim stars, few bright.
       const float m = rng.next_f01();
