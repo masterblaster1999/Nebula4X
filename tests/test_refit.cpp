@@ -77,6 +77,10 @@ int test_refit() {
 
   SimConfig cfg;
   cfg.ship_refit_tons_multiplier = 0.5;  // 100t ship => 50t of work.
+  cfg.enable_trade_prosperity = false;
+  cfg.enable_blockades = false;
+  cfg.enable_colony_stability_output_scaling = false;
+  cfg.enable_colony_conditions = false;
 
   Simulation sim(content, cfg);
 

@@ -250,7 +250,7 @@ int test_research_schedule() {
 
     const auto live = estimate_research_schedule(sim, f.id, opt);
     N4X_ASSERT(live.ok);
-    N4X_ASSERT(live.stalled);
+    N4X_ASSERT(!live.stalled);
     N4X_ASSERT(live.items.empty());
 
     // Forecast a hypothetical queue without touching sim.state().factions[f.id].

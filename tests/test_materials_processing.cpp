@@ -17,7 +17,12 @@ int test_materials_processing() {
   using namespace nebula4x;
 
   ContentDB content = load_content_db_from_file("data/blueprints/starting_blueprints.json");
-  Simulation sim(std::move(content), SimConfig{});
+  SimConfig cfg;
+  cfg.enable_colony_stability_output_scaling = false;
+  cfg.enable_colony_conditions = false;
+  cfg.enable_trade_prosperity = false;
+  cfg.enable_blockades = false;
+  Simulation sim(std::move(content), cfg);
 
   GameState s;
   s.save_version = GameState{}.save_version;

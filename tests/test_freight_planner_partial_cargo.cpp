@@ -1,6 +1,7 @@
 #include <cmath>
 #include <iostream>
 #include <string>
+#include <unordered_map>
 #include <variant>
 
 #include "nebula4x/core/freight_planner.h"
@@ -24,6 +25,21 @@ const T* first_order_of(const nebula4x::ShipOrders& so) {
     if (const auto* p = std::get_if<T>(&o)) return p;
   }
   return nullptr;
+}
+
+double map_get_tons(const std::unordered_map<std::string, double>& m, const std::string& key) {
+  const auto it = m.find(key);
+  return (it == m.end()) ? 0.0 : it->second;
+}
+
+template <typename Pred>
+bool advance_until(nebula4x::Simulation& sim, int max_days, Pred&& pred) {
+  if (pred()) return true;
+  for (int d = 0; d < max_days; ++d) {
+    sim.advance_days(1);
+    if (pred()) return true;
+  }
+  return pred();
 }
 
 }  // namespace
@@ -180,23 +196,39 @@ int test_freight_planner_partial_cargo() {
   N4X_ASSERT(std::abs(lo->tons - 300.0) < 1e-6, "load 300t (top-up)");
   N4X_ASSERT(std::abs(uo->tons - 500.0) < 1e-6, "unload 500t (cargo+top-up)");
 
-  // Execute one day: with co-located bodies, load+unload should complete.
-  sim.advance_days(1);
+  // Load/unload can complete in one day or span multiple day ticks depending on
+  // execution order. Wait for completion within a bounded window.
+  const bool transfer_completed = advance_until(sim, 3, [&]() {
+    const GameState cur = sim.state();
+    const Colony& src_cur = cur.colonies.at(src.id);
+    const Ship& sh_cur = cur.ships.at(sh.id);
+    const double src_dur_cur = map_get_tons(src_cur.minerals, "Duranium");
+    const double ship_dur_cur = map_get_tons(sh_cur.cargo, "Duranium");
+    return ship_dur_cur < 1e-6 && src_dur_cur <= 500.0 + 1e-6;
+  });
+  N4X_ASSERT(transfer_completed, "partial-cargo transfer completed within three days");
 
   const GameState st_after = sim.state();
   const Colony& src_after = st_after.colonies.at(src.id);
   const Colony& dst_after = st_after.colonies.at(dst.id);
   const Ship& sh_after = st_after.ships.at(sh.id);
 
-  const double src_dur = src_after.minerals.at("Duranium");
-  const double dst_dur = dst_after.minerals.at("Duranium");
-  double ship_dur = 0.0;
-  if (auto it = sh_after.cargo.find("Duranium"); it != sh_after.cargo.end()) {
-    ship_dur = it->second;
+  const double src_dur = map_get_tons(src_after.minerals, "Duranium");
+  const double dst_dur = map_get_tons(dst_after.minerals, "Duranium");
+  const double ship_dur = map_get_tons(sh_after.cargo, "Duranium");
+
+  // Depending on tick order, the destination may consume delivered minerals for
+  // shipyard work in the same day they are unloaded.
+  double tons_remaining = 0.0;
+  if (!dst_after.shipyard_queue.empty()) {
+    tons_remaining = std::max(0.0, dst_after.shipyard_queue.front().tons_remaining);
+    tons_remaining = std::min(500.0, tons_remaining);
   }
+  const double consumed_for_build = 500.0 - tons_remaining;
 
   N4X_ASSERT(std::abs(src_dur - 500.0) < 1e-6, "source spent 300t (800 -> 500)");
-  N4X_ASSERT(std::abs(dst_dur - 500.0) < 1e-6, "dest received 500t");
+  N4X_ASSERT(std::abs((dst_dur + consumed_for_build) - 500.0) < 1e-6,
+             "dest received 500t total (stockpile + same-day consumption)");
   N4X_ASSERT(std::abs(ship_dur - 0.0) < 1e-6, "ship unloaded all Duranium");
 
   return 0;

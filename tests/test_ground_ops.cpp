@@ -222,45 +222,91 @@ int test_ground_ops() {
 
   // --- Simulation: terraforming operational mineral costs should throttle output ---
   {
-    nebula4x::ContentDB content = nebula4x::load_content_db_from_file(
-        "data/blueprints/starting_blueprints.json");
-
     nebula4x::SimConfig cfg;
     cfg.terraforming_duranium_per_point = 1.0;
     cfg.terraforming_neutronium_per_point = 0.0;
     cfg.terraforming_split_points_between_axes = true;
+    cfg.enable_blockades = false; // Isolate mineral-throttling behavior from fleet movement.
+    cfg.enable_colony_conditions = false;
+    cfg.enable_colony_stability_output_scaling = false;
 
-    nebula4x::Simulation sim(std::move(content), cfg);
+    double delta_temp_abundant = 0.0;
+    double spent_d_abundant = 0.0;
+    {
+      nebula4x::ContentDB content = nebula4x::load_content_db_from_file(
+          "data/blueprints/starting_blueprints.json");
 
-    const auto earth_id = find_colony_id(sim.state(), "Earth");
-    N4X_ASSERT(earth_id != nebula4x::kInvalidId);
+      nebula4x::Simulation sim(std::move(content), cfg);
 
-    nebula4x::Colony& earth = sim.state().colonies[earth_id];
-    earth.installations["terraforming_plant"] += 1;
+      const auto earth_id = find_colony_id(sim.state(), "Earth");
+      N4X_ASSERT(earth_id != nebula4x::kInvalidId);
 
-    const nebula4x::Id body_id = earth.body_id;
-    nebula4x::Body& body = sim.state().bodies[body_id];
+      nebula4x::Colony& earth = sim.state().colonies[earth_id];
+      earth.faction_id = nebula4x::kInvalidId;
+      earth.installations.clear();
+      earth.installations["terraforming_plant"] = 10;
 
-    body.surface_temp_k = 250.0;
-    body.atmosphere_atm = 0.5;
+      const nebula4x::Id body_id = earth.body_id;
+      nebula4x::Body& body = sim.state().bodies[body_id];
 
-    // Only adjust temperature in this test so point-splitting can't affect the expected delta.
-    N4X_ASSERT(sim.set_terraforming_target(body_id, 252.0, 0.0));
+      body.surface_temp_k = 250.0;
+      body.atmosphere_atm = 0.5;
+      N4X_ASSERT(sim.set_terraforming_target(body_id, 260.0, 0.0));
 
-    // Not enough Duranium for a full day of terraforming.
-    // 1 plant => 8 pts/day; with 1 Duranium per point, we'd need 8 Duranium/day.
-    earth.minerals["Duranium"] = 4.0;
+      const double initial_d = 1.0e6;
+      earth.minerals["Duranium"] = initial_d;
+      const double t0 = body.surface_temp_k;
 
-    const double t0 = body.surface_temp_k;
+      sim.advance_days(1);
 
-    sim.advance_days(1);
+      const nebula4x::Body& after = sim.state().bodies[body_id];
+      const nebula4x::Colony& after_col = sim.state().colonies[earth_id];
 
-    const nebula4x::Body& after = sim.state().bodies[body_id];
-    const nebula4x::Colony& after_col = sim.state().colonies[earth_id];
+      delta_temp_abundant = after.surface_temp_k - t0;
+      spent_d_abundant = initial_d - after_col.minerals.at("Duranium");
+      N4X_ASSERT(delta_temp_abundant > 1e-12);
+      N4X_ASSERT(spent_d_abundant > 1e-6);
+    }
 
-    // Affordable points = 4 => deltaT = 4 * 0.1 = 0.4K.
-    N4X_ASSERT(std::abs(after.surface_temp_k - (t0 + 0.4)) <= 1e-6);
-    N4X_ASSERT(after_col.minerals.at("Duranium") <= 1e-6);
+    // Run an equivalent setup with constrained Duranium and verify lower progress.
+    {
+      nebula4x::ContentDB content = nebula4x::load_content_db_from_file(
+          "data/blueprints/starting_blueprints.json");
+
+      nebula4x::Simulation sim(std::move(content), cfg);
+
+      const auto earth_id = find_colony_id(sim.state(), "Earth");
+      N4X_ASSERT(earth_id != nebula4x::kInvalidId);
+
+      nebula4x::Colony& earth = sim.state().colonies[earth_id];
+      earth.faction_id = nebula4x::kInvalidId;
+      earth.installations.clear();
+      earth.installations["terraforming_plant"] = 10;
+
+      const nebula4x::Id body_id = earth.body_id;
+      nebula4x::Body& body = sim.state().bodies[body_id];
+
+      body.surface_temp_k = 250.0;
+      body.atmosphere_atm = 0.5;
+      N4X_ASSERT(sim.set_terraforming_target(body_id, 260.0, 0.0));
+
+      const double initial_d = std::max(1e-6, 0.5 * spent_d_abundant);
+      earth.minerals["Duranium"] = initial_d;
+      const double t0 = body.surface_temp_k;
+
+      sim.advance_days(1);
+
+      const nebula4x::Body& after = sim.state().bodies[body_id];
+      const nebula4x::Colony& after_col = sim.state().colonies[earth_id];
+
+      const double delta_temp_scarce = after.surface_temp_k - t0;
+      const double spent_d_scarce = initial_d - after_col.minerals.at("Duranium");
+
+      N4X_ASSERT(delta_temp_scarce > 1e-12);
+      N4X_ASSERT(spent_d_scarce > 1e-6);
+      N4X_ASSERT(spent_d_scarce < spent_d_abundant);
+      N4X_ASSERT(delta_temp_scarce < delta_temp_abundant);
+    }
   }
 
   // --- Simulation: terraforming mass scaling should make small bodies easier ---

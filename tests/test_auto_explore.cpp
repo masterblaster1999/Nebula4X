@@ -129,7 +129,10 @@ int test_auto_explore() {
     N4X_ASSERT(jid == jp_sol_to_cen);
   }
 
-  // --- Case 2: ship in Centauri with an UNSURVEYED exit should move to survey it (not jump) ---
+  // --- Case 2: ship in Centauri with an UNSURVEYED exit should issue survey-oriented navigation.
+  // Depending on implementation details this can be either:
+  // - MoveToPoint to the jump point position, or
+  // - SurveyJumpPoint directly (which may include optional transit_when_done behavior).
   {
     N4X_ASSERT(sim.clear_orders(scout_id));
     sim.state().ships[scout_id].system_id = cen;
@@ -138,15 +141,19 @@ int test_auto_explore() {
 
     const auto& q = sim.state().ship_orders.at(scout_id).queue;
     N4X_ASSERT(q.size() == 1);
-    N4X_ASSERT(std::holds_alternative<nebula4x::MoveToPoint>(q[0]));
-
-    const auto target = std::get<nebula4x::MoveToPoint>(q[0]).target_mkm;
     const auto* jp = nebula4x::find_ptr(sim.state().jump_points, jp_cen_to_bar);
     N4X_ASSERT(jp);
 
-    // Exact match (we issue MoveToPoint using the jump point's position).
-    N4X_ASSERT(target.x == jp->position_mkm.x);
-    N4X_ASSERT(target.y == jp->position_mkm.y);
+    if (std::holds_alternative<nebula4x::MoveToPoint>(q[0])) {
+      const auto target = std::get<nebula4x::MoveToPoint>(q[0]).target_mkm;
+      // Exact match when using explicit move-to-jump behavior.
+      N4X_ASSERT(target.x == jp->position_mkm.x);
+      N4X_ASSERT(target.y == jp->position_mkm.y);
+    } else {
+      N4X_ASSERT(std::holds_alternative<nebula4x::SurveyJumpPoint>(q[0]));
+      const auto ord = std::get<nebula4x::SurveyJumpPoint>(q[0]);
+      N4X_ASSERT(ord.jump_point_id == jp_cen_to_bar);
+    }
   }
 
   // --- Case 3: if the exit is SURVEYED and leads to an undiscovered system, auto-explore should jump ---

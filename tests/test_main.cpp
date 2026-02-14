@@ -1,14 +1,21 @@
 #include <algorithm>
+#include <cctype>
 #include <chrono>
+#include <condition_variable>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <mutex>
 #include <random>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
+
+#include "nebula4x/util/log.h"
 
 int test_date();
 int test_simulation();
@@ -101,6 +108,7 @@ int test_sensor_coverage();
 int test_swept_contacts();
 int test_body_occlusion();
 int test_mineral_deposits();
+int test_mining_scarcity_allocation();
 int test_mobile_mining();
 int test_auto_mine();
 int test_power_system();
@@ -113,6 +121,7 @@ int test_duel_tournament();
 int test_duel_swiss_tournament();
 int test_attack_lead_pursuit();
 int test_lost_contact_search();
+int test_lost_contact_search_velocity_rake();
 int test_combat_doctrine();
 int test_advisor();
 int test_blockade_economy();
@@ -201,6 +210,34 @@ unsigned env_uint(const char* key, unsigned def) {
   }
 }
 
+bool parse_log_level(const std::string& text, nebula4x::log::Level* out) {
+  if (!out) return false;
+  std::string v = text;
+  std::transform(v.begin(), v.end(), v.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  if (v == "debug") {
+    *out = nebula4x::log::Level::Debug;
+    return true;
+  }
+  if (v == "info") {
+    *out = nebula4x::log::Level::Info;
+    return true;
+  }
+  if (v == "warn" || v == "warning") {
+    *out = nebula4x::log::Level::Warn;
+    return true;
+  }
+  if (v == "error" || v == "err") {
+    *out = nebula4x::log::Level::Error;
+    return true;
+  }
+  if (v == "off" || v == "none" || v == "silent") {
+    *out = nebula4x::log::Level::Off;
+    return true;
+  }
+  return false;
+}
+
 bool contains_substr(const std::string& haystack, const std::string& needle) {
   if (needle.empty()) return true;
   return haystack.find(needle) != std::string::npos;
@@ -248,19 +285,22 @@ void print_usage(const char* argv0) {
   std::cout << "Options:\n";
   std::cout << "  -l, --list                 List all tests\n";
   std::cout << "  -f, --filter <substr>      Run only tests whose name contains <substr>\n";
+  std::cout << "      --exact <name>         Run only the test whose name exactly matches <name>\n";
   std::cout << "  -s, --shuffle              Shuffle test order\n";
   std::cout << "      --seed <n>             RNG seed for shuffle (0 = random)\n";
   std::cout << "  -r, --repeat <n>           Repeat selected tests n times (for flake hunting)\n";
   std::cout << "      --shard-count <n>      Split tests into N shards and run only one shard\n";
   std::cout << "      --shard-index <i>      Shard index in [0, N-1] (used with --shard-count)\n";
   std::cout << "      --junit <path>         Write JUnit XML report to <path>\n";
+  std::cout << "      --heartbeat-seconds <n>  Emit a heartbeat every n seconds while a test runs (0 disables)\n";
+  std::cout << "      --log-level <level>    Set runtime log level: debug|info|warn|error|off\n";
   std::cout << "  -x, --fail-fast            Stop on first failing test\n";
   std::cout << "  -v, --verbose              Print per-test timing and PASS/FAIL\n";
   std::cout << "  -h, --help                 Show this help\n\n";
   std::cout << "Env vars (defaults):\n";
   std::cout << "  N4X_TEST_FILTER, N4X_TEST_SHUFFLE, N4X_TEST_SEED, N4X_TEST_REPEAT,\n";
   std::cout << "  N4X_TEST_FAIL_FAST, N4X_TEST_VERBOSE, N4X_TEST_SHARD_COUNT, N4X_TEST_SHARD_INDEX,\n";
-  std::cout << "  N4X_TEST_JUNIT\n";
+  std::cout << "  N4X_TEST_JUNIT, N4X_TEST_HEARTBEAT_SECONDS, N4X_TEST_LOG_LEVEL\n";
 }
 
 } // namespace
@@ -317,6 +357,7 @@ int main(int argc, char** argv) {
       {"swept_contacts", test_swept_contacts},
       {"body_occlusion", test_body_occlusion},
       {"mineral_deposits", test_mineral_deposits},
+      {"mining_scarcity_allocation", test_mining_scarcity_allocation},
       {"mobile_mining", test_mobile_mining},
       {"auto_mine", test_auto_mine},
       {"power_system", test_power_system},
@@ -365,6 +406,7 @@ int main(int argc, char** argv) {
       {"duel_swiss_tournament", test_duel_swiss_tournament},
       {"attack_lead_pursuit", test_attack_lead_pursuit},
       {"lost_contact_search", test_lost_contact_search},
+      {"lost_contact_search_velocity_rake", test_lost_contact_search_velocity_rake},
       {"combat_doctrine", test_combat_doctrine},
       {"ship_repairs", test_ship_repairs},
       {"crew_experience", test_crew_experience},
@@ -382,11 +424,23 @@ int main(int argc, char** argv) {
   unsigned seed = env_uint("N4X_TEST_SEED", 0);
   int repeat = std::max(1, env_int("N4X_TEST_REPEAT", 1));
   std::string filter = get_env_str("N4X_TEST_FILTER");
+  std::string exact_name;
   const int shard_count_default = std::max(1, env_int("N4X_TEST_SHARD_COUNT", 1));
   const int shard_index_default = std::max(0, env_int("N4X_TEST_SHARD_INDEX", 0));
   int shard_count = shard_count_default;
   int shard_index = shard_index_default;
   std::string junit_path = get_env_str("N4X_TEST_JUNIT");
+  int heartbeat_seconds = std::max(0, env_int("N4X_TEST_HEARTBEAT_SECONDS", 10));
+  nebula4x::log::Level test_log_level = nebula4x::log::Level::Error;
+  bool log_level_explicit = false;
+  if (const std::string env_log_level = get_env_str("N4X_TEST_LOG_LEVEL"); !env_log_level.empty()) {
+    if (!parse_log_level(env_log_level, &test_log_level)) {
+      std::cerr << "Invalid N4X_TEST_LOG_LEVEL: '" << env_log_level
+                << "' (expected debug|info|warn|error|off)\n";
+      return 2;
+    }
+    log_level_explicit = true;
+  }
 
   // Parse arguments (override env defaults).
   for (int i = 1; i < argc; ++i) {
@@ -487,6 +541,18 @@ int main(int argc, char** argv) {
       filter = a.substr(std::string("--filter=").size());
       continue;
     }
+    if (a == "--exact") {
+      if (i + 1 >= argc) {
+        std::cerr << "Missing value for --exact\n";
+        return 2;
+      }
+      exact_name = argv[++i];
+      continue;
+    }
+    if (a.rfind("--exact=", 0) == 0) {
+      exact_name = a.substr(std::string("--exact=").size());
+      continue;
+    }
     if (a == "--seed") {
       if (i + 1 >= argc) {
         std::cerr << "Missing value for --seed\n";
@@ -539,6 +605,52 @@ int main(int argc, char** argv) {
       }
       continue;
     }
+    if (a == "--heartbeat-seconds") {
+      if (i + 1 >= argc) {
+        std::cerr << "Missing value for --heartbeat-seconds\n";
+        return 2;
+      }
+      {
+        int v = 0;
+        if (!parse_int_strict(argv[++i], &v)) {
+          std::cerr << "Invalid value for --heartbeat-seconds\n";
+          return 2;
+        }
+        heartbeat_seconds = std::max(0, v);
+      }
+      continue;
+    }
+    if (a.rfind("--heartbeat-seconds=", 0) == 0) {
+      {
+        int v = 0;
+        if (!parse_int_strict(a.substr(std::string("--heartbeat-seconds=").size()), &v)) {
+          std::cerr << "Invalid value for --heartbeat-seconds\n";
+          return 2;
+        }
+        heartbeat_seconds = std::max(0, v);
+      }
+      continue;
+    }
+    if (a == "--log-level") {
+      if (i + 1 >= argc) {
+        std::cerr << "Missing value for --log-level\n";
+        return 2;
+      }
+      if (!parse_log_level(argv[++i], &test_log_level)) {
+        std::cerr << "Invalid value for --log-level (expected debug|info|warn|error|off)\n";
+        return 2;
+      }
+      log_level_explicit = true;
+      continue;
+    }
+    if (a.rfind("--log-level=", 0) == 0) {
+      if (!parse_log_level(a.substr(std::string("--log-level=").size()), &test_log_level)) {
+        std::cerr << "Invalid value for --log-level (expected debug|info|warn|error|off)\n";
+        return 2;
+      }
+      log_level_explicit = true;
+      continue;
+    }
 
     // Convenience: treat a single bare argument as a filter.
     if (filter.empty()) {
@@ -549,6 +661,12 @@ int main(int argc, char** argv) {
       return 2;
     }
   }
+
+  if (!log_level_explicit && verbose) {
+    // Verbose runner output is usually paired with at least warning-level runtime logs.
+    test_log_level = nebula4x::log::Level::Warn;
+  }
+  nebula4x::log::set_level(test_log_level);
 
   if (list) {
     for (const auto& t : all) {
@@ -561,11 +679,19 @@ int main(int argc, char** argv) {
   std::vector<TestCase> selected;
   selected.reserve(all.size());
   for (const auto& t : all) {
-    if (contains_substr(t.name, filter)) selected.push_back(t);
+    if (!exact_name.empty()) {
+      if (exact_name == t.name) selected.push_back(t);
+    } else if (contains_substr(t.name, filter)) {
+      selected.push_back(t);
+    }
   }
 
   if (selected.empty()) {
-    std::cerr << "No tests matched filter: '" << filter << "'\n";
+    if (!exact_name.empty()) {
+      std::cerr << "No tests matched exact name: '" << exact_name << "'\n";
+    } else {
+      std::cerr << "No tests matched filter: '" << filter << "'\n";
+    }
     return 1;
   }
 
@@ -600,11 +726,16 @@ int main(int argc, char** argv) {
 
   if (verbose) {
     std::cout << "Running " << selected.size() << " test(s)";
-    if (!filter.empty()) std::cout << " (filter='" << filter << "')";
+    if (!exact_name.empty()) {
+      std::cout << " (exact='" << exact_name << "')";
+    } else if (!filter.empty()) {
+      std::cout << " (filter='" << filter << "')";
+    }
     if (repeat > 1) std::cout << " x" << repeat;
     if (shuffle) std::cout << " (shuffled, seed=" << actual_seed << ")";
     if (shard_count > 1) std::cout << " (shard " << shard_index << "/" << shard_count << ")";
     if (!junit_path.empty()) std::cout << " (junit='" << junit_path << "')";
+    if (heartbeat_seconds > 0) std::cout << " (heartbeat=" << heartbeat_seconds << "s)";
     std::cout << "\n";
   }
 
@@ -633,11 +764,18 @@ int main(int argc, char** argv) {
     return 0;
   }
 
+  const std::size_t total_invocations = static_cast<std::size_t>(repeat) * selected.size();
+  if (!verbose) {
+    std::cout << "Running " << total_invocations << " test invocation(s)...\n";
+  }
+
   const bool capture = !junit_path.empty();
   std::vector<TestRunResult> results;
   if (capture) results.reserve(static_cast<std::size_t>(repeat) * selected.size());
 
   int fails = 0;
+  std::size_t completed = 0;
+  bool printed_progress = false;
   const auto t0 = std::chrono::steady_clock::now();
 
   bool stop = false;
@@ -648,11 +786,49 @@ int main(int argc, char** argv) {
 
     for (const auto& t : selected) {
       const auto start = std::chrono::steady_clock::now();
+      const std::size_t invocation_no = completed + 1;
       int r = 0;
       std::string captured_out;
       std::string captured_err;
+      std::mutex hb_mu;
+      std::condition_variable hb_cv;
+      bool hb_done = false;
+      std::thread heartbeat;
+      if (verbose) {
+        std::cout << "RUN   " << invocation_no << "/" << total_invocations << "  " << t.name << "\n";
+        std::cout.flush();
+      }
       {
         StreamCapture cap(capture);
+        if (heartbeat_seconds > 0) {
+          const char* test_name = t.name;
+          const int heartbeat_interval_s = heartbeat_seconds;
+          const std::size_t hb_invocation_no = invocation_no;
+          const std::size_t hb_total_invocations = total_invocations;
+          const bool hb_capture = capture;
+          heartbeat = std::thread(
+              [&hb_mu, &hb_cv, &hb_done, start, test_name, heartbeat_interval_s, hb_invocation_no, hb_total_invocations,
+               hb_capture]() {
+            using namespace std::chrono;
+            std::unique_lock<std::mutex> lock(hb_mu);
+            while (!hb_done) {
+              if (hb_cv.wait_for(lock, seconds(heartbeat_interval_s), [&hb_done]() { return hb_done; })) break;
+              const auto now = steady_clock::now();
+              const auto elapsed_s = duration_cast<seconds>(now - start).count();
+              lock.unlock();
+              if (hb_capture) {
+                std::fprintf(stderr, "\n[still running] %zu/%zu  %s (%llds)\n", hb_invocation_no, hb_total_invocations,
+                             test_name, static_cast<long long>(elapsed_s));
+                std::fflush(stderr);
+              } else {
+                std::cout << "\n[still running] " << hb_invocation_no << "/" << hb_total_invocations << "  " << test_name
+                          << " (" << elapsed_s << "s)\n";
+                std::cout.flush();
+              }
+              lock.lock();
+            }
+          });
+        }
         try {
           r = t.fn();
         } catch (const std::exception& e) {
@@ -661,6 +837,14 @@ int main(int argc, char** argv) {
         } catch (...) {
           std::cerr << "Unhandled non-standard exception\n";
           r = 1;
+        }
+        if (heartbeat.joinable()) {
+          {
+            std::lock_guard<std::mutex> lock(hb_mu);
+            hb_done = true;
+          }
+          hb_cv.notify_one();
+          heartbeat.join();
         }
         if (capture) {
           captured_out = cap.out_buf.str();
@@ -680,8 +864,18 @@ int main(int argc, char** argv) {
         results.push_back(std::move(tr));
       }
 
+      ++completed;
       if (verbose) {
         std::cout << (r == 0 ? "PASS" : "FAIL") << "  " << t.name << "  (" << ms << " ms)\n";
+      }
+      if (!verbose) {
+        std::cout << (r == 0 ? '.' : 'F');
+        printed_progress = true;
+        if ((completed % 50) == 0 || completed == total_invocations) {
+          std::cout << " " << completed << "/" << total_invocations << "\n";
+        } else {
+          std::cout.flush();
+        }
       }
 
       if (capture && r != 0) {
@@ -702,6 +896,10 @@ int main(int argc, char** argv) {
 
   const auto t1 = std::chrono::steady_clock::now();
   const auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+
+  if (!verbose && printed_progress && completed != total_invocations && (completed % 50) != 0) {
+    std::cout << " " << completed << "/" << total_invocations << "\n";
+  }
 
   if (!junit_path.empty()) {
     try {
@@ -761,7 +959,11 @@ int main(int argc, char** argv) {
   std::cerr << fails << " test(s) failed (" << total_ms << " ms)\n";
   if (shuffle) {
     std::cerr << "Repro: --shuffle --seed " << actual_seed;
-    if (!filter.empty()) std::cerr << " --filter " << filter;
+    if (!exact_name.empty()) {
+      std::cerr << " --exact " << exact_name;
+    } else if (!filter.empty()) {
+      std::cerr << " --filter " << filter;
+    }
     if (repeat > 1) std::cerr << " --repeat " << repeat;
     std::cerr << "\n";
   }

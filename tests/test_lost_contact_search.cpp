@@ -135,3 +135,121 @@ int test_lost_contact_search() {
 
   return 0;
 }
+
+int test_lost_contact_search_velocity_rake() {
+  ContentDB content;
+
+  ShipDesign hunter;
+  hunter.id = "hunter";
+  hunter.name = "Hunter";
+  hunter.max_hp = 1000.0;
+  // Fast enough to hit each probe waypoint in a day for deterministic stepping.
+  hunter.speed_km_s = 1200.0;
+  hunter.sensor_range_mkm = 0.0; // keep target undetected
+  content.designs[hunter.id] = hunter;
+
+  ShipDesign target_design;
+  target_design.id = "target";
+  target_design.name = "Target";
+  target_design.max_hp = 1000.0;
+  target_design.speed_km_s = 1.0;
+  content.designs[target_design.id] = target_design;
+
+  SimConfig cfg;
+  cfg.contact_search_offset_fraction = 1.0;
+  cfg.contact_search_pattern_points = 64;
+  cfg.contact_uncertainty_growth_fraction_of_speed = 0.0;
+  cfg.contact_uncertainty_growth_min_mkm_per_day = 0.0;
+  cfg.contact_prediction_max_days = 30;
+
+  Simulation sim(content, cfg);
+
+  GameState st;
+  st.save_version = 36;
+  st.date = Date::from_ymd(2200, 1, 10);
+
+  Faction fa;
+  fa.id = 1;
+  fa.name = "Hunters";
+  st.factions[fa.id] = fa;
+
+  Faction fb;
+  fb.id = 2;
+  fb.name = "Targets";
+  st.factions[fb.id] = fb;
+
+  StarSystem sys;
+  sys.id = 1;
+  sys.name = "Test System";
+  st.systems[sys.id] = sys;
+
+  Ship hunter_ship;
+  hunter_ship.id = 100;
+  hunter_ship.name = "H";
+  hunter_ship.faction_id = fa.id;
+  hunter_ship.system_id = sys.id;
+  hunter_ship.position_mkm = {0.0, 0.0};
+  hunter_ship.design_id = hunter.id;
+  st.ships[hunter_ship.id] = hunter_ship;
+
+  Ship target_ship;
+  target_ship.id = 200;
+  target_ship.name = "T";
+  target_ship.faction_id = fb.id;
+  target_ship.system_id = sys.id;
+  target_ship.position_mkm = {500.0, 0.0};
+  target_ship.design_id = target_design.id;
+  st.ships[target_ship.id] = target_ship;
+
+  const int now = static_cast<int>(st.date.days_since_epoch());
+
+  // Contact track velocity is +X mkm/day:
+  // prev at x=-2 (day now-1), last at x=-1 (day now).
+  // At day now+1, predicted center is x=0, so the first search waypoint is
+  // generated immediately and should be forward (+X) biased.
+  Contact c;
+  c.ship_id = target_ship.id;
+  c.system_id = sys.id;
+  c.last_seen_day = now;
+  c.last_seen_position_mkm = {-1.0, 0.0};
+  c.prev_seen_day = now - 1;
+  c.prev_seen_position_mkm = {-2.0, 0.0};
+  c.last_seen_position_uncertainty_mkm = 100.0;
+  c.last_seen_design_id = target_design.id;
+  c.last_seen_faction_id = fb.id;
+  st.factions[fa.id].ship_contacts[target_ship.id] = c;
+
+  sim.load_game(st);
+
+  N4X_ASSERT(sim.issue_attack_ship(hunter_ship.id, target_ship.id, /*restrict_to_discovered=*/false),
+             "issue_attack_ship should succeed");
+
+  // Day 1: generate first velocity-aware probe.
+  sim.advance_days(1);
+
+  Vec2 off1{0.0, 0.0};
+  {
+    const auto& s = sim.state();
+    N4X_ASSERT(!s.ship_orders.at(hunter_ship.id).queue.empty(), "AttackShip order should exist");
+    const auto& ord = std::get<AttackShip>(s.ship_orders.at(hunter_ship.id).queue.front());
+    N4X_ASSERT(ord.search_waypoint_index == 1, "expected first search waypoint");
+    N4X_ASSERT(ord.has_search_offset, "first waypoint should have an offset");
+    off1 = ord.search_offset_mkm;
+  }
+
+  N4X_ASSERT(off1.x > 1e-6, "first probe should bias forward along track velocity");
+  N4X_ASSERT(std::abs(off1.y) < 1e-6, "first probe should stay on the track axis");
+
+  // Day 2: ship reaches probe #1 and should switch to backward probe #2.
+  sim.advance_days(1);
+  {
+    const auto& s = sim.state();
+    const auto& ord = std::get<AttackShip>(s.ship_orders.at(hunter_ship.id).queue.front());
+    N4X_ASSERT(ord.search_waypoint_index == 2, "expected second search waypoint");
+    N4X_ASSERT(ord.has_search_offset, "second waypoint should have an offset");
+    N4X_ASSERT(ord.search_offset_mkm.x < -1e-6, "second probe should test behind-track direction");
+    N4X_ASSERT(std::abs(ord.search_offset_mkm.y) < 1e-6, "second probe should stay on the track axis");
+  }
+
+  return 0;
+}

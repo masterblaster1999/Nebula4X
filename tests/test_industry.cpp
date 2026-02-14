@@ -2,6 +2,7 @@
 #include <cmath>
 #include <iostream>
 #include <string>
+#include <unordered_map>
 
 #include "nebula4x/core/simulation.h"
 
@@ -19,6 +20,21 @@ namespace {
 double get_mineral(const nebula4x::Colony& c, const std::string& mineral) {
   auto it = c.minerals.find(mineral);
   return (it == c.minerals.end()) ? 0.0 : it->second;
+}
+
+double get_map_tons(const std::unordered_map<std::string, double>& m, const std::string& key) {
+  const auto it = m.find(key);
+  return (it == m.end()) ? 0.0 : it->second;
+}
+
+template <typename Pred>
+bool advance_until(nebula4x::Simulation& sim, int max_days, Pred&& pred) {
+  if (pred()) return true;
+  for (int d = 0; d < max_days; ++d) {
+    sim.advance_days(1);
+    if (pred()) return true;
+  }
+  return pred();
 }
 
 }  // namespace
@@ -39,6 +55,9 @@ int test_industry() {
 
     SimConfig cfg;
     cfg.enable_combat = false;
+    cfg.enable_colony_stability_output_scaling = false;
+    cfg.enable_colony_conditions = false;
+    cfg.enable_trade_prosperity = false;
 
     Simulation sim(content, cfg);
 
@@ -118,6 +137,9 @@ int test_industry() {
 
     SimConfig cfg;
     cfg.enable_combat = false;
+    cfg.enable_colony_stability_output_scaling = false;
+    cfg.enable_colony_conditions = false;
+    cfg.enable_trade_prosperity = false;
     cfg.auto_freight_min_transfer_tons = 1.0;
     cfg.auto_freight_max_take_fraction_of_surplus = 1.0;
     cfg.auto_freight_industry_input_buffer_days = 1.0;
@@ -187,19 +209,28 @@ int test_industry() {
 
     sim.load_game(st);
 
-    sim.advance_days(1);
+    // Delivery may complete over one or more day ticks depending on order timing.
+    const bool delivered_inputs = advance_until(sim, 3, [&]() {
+      return get_mineral(sim.state().colonies.at(dst.id), "Duranium") >= 10.0 - 1e-6;
+    });
 
     const double src_d1 = get_mineral(sim.state().colonies.at(src.id), "Duranium");
     const double dst_d1 = get_mineral(sim.state().colonies.at(dst.id), "Duranium");
-    N4X_ASSERT(std::abs(dst_d1 - 10.0) < 1e-6, "auto-freight delivered 1-day industry input buffer");
-    N4X_ASSERT(std::abs((src_d1 + dst_d1) - 1000.0) < 1e-6,
-               "Duranium conserved in industry freight test");
+    const double ship_d1 = get_map_tons(sim.state().ships.at(sh.id).cargo, "Duranium");
+
+    N4X_ASSERT(delivered_inputs, "auto-freight delivered 1-day industry input buffer within three days");
+    N4X_ASSERT(std::abs(dst_d1 - 10.0) < 1e-6, "destination received 10 Duranium industry buffer");
+    N4X_ASSERT(std::abs((src_d1 + dst_d1 + ship_d1) - 1000.0) < 1e-6,
+               "Duranium conserved in industry freight test (colonies + ship cargo)");
 
     // Disable further auto-freight and let industry run for a day on delivered inputs.
     sim.state().ships.at(sh.id).auto_freight = false;
-    sim.advance_days(1);
+    const bool processed_inputs = advance_until(sim, 2, [&]() {
+      return get_mineral(sim.state().colonies.at(dst.id), "Fuel") >= 200.0 - 1e-6;
+    });
 
     const Colony& dst_after = sim.state().colonies.at(dst.id);
+    N4X_ASSERT(processed_inputs, "industry processed delivered inputs within two days");
     N4X_ASSERT(std::abs(get_mineral(dst_after, "Duranium") - 0.0) < 1e-6,
                "industry consumed delivered inputs");
     N4X_ASSERT(std::abs(get_mineral(dst_after, "Fuel") - 200.0) < 1e-6,

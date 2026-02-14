@@ -42,11 +42,15 @@ int test_repair_planner() {
   cfg.enable_blockades = false;
 
   Simulation sim(content, cfg);
-  sim.new_game();
 
-  GameState st = sim.state();
-  N4X_ASSERT(!st.factions.empty(), "new_game should create a faction");
-  const Faction f = st.factions.begin()->second;
+  GameState st;
+  st.save_version = GameState{}.save_version;
+
+  Faction f;
+  f.id = 1;
+  f.name = "Player";
+  f.control = FactionControl::Player;
+  st.factions[f.id] = f;
 
   // One system.
   StarSystem sys;
@@ -56,10 +60,15 @@ int test_repair_planner() {
   st.systems[sys.id] = sys;
 
   // Two bodies separated in the same system.
+  // Note: load_game recomputes body positions from orbit params, so encode
+  // separation via orbit_radius/period rather than position_mkm alone.
   Body a_body;
   a_body.id = 10;
   a_body.name = "A";
   a_body.system_id = sys.id;
+  a_body.orbit_radius_mkm = 0.0;
+  a_body.orbit_period_days = 1.0;
+  a_body.orbit_phase_radians = 0.0;
   a_body.position_mkm = Vec2{0.0, 0.0};
   st.bodies[a_body.id] = a_body;
 
@@ -67,6 +76,9 @@ int test_repair_planner() {
   b_body.id = 11;
   b_body.name = "B";
   b_body.system_id = sys.id;
+  b_body.orbit_radius_mkm = 20.0;
+  b_body.orbit_period_days = 1.0;
+  b_body.orbit_phase_radians = 0.0;
   b_body.position_mkm = Vec2{20.0, 0.0};
   st.bodies[b_body.id] = b_body;
 
@@ -97,7 +109,9 @@ int test_repair_planner() {
   big.position_mkm = Vec2{1.0, 0.0};
   big.design_id = d.id;
   big.speed_km_s = d.speed_km_s;
-  big.hp = 0.0;  // missing 100
+  // hp <= 0 is treated as "initialize from design" during load; keep this
+  // ship near-destroyed with a small positive HP so damage persists.
+  big.hp = 1.0;  // missing 99
   big.repair_priority = RepairPriority::Normal;
   st.ships[big.id] = big;
 

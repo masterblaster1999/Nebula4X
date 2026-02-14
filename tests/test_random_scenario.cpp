@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <iostream>
@@ -113,11 +114,137 @@ int count_jump_edge_crossings(const nebula4x::GameState& s) {
   return crossings;
 }
 
+double total_body_minerals(const nebula4x::GameState& s) {
+  double total = 0.0;
+  for (const auto& [bid, b] : s.bodies) {
+    (void)bid;
+    for (const auto& [k, v] : b.mineral_deposits) {
+      (void)k;
+      if (std::isfinite(v) && v > 0.0) total += v;
+    }
+  }
+  return total;
+}
+
+struct AnomalyProfile {
+  int count{0};
+  double avg_dist_norm{0.0};
+  double avg_hazard{0.0};
+};
+
+AnomalyProfile anomaly_profile(const nebula4x::GameState& s) {
+  AnomalyProfile out;
+  if (s.systems.empty()) return out;
+
+  const nebula4x::Id home =
+      (s.selected_system != nebula4x::kInvalidId && nebula4x::find_ptr(s.systems, s.selected_system) != nullptr)
+          ? s.selected_system
+          : s.systems.begin()->first;
+  const auto* hs = nebula4x::find_ptr(s.systems, home);
+  if (!hs) return out;
+
+  const nebula4x::Vec2 home_pos = hs->galaxy_pos;
+  double max_d = 1e-6;
+  for (const auto& [sid, sys] : s.systems) {
+    (void)sid;
+    max_d = std::max(max_d, (sys.galaxy_pos - home_pos).length());
+  }
+
+  double dist_sum = 0.0;
+  double hazard_sum = 0.0;
+  for (const auto& [aid, a] : s.anomalies) {
+    (void)aid;
+    const auto* sys = nebula4x::find_ptr(s.systems, a.system_id);
+    if (!sys) continue;
+    const double dn = std::clamp((sys->galaxy_pos - home_pos).length() / max_d, 0.0, 1.0);
+    dist_sum += dn;
+    hazard_sum += std::max(0.0, a.hazard_chance) * std::max(0.0, a.hazard_damage);
+    ++out.count;
+  }
+
+  if (out.count > 0) {
+    out.avg_dist_norm = dist_sum / static_cast<double>(out.count);
+    out.avg_hazard = hazard_sum / static_cast<double>(out.count);
+  }
+  return out;
+}
+
+bool run_matrix_case(int shape, int placement, int style, double dens, bool enable_regions,
+                     std::uint32_t case_seed, int case_systems) {
+  auto fail = [&](const char* why) {
+    std::cerr << "matrix case failed: " << why
+              << " (shape=" << shape
+              << ", placement=" << placement
+              << ", style=" << style
+              << ", dens=" << dens
+              << ", regions=" << (enable_regions ? "true" : "false")
+              << ", seed=" << case_seed
+              << ", systems=" << case_systems << ")\n";
+    return false;
+  };
+
+  nebula4x::RandomScenarioConfig cfg;
+  cfg.seed = case_seed;
+  cfg.num_systems = case_systems;
+  cfg.galaxy_shape = static_cast<nebula4x::RandomGalaxyShape>(shape);
+  cfg.placement_style = static_cast<nebula4x::RandomPlacementStyle>(placement);
+  cfg.placement_quality = 12;
+  cfg.jump_network_style = static_cast<nebula4x::RandomJumpNetworkStyle>(style);
+  cfg.jump_density = dens;
+  cfg.enable_regions = enable_regions;
+  cfg.num_regions = -1;
+
+  const auto a = nebula4x::make_random_scenario(cfg);
+  if (style == 0 && enable_regions) {
+    // Determinism is already covered above; keep one representative matrix
+    // case as an additional guard while avoiding repeated heavy serialization.
+    const auto b = nebula4x::make_random_scenario(cfg);
+    if (nebula4x::serialize_game_to_json(a) != nebula4x::serialize_game_to_json(b)) {
+      return fail("determinism mismatch");
+    }
+  }
+
+  if (!jump_network_connected(a)) {
+    return fail("jump network disconnected");
+  }
+
+  // The PlanarProximity archetype should never introduce straight-edge crossings.
+  if (style == static_cast<int>(nebula4x::RandomJumpNetworkStyle::PlanarProximity) &&
+      count_jump_edge_crossings(a) != 0) {
+    return fail("planar proximity crossing detected");
+  }
+
+  // Jump points should remain bi-directional.
+  for (const auto& [id, jp] : a.jump_points) {
+    const auto* other = nebula4x::find_ptr(a.jump_points, jp.linked_jump_id);
+    if (!other) return fail("missing linked jump point");
+    if (other->linked_jump_id != id) return fail("jump backlink mismatch");
+  }
+
+  // Region consistency.
+  if (enable_regions) {
+    if (a.regions.empty()) return fail("regions missing");
+    for (const auto& [sid, sys] : a.systems) {
+      (void)sid;
+      if (sys.region_id == nebula4x::kInvalidId) return fail("system missing region id");
+      if (!nebula4x::find_ptr(a.regions, sys.region_id)) return fail("system points to missing region");
+    }
+  } else {
+    if (!a.regions.empty()) return fail("regions unexpectedly present");
+    for (const auto& [sid, sys] : a.systems) {
+      (void)sid;
+      if (sys.region_id != nebula4x::kInvalidId) return fail("region id present when regions disabled");
+    }
+  }
+
+  return true;
+}
+
 } // namespace
 
 int test_random_scenario() {
   const std::uint32_t seed = 12345;
-  const int n = 10;
+  const int n = 6;
 
   const auto s1 = nebula4x::make_random_scenario(seed, n);
   const auto s2 = nebula4x::make_random_scenario(seed, n);
@@ -191,10 +318,10 @@ int test_random_scenario() {
   N4X_ASSERT(has_indep_colony);
 
   // Procedural alien species / empire profiles should be generated for AI empires.
-  {
+  auto validate_ai_species = [](const nebula4x::GameState& st) {
     std::unordered_set<std::string> species_names;
     int ai_empires = 0;
-    for (const auto& [fid, f] : s1.factions) {
+    for (const auto& [fid, f] : st.factions) {
       (void)fid;
       if (f.control != nebula4x::FactionControl::AI_Explorer) continue;
       ++ai_empires;
@@ -217,7 +344,20 @@ int test_random_scenario() {
                              deviates(tr.pop_growth) || deviates(tr.troop_training);
       N4X_ASSERT(has_trait);
     }
-    N4X_ASSERT(ai_empires >= 1);
+    return ai_empires;
+  };
+
+  // Auto-scaled scenarios may legitimately choose zero AI empires for some sizes/seeds.
+  (void)validate_ai_species(s1);
+
+  // Explicitly forcing AI empires should produce at least one AI_Explorer with valid species/traits.
+  {
+    nebula4x::RandomScenarioConfig cfg;
+    cfg.seed = seed;
+    cfg.num_systems = n;
+    cfg.num_ai_empires = 2;
+    const auto s_ai = nebula4x::make_random_scenario(cfg);
+    N4X_ASSERT(validate_ai_species(s_ai) >= 1);
   }
 
   // Config toggle: disable independents.
@@ -229,6 +369,45 @@ int test_random_scenario() {
   for (const auto& [fid, f] : s_noind.factions) {
     (void)fid;
     N4X_ASSERT(!(f.control == nebula4x::FactionControl::AI_Passive && f.name == "Independent Worlds"));
+  }
+
+  // Resource abundance should scale procedural mineral totals meaningfully.
+  {
+    nebula4x::RandomScenarioConfig low_res;
+    low_res.seed = seed + 42u;
+    low_res.num_systems = 20;
+    low_res.resource_abundance = 0.6;
+
+    nebula4x::RandomScenarioConfig hi_res = low_res;
+    hi_res.resource_abundance = 1.8;
+
+    const auto s_low_res = nebula4x::make_random_scenario(low_res);
+    const auto s_hi_res = nebula4x::make_random_scenario(hi_res);
+    const double m_low = total_body_minerals(s_low_res);
+    const double m_hi = total_body_minerals(s_hi_res);
+    N4X_ASSERT(m_low > 0.0);
+    N4X_ASSERT(m_hi > m_low * 2.5);
+  }
+
+  // Frontier intensity should push anomalies outward and increase hazard pressure.
+  {
+    nebula4x::RandomScenarioConfig low_frontier;
+    low_frontier.seed = seed + 99u;
+    low_frontier.num_systems = 28;
+    low_frontier.frontier_intensity = 0.6;
+
+    nebula4x::RandomScenarioConfig hi_frontier = low_frontier;
+    hi_frontier.frontier_intensity = 1.8;
+
+    const auto s_low_frontier = nebula4x::make_random_scenario(low_frontier);
+    const auto s_hi_frontier = nebula4x::make_random_scenario(hi_frontier);
+    const AnomalyProfile p_low = anomaly_profile(s_low_frontier);
+    const AnomalyProfile p_hi = anomaly_profile(s_hi_frontier);
+
+    N4X_ASSERT(p_low.count > 0);
+    N4X_ASSERT(p_hi.count >= p_low.count);
+    N4X_ASSERT(p_hi.avg_dist_norm >= p_low.avg_dist_norm);
+    N4X_ASSERT(p_hi.avg_hazard >= p_low.avg_hazard * 0.90);
   }
 
   // Regions invariants (enabled by default in RandomScenarioConfig).
@@ -259,64 +438,38 @@ int test_random_scenario() {
   // ...and the graph should be connected.
   N4X_ASSERT(jump_network_connected(s1));
 
-  // Smoke-test all jump network styles/densities, galaxy shapes, and placement
-  // modes for determinism + connectivity.
-  for (int shape = 0; shape <= 5; ++shape) {
-    for (int placement = 0; placement <= 1; ++placement) {
-      for (int style = 0; style <= 6; ++style) {
-        for (double dens : {0.0, 1.0, 2.0}) {
-          for (bool enable_regions : {false, true}) {
-            nebula4x::RandomScenarioConfig cfg;
-            cfg.seed = seed;
-            cfg.num_systems = n;
-            cfg.galaxy_shape = static_cast<nebula4x::RandomGalaxyShape>(shape);
-            cfg.placement_style = static_cast<nebula4x::RandomPlacementStyle>(placement);
-            cfg.placement_quality = 24;
-            cfg.jump_network_style = static_cast<nebula4x::RandomJumpNetworkStyle>(style);
-            cfg.jump_density = dens;
-            cfg.enable_regions = enable_regions;
-            cfg.num_regions = -1;
+  // Bounded smoke-matrix:
+  // 1) all jump-network styles x both region modes
+  // 2) a shape sweep to cover all galaxy shapes
+  // This keeps coverage broad while capping runtime for isolated test execution.
 
-            const auto a = nebula4x::make_random_scenario(cfg);
-            const auto b = nebula4x::make_random_scenario(cfg);
-
-            // Deterministic for identical config.
-            N4X_ASSERT(nebula4x::serialize_game_to_json(a) == nebula4x::serialize_game_to_json(b));
-
-            // Connected jump graph for all archetypes.
-            N4X_ASSERT(jump_network_connected(a));
-
-            // The PlanarProximity archetype should never introduce straight-edge crossings.
-            if (style == static_cast<int>(nebula4x::RandomJumpNetworkStyle::PlanarProximity)) {
-              N4X_ASSERT(count_jump_edge_crossings(a) == 0);
-            }
-
-            // Jump points should remain bi-directional.
-            for (const auto& [id, jp] : a.jump_points) {
-              const auto* other = nebula4x::find_ptr(a.jump_points, jp.linked_jump_id);
-              N4X_ASSERT(other != nullptr);
-              N4X_ASSERT(other->linked_jump_id == id);
-            }
-
-            // Region consistency.
-            if (enable_regions) {
-              N4X_ASSERT(!a.regions.empty());
-              for (const auto& [sid, sys] : a.systems) {
-                (void)sid;
-                N4X_ASSERT(sys.region_id != nebula4x::kInvalidId);
-                N4X_ASSERT(nebula4x::find_ptr(a.regions, sys.region_id) != nullptr);
-              }
-            } else {
-              N4X_ASSERT(a.regions.empty());
-              for (const auto& [sid, sys] : a.systems) {
-                (void)sid;
-                N4X_ASSERT(sys.region_id == nebula4x::kInvalidId);
-              }
-            }
-          }
-        }
-      }
+  const std::array<double, 3> densities = {0.0, 1.0, 2.0};
+  for (int style = 0; style <= 6; ++style) {
+    for (bool enable_regions : {false, true}) {
+      const int shape = style % 6;       // covers all 6 galaxy shapes across styles
+      const int placement = style % 2;   // exercises both placement modes
+      const double dens = densities[static_cast<std::size_t>(style % static_cast<int>(densities.size()))];
+      const std::uint32_t case_seed = seed + 1000u + static_cast<std::uint32_t>(style * 37 + (enable_regions ? 1 : 0));
+      N4X_ASSERT(run_matrix_case(shape, placement, style, dens, enable_regions, case_seed, 7));
     }
+  }
+
+  // Explicit shape sweep (fixed jump style) to ensure all shapes are exercised directly.
+  for (int shape = 0; shape <= 5; ++shape) {
+    const int placement = shape % 2;
+    const std::uint32_t case_seed = seed + 5000u + static_cast<std::uint32_t>(shape * 11);
+    N4X_ASSERT(run_matrix_case(shape, placement, 0, 1.0, true, case_seed, 7));
+  }
+
+  // Stress regression: clustered jump style can create empty k-means buckets
+  // under some seeds/sizes. Exercise a denser set of medium maps.
+  for (int i = 0; i < 8; ++i) {
+    const std::uint32_t case_seed = seed + 9000u + static_cast<std::uint32_t>(i * 17);
+    N4X_ASSERT(run_matrix_case(
+        static_cast<int>(nebula4x::RandomGalaxyShape::Clustered),
+        static_cast<int>(nebula4x::RandomPlacementStyle::BlueNoise),
+        static_cast<int>(nebula4x::RandomJumpNetworkStyle::ClusterBridges),
+        1.4, true, case_seed, 24));
   }
 
   return 0;

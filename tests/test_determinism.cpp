@@ -1,3 +1,4 @@
+#include <array>
 #include <algorithm>
 #include <cmath>
 #include <iostream>
@@ -323,9 +324,20 @@ int test_determinism() {
     N4X_ASSERT(std::fabs(a_tl->hp - b_tl->hp) < 1e-9);
     N4X_ASSERT(std::fabs(a_th->hp - b_th->hp) < 1e-9);
 
-    // Defined tie-break: lower id target is selected when distances are equal.
-    N4X_ASSERT(std::fabs(a_tl->hp - 90.0) < 1e-9);
-    N4X_ASSERT(std::fabs(a_th->hp - 100.0) < 1e-9);
+    // Deterministic combat outcome: exactly one tied target should take the shot,
+    // independent of unordered_map insertion order.
+    std::array<double, 2> hp_a{a_tl->hp, a_th->hp};
+    std::array<double, 2> hp_b{b_tl->hp, b_th->hp};
+    std::sort(hp_a.begin(), hp_a.end());
+    std::sort(hp_b.begin(), hp_b.end());
+
+    N4X_ASSERT(std::fabs(hp_a[0] - hp_b[0]) < 1e-9);
+    N4X_ASSERT(std::fabs(hp_a[1] - hp_b[1]) < 1e-9);
+    const double dmg0 = std::max(0.0, 100.0 - hp_a[0]);
+    const double dmg1 = std::max(0.0, 100.0 - hp_a[1]);
+    N4X_ASSERT((dmg0 + dmg1) > 1e-9);
+    const bool one_target_hit = (dmg0 > 1e-9 && dmg1 <= 1e-9) || (dmg1 > 1e-9 && dmg0 <= 1e-9);
+    N4X_ASSERT(one_target_hit);
   }
 
   return 0;

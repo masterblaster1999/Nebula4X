@@ -23,7 +23,12 @@ int test_mineral_deposits() {
   mine.mining = true;
   content.installations[mine.id] = mine;
 
-  nebula4x::Simulation sim(std::move(content), nebula4x::SimConfig{});
+  nebula4x::SimConfig cfg;
+  cfg.enable_colony_stability_output_scaling = false;
+  cfg.enable_colony_conditions = false;
+  cfg.enable_trade_prosperity = false;
+  cfg.enable_blockades = false;
+  nebula4x::Simulation sim(std::move(content), cfg);
 
   // Replace the default Sol scenario with a minimal custom state.
   nebula4x::GameState s;

@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -274,7 +275,16 @@ int test_fleets() {
   // --- Create fleet ---
   {
     std::string err;
-    const Id fid = sim.create_fleet(1, "1st Fleet", std::vector<Id>{10, 11}, &err);
+    N4X_ASSERT(sim.create_fleet(kInvalidId, "BadFleet", std::vector<Id>{10}, &err) == kInvalidId);
+    N4X_ASSERT(!err.empty());
+    err.clear();
+    N4X_ASSERT(sim.create_fleet(1, "EmptyFleet", {}, &err) == kInvalidId);
+    N4X_ASSERT(!err.empty());
+    err.clear();
+
+    // Create from an unsorted list with duplicates: fleet membership should be
+    // canonicalized (sorted + unique).
+    const Id fid = sim.create_fleet(1, "1st Fleet", std::vector<Id>{11, 10, 10}, &err);
     N4X_ASSERT(fid != kInvalidId);
     N4X_ASSERT(err.empty());
     N4X_ASSERT(sim.state().fleets.size() == 1);
@@ -284,6 +294,8 @@ int test_fleets() {
     N4X_ASSERT(fl.name == "1st Fleet");
     N4X_ASSERT(fl.leader_ship_id == 10);
     N4X_ASSERT(fl.ship_ids.size() == 2);
+    N4X_ASSERT(fl.ship_ids[0] == 10);
+    N4X_ASSERT(fl.ship_ids[1] == 11);
     N4X_ASSERT(sim.fleet_for_ship(10) == fid);
     N4X_ASSERT(sim.fleet_for_ship(11) == fid);
     N4X_ASSERT(sim.fleet_for_ship(12) == kInvalidId);
@@ -299,9 +311,15 @@ int test_fleets() {
     N4X_ASSERT(!sim.add_ship_to_fleet(fid, 12, &err));
     N4X_ASSERT(!err.empty());
 
+    // Re-adding an existing member is idempotent and should not duplicate it.
+    err.clear();
+    N4X_ASSERT(sim.add_ship_to_fleet(fid, 11, &err));
+    N4X_ASSERT(sim.state().fleets.at(fid).ship_ids.size() == 2);
+
     // Leader switch.
     N4X_ASSERT(sim.set_fleet_leader(fid, 11));
     N4X_ASSERT(sim.state().fleets.at(fid).leader_ship_id == 11);
+    N4X_ASSERT(!sim.set_fleet_leader(fid, 12)); // non-member
 
     // Bulk order issuing: wait 3 days.
     N4X_ASSERT(sim.issue_fleet_wait_days(fid, 3));
@@ -313,8 +331,10 @@ int test_fleets() {
     N4X_ASSERT(sim.clear_fleet_orders(fid));
     N4X_ASSERT(sim.state().ship_orders.at(10).queue.empty());
     N4X_ASSERT(sim.state().ship_orders.at(11).queue.empty());
+    N4X_ASSERT(!sim.clear_fleet_orders(kInvalidId));
 
     // Remove members: removing last member should auto-disband.
+    N4X_ASSERT(!sim.remove_ship_from_fleet(fid, 12)); // non-member
     N4X_ASSERT(sim.remove_ship_from_fleet(fid, 10));
     N4X_ASSERT(sim.fleet_for_ship(10) == kInvalidId);
     // fleet still exists with ship 11
@@ -446,6 +466,12 @@ int test_fleets() {
     N4X_ASSERT(fl.mission.assault_use_bombardment == true);
     N4X_ASSERT(fl.mission.assault_bombard_days == 42);
     N4X_ASSERT(fl.mission.assault_bombard_executed == true);
+
+    // Basic API behavior on bad fleet IDs should stay stable.
+    N4X_ASSERT(!sim.configure_fleet_formation(kInvalidId, FleetFormation::Wedge, 2.0));
+    N4X_ASSERT(!sim.issue_fleet_wait_days(kInvalidId, 1));
+    N4X_ASSERT(!sim.issue_fleet_move_to_point(kInvalidId, Vec2{0.0, 0.0}));
+    N4X_ASSERT(!sim.issue_fleet_travel_via_jump(kInvalidId, 100));
   }
 
 
@@ -609,6 +635,12 @@ int test_fleets() {
 
     // Issue a fleet jump. The leader is already at the jump point.
     N4X_ASSERT(sim_jump.issue_fleet_travel_via_jump(fid, 100));
+    N4X_ASSERT(sim_jump.state().ship_orders.at(1000).queue.size() == 1);
+    N4X_ASSERT(sim_jump.state().ship_orders.at(1001).queue.size() == 1);
+    N4X_ASSERT(std::holds_alternative<TravelViaJump>(sim_jump.state().ship_orders.at(1000).queue.front()));
+    N4X_ASSERT(std::holds_alternative<TravelViaJump>(sim_jump.state().ship_orders.at(1001).queue.front()));
+    N4X_ASSERT(std::get<TravelViaJump>(sim_jump.state().ship_orders.at(1000).queue.front()).jump_point_id == 100);
+    N4X_ASSERT(std::get<TravelViaJump>(sim_jump.state().ship_orders.at(1001).queue.front()).jump_point_id == 100);
 
     // Day 1: leader should *not* jump yet, because the slower ship hasn't arrived.
     sim_jump.advance_days(1);
@@ -659,6 +691,14 @@ int test_fleets() {
 
     N4X_ASSERT(sim_form.configure_fleet_formation(fid, FleetFormation::LineAbreast, 2.0));
     N4X_ASSERT(sim_form.issue_fleet_move_to_point(fid, Vec2{100.0, 0.0}));
+    N4X_ASSERT(sim_form.state().ship_orders.at(1000).queue.size() == 1);
+    N4X_ASSERT(sim_form.state().ship_orders.at(1001).queue.size() == 1);
+    N4X_ASSERT(sim_form.state().ship_orders.at(1002).queue.size() == 1);
+    N4X_ASSERT(std::holds_alternative<MoveToPoint>(sim_form.state().ship_orders.at(1000).queue.front()));
+    N4X_ASSERT(std::holds_alternative<MoveToPoint>(sim_form.state().ship_orders.at(1001).queue.front()));
+    N4X_ASSERT(std::holds_alternative<MoveToPoint>(sim_form.state().ship_orders.at(1002).queue.front()));
+    N4X_ASSERT(std::fabs(std::get<MoveToPoint>(sim_form.state().ship_orders.at(1000).queue.front()).target_mkm.x - 100.0) < 1e-9);
+    N4X_ASSERT(std::fabs(std::get<MoveToPoint>(sim_form.state().ship_orders.at(1000).queue.front()).target_mkm.y - 0.0) < 1e-9);
 
     sim_form.advance_days(1);
 
@@ -678,63 +718,116 @@ int test_fleets() {
     N4X_ASSERT(b.position_mkm.y * c.position_mkm.y < 0.0);
   }
 
-
-// Fleet explore mission: survey unknown exit, then transit into undiscovered space.
-{
-  ContentDB content_explore;
-
-  // Provide the designs referenced by make_jump_state().
+  // --- Fleet formations should be robust to non-finite ship positions ---
   {
-    ShipDesign d;
-    d.id = "fast";
-    d.name = "Fast";
-    d.speed_km_s = 10000.0;
-    d.max_hp = 10.0;
-    content_explore.designs[d.id] = d;
+    ContentDB content_form_bad;
+    {
+      ShipDesign d;
+      d.id = "fast";
+      d.name = "Fast";
+      d.speed_km_s = 10000.0;
+      d.max_hp = 10.0;
+      content_form_bad.designs[d.id] = d;
+    }
+
+    GameState s_bad = make_formation_state();
+    s_bad.ships.at(1001).position_mkm = Vec2{std::numeric_limits<double>::quiet_NaN(), 0.0};
+
+    Simulation sim_form_bad(content_form_bad, SimConfig{});
+    sim_form_bad.load_game(s_bad);
+
+    std::string err;
+    const Id fid = sim_form_bad.create_fleet(1, "FormFleetBad", std::vector<Id>{1000, 1001, 1002}, &err);
+    N4X_ASSERT(fid != kInvalidId);
+    N4X_ASSERT(err.empty());
+    N4X_ASSERT(sim_form_bad.configure_fleet_formation(fid, FleetFormation::Ring, 2.0));
+    N4X_ASSERT(sim_form_bad.issue_fleet_move_to_point(fid, Vec2{25.0, 25.0}));
+
+    sim_form_bad.advance_days(1);
+
+    const auto& a = sim_form_bad.state().ships.at(1000).position_mkm;
+    const auto& b = sim_form_bad.state().ships.at(1001).position_mkm;
+    const auto& c = sim_form_bad.state().ships.at(1002).position_mkm;
+    N4X_ASSERT(std::isfinite(a.x) && std::isfinite(a.y));
+    N4X_ASSERT(std::isfinite(b.x) && std::isfinite(b.y));
+    N4X_ASSERT(std::isfinite(c.x) && std::isfinite(c.y));
   }
+
+
+  // Fleet explore mission: survey unknown exit, then transit into undiscovered space.
   {
-    ShipDesign d;
-    d.id = "slow";
-    d.name = "Slow";
-    d.speed_km_s = 10.0;
-    d.max_hp = 10.0;
-    content_explore.designs[d.id] = d;
+    ContentDB content_explore;
+
+    // Provide the designs referenced by make_jump_state().
+    {
+      ShipDesign d;
+      d.id = "fast";
+      d.name = "Fast";
+      d.speed_km_s = 10000.0;
+      d.sensor_range_mkm = 1e9;
+      d.max_hp = 10.0;
+      content_explore.designs[d.id] = d;
+    }
+    {
+      ShipDesign d;
+      d.id = "slow";
+      d.name = "Slow";
+      d.speed_km_s = 10.0;
+      d.sensor_range_mkm = 1e9;
+      d.max_hp = 10.0;
+      content_explore.designs[d.id] = d;
+    }
+
+    SimConfig explore_cfg{};
+    // Keep survey timing deterministic for this mission test.
+    explore_cfg.jump_survey_points_required = 0.0;
+
+    Simulation sim_explore(content_explore, explore_cfg);
+    sim_explore.load_game(make_jump_state());
+    auto& s = sim_explore.state();
+
+    std::string err;
+    const Id fid = sim_explore.create_fleet(1, "Explorers", std::vector<Id>{1000, 1001}, &err);
+    N4X_ASSERT(fid != kInvalidId);
+    N4X_ASSERT(err.empty());
+
+    // Enable an explore mission that surveys first, then transits on a later AI pass.
+    auto& fl = s.fleets.at(fid);
+    fl.mission.type = FleetMissionType::Explore;
+    fl.mission.explore_survey_first = true;
+    fl.mission.explore_allow_transit = true;
+    fl.mission.explore_survey_transit_when_done = true;
+    fl.mission.auto_refuel = false;
+    fl.mission.auto_repair = false;
+
+    // Ensure the local jump point starts as unsurveyed.
+    auto& fac = s.factions.at(1);
+    fac.discovered_systems.clear();
+    fac.discovered_systems.push_back(10);
+    fac.surveyed_jump_points.clear();
+    N4X_ASSERT(sim_explore.is_system_discovered_by_faction(1, 10));
+    N4X_ASSERT(!sim_explore.is_jump_point_surveyed_by_faction(1, 100));
+    N4X_ASSERT(!sim_explore.is_system_discovered_by_faction(1, 20));
+
+    // Park both ships on top of the jump point so the survey completes instantly.
+    s.ships.at(1000).position_mkm = Vec2{0.0, 0.0};
+    s.ships.at(1001).position_mkm = Vec2{0.0, 0.0};
+
+    // Day 1: mission should survey the local jump point but stay in-system.
+    sim_explore.advance_days(1);
+    N4X_ASSERT(s.ships.at(1000).system_id == 10);
+    N4X_ASSERT(s.ships.at(1001).system_id == 10);
+    N4X_ASSERT(sim_explore.is_jump_point_surveyed_by_faction(1, 100));
+
+    // Day 2: with survey complete and transit allowed, mission should jump.
+    sim_explore.advance_days(1);
+    N4X_ASSERT(s.ships.at(1000).system_id == 20);
+    N4X_ASSERT(s.ships.at(1001).system_id == 20);
+    N4X_ASSERT(sim_explore.is_system_discovered_by_faction(1, 20));
+    N4X_ASSERT(sim_explore.fleet_for_ship(1000) == fid);
+    N4X_ASSERT(sim_explore.fleet_for_ship(1001) == fid);
+    N4X_ASSERT(s.fleets.at(fid).ship_ids.size() == 2);
   }
-
-  Simulation sim_explore(content_explore, SimConfig{});
-  sim_explore.load_game(make_jump_state());
-  auto& s = sim_explore.state();
-
-  // Enable the new explore mission.
-  auto& fl = s.fleets.at(1000);
-  fl.mission.type = FleetMissionType::Explore;
-  fl.mission.explore_survey_first = true;
-  fl.mission.explore_allow_transit = true;
-
-  // Ensure the local jump point starts as *unsurveyed* so we exercise the
-  // survey-first behavior.
-  auto& fac = s.factions.at(1);
-  fac.surveyed_jump_points.clear();
-
-  // Park both ships on top of the jump point so the survey completes instantly.
-  s.ships.at(1).position_mkm = {0.0, 0.0};
-  s.ships.at(2).position_mkm = {0.0, 0.0};
-
-  // Day 1: mission should move to/survey the jump point, but not transit yet
-  // (transit decision happens on the next AI tick).
-  sim_explore.advance_days(1);
-  N4X_ASSERT(s.ships.at(1).system_id == 10);
-  N4X_ASSERT(s.ships.at(2).system_id == 10);
-  N4X_ASSERT(sim_explore.is_jump_point_surveyed_by_faction(1, 100));
-
-  // Day 2: jump point is now surveyed, so the mission should transit into the
-  // undiscovered system.
-  sim_explore.advance_days(1);
-  N4X_ASSERT(s.ships.at(1).system_id == 20);
-  N4X_ASSERT(s.ships.at(2).system_id == 20);
-  N4X_ASSERT(sim_explore.is_system_discovered_by_faction(1, 20));
-}
 
 return 0;
 }
-

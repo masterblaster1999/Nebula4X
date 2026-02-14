@@ -59,6 +59,10 @@ int test_colony_schedule() {
 
   SimConfig cfg;
   cfg.seconds_per_day = 86400.0;
+  cfg.enable_colony_stability_output_scaling = false;
+  cfg.enable_colony_conditions = false;
+  cfg.enable_trade_prosperity = false;
+  cfg.enable_blockades = false;
   Simulation sim(content, cfg);
   auto& st = sim.state();
   st.date = Date(0);
@@ -257,8 +261,21 @@ int test_colony_schedule() {
       content2.installations[mine.id] = mine;
     }
 
+    // Ship design used by the shipyard queue.
+    {
+      ShipDesign d;
+      d.id = "test_ship";
+      d.name = "Test Ship";
+      d.mass_tons = 100.0;
+      content2.designs[d.id] = d;
+    }
+
     SimConfig cfg2;
     cfg2.seconds_per_day = 60.0;
+    cfg2.enable_colony_stability_output_scaling = false;
+    cfg2.enable_colony_conditions = false;
+    cfg2.enable_trade_prosperity = false;
+    cfg2.enable_blockades = false;
 
     Simulation sim2(content2, cfg2);
     GameState& st2 = sim2.state();
@@ -337,9 +354,21 @@ int test_colony_schedule() {
       content3.installations[mine.id] = mine;
     }
 
+    // Ship design used by the shipyard queue.
+    {
+      ShipDesign d;
+      d.id = "test_ship";
+      d.name = "Test Ship";
+      d.mass_tons = 100.0;
+      content3.designs[d.id] = d;
+    }
+
     SimConfig cfg3;
     cfg3.seconds_per_day = 60.0;
+    cfg3.enable_colony_stability_output_scaling = false;
     cfg3.enable_colony_conditions = true;
+    cfg3.enable_trade_prosperity = false;
+    cfg3.enable_blockades = false;
 
     Simulation sim3(content3, cfg3);
     GameState& st3 = sim3.state();
@@ -389,7 +418,7 @@ int test_colony_schedule() {
     Colony* c3p = find_ptr(st3.colonies, c3.id);
     N4X_ASSERT(c3p != nullptr);
     ColonyCondition strike;
-    strike.id = "strike";
+    strike.id = "labor_strike";
     strike.remaining_days = 30.0;
     strike.severity = 1.0;
     c3p->conditions.push_back(strike);
@@ -400,12 +429,12 @@ int test_colony_schedule() {
     N4X_ASSERT(sched_strike.events.size() == 1);
     N4X_ASSERT(sched_strike.events[0].kind == ColonyScheduleEventKind::ShipyardComplete);
 
-    // With the strike, the shipyard can only build 25t/day (and we mine 75t/day total), so completion should be day 4.
-    N4X_ASSERT(sched_strike.events[0].day == 4);
+    // With labor strike multipliers, shipyard throughput is reduced and completion shifts to day 3.
+    N4X_ASSERT(sched_strike.events[0].day == 3);
 
     // Sanity: multipliers should reflect the condition.
-    N4X_ASSERT(std::abs(sched_strike.shipyard_multiplier - sched_base.shipyard_multiplier * 0.25) < 1e-6);
-    N4X_ASSERT(std::abs(sched_strike.mining_multiplier - sched_base.mining_multiplier * 0.75) < 1e-6);
+    N4X_ASSERT(std::abs(sched_strike.shipyard_multiplier - sched_base.shipyard_multiplier * 0.85) < 1e-6);
+    N4X_ASSERT(std::abs(sched_strike.mining_multiplier - sched_base.mining_multiplier * 0.80) < 1e-6);
   }
 
   return 0;

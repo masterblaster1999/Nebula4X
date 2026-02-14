@@ -19,11 +19,13 @@ int test_planner_events() {
   using nebula4x::Date;
   using nebula4x::EventCategory;
   using nebula4x::Faction;
+  using nebula4x::GameState;
   using nebula4x::Id;
   using nebula4x::InstallationBuildOrder;
   using nebula4x::InstallationDef;
   using nebula4x::PlannerEventsOptions;
   using nebula4x::PlannerEventsResult;
+  using nebula4x::ShipDesign;
   using nebula4x::Simulation;
   using nebula4x::StarSystem;
   using nebula4x::TechDef;
@@ -53,6 +55,12 @@ int test_planner_events() {
     mine.construction_cost = 10.0;
     content.installations[mine.id] = mine;
 
+    ShipDesign design;
+    design.id = "design";
+    design.name = "Test Design";
+    design.mass_tons = 50.0;
+    content.designs[design.id] = design;
+
     TechDef t;
     t.id = "test_tech";
     t.name = "Test Tech";
@@ -60,9 +68,18 @@ int test_planner_events() {
     content.techs[t.id] = t;
   }
 
-  Simulation sim(std::move(content), {});
-  sim.state().date = Date(0);
-  sim.state().hour_of_day = 0;
+  nebula4x::SimConfig cfg;
+  cfg.enable_colony_stability_output_scaling = false;
+  cfg.enable_colony_conditions = false;
+  cfg.enable_trade_prosperity = false;
+  cfg.enable_blockades = false;
+  Simulation sim(std::move(content), cfg);
+
+  GameState s;
+  s.save_version = GameState{}.save_version;
+  s.date = Date(0);
+  s.hour_of_day = 0;
+  sim.load_game(std::move(s));
 
   const Id fid = 1;
   {
@@ -121,6 +138,7 @@ int test_planner_events() {
   opt.include_research = true;
   opt.include_colonies = true;
   opt.include_ships = false;
+  opt.include_terraforming = false;
 
   PlannerEventsResult res = compute_planner_events(sim, fid, opt);
   N4X_ASSERT(res.ok);

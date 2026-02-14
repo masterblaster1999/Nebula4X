@@ -43,7 +43,8 @@ int test_contact_prediction() {
 
   GameState st;
   st.save_version = GameState{}.save_version;
-  st.date = Date::from_ymd(2200, 1, 11);
+  // Keep now >= 11 so (now-11) remains a valid previous contact day.
+  st.date = Date::from_ymd(2200, 1, 12);
   const int now = static_cast<int>(st.date.days_since_epoch());
 
   StarSystem sys;

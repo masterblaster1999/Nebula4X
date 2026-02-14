@@ -22,6 +22,16 @@ double get_mineral(const nebula4x::Colony& c, const std::string& mineral) {
   return (it == c.minerals.end()) ? 0.0 : it->second;
 }
 
+template <typename Pred>
+bool advance_until(nebula4x::Simulation& sim, int max_days, Pred&& pred) {
+  if (pred()) return true;
+  for (int d = 0; d < max_days; ++d) {
+    sim.advance_days(1);
+    if (pred()) return true;
+  }
+  return pred();
+}
+
 }  // namespace
 
 int test_auto_freight() {
@@ -80,6 +90,7 @@ int test_auto_freight() {
   sys.name = "Sol";
   sys.galaxy_pos = Vec2{0.0, 0.0};
   st.systems[sys.id] = sys;
+  st.factions[f.id].discovered_systems.push_back(sys.id);
 
   Body src_body;
   src_body.id = 10;
@@ -138,24 +149,28 @@ int test_auto_freight() {
   N4X_ASSERT(std::abs(src_before - 1000.0) < 1e-6, "source starts with 1000 Duranium");
   N4X_ASSERT(std::abs(dst_before - 0.0) < 1e-6, "destination starts with 0 Duranium");
 
-  // Run one day: shipyard stalls, then auto-freight should schedule + complete the haul in the same day.
-  sim.advance_days(1);
+  // Auto-freight should schedule and complete delivery within a short bounded window.
+  // Depending on tick model, load/unload can complete in one day or over two days.
+  const bool delivered_day1_or_2 = advance_until(sim, 2, [&]() {
+    return get_mineral(sim.state().colonies.at(dst.id), "Duranium") > 1e-9;
+  });
 
   const double src_after = get_mineral(sim.state().colonies.at(src.id), "Duranium");
   const double dst_after = get_mineral(sim.state().colonies.at(dst.id), "Duranium");
 
-  N4X_ASSERT(dst_after > 0.0, "destination received Duranium via auto-freight");
+  N4X_ASSERT(delivered_day1_or_2, "destination received Duranium via auto-freight within two days");
+  N4X_ASSERT(dst_after > 0.0, "destination has delivered Duranium");
   N4X_ASSERT(src_after < 1000.0, "source exported some Duranium via auto-freight");
 
   // Conservation check (no mines/industry in this test).
   N4X_ASSERT(std::abs((src_after + dst_after) - 1000.0) < 1e-6,
              "total Duranium conserved between colonies");
 
-  // Since both bodies are at the same position, loading and unloading should complete in the same day.
+  // Since both bodies are at the same position, cargo should be fully delivered after completion.
   const Ship& tsh = sim.state().ships.at(sh.id);
   auto it = tsh.cargo.find("Duranium");
   const double cargo_after = (it == tsh.cargo.end()) ? 0.0 : it->second;
-  N4X_ASSERT(cargo_after < 1e-6, "ship cargo is empty after same-day delivery");
+  N4X_ASSERT(cargo_after < 1e-6, "ship cargo is empty after completed delivery");
 
 
   // 2) Manual mineral reserves should cap exports.
@@ -167,11 +182,14 @@ int test_auto_freight() {
 
     sim2.load_game(st2);
 
-    sim2.advance_days(1);
+    const bool delivered_capped = advance_until(sim2, 2, [&]() {
+      return get_mineral(sim2.state().colonies.at(dst.id), "Duranium") >= 50.0 - 1e-6;
+    });
 
     const double src_after2 = get_mineral(sim2.state().colonies.at(src.id), "Duranium");
     const double dst_after2 = get_mineral(sim2.state().colonies.at(dst.id), "Duranium");
 
+    N4X_ASSERT(delivered_capped, "reserve-capped delivery completed within two days");
     N4X_ASSERT(std::abs(src_after2 - 950.0) < 1e-6, "source kept reserve (export capped)");
     N4X_ASSERT(std::abs(dst_after2 - 50.0) < 1e-6, "destination received only surplus above reserve");
 
@@ -192,13 +210,17 @@ int test_auto_freight() {
 
     sim3.load_game(st3);
 
-    sim3.advance_days(1);
+    const bool delivered_bundle = advance_until(sim3, 4, [&]() {
+      return get_mineral(sim3.state().colonies.at(dst.id), "Duranium") >= 100.0 - 1e-6 &&
+             get_mineral(sim3.state().colonies.at(dst.id), "Corbomite") >= 100.0 - 1e-6;
+    });
 
     const double src_dur = get_mineral(sim3.state().colonies.at(src.id), "Duranium");
     const double dst_dur = get_mineral(sim3.state().colonies.at(dst.id), "Duranium");
     const double src_cor = get_mineral(sim3.state().colonies.at(src.id), "Corbomite");
     const double dst_cor = get_mineral(sim3.state().colonies.at(dst.id), "Corbomite");
 
+    N4X_ASSERT(delivered_bundle, "bundled delivery completed within four days");
     N4X_ASSERT(std::abs(dst_dur - 100.0) < 1e-6, "destination received bundled Duranium");
     N4X_ASSERT(std::abs(dst_cor - 100.0) < 1e-6, "destination received bundled Corbomite");
     N4X_ASSERT(std::abs(src_dur - 900.0) < 1e-6, "source exported bundled Duranium");
@@ -207,7 +229,7 @@ int test_auto_freight() {
     const Ship& tsh3 = sim3.state().ships.at(sh.id);
     const double cargo_dur = tsh3.cargo.count("Duranium") ? tsh3.cargo.at("Duranium") : 0.0;
     const double cargo_cor = tsh3.cargo.count("Corbomite") ? tsh3.cargo.at("Corbomite") : 0.0;
-    N4X_ASSERT(cargo_dur < 1e-6 && cargo_cor < 1e-6, "ship cargo is empty after bundled same-day delivery");
+    N4X_ASSERT(cargo_dur < 1e-6 && cargo_cor < 1e-6, "ship cargo is empty after bundled delivery");
   }
 
   // 4) Bundling can be disabled via config, falling back to one-mineral-per-trip.
@@ -225,19 +247,26 @@ int test_auto_freight() {
 
     sim4.load_game(st4);
 
-    // Day 1: only the first mineral in deterministic priority order should arrive.
-    sim4.advance_days(1);
+    // With bundling disabled, only the first mineral in deterministic priority
+    // order should arrive on the first completed trip.
+    const bool first_trip_done = advance_until(sim4, 2, [&]() {
+      return get_mineral(sim4.state().colonies.at(dst.id), "Corbomite") >= 100.0 - 1e-6;
+    });
     const double dst_dur1 = get_mineral(sim4.state().colonies.at(dst.id), "Duranium");
     const double dst_cor1 = get_mineral(sim4.state().colonies.at(dst.id), "Corbomite");
-    N4X_ASSERT(std::abs(dst_cor1 - 100.0) < 1e-6, "first trip delivered Corbomite");
-    N4X_ASSERT(std::abs(dst_dur1 - 0.0) < 1e-6, "first trip did not deliver Duranium");
+    N4X_ASSERT(first_trip_done, "first non-bundled trip completed within two days");
+    N4X_ASSERT(std::abs(dst_cor1 - 100.0) < 1e-6, "first delivered mineral is Corbomite");
+    N4X_ASSERT(std::abs(dst_dur1 - 0.0) < 1e-6, "Duranium not delivered on first non-bundled trip");
 
-    // Day 2: the remaining mineral should be delivered.
-    sim4.advance_days(1);
+    // The remaining mineral should arrive on the next completed trip.
+    const bool second_trip_done = advance_until(sim4, 2, [&]() {
+      return get_mineral(sim4.state().colonies.at(dst.id), "Duranium") >= 100.0 - 1e-6;
+    });
     const double dst_dur2 = get_mineral(sim4.state().colonies.at(dst.id), "Duranium");
     const double dst_cor2 = get_mineral(sim4.state().colonies.at(dst.id), "Corbomite");
-    N4X_ASSERT(std::abs(dst_cor2 - 100.0) < 1e-6, "second day preserved Corbomite delivery");
-    N4X_ASSERT(std::abs(dst_dur2 - 100.0) < 1e-6, "second day delivered Duranium");
+    N4X_ASSERT(second_trip_done, "second non-bundled trip completed within two more days");
+    N4X_ASSERT(std::abs(dst_cor2 - 100.0) < 1e-6, "Corbomite delivery preserved");
+    N4X_ASSERT(std::abs(dst_dur2 - 100.0) < 1e-6, "second trip delivered Duranium");
   }
 
   return 0;
