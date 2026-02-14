@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <utility>
 
@@ -42,10 +43,24 @@ inline bool vec_contains(const std::vector<T>& v, const T& x) {
 inline bool is_mining_installation(const InstallationDef& def) {
   if (def.mining) return true;
   // Back-compat heuristic: if the content didn't explicitly set the flag,
-  // treat installations whose id contains "mine" and that produce minerals as miners.
+  // treat installations whose id has a mining token and that produce minerals as miners.
+  //
+  // Token-based matching avoids false positives like "mineral_processor".
   if (def.produces_per_day.empty()) return false;
   const std::string lid = ascii_to_lower(def.id);
-  return lid.find("mine") != std::string::npos;
+  auto is_token_char = [](unsigned char c) { return std::isalnum(c) != 0; };
+  std::size_t i = 0;
+  while (i < lid.size()) {
+    while (i < lid.size() && !is_token_char(static_cast<unsigned char>(lid[i]))) ++i;
+    std::size_t j = i;
+    while (j < lid.size() && is_token_char(static_cast<unsigned char>(lid[j]))) ++j;
+    if (j > i) {
+      const std::string_view tok(lid.data() + i, j - i);
+      if (tok == "mine" || tok == "mining" || tok == "miner") return true;
+    }
+    i = j + 1;
+  }
+  return false;
 }
 
 inline bool faction_has_tech(const Faction& f, const std::string& tech_id) {

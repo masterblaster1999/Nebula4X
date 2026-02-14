@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cmath>
+#include <limits>
 
 #include "nebula4x/util/trace_events.h"
 
@@ -17,10 +18,19 @@ struct PairCost {
   std::uint32_t slot_index;
 };
 
+static bool finite_vec(const Vec2& v) {
+  return std::isfinite(v.x) && std::isfinite(v.y);
+}
+
+static Vec2 sanitize_vec(const Vec2& v, const Vec2& fallback) {
+  return finite_vec(v) ? v : fallback;
+}
+
 static double dist2(const Vec2& a, const Vec2& b) {
   const double dx = a.x - b.x;
   const double dy = a.y - b.y;
-  return dx * dx + dy * dy;
+  const double v = dx * dx + dy * dy;
+  return std::isfinite(v) ? v : std::numeric_limits<double>::infinity();
 }
 }
 
@@ -32,7 +42,7 @@ std::unordered_map<Id, Vec2> compute_fleet_formation_offsets(FleetFormation form
   NEBULA4X_TRACE_SCOPE("compute_fleet_formation_offsets", "sim.formation");
   std::unordered_map<Id, Vec2> out;
   if (formation == FleetFormation::None) return out;
-  if (spacing_mkm <= 0.0) return out;
+  if (!std::isfinite(spacing_mkm) || spacing_mkm <= 0.0) return out;
   if (members_sorted_unique.empty()) return out;
 
   // Choose a deterministic leader.
@@ -54,7 +64,10 @@ std::unordered_map<Id, Vec2> compute_fleet_formation_offsets(FleetFormation form
   if (m == 0) return out;
 
   // Orthonormal basis derived from leader position and raw target.
-  Vec2 forward = raw_target_mkm - leader_pos_mkm;
+  const Vec2 leader_pos = sanitize_vec(leader_pos_mkm, Vec2{0.0, 0.0});
+  const Vec2 target_pos = sanitize_vec(raw_target_mkm, leader_pos + Vec2{1.0, 0.0});
+
+  Vec2 forward = target_pos - leader_pos;
   const double flen = forward.length();
   if (flen < 1e-9) {
     forward = Vec2{1.0, 0.0};
@@ -143,7 +156,8 @@ std::unordered_map<Id, Vec2> compute_fleet_formation_offsets(FleetFormation form
   bool have_positions = (member_positions_mkm != nullptr);
   if (have_positions) {
     for (Id sid : followers) {
-      if (member_positions_mkm->find(sid) == member_positions_mkm->end()) {
+      auto it = member_positions_mkm->find(sid);
+      if (it == member_positions_mkm->end() || !finite_vec(it->second)) {
         have_positions = false;
         break;
       }
@@ -165,15 +179,17 @@ std::unordered_map<Id, Vec2> compute_fleet_formation_offsets(FleetFormation form
     const Id sid = followers[si];
     const Vec2 ship_pos = member_positions_mkm->at(sid);
     for (std::uint32_t sl = 0; sl < static_cast<std::uint32_t>(m); ++sl) {
-      const Vec2 desired = raw_target_mkm + slots[sl];
+      const Vec2 desired = target_pos + slots[sl];
       const double d2 = dist2(ship_pos, desired);
       pairs.push_back(PairCost{d2, sid, si, sl});
     }
   }
 
   std::sort(pairs.begin(), pairs.end(), [](const PairCost& a, const PairCost& b) {
-    if (a.d2 < b.d2) return true;
-    if (a.d2 > b.d2) return false;
+    const double ad2 = std::isfinite(a.d2) ? a.d2 : std::numeric_limits<double>::infinity();
+    const double bd2 = std::isfinite(b.d2) ? b.d2 : std::numeric_limits<double>::infinity();
+    if (ad2 < bd2) return true;
+    if (ad2 > bd2) return false;
     if (a.ship_id < b.ship_id) return true;
     if (a.ship_id > b.ship_id) return false;
     return a.slot_index < b.slot_index;

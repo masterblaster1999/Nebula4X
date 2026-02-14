@@ -18,7 +18,8 @@ using json::Array;
 using json::Object;
 using json::Value;
 
-constexpr int kCurrentSaveVersion = 57;
+// Keep load-time version upgrades aligned with the canonical GameState default.
+const int kCurrentSaveVersion = GameState{}.save_version;
 
 
 std::string contract_kind_to_string(ContractKind k) {
@@ -666,6 +667,9 @@ Value order_to_json(const Order& order) {
           obj["colony_id"] = static_cast<double>(o.colony_id);
           obj["duration_days"] = static_cast<double>(o.duration_days);
           if (o.progress_days > 1e-12) obj["progress_days"] = o.progress_days;
+          if (o.installation_damage_carry > 1e-12) obj["installation_damage_carry"] = o.installation_damage_carry;
+          if (!o.priority_installation_id.empty()) obj["priority_installation_id"] = o.priority_installation_id;
+          if (o.stop_when_ground_forces_neutralized) obj["stop_when_ground_forces_neutralized"] = true;
         } else if constexpr (std::is_same_v<T, SalvageWreck>) {
           obj["type"] = std::string("salvage_wreck");
           obj["wreck_id"] = static_cast<double>(o.wreck_id);
@@ -886,6 +890,15 @@ Order order_from_json(const Value& v) {
     }
     if (auto it = o.find("progress_days"); it != o.end()) {
       b.progress_days = it->second.number_value(0.0);
+    }
+    if (auto it = o.find("installation_damage_carry"); it != o.end()) {
+      b.installation_damage_carry = std::max(0.0, it->second.number_value(0.0));
+    }
+    if (auto it = o.find("priority_installation_id"); it != o.end()) {
+      b.priority_installation_id = it->second.string_value();
+    }
+    if (auto it = o.find("stop_when_ground_forces_neutralized"); it != o.end()) {
+      b.stop_when_ground_forces_neutralized = it->second.bool_value(false);
     }
     return b;
   }
@@ -1683,7 +1696,7 @@ json::Value serialize_game_to_json_value(const GameState& s) {
     Object o;
     o["id"] = static_cast<double>(a.id);
     if (!a.name.empty()) o["name"] = a.name;
-    if (!a.kind.empty()) o["kind"] = a.kind;
+    if (a.kind != AnomalyKind::Unknown) o["kind"] = anomaly_kind_to_string(a.kind);
     o["system_id"] = static_cast<double>(a.system_id);
     o["position_mkm"] = vec2_to_json(a.position_mkm);
     if (a.investigation_days != 1) o["investigation_days"] = static_cast<double>(a.investigation_days);
@@ -2814,7 +2827,27 @@ GameState deserialize_game_from_json(const std::string& json_text) {
         a.id = static_cast<Id>(o.at("id").int_value(kInvalidId));
         if (a.id == kInvalidId) continue;
         if (auto itn = o.find("name"); itn != o.end()) a.name = itn->second.string_value();
-        if (auto itk = o.find("kind"); itk != o.end()) a.kind = itk->second.string_value();
+        if (auto itk = o.find("kind"); itk != o.end()) {
+          if (itk->second.is_string()) {
+            a.kind = anomaly_kind_from_string(itk->second.string_value());
+          } else if (itk->second.is_number()) {
+            const int kv = static_cast<int>(itk->second.int_value(0));
+            switch (kv) {
+              case 1: a.kind = AnomalyKind::Signal; break;
+              case 2: a.kind = AnomalyKind::Distress; break;
+              case 3: a.kind = AnomalyKind::Ruins; break;
+              case 4: a.kind = AnomalyKind::Artifact; break;
+              case 5: a.kind = AnomalyKind::Phenomenon; break;
+              case 6: a.kind = AnomalyKind::Distortion; break;
+              case 7: a.kind = AnomalyKind::Xenoarchaeology; break;
+              case 8: a.kind = AnomalyKind::CodexEcho; break;
+              case 9: a.kind = AnomalyKind::Echo; break;
+              case 10: a.kind = AnomalyKind::Cache; break;
+              case 11: a.kind = AnomalyKind::Generic; break;
+              default: a.kind = AnomalyKind::Unknown; break;
+            }
+          }
+        }
         if (auto its = o.find("system_id"); its != o.end()) a.system_id = static_cast<Id>(its->second.int_value(kInvalidId));
         if (auto itp = o.find("position_mkm"); itp != o.end()) a.position_mkm = vec2_from_json(itp->second);
         if (auto itd = o.find("investigation_days"); itd != o.end()) a.investigation_days = static_cast<int>(itd->second.int_value(1));

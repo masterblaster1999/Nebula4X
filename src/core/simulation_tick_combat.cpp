@@ -1189,6 +1189,8 @@ void Simulation::tick_combat(double dt_days) {
                 double killed_ground = 0.0;
                 double pop_loss_m = 0.0;
                 std::vector<std::pair<std::string, int>> destroyed;
+                double installation_carry = std::max(0.0, bo->installation_damage_carry);
+                if (!std::isfinite(installation_carry)) installation_carry = 0.0;
 
                 const double gf_per_dmg = std::max(0.0, cfg_.bombard_ground_strength_per_damage);
                 if (remaining > 1e-12 && gf_per_dmg > 1e-12 && col->ground_forces > 1e-12) {
@@ -1205,8 +1207,23 @@ void Simulation::tick_combat(double dt_days) {
                   }
                 }
 
+                if (bo->stop_when_ground_forces_neutralized && col->ground_forces <= 1e-9) {
+                  bo->installation_damage_carry = 0.0;
+                  auto itq = state_.ship_orders.find(aid);
+                  if (itq != state_.ship_orders.end() && !itq->second.queue.empty() &&
+                      std::holds_alternative<BombardColony>(itq->second.queue.front())) {
+                    itq->second.queue.erase(itq->second.queue.begin());
+                  }
+                  continue;
+                }
+
                 const double hp_per_cost = std::max(0.0, cfg_.bombard_installation_hp_per_construction_cost);
                 if (remaining > 1e-12 && !col->installations.empty()) {
+                  if (installation_carry > 1e-12) {
+                    remaining += installation_carry;
+                    installation_carry = 0.0;
+                  }
+
                   struct Cand {
                     std::string id;
                     int count{0};
@@ -1234,6 +1251,9 @@ void Simulation::tick_combat(double dt_days) {
                       }
                       c.hp = std::max(1.0, static_cast<double>(def.construction_cost) * hp_per_cost);
                     }
+                    if (!bo->priority_installation_id.empty() && c.id == bo->priority_installation_id) {
+                      c.pri = -1;
+                    }
                     cands.push_back(std::move(c));
                   }
 
@@ -1247,7 +1267,8 @@ void Simulation::tick_combat(double dt_days) {
                     if (c.count <= 0) continue;
                     if (c.hp <= 1e-12) c.hp = 1.0;
 
-                    const int can_kill = static_cast<int>(std::floor((remaining + 1e-9) / c.hp));
+                    const double can_kill_real = (remaining / c.hp) + 1e-6;
+                    const int can_kill = static_cast<int>(std::floor(can_kill_real));
                     const int kill = std::min(c.count, std::max(0, can_kill));
                     if (kill <= 0) continue;
 
@@ -1260,6 +1281,14 @@ void Simulation::tick_combat(double dt_days) {
                     remaining = std::max(0.0, remaining);
                     destroyed.push_back({c.id, kill});
                   }
+
+                  // Preserve fractional installation damage across sub-day ticks.
+                  // Without this, small dt_days can quantize all installation kills to
+                  // zero even when total daily damage should destroy structures.
+                  if (!col->installations.empty() && remaining > 1e-12) {
+                    installation_carry += remaining;
+                    remaining = 0.0;
+                  }
                 }
 
                 const double pop_per_dmg = std::max(0.0, cfg_.bombard_population_millions_per_damage);
@@ -1268,6 +1297,7 @@ void Simulation::tick_combat(double dt_days) {
                   col->population_millions = std::max(0.0, col->population_millions - pop_loss_m);
                   remaining = 0.0;
                 }
+                bo->installation_damage_carry = std::max(0.0, installation_carry);
 
                 const bool did_effect = (killed_ground > 1e-12) || (!destroyed.empty()) || (pop_loss_m > 1e-12);
                 if (did_effect) {

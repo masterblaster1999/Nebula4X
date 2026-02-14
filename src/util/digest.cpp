@@ -594,7 +594,7 @@ static void hash_game_state_anomalies(Digest64& d, const GameState& s) {
     const auto& a = s.anomalies.at(aid);
     d.add_u64(aid);
     d.add_string(a.name);
-    d.add_string(a.kind);
+    d.add_u64(static_cast<std::uint64_t>(a.kind));
     d.add_u64(a.system_id);
     hash_vec2(d, a.position_mkm);
     d.add_i64(a.investigation_days);

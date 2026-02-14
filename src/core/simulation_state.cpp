@@ -19,6 +19,7 @@
 #include "nebula4x/core/ai_economy.h"
 #include "nebula4x/core/content_validation.h"
 #include "nebula4x/core/design_stats.h"
+#include "nebula4x/core/enum_strings.h"
 #include "nebula4x/core/state_validation.h"
 #include "nebula4x/core/procgen_obscure.h"
 #include "nebula4x/util/log.h"
@@ -425,7 +426,7 @@ void Simulation::discover_anomaly_for_faction(Id faction_id, Id anomaly_id, Id d
 
     std::ostringstream ss;
     ss << "System: " << sys_name;
-    if (!anom->kind.empty()) ss << "\nKind: " << anom->kind;
+    if (anom->kind != AnomalyKind::Unknown) ss << "\nKind: " << anomaly_kind_label(anom->kind);
     ss << "\nInvestigation: " << std::max(1, anom->investigation_days) << " day(s) on-station";
     if (anom->research_reward > 1e-9) {
       ss.setf(std::ios::fixed);
@@ -679,6 +680,38 @@ void Simulation::new_game_random(std::uint32_t seed, int num_systems) {
 void Simulation::load_game(GameState loaded) {
   state_ = std::move(loaded);
   ++state_generation_;
+
+  // Ensure id allocation cannot collide with ids already present in loaded state.
+  // This protects manually-constructed/legacy saves that forgot to bump next_id.
+  {
+    Id max_id = 0;
+    auto bump = [&](Id id) {
+      if (id != kInvalidId && id > max_id) max_id = id;
+    };
+    auto bump_keys = [&](const auto& m) {
+      for (const auto& [id, _] : m) bump(id);
+    };
+
+    bump_keys(state_.systems);
+    bump_keys(state_.regions);
+    bump_keys(state_.bodies);
+    bump_keys(state_.jump_points);
+    bump_keys(state_.ships);
+    bump_keys(state_.wrecks);
+    bump_keys(state_.anomalies);
+    bump_keys(state_.contracts);
+    bump_keys(state_.missile_salvos);
+    bump_keys(state_.colonies);
+    bump_keys(state_.factions);
+    bump_keys(state_.treaties);
+    bump_keys(state_.diplomatic_offers);
+    bump_keys(state_.fleets);
+
+    if (state_.next_id == kInvalidId || state_.next_id <= max_id) {
+      state_.next_id = max_id + 1;
+      if (state_.next_id == kInvalidId) ++state_.next_id;
+    }
+  }
 
   {
     std::uint64_t max_seq = 0;

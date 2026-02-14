@@ -56,6 +56,16 @@ GameState make_sol_scenario() {
     s.factions[pirates] = f;
   }
 
+  const Id neutrals = allocate_id(s);
+  {
+    Faction f;
+    f.id = neutrals;
+    f.name = "Neutral League";
+    f.control = FactionControl::AI_Passive;
+    f.research_points = 0.0;
+    s.factions[neutrals] = f;
+  }
+
 
   // --- Systems ---
   const Id sol = allocate_id(s);
@@ -88,6 +98,11 @@ GameState make_sol_scenario() {
 
   s.selected_system = sol;
 
+  // Starting intel: each faction knows its own home system at game start.
+  s.factions[terrans].discovered_systems = {sol};
+  s.factions[pirates].discovered_systems = {centauri};
+  s.factions[neutrals].discovered_systems = {barnard};
+
   auto add_body = [&](Id system_id, const std::string& name, BodyType type, double a_mkm, double period_days,
                       double mean_anomaly, double eccentricity = 0.0, double arg_periapsis = 0.0) {
     const Id id = allocate_id(s);
@@ -107,14 +122,45 @@ GameState make_sol_scenario() {
   };
 
   // --- Sol bodies ---
-  (void)add_body(sol, "Sun", BodyType::Star, 0.0, 1.0, 0.0);
-  const Id earth = add_body(sol, "Earth", BodyType::Planet, 149.6, 365.25, 0.0);
-  const Id mars = add_body(sol, "Mars", BodyType::Planet, 227.9, 686.98, 1.0);
-  (void)add_body(sol, "Jupiter", BodyType::GasGiant, 778.5, 4332.6, 2.0);
+  // Keep this scenario close to the actual Solar System while still using a compact
+  // set of gameplay-relevant bodies.
+  const Id sun = add_body(sol, "Sun", BodyType::Star, 0.0, 1.0, 0.0);
+  const Id mercury = add_body(sol, "Mercury", BodyType::Planet, 57.91, 87.969, 0.4, 0.2056, 0.508);
+  const Id venus = add_body(sol, "Venus", BodyType::Planet, 108.21, 224.701, 1.6, 0.0068, 0.958);
+  const Id earth = add_body(sol, "Earth", BodyType::Planet, 149.60, 365.256, 0.0, 0.0167, 1.993);
+  const Id mars = add_body(sol, "Mars", BodyType::Planet, 227.94, 686.980, 1.0, 0.0934, 4.999);
+  const Id jupiter = add_body(sol, "Jupiter", BodyType::GasGiant, 778.57, 4332.589, 2.0, 0.0489, 4.779);
+  const Id saturn = add_body(sol, "Saturn", BodyType::GasGiant, 1433.53, 10759.22, 2.7, 0.0565, 5.924);
+  const Id uranus = add_body(sol, "Uranus", BodyType::GasGiant, 2872.46, 30688.5, 3.3, 0.0460, 1.692);
+  const Id neptune = add_body(sol, "Neptune", BodyType::GasGiant, 4495.06, 60182.0, 4.1, 0.0090, 4.763);
+  const Id moon = add_body(sol, "Moon", BodyType::Moon, 0.3844, 27.322, 2.8, 0.0549, 5.554);
+  s.bodies.at(moon).parent_body_id = earth;
 
-  // Basic environmental defaults + a starter terraforming target for Mars.
+  // Physical/environmental metadata (approximate modern values).
   {
+    auto& su = s.bodies.at(sun);
+    su.mass_solar = 1.0;
+    su.luminosity_solar = 1.0;
+    su.radius_km = 696340.0;
+    su.surface_temp_k = 5772.0;
+
+    auto& me = s.bodies.at(mercury);
+    me.mass_earths = 0.0553;
+    me.radius_km = 2439.7;
+    me.surface_temp_k = 440.0;
+    me.atmosphere_atm = 1e-12;
+    me.oxygen_atm = 0.0;
+
+    auto& ve = s.bodies.at(venus);
+    ve.mass_earths = 0.815;
+    ve.radius_km = 6051.8;
+    ve.surface_temp_k = 737.0;
+    ve.atmosphere_atm = 92.0;
+    ve.oxygen_atm = 0.0;
+
     auto& e = s.bodies.at(earth);
+    e.mass_earths = 1.0;
+    e.radius_km = 6371.0;
     e.surface_temp_k = 288.0;
     e.atmosphere_atm = 1.0;
     e.oxygen_atm = 0.21;
@@ -123,69 +169,103 @@ GameState make_sol_scenario() {
     e.terraforming_target_o2_atm = 0.21;
     e.terraforming_complete = true;
 
+    auto& mo = s.bodies.at(moon);
+    mo.mass_earths = 0.0123;
+    mo.radius_km = 1737.4;
+    mo.surface_temp_k = 220.0;
+    mo.atmosphere_atm = 1e-12;
+    mo.oxygen_atm = 0.0;
+
     auto& m = s.bodies.at(mars);
+    m.mass_earths = 0.107;
+    m.radius_km = 3389.5;
     m.surface_temp_k = 210.0;
     m.atmosphere_atm = 0.006;
     m.oxygen_atm = 0.0;
-    // Prototype target: "Earthlike".
+    // Keep Mars as an obvious early terraforming target.
     m.terraforming_target_temp_k = 288.0;
     m.terraforming_target_atm = 0.8;
     m.terraforming_target_o2_atm = 0.168;
     m.terraforming_complete = false;
+
+    auto& ju = s.bodies.at(jupiter);
+    ju.mass_earths = 317.8;
+    ju.radius_km = 69911.0;
+    ju.surface_temp_k = 165.0;
+
+    auto& sa = s.bodies.at(saturn);
+    sa.mass_earths = 95.2;
+    sa.radius_km = 58232.0;
+    sa.surface_temp_k = 134.0;
+
+    auto& ur = s.bodies.at(uranus);
+    ur.mass_earths = 14.5;
+    ur.radius_km = 25362.0;
+    ur.surface_temp_k = 76.0;
+
+    auto& ne = s.bodies.at(neptune);
+    ne.mass_earths = 17.1;
+    ne.radius_km = 24622.0;
+    ne.surface_temp_k = 72.0;
   }
 
-  // Minor bodies (prototype): a modest asteroid belt and a short-period comet.
-  //
-  // This keeps the Sol start interesting for mining and demonstrates
-  // non-circular (eccentric) orbits without blowing out the map scale.
-  auto period_solar = [](double a_mkm) {
-    const double a_au = a_mkm / 149.6;
-    const double years = std::sqrt(std::max(0.0, a_au * a_au * a_au));
-    return std::max(1.0, years * 365.25);
-  };
-
-  auto eq_temp_solar = [](double dist_au, double albedo) {
-    const double d = std::max(0.05, dist_au);
-    const double a = std::clamp(albedo, 0.0, 0.95);
-    const double t = 278.0 / std::sqrt(d) * std::pow(1.0 - a, 0.25);
-    return std::clamp(t, 30.0, 2000.0);
-  };
-
+  // Major asteroids and one known periodic comet.
   std::vector<Id> sol_belt;
-  sol_belt.reserve(12);
-  for (int i = 0; i < 12; ++i) {
-    const double rr = 414.0 + (static_cast<double>(i) - 5.5) * 3.0; // ~2.7 AU belt band
-    const double ph = 0.35 * static_cast<double>(i);
-    const Id aid = add_body(sol, "Asteroid " + std::to_string(i + 1), BodyType::Asteroid, rr, period_solar(rr), ph);
+  sol_belt.reserve(4);
+  struct AstSeed {
+    const char* name;
+    double a_mkm;
+    double period_days;
+    double phase;
+    double eccentricity;
+    double arg_periapsis;
+    double mass_earths;
+    double radius_km;
+    double surface_temp_k;
+  };
+  const std::array<AstSeed, 4> kAsteroids = {
+      AstSeed{"Ceres", 413.7, 1680.0, 0.2, 0.0758, 1.280, 0.000157, 473.0, 167.0},
+      AstSeed{"Vesta", 353.3, 1325.0, 1.1, 0.0887, 2.646, 0.000039, 262.7, 197.0},
+      AstSeed{"Pallas", 414.5, 1686.0, 2.1, 0.2310, 5.436, 0.000034, 256.0, 164.0},
+      AstSeed{"Hygiea", 470.3, 2033.0, 2.8, 0.1120, 5.445, 0.000015, 217.0, 151.0},
+  };
+  for (const AstSeed& as : kAsteroids) {
+    const Id aid = add_body(sol, as.name, BodyType::Asteroid, as.a_mkm, as.period_days, as.phase, as.eccentricity,
+                            as.arg_periapsis);
     sol_belt.push_back(aid);
     auto& b = s.bodies.at(aid);
-    b.radius_km = 50.0 + 15.0 * (i % 5);
-    b.surface_temp_k = eq_temp_solar(rr / 149.6, 0.08);
+    b.mass_earths = as.mass_earths;
+    b.radius_km = as.radius_km;
+    b.surface_temp_k = as.surface_temp_k;
   }
 
-  // A short-period comet with a noticeable eccentricity but a manageable aphelion.
-  const double encke_a = 332.0; // ~2.22 AU
-  const Id encke =
-      add_body(sol, "Comet Encke", BodyType::Comet, encke_a, period_solar(encke_a), 0.7, 0.85, 1.2);
+  const Id encke = add_body(sol, "Comet Encke", BodyType::Comet, 334.6, 1203.7, 0.7, 0.848, 3.252);
   {
     auto& b = s.bodies.at(encke);
-    b.radius_km = 6.0;
-    // Temperature shown is a rough perihelion equilibrium estimate.
-    const double q_au = (encke_a / 149.6) * (1.0 - 0.85);
-    b.surface_temp_k = eq_temp_solar(q_au, 0.04);
+    b.mass_earths = 0.0000000005;
+    b.radius_km = 2.4;
+    b.surface_temp_k = 260.0;
   }
 
   // --- Alpha Centauri bodies ---
-  (void)add_body(centauri, "Alpha Centauri A", BodyType::Star, 0.0, 1.0, 0.0);
+  const Id alpha_cen_a = add_body(centauri, "Alpha Centauri A", BodyType::Star, 0.0, 1.0, 0.0);
   const Id centauri_prime = add_body(centauri, "Centauri Prime", BodyType::Planet, 110.0, 320.0, 0.4);
 
   // --- Barnard's Star bodies ---
-  (void)add_body(barnard, "Barnard's Star", BodyType::Star, 0.0, 1.0, 0.0);
+  const Id barnard_star = add_body(barnard, "Barnard's Star", BodyType::Star, 0.0, 1.0, 0.0);
   const Id barnard_b = add_body(barnard, "Barnard b", BodyType::Planet, 60.0, 233.0, 0.2);
 
   // Environment for non-Sol colonies (prototype defaults).
   {
+    auto& ac = s.bodies.at(alpha_cen_a);
+    ac.mass_solar = 1.10;
+    ac.luminosity_solar = 1.52;
+    ac.radius_km = 854000.0;
+    ac.surface_temp_k = 5790.0;
+
     auto& cp = s.bodies.at(centauri_prime);
+    cp.mass_earths = 1.12;
+    cp.radius_km = 6800.0;
     cp.surface_temp_k = 285.0;
     cp.atmosphere_atm = 0.95;
     cp.oxygen_atm = 0.20;
@@ -194,9 +274,17 @@ GameState make_sol_scenario() {
     cp.terraforming_target_o2_atm = cp.oxygen_atm;
     cp.terraforming_complete = true;
 
+    auto& bs = s.bodies.at(barnard_star);
+    bs.mass_solar = 0.144;
+    bs.luminosity_solar = 0.0035;
+    bs.radius_km = 136500.0;
+    bs.surface_temp_k = 3130.0;
+
     auto& bb = s.bodies.at(barnard_b);
-    bb.surface_temp_k = 240.0;
-    bb.atmosphere_atm = 0.20;
+    bb.mass_earths = 3.2;
+    bb.radius_km = 9600.0;
+    bb.surface_temp_k = 125.0;
+    bb.atmosphere_atm = 0.08;
     bb.oxygen_atm = 0.0;
     bb.terraforming_target_temp_k = 288.0;
     bb.terraforming_target_atm = 1.0;
@@ -345,6 +433,33 @@ GameState make_sol_scenario() {
     s.colonies[c.id] = c;
   }
 
+  // --- Neutral League foothold (Barnard's Star) ---
+  // Small independent settlement so neutrals are visible from turn 1.
+  const Id neutral_colony = allocate_id(s);
+  {
+    Colony c;
+    c.id = neutral_colony;
+    c.name = "Barnard Freehold";
+    c.faction_id = neutrals;
+    c.body_id = barnard_b;
+    c.population_millions = 85.0;
+    c.minerals = {
+        {"Duranium", 1200.0},
+        {"Neutronium", 140.0},
+        {"Fuel", 2200.0},
+        {"Munitions", 120.0},
+    };
+    c.installations = {
+        {"automated_mine", 6},
+        {"construction_factory", 1},
+        {"fuel_refinery", 1},
+        {"sensor_station", 1},
+        {"infrastructure", 2},
+    };
+    c.ground_forces = 45.0;
+    s.colonies[c.id] = c;
+  }
+
   // --- Pirate base colony (Alpha Centauri) ---
   // Gives the default pirates an economy so they can scale up over time.
   {
@@ -403,9 +518,21 @@ GameState make_sol_scenario() {
     sh.auto_rearm = true;
   }
 
+  // --- Neutral League traffic (Barnard's Star) ---
+  const Vec2 neutral_pos = s.bodies.at(barnard_b).position_mkm;
+  const Id neutral_freighter =
+      add_ship(neutrals, barnard, neutral_pos + Vec2{0.5, -0.4}, "League Courier", "freighter_alpha");
+  {
+    auto& sh = s.ships[neutral_freighter];
+    sh.auto_refuel = true;
+    sh.auto_repair = true;
+    sh.auto_rearm = true;
+    sh.auto_freight = true;
+  }
+
   // --- Anomalies (investigation targets) ---
   {
-    auto add_anomaly = [&](Id system_id, const std::string& name, const std::string& kind, const Vec2& pos_mkm,
+    auto add_anomaly = [&](Id system_id, const std::string& name, AnomalyKind kind, const Vec2& pos_mkm,
                            int investigation_days, double research_reward, const std::string& unlock_component_id,
                            std::unordered_map<std::string, double> mineral_reward,
                            double hazard_chance, double hazard_damage) {
@@ -427,16 +554,16 @@ GameState make_sol_scenario() {
     };
 
     // A small early-game target in the home system.
-    (void)add_anomaly(sol, "Strange Lunar Echo", "signal", earth_pos + Vec2{4.2, 0.6}, 6, 150.0, "sensor_mk2",
+    (void)add_anomaly(sol, "Strange Lunar Echo", AnomalyKind::Signal, earth_pos + Vec2{4.2, 0.6}, 6, 150.0, "sensor_mk2",
                     {{"Duranium", 25.0}, {"Neutronium", 5.0}}, 0.05, 1.0);
 
     // A more ambitious site in pirate space.
-    (void)add_anomaly(centauri, "Derelict Xeno Beacon", "artifact", pirate_pos + Vec2{6.0, -2.0}, 10, 240.0,
+    (void)add_anomaly(centauri, "Derelict Xeno Beacon", AnomalyKind::Artifact, pirate_pos + Vec2{6.0, -2.0}, 10, 240.0,
                   "stealth_coating_mk1",
                   {{"Duranium", 80.0}, {"Tritanium", 25.0}, {"Sorium", 40.0}}, 0.30, 3.5);
 
     // A quick curiosity to encourage scouting.
-    (void)add_anomaly(barnard, "Micrometeorite Halo", "phenomenon", Vec2{55.0, 30.0}, 4, 90.0, "",
+    (void)add_anomaly(barnard, "Micrometeorite Halo", AnomalyKind::Phenomenon, Vec2{55.0, 30.0}, 4, 90.0, "",
                     {{"Sorium", 30.0}}, 0.12, 1.5);
   }
 
@@ -524,6 +651,17 @@ std::string to_roman(int n) {
 }
 
 double clamp01(double x) { return std::clamp(x, 0.0, 1.0); }
+
+void scale_mineral_payload(std::unordered_map<std::string, double>& minerals, double mult) {
+  if (!(mult > 0.0) || !std::isfinite(mult)) {
+    minerals.clear();
+    return;
+  }
+  for (auto& [k, v] : minerals) {
+    (void)k;
+    v = std::max(0.0, v * mult);
+  }
+}
 
 std::uint32_t hash_u32(std::uint32_t x) {
   // Deterministic integer hash (good avalanche) for procedural noise.
@@ -893,15 +1031,24 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
   const RandomGalaxyShape galaxy_shape = cfg.galaxy_shape;
   const bool pirates_enabled = cfg.enable_pirates;
   const double pirate_strength = std::max(0.0, cfg.pirate_strength);
+  const double resource_abundance = std::clamp(cfg.resource_abundance, 0.5, 2.0);
+  const double frontier_intensity = std::clamp(cfg.frontier_intensity, 0.5, 2.0);
+  const double frontier_t = clamp01((frontier_intensity - 0.5) / 1.5);
 
   const bool independents_enabled = cfg.enable_independents;
   const int independent_outposts_cfg = cfg.num_independent_outposts;
 
   if (num_systems < 1) num_systems = 1;
-  // Keep things reasonably small so the prototype UI stays responsive.
-  if (num_systems > 64) num_systems = 64;
+  // Keep things bounded so generation stays responsive at very large counts.
+  if (num_systems > 300) num_systems = 300;
 
   std::mt19937 rng(seed);
+
+  const auto frontier_dist_shape = [&](double dist_norm) {
+    const double d = clamp01(dist_norm);
+    const double exp = std::clamp(1.35 - 0.95 * frontier_t, 0.35, 1.40);
+    return std::pow(d, exp);
+  };
 
   // --- Factions ---
   const Id terrans = allocate_id(s);
@@ -1029,6 +1176,7 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
     d["Gallicite"] = prop(0.06, 0.55, 1.85);
 
     d["Sorium"] = std::max(0.0, base * 0.12 * sorium_mult * rand_log_uniform(rng, 0.55, 1.85));
+    scale_mineral_payload(d, resource_abundance);
   };
 
   struct SysInfo {
@@ -1712,7 +1860,7 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
       if (num_systems <= 1) {
         region_count = 1;
       } else {
-        // sqrt(n) is a decent heuristic for small maps (<=64 systems).
+        // sqrt(n) is a decent heuristic for small-to-mid maps (up to a few hundred systems).
         region_count = std::clamp(static_cast<int>(std::llround(std::sqrt(static_cast<double>(num_systems)))), 2, 10);
       }
     }
@@ -1967,17 +2115,27 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
     if (num_systems > 1) {
       std::mt19937 prng(seed ^ 0xBADA55E5u);
 
+      double max_dist = 1e-6;
+      for (int i = 1; i < num_systems; ++i) {
+        const double dist = (systems[static_cast<std::size_t>(i)].galaxy_pos - systems.front().galaxy_pos).length();
+        max_dist = std::max(max_dist, dist);
+      }
+
       double best_score = -1.0;
       for (int i = 1; i < num_systems; ++i) {
         const double dist = (systems[static_cast<std::size_t>(i)].galaxy_pos - systems.front().galaxy_pos).length();
+        const double dn = std::clamp(dist / max_dist, 0.0, 1.0);
 
         double risk = 0.25;
         if (const auto* reg = find_ptr(s.regions, systems[static_cast<std::size_t>(i)].region_id)) {
           risk = reg->pirate_risk;
         }
 
-        // Distance dominates, but region risk can tilt the choice.
-        const double score = dist * (0.70 + 0.80 * clamp01(risk)) * (1.0 + 0.03 * rand_unit(prng));
+        // Distance dominates, and frontier intensity controls how hard pirate
+        // pressure shifts toward the rim.
+        const double frontier_bias = 0.70 + (0.75 + 0.85 * frontier_t) * frontier_dist_shape(dn);
+        const double score =
+            dist * frontier_bias * (0.70 + 0.80 * clamp01(risk)) * (1.0 + 0.03 * rand_unit(prng));
 
         if (score > best_score) {
           best_score = score;
@@ -2566,7 +2724,7 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
 
     std::vector<double> best(static_cast<std::size_t>(n), std::numeric_limits<double>::infinity());
     std::vector<int> parent(static_cast<std::size_t>(n), -1);
-    std::vector<std::uint8_t> used(static_cast<std::size_t>(n), 0);
+    std::vector<std::uint8_t> used(static_cast<std::size_t>(n), std::uint8_t{0});
 
     best[0] = 0.0;
 
@@ -2897,6 +3055,45 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
       std::vector<std::vector<int>> clusters(static_cast<std::size_t>(k));
       for (int i = 0; i < num_systems; ++i) clusters[static_cast<std::size_t>(assign[static_cast<std::size_t>(i)])].push_back(i);
 
+      // Guard against empty clusters (can still happen after centroid reseeds on the
+      // final Lloyd iteration). We keep clusters non-empty before bridge generation
+      // so downstream `.front()` calls are always valid.
+      {
+        for (int ci = 0; ci < k; ++ci) {
+          auto& dst = clusters[static_cast<std::size_t>(ci)];
+          if (!dst.empty()) continue;
+
+          int donor = -1;
+          int donor_pos = -1;
+          double best_d = -1.0;
+
+          for (int cj = 0; cj < k; ++cj) {
+            auto& src = clusters[static_cast<std::size_t>(cj)];
+            if (src.size() <= 1) continue;
+            for (int pos = 0; pos < static_cast<int>(src.size()); ++pos) {
+              const int idx = src[static_cast<std::size_t>(pos)];
+              const Vec2 d = systems[static_cast<std::size_t>(idx)].galaxy_pos - centers[static_cast<std::size_t>(ci)];
+              const double dd = d.x * d.x + d.y * d.y;
+              if (dd > best_d) {
+                best_d = dd;
+                donor = cj;
+                donor_pos = pos;
+              }
+            }
+          }
+
+          if (donor >= 0 && donor_pos >= 0) {
+            auto& src = clusters[static_cast<std::size_t>(donor)];
+            const int moved = src[static_cast<std::size_t>(donor_pos)];
+            src.erase(src.begin() + donor_pos);
+            dst.push_back(moved);
+          } else if (num_systems > 0) {
+            // Conservative fallback in degenerate cases.
+            dst.push_back(ci % num_systems);
+          }
+        }
+      }
+
       // Intra-cluster links.
       const int intra_k = std::clamp(2 + static_cast<int>(std::llround(jump_density)), 2, 6);
       for (auto& cl : clusters) {
@@ -2912,7 +3109,7 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
       if (k >= 2) {
         std::vector<double> best(static_cast<std::size_t>(k), std::numeric_limits<double>::infinity());
         std::vector<int> parent(static_cast<std::size_t>(k), -1);
-        std::vector<std::uint8_t> used(static_cast<std::size_t>(k), 0);
+        std::vector<std::uint8_t> used(static_cast<std::size_t>(k), std::uint8_t{0});
         best[0] = 0.0;
 
         for (int it = 0; it < k; ++it) {
@@ -3599,6 +3796,7 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
       // places that are poor to mine but rewarding to explore (and vice versa).
       const double salv_mult = reg ? std::clamp(reg->salvage_richness_mult, 0.25, 3.5) : 1.0;
       scale *= salv_mult;
+      scale *= resource_abundance;
 
       auto add = [&](const char* key, double lo, double hi, double p) {
         if (rand_unit(wrng) < p) m[key] = rand_log_uniform(wrng, lo, hi) * scale;
@@ -3639,7 +3837,7 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
       const char* ex = kExotics[static_cast<std::size_t>(rand_int(wrng, 0, (int)kExotics.size() - 1))];
 
       const double ruins = reg ? clamp01(reg->ruins_density) : 0.0;
-      m[ex] += rand_log_uniform(wrng, 80.0, 520.0) * scale * (1.0 + 0.75 * ruins);
+      m[ex] += rand_log_uniform(wrng, 80.0, 520.0) * scale * resource_abundance * (1.0 + 0.75 * ruins);
       return m;
     };
 
@@ -3671,7 +3869,8 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
 
 
     // Additional sites: a mix of near and far systems.
-    int extra_sites = std::clamp(num_systems / 3, 2, 14);
+    int extra_sites = static_cast<int>(std::llround(static_cast<double>(num_systems) / 3.0 * (0.90 + 0.45 * frontier_t)));
+    extra_sites = std::clamp(extra_sites, 2, 18);
     if (num_systems <= 2) extra_sites = 0;
 
     struct SysPick {
@@ -3707,6 +3906,7 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
       sys_idx += 1;
     }
     std::sort(picks.begin(), picks.end(), [](const SysPick& a, const SysPick& b) { return a.dist < b.dist; });
+    const double max_pick_dist = picks.empty() ? 1e-6 : std::max(1e-6, picks.back().dist);
 
     const int pool = (int)picks.size();
     const int near_pool = std::min(pool, 8);
@@ -3723,7 +3923,9 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
       double total = 0.0;
       for (int i = lo; i < hi; ++i) {
         if (used_sys.count(picks[static_cast<std::size_t>(i)].id)) continue;
+        const double dn = std::clamp(picks[static_cast<std::size_t>(i)].dist / max_pick_dist, 0.0, 1.0);
         double w = 1.0 + 2.0 * clamp01(picks[static_cast<std::size_t>(i)].nebula);
+        w *= 0.75 + (0.90 + 0.55 * frontier_t) * frontier_dist_shape(dn);
         w *= 0.85 + 0.50 * std::clamp(picks[static_cast<std::size_t>(i)].hub01, 0.0, 1.0);
         w *= 1.0 + 0.10 * std::clamp(picks[static_cast<std::size_t>(i)].choke01, 0.0, 1.0);
         if (const auto* reg = find_ptr(s.regions, picks[static_cast<std::size_t>(i)].region_id)) {
@@ -3736,7 +3938,9 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
       double t = rand_real(wrng, 0.0, total);
       for (int i = lo; i < hi; ++i) {
         if (used_sys.count(picks[static_cast<std::size_t>(i)].id)) continue;
+        const double dn = std::clamp(picks[static_cast<std::size_t>(i)].dist / max_pick_dist, 0.0, 1.0);
         double w = 1.0 + 2.0 * clamp01(picks[static_cast<std::size_t>(i)].nebula);
+        w *= 0.75 + (0.90 + 0.55 * frontier_t) * frontier_dist_shape(dn);
         w *= 0.85 + 0.50 * std::clamp(picks[static_cast<std::size_t>(i)].hub01, 0.0, 1.0);
         w *= 1.0 + 0.10 * std::clamp(picks[static_cast<std::size_t>(i)].choke01, 0.0, 1.0);
         if (const auto* reg = find_ptr(s.regions, picks[static_cast<std::size_t>(i)].region_id)) {
@@ -3777,7 +3981,7 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
         if (rand_unit(wrng) < 0.14) kind = "Lost Survey Ship";
 
         std::string nm = std::string(kind) + " (" + pick->name + ")";
-        const double base_scale = want_far ? 1.0 : 0.55;
+        const double base_scale = want_far ? (0.95 + 0.35 * frontier_t) : (0.60 - 0.10 * frontier_t);
         const double neb_scale = 0.85 + 0.55 * clamp01(pick->nebula);
         const Region* rreg = find_ptr(s.regions, pick->region_id);
         add_wreck(pick->id, nm, pos, salvage_package(base_scale * neb_scale, pick->nebula, rreg));
@@ -3807,7 +4011,8 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
         if (ruins < 0.08) continue;
 
         const double dn = std::clamp(p.dist / max_dist, 0.0, 1.0);
-        double w = (0.10 + 2.40 * ruins) * (0.55 + 0.75 * dn) * (0.85 + 0.35 * clamp01(p.nebula));
+        const double frontier_bias = 0.55 + (0.70 + 0.65 * frontier_t) * frontier_dist_shape(dn);
+        double w = (0.10 + 2.40 * ruins) * frontier_bias * (0.85 + 0.35 * clamp01(p.nebula));
         const double hub = std::clamp(p.hub01, 0.0, 1.0);
         const double choke = std::clamp(p.choke01, 0.0, 1.0);
         w *= (0.85 + 0.50 * hub) * (1.0 + 0.15 * choke);
@@ -3888,7 +4093,7 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
   {
     std::mt19937 arng(seed ^ 0xA11E0B7Bu);
 
-    auto add_anomaly = [&](Id system_id, const std::string& name, const std::string& kind, const Vec2& pos_mkm,
+    auto add_anomaly = [&](Id system_id, const std::string& name, AnomalyKind kind, const Vec2& pos_mkm,
                            int investigation_days, double research_reward, const std::string& unlock_component_id,
                            std::unordered_map<std::string, double> mineral_reward,
                            double hazard_chance, double hazard_damage) -> Id {
@@ -3926,6 +4131,7 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
     const double ruins_avg = (ruins_n > 0) ? (ruins_sum / static_cast<double>(ruins_n)) : 0.0;
 
     int target_total = static_cast<int>(std::llround(static_cast<double>(num_systems) * (0.09 + 0.11 * ruins_avg)));
+    target_total = static_cast<int>(std::llround(static_cast<double>(target_total) * (0.90 + 0.50 * frontier_t)));
     target_total = std::clamp(target_total, 1, 20);
 
     // Always place a small, low-risk anomaly in the home system so the mechanic
@@ -3941,7 +4147,9 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
         }
       }
       const Vec2 pos = random_offset(45.0, std::max(95.0, ext * 0.35));
-      add_anomaly(home_system, "Distorted Signal", "signal", pos, 5, 90.0, "", {{"Duranium", 20.0}}, 0.03, 0.8);
+      std::unordered_map<std::string, double> intro_reward = {{"Duranium", 20.0}};
+      scale_mineral_payload(intro_reward, resource_abundance);
+      add_anomaly(home_system, "Distorted Signal", AnomalyKind::Signal, pos, 5, 90.0, "", std::move(intro_reward), 0.03, 0.8);
     }
 
     // Candidates across the galaxy, weighted by ruins density and distance.
@@ -3983,7 +4191,8 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
       const double neb = clamp01(si.nebula_density);
       const double dn = std::clamp((si.galaxy_pos - home_pos).length() / max_dist, 0.0, 1.0);
 
-      double w = (0.20 + 2.30 * ruins) * (0.55 + 0.85 * dn) * (0.90 + 0.40 * neb);
+      const double frontier_bias = 0.55 + (0.80 + 0.90 * frontier_t) * frontier_dist_shape(dn);
+      double w = (0.20 + 2.30 * ruins) * frontier_bias * (0.90 + 0.40 * neb);
       w *= std::clamp(0.85 + 0.45 * hub01 + 0.20 * choke01, 0.50, 1.80);
       if (w <= 0.0) continue;
 
@@ -4001,18 +4210,22 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
         "stealth_coating_mk1",
     };
 
-    static const std::array<const char*, 8> kKinds = {
-        "signal",
-        "artifact",
-        "ruins",
-        "phenomenon",
-        "anomaly",
-        "distortion",
-        "echo",
-        "cache",
+    static const std::array<AnomalyKind, 9> kKinds = {
+        AnomalyKind::Signal,
+        AnomalyKind::Artifact,
+        AnomalyKind::Ruins,
+        AnomalyKind::Phenomenon,
+        AnomalyKind::Generic,
+        AnomalyKind::Distortion,
+        AnomalyKind::Echo,
+        AnomalyKind::Cache,
+        AnomalyKind::Xenoarchaeology,
     };
 
-    static const std::array<const char*, 10> kNames = {
+    const double xeno_spawn_pressure_early = std::clamp(cfg.xenoarchaeology_spawn_pressure_early, 0.25, 3.0);
+    const double xeno_spawn_pressure_late = std::clamp(cfg.xenoarchaeology_spawn_pressure_late, 0.25, 3.0);
+
+    static const std::array<const char*, 11> kNames = {
         "Strange Beacon",
         "Ancient Probe",
         "Temporal Echo",
@@ -4023,10 +4236,13 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
         "Xeno Artifact",
         "Forgotten Array",
         "Silent Relay",
+        "Buried Concord",
     };
 
     // Already placed 1 in home.
-    int remaining = std::max(0, target_total - 1);
+    const int frontier_bonus = std::max(0, static_cast<int>(std::llround(
+                                             std::max(0, cfg.num_systems) * (0.02 + 0.14 * frontier_t))));
+    int remaining = std::max(0, (target_total + frontier_bonus) - 1);
     for (int i = 0; i < remaining && !cands.empty(); ++i) {
       double total = 0.0;
       for (const auto& c : cands) total += c.w;
@@ -4046,6 +4262,7 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
       const double ruins = cands[sel].ruins;
       const double neb = cands[sel].neb;
       const double dn = cands[sel].dist_norm;
+      const double frontier_bias = 0.85 + 0.70 * frontier_t * frontier_dist_shape(dn);
 
       const double hub01 = cands[sel].hub01;
       const double choke01 = cands[sel].choke01;
@@ -4062,16 +4279,49 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
         }
       }
 
-      const char* kind = kKinds[static_cast<std::size_t>(rand_int(arng, 0, (int)kKinds.size() - 1))];
+      std::array<double, kKinds.size()> kind_w{};
+      for (std::size_t ki = 0; ki < kKinds.size(); ++ki) {
+        kind_w[ki] = 1.0;
+        if (kKinds[ki] == AnomalyKind::Xenoarchaeology) {
+          const double xeno_t = frontier_dist_shape(dn);
+          kind_w[ki] = std::clamp(
+                                  xeno_spawn_pressure_early + (xeno_spawn_pressure_late - xeno_spawn_pressure_early) * xeno_t,
+                                  0.05,
+                                  8.0);
+          kind_w[ki] *= std::clamp(0.70 + 1.45 * ruins + 0.35 * dn + 0.20 * neb, 0.35, 3.00);
+        } else if (kKinds[ki] == AnomalyKind::Ruins) {
+          kind_w[ki] *= std::clamp(0.55 + 1.75 * ruins + 0.15 * dn, 0.30, 3.00);
+        } else if (kKinds[ki] == AnomalyKind::Cache) {
+          kind_w[ki] *= std::clamp(0.70 + 0.90 * neb + 0.55 * dn, 0.40, 2.50);
+        } else if (kKinds[ki] == AnomalyKind::Distortion || kKinds[ki] == AnomalyKind::Phenomenon) {
+          kind_w[ki] *= std::clamp(0.80 + 0.70 * neb + 0.35 * frontier_t, 0.45, 2.40);
+        }
+        kind_w[ki] = std::clamp(kind_w[ki], 0.05, 8.00);
+      }
+      double kind_total = 0.0;
+      for (double w : kind_w) kind_total += std::max(0.0, w);
+      if (kind_total <= 1e-9) kind_total = static_cast<double>(kKinds.size());
+      double kt = rand_real(arng, 0.0, kind_total);
+      std::size_t kind_sel = 0;
+      for (std::size_t ki = 0; ki < kKinds.size(); ++ki) {
+        kt -= std::max(0.0, kind_w[ki]);
+        if (kt <= 0.0) {
+          kind_sel = ki;
+          break;
+        }
+      }
+      const AnomalyKind kind = kKinds[kind_sel];
       const char* base = kNames[static_cast<std::size_t>(rand_int(arng, 0, (int)kNames.size() - 1))];
       const std::string sys_name = si ? si->name : std::string("Unknown");
       const std::string nm = std::string(base) + " (" + sys_name + ")";
 
       // Investigation time and rewards scale with ruins density and distance.
-      const int days = std::clamp(4 + static_cast<int>(std::llround(6.0 * ruins + 4.0 * dn + rand_real(arng, 0.0, 4.0))), 3,
-                                  18);
+      const int days = std::clamp(
+          4 + static_cast<int>(std::llround((6.0 * ruins + 4.0 * dn + rand_real(arng, 0.0, 4.0)) * frontier_bias)), 3, 20);
 
-      const double rp = std::max(0.0, rand_real(arng, 60.0, 140.0) * (0.75 + 0.55 * dn) + 260.0 * ruins + 60.0 * neb);
+      const double rp = std::max(
+          0.0,
+          (rand_real(arng, 60.0, 140.0) * (0.75 + 0.55 * dn) + 260.0 * ruins + 60.0 * neb) * frontier_bias);
 
       std::string unlock;
       if (!unlock_pool.empty() && rand_unit(arng) < 0.22) {
@@ -4082,12 +4332,15 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
       // beyond pure RP, and naturally interacts with the existing salvage/cargo systems.
       std::unordered_map<std::string, double> minerals;
       {
-        const double kind_cache = (std::string(kind) == "cache") ? 0.35 : 0.0;
+        const double kind_cache = (kind == AnomalyKind::Cache) ? 0.35 : (kind == AnomalyKind::Xenoarchaeology) ? 0.20 : 0.0;
         const double p = std::clamp(0.10 + 0.55 * ruins + 0.20 * neb + kind_cache, 0.0, 0.90);
         if (rand_unit(arng) < p) {
           // Total tonnage scales with ruins density and distance (deeper space = better finds).
           double total_tons = rand_real(arng, 18.0, 140.0) * (0.75 + 0.80 * ruins + 0.55 * dn);
-          if (std::string(kind) == "cache") total_tons *= 1.35;
+          total_tons *= resource_abundance;
+          total_tons *= frontier_bias;
+          if (kind == AnomalyKind::Cache) total_tons *= 1.35;
+          if (kind == AnomalyKind::Xenoarchaeology) total_tons *= 1.25;
           total_tons = std::clamp(total_tons, 8.0, 420.0);
 
           // A small fixed pool of common minerals (string ids used throughout scenarios/content).
@@ -4137,16 +4390,39 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
       double hazard_damage = 0.0;
       {
         double kind_risk = 1.0;
-        const std::string k = std::string(kind);
-        if (k == "cache") kind_risk = 0.35;
-        else if (k == "signal" || k == "echo") kind_risk = 0.55;
-        else if (k == "distortion" || k == "phenomenon") kind_risk = 1.15;
+        if (kind == AnomalyKind::Cache) kind_risk = 0.35;
+        else if (kind == AnomalyKind::Signal || kind == AnomalyKind::Echo) kind_risk = 0.55;
+        else if (kind == AnomalyKind::Distortion || kind == AnomalyKind::Phenomenon) kind_risk = 1.15;
+        else if (kind == AnomalyKind::Xenoarchaeology) kind_risk = 1.28;
 
-        const double p = std::clamp((0.06 + 0.22 * dn + 0.25 * neb + 0.18 * ruins) * kind_risk, 0.0, 0.85);
-        if (rand_unit(arng) < p) {
-          hazard_chance = std::clamp(0.10 + 0.35 * neb + 0.20 * ruins + 0.10 * rand_unit(arng), 0.0, 0.95);
-          hazard_damage = rand_real(arng, 0.8, 4.0) * (0.75 + 0.85 * dn + 1.20 * ruins + 0.55 * neb);
-          hazard_damage = std::clamp(hazard_damage, 0.5, 12.0);
+        const double hazard_pressure = std::clamp(0.90 + 1.10 * frontier_t, 0.90, 2.00);
+        const double p_floor = 0.03 + 0.17 * frontier_t;
+        const double p = std::clamp(
+            std::max(p_floor,
+                     (0.06 + 0.22 * dn + 0.25 * neb + 0.18 * ruins) * kind_risk * frontier_bias * hazard_pressure),
+            0.0,
+            0.95);
+        const double hazard_roll = rand_unit(arng);
+        const double hazard_shape_roll = rand_unit(arng);
+        const double hazard_damage_roll = rand_real(arng, 0.8, 4.0);
+        if (hazard_roll < p) {
+          const double hazard_scale = std::clamp(0.85 + 0.90 * frontier_t, 0.85, 1.75);
+          hazard_chance =
+              std::clamp((0.10 + 0.35 * neb + 0.20 * ruins + 0.10 * hazard_shape_roll) * frontier_bias * hazard_scale,
+                         0.0, 0.95);
+          hazard_damage = hazard_damage_roll * (0.75 + 0.85 * dn + 1.20 * ruins + 0.55 * neb) * frontier_bias * hazard_scale;
+          hazard_damage = std::clamp(hazard_damage, 0.5, 14.0);
+        }
+
+        // Keep a small baseline frontier-risk floor so higher frontier intensity
+        // consistently reflects at the aggregate hazard profile level.
+        if (!(hazard_chance > 1e-12 && hazard_damage > 1e-12)) {
+          const double baseline_chance =
+              std::clamp((0.012 + 0.050 * frontier_t) * (0.55 + 0.45 * dn), 0.0, 0.15);
+          const double baseline_damage =
+              std::clamp(0.45 + 1.55 * frontier_t * (0.55 + 0.45 * dn), 0.45, 4.0);
+          hazard_chance = std::max(hazard_chance, baseline_chance);
+          hazard_damage = std::max(hazard_damage, baseline_damage);
         }
       }
 
@@ -4310,6 +4586,9 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
     if (!systems.empty()) center = center * (1.0 / static_cast<double>(systems.size()));
     double max_r = 1.0;
     for (const auto& si : systems) max_r = std::max(max_r, (si.galaxy_pos - center).length());
+    const Vec2 home_pos = systems.empty() ? Vec2{0.0, 0.0} : systems.front().galaxy_pos;
+    double max_home_dist = 1.0;
+    for (const auto& si : systems) max_home_dist = std::max(max_home_dist, (si.galaxy_pos - home_pos).length());
 
     int max_degree = 1;
     for (const auto& si : systems) {
@@ -4333,6 +4612,7 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
       const double deg01 = std::clamp(static_cast<double>(deg) / static_cast<double>(max_degree), 0.0, 1.0);
       const double dist = (si.galaxy_pos - center).length();
       const double central01 = 1.0 - std::clamp(dist / max_r, 0.0, 1.0);
+      const double home_dn = std::clamp((si.galaxy_pos - home_pos).length() / max_home_dist, 0.0, 1.0);
 
       const double net_hub01 = (i >= 0 && i < static_cast<int>(jump_hub01.size()))
                                  ? jump_hub01[static_cast<std::size_t>(i)]
@@ -4345,6 +4625,7 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
       // Prefer actual traffic hubs (betweenness/degree), with a small galaxy-central bonus.
       double w = 0.20 + 0.80 * std::clamp(0.70 * net_hub01 + 0.30 * central01, 0.0, 1.0);
       w *= 0.93 + 0.14 * choke01;
+      w *= 0.80 + (0.70 + 0.70 * frontier_t) * frontier_dist_shape(home_dn);
 
       // Region bias: richer + less pirate-ridden space attracts more independent settlers.
       if (si.region_id != kInvalidId) {
@@ -4368,6 +4649,7 @@ GameState make_random_scenario(const RandomScenarioConfig& cfg) {
       if (num_systems <= 3) want = 0;
       else want = std::clamp(num_systems / 4, 1, 12);
     }
+    want = static_cast<int>(std::llround(static_cast<double>(want) * (0.90 + 0.30 * frontier_t)));
 
     want = std::clamp(want, 0, static_cast<int>(cands.size()));
 

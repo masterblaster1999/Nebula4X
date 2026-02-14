@@ -64,7 +64,7 @@ void Simulation::tick_colonies(double dt_days, bool emit_daily_events) {
   };
 
   // Aggregate mining requests so that multiple colonies on the same body share
-  // finite deposits fairly (proportional allocation) and deterministically.
+  // finite deposits fairly and deterministically.
   //
   // Structure: body_id -> mineral -> [(colony_id, requested_tons_this_tick), ...]
   std::unordered_map<Id, std::unordered_map<std::string, std::vector<std::pair<Id, double>>>> mine_reqs;
@@ -265,14 +265,124 @@ void Simulation::tick_colonies(double dt_days, bool emit_daily_events) {
           }
           it_dep->second = std::max(0.0, before - total_req);
         } else {
-          // Not enough deposit: allocate proportionally.
-          const double ratio = before / total_req;
+          // Not enough deposit:
+          // - legacy mode: proportional allocation by request
+          // - scarcity-aware mode: boost colonies that are short on local buffer
+          //   (still deterministic and request-bounded).
+          struct ScarcityAllocation {
+            Id colony_id{kInvalidId};
+            double req{0.0};
+            double weight{0.0};
+            double alloc{0.0};
+          };
+
+          std::vector<ScarcityAllocation> allocs;
+          allocs.reserve(list.size());
+
+          const double safe_dt_days = std::max(1e-6, dt_days);
+          const double buffer_days = std::max(0.0, cfg_.mining_scarcity_buffer_days);
+          const double need_boost = std::max(0.0, cfg_.mining_scarcity_need_boost);
+          const bool scarcity_priority = cfg_.enable_mining_scarcity_priority && need_boost > 1e-12 &&
+                                         buffer_days > 1e-12 && list.size() > 1;
+
           for (const auto& [colony_id, req] : list) {
             if (req <= 1e-12) continue;
-            if (auto* c = find_ptr(state_.colonies, colony_id)) {
-              c->minerals[mineral] += req * ratio;
+            ScarcityAllocation a;
+            a.colony_id = colony_id;
+            a.req = req;
+            if (!scarcity_priority) {
+              a.weight = req;
+            } else {
+              double stock = 0.0;
+              if (const Colony* c = find_ptr(state_.colonies, colony_id)) {
+                if (auto it_stock = c->minerals.find(mineral); it_stock != c->minerals.end()) {
+                  stock = std::max(0.0, it_stock->second);
+                }
+              }
+
+              const double req_per_day = req / safe_dt_days;
+              const double target_buffer = req_per_day * buffer_days;
+              double shortage = 0.0;
+              if (target_buffer > 1e-9) {
+                shortage = std::clamp((target_buffer - stock) / target_buffer, 0.0, 1.0);
+              }
+              const double mult = 1.0 + need_boost * shortage;
+              a.weight = req * std::max(0.0, mult);
+              if (!std::isfinite(a.weight) || a.weight <= 1e-12) a.weight = req;
+            }
+            allocs.push_back(a);
+          }
+
+          double remaining = before;
+          constexpr int kMaxPasses = 8;
+          for (int pass = 0; pass < kMaxPasses && remaining > 1e-9; ++pass) {
+            double weight_sum = 0.0;
+            int active = 0;
+            for (const auto& a : allocs) {
+              const double room = a.req - a.alloc;
+              if (room <= 1e-12) continue;
+              weight_sum += std::max(1e-12, a.weight);
+              ++active;
+            }
+            if (active <= 0) break;
+
+            double given = 0.0;
+            if (weight_sum <= 1e-12) {
+              const double equal_share = remaining / static_cast<double>(active);
+              for (auto& a : allocs) {
+                const double room = a.req - a.alloc;
+                if (room <= 1e-12) continue;
+                const double add = std::min(room, equal_share);
+                if (add <= 1e-12) continue;
+                a.alloc += add;
+                given += add;
+              }
+            } else {
+              for (auto& a : allocs) {
+                const double room = a.req - a.alloc;
+                if (room <= 1e-12) continue;
+                const double frac = std::max(1e-12, a.weight) / weight_sum;
+                const double target = remaining * frac;
+                const double add = std::min(room, target);
+                if (add <= 1e-12) continue;
+                a.alloc += add;
+                given += add;
+              }
+            }
+
+            if (given <= 1e-12) break;
+            remaining = std::max(0.0, remaining - given);
+          }
+
+          if (remaining > 1e-9) {
+            // Deterministic final pass to consume residual due to capping/rounding.
+            for (auto& a : allocs) {
+              if (remaining <= 1e-9) break;
+              const double room = a.req - a.alloc;
+              if (room <= 1e-12) continue;
+              const double add = std::min(room, remaining);
+              a.alloc += add;
+              remaining = std::max(0.0, remaining - add);
             }
           }
+
+          double distributed = 0.0;
+          for (const auto& a : allocs) {
+            if (a.alloc <= 1e-12) continue;
+            if (auto* c = find_ptr(state_.colonies, a.colony_id)) {
+              c->minerals[mineral] += a.alloc;
+              distributed += a.alloc;
+            }
+          }
+
+          // Keep mass conservation robust under floating-point roundoff.
+          distributed = std::clamp(distributed, 0.0, before);
+          it_dep->second = std::max(0.0, before - distributed);
+          if (it_dep->second <= 1e-9) it_dep->second = 0.0;
+          if (it_dep->second > 0.0 && it_dep->second < before * 1e-12) it_dep->second = 0.0;
+        }
+
+        if (it_dep->second <= 1e-9) {
           it_dep->second = 0.0;
         }
 

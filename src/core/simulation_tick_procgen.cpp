@@ -106,7 +106,7 @@ void Simulation::tick_dynamic_points_of_interest() {
   const int per_sys_anom_cap = std::max(0, cfg_.dynamic_poi_max_unresolved_anomalies_per_system);
   const int per_sys_cache_cap = std::max(0, cfg_.dynamic_poi_max_active_caches_per_system);
 
-  const double base_anom_chance = std::clamp(cfg_.dynamic_anomaly_spawn_chance_per_system_per_day, 0.0, 1.0);
+  double base_anom_chance = std::clamp(cfg_.dynamic_anomaly_spawn_chance_per_system_per_day, 0.0, 1.0);
   const double base_cache_chance = std::clamp(cfg_.dynamic_cache_spawn_chance_per_system_per_day, 0.0, 1.0);
 
   if (base_anom_chance <= 1e-12 && base_cache_chance <= 1e-12) return;
@@ -152,6 +152,24 @@ void Simulation::tick_dynamic_points_of_interest() {
     ++caches_per_sys[w.system_id];
     occupied_by_sys[w.system_id].push_back(w.position_mkm);
   }
+
+  int resolved_anomaly_count = 0;
+  for (const auto& [_, a] : state_.anomalies) {
+    if (a.resolved) ++resolved_anomaly_count;
+  }
+  int max_discovered_systems = 0;
+  for (const auto& [_, f] : state_.factions) {
+    max_discovered_systems = std::max(max_discovered_systems, static_cast<int>(f.discovered_systems.size()));
+  }
+
+  const double resolved_maturity = std::clamp(static_cast<double>(resolved_anomaly_count) / 42.0, 0.0, 1.0);
+  const double reach_maturity = std::clamp(static_cast<double>(std::max(0, max_discovered_systems - 1)) / 16.0, 0.0, 1.0);
+  const double early_exploration_pressure =
+      std::clamp(0.60 * (1.0 - resolved_maturity) + 0.40 * (1.0 - reach_maturity), 0.0, 1.0);
+
+  // Early-game exploration acceleration: spawn slightly more anomalies while the
+  // galaxy is still mostly unknown.
+  base_anom_chance = std::clamp(base_anom_chance * (1.0 + 0.34 * early_exploration_pressure), 0.0, 1.0);
 
   if (unresolved_total >= max_anoms_total && caches_total >= max_caches_total) return;
 
@@ -236,8 +254,8 @@ void Simulation::tick_dynamic_points_of_interest() {
     // Choose a flavor (kind/name) influenced by region factors.
     // We keep this decision system-level (neb_base) so regions retain identity
     // even when microfields add local pockets.
-    const double w_ruins = 0.20 + 1.40 * rf.ruins;
-    const double w_distress = 0.10 + 1.10 * rf.pirate;
+    const double w_ruins = 0.20 + 1.40 * rf.ruins + 0.26 * early_exploration_pressure;
+    const double w_distress = 0.10 + 1.10 * rf.pirate + 0.22 * early_exploration_pressure;
 
     // Microfield roughness estimate: filaments increase the odds of "phenomenon".
     double rough = 0.0;
@@ -251,23 +269,31 @@ void Simulation::tick_dynamic_points_of_interest() {
       if (n > 0) rough /= static_cast<double>(n);
     }
 
-    const double w_phenom = 0.15 + 1.20 * neb_base + 0.90 * rough;
-    const double w_signal = 0.55;
+    const double w_phenom = (0.15 + 1.20 * neb_base + 0.90 * rough) * (1.0 - 0.22 * early_exploration_pressure);
+    const double w_distortion = (0.10 + 1.30 * neb_base + 0.70 * rough) * (1.0 - 0.30 * early_exploration_pressure);
+    const double w_xeno = 0.06 + 1.10 * rf.ruins + 0.20 * (1.0 - rf.pirate);
+    const double w_signal = 0.45 + 0.40 * early_exploration_pressure;
 
-    const double w_sum = w_ruins + w_distress + w_phenom + w_signal;
+    const double w_sum = w_ruins + w_distress + w_phenom + w_distortion + w_xeno + w_signal;
     const double u = rng.next_u01() * w_sum;
 
     if (u < w_ruins) {
-      a.kind = "ruins";
+      a.kind = AnomalyKind::Ruins;
       a.name = "";  // filled by procedural naming below
     } else if (u < w_ruins + w_distress) {
-      a.kind = "distress";
+      a.kind = AnomalyKind::Distress;
       a.name = "";
     } else if (u < w_ruins + w_distress + w_phenom) {
-      a.kind = "phenomenon";
+      a.kind = AnomalyKind::Phenomenon;
+      a.name = "";
+    } else if (u < w_ruins + w_distress + w_phenom + w_distortion) {
+      a.kind = AnomalyKind::Distortion;
+      a.name = "";
+    } else if (u < w_ruins + w_distress + w_phenom + w_distortion + w_xeno) {
+      a.kind = AnomalyKind::Xenoarchaeology;
       a.name = "";
     } else {
-      a.kind = "signal";
+      a.kind = AnomalyKind::Signal;
       a.name = "";
     }
 
@@ -284,7 +310,7 @@ void Simulation::tick_dynamic_points_of_interest() {
     double r_min = 25.0;
     double r_max = 150.0;
 
-    if (a.kind == "signal") {
+    if (a.kind == AnomalyKind::Signal) {
       target_d = std::clamp(0.18 + 0.10 * (1.0 - neb_base), 0.05, 0.45);
       w_d = 1.25;
       w_g = 0.40;
@@ -293,7 +319,7 @@ void Simulation::tick_dynamic_points_of_interest() {
       samples = 18;
       r_min = 20.0;
       r_max = 140.0;
-    } else if (a.kind == "distress") {
+    } else if (a.kind == AnomalyKind::Distress) {
       target_d = std::clamp(0.32 + 0.18 * rf.pirate, 0.10, 0.70);
       w_d = 1.10;
       w_g = 0.35;
@@ -302,7 +328,7 @@ void Simulation::tick_dynamic_points_of_interest() {
       samples = 18;
       r_min = 25.0;
       r_max = 160.0;
-    } else if (a.kind == "phenomenon") {
+    } else if (a.kind == AnomalyKind::Phenomenon) {
       target_d = std::clamp(0.40 + 0.25 * neb_base, 0.15, 0.85);
       w_d = 0.80;
       w_g = 1.25;
@@ -310,6 +336,24 @@ void Simulation::tick_dynamic_points_of_interest() {
       min_sep = 20.0;
       samples = 20;
       r_min = 35.0;
+      r_max = 185.0;
+    } else if (a.kind == AnomalyKind::Distortion) {
+      target_d = std::clamp(0.50 + 0.30 * neb_base + 0.25 * rough, 0.22, 0.92);
+      w_d = 1.10;
+      w_g = 1.35;
+      w_s = 0.75;
+      min_sep = 19.0;
+      samples = 22;
+      r_min = 28.0;
+      r_max = 190.0;
+    } else if (a.kind == AnomalyKind::Xenoarchaeology) {
+      target_d = std::clamp(0.56 + 0.16 * rf.ruins, 0.24, 0.88);
+      w_d = 1.05;
+      w_g = 0.75;
+      w_s = 0.82;
+      min_sep = 21.0;
+      samples = 21;
+      r_min = 30.0;
       r_max = 185.0;
     } else {  // ruins / artifact
       target_d = std::clamp(0.52 + 0.25 * rf.ruins + 0.10 * neb_base, 0.25, 0.90);
@@ -322,6 +366,25 @@ void Simulation::tick_dynamic_points_of_interest() {
       r_max = 210.0;
     }
 
+    // Early exploration quality-of-life:
+    // - keep beginner-relevant sites closer to jump approaches
+    // - reduce friction on first scouting arcs
+    if (early_exploration_pressure > 1e-6) {
+      const bool early_friendly_kind =
+          (a.kind == AnomalyKind::Signal || a.kind == AnomalyKind::Distress || a.kind == AnomalyKind::Ruins ||
+           a.kind == AnomalyKind::Xenoarchaeology || a.kind == AnomalyKind::Artifact);
+      if (early_friendly_kind) {
+        min_sep = std::max(12.0, min_sep * (0.90 - 0.08 * early_exploration_pressure));
+        r_min = std::max(14.0, r_min * (0.78 - 0.08 * early_exploration_pressure));
+        r_max = std::max(r_min + 24.0, r_max * (0.86 - 0.10 * early_exploration_pressure));
+        w_s += 0.10 * early_exploration_pressure;
+      } else {
+        r_min = std::max(16.0, r_min * (0.90 - 0.04 * early_exploration_pressure));
+        r_max = std::max(r_min + 30.0, r_max * (0.95 - 0.04 * early_exploration_pressure));
+      }
+      samples = std::clamp(samples + static_cast<int>(std::lround(2.0 * early_exploration_pressure)), 12, 30);
+    }
+
     a.position_mkm = pick_biased_site(system_id, rng, occupied, target_d, w_d, w_g, w_s, min_sep, samples, r_min, r_max);
     occupied.push_back(a.position_mkm);
 
@@ -332,41 +395,173 @@ void Simulation::tick_dynamic_points_of_interest() {
     // This gives anomalies unique identities without introducing new entity
     // fields or save format changes.
     a.name = procgen_obscure::generate_anomaly_name(a);
+    const procgen_obscure::AnomalyScanReadout scan_profile =
+        procgen_obscure::anomaly_scan_readout(a, neb, rf.ruins, rf.pirate);
+    const procgen_obscure::AnomalySiteProfile site_profile =
+        procgen_obscure::anomaly_site_profile(a, neb, rf.ruins, rf.pirate, grad);
+    const procgen_obscure::AnomalyConvergenceProfile convergence_profile =
+        procgen_obscure::anomaly_convergence_profile(a, scan_profile, site_profile, neb, rf.ruins, rf.pirate, grad);
+    double convergence_link_chance = convergence_profile.link_chance;
+    if (early_exploration_pressure > 1e-6) {
+      const bool early_chain_kind =
+          (a.kind == AnomalyKind::Signal || a.kind == AnomalyKind::Ruins || a.kind == AnomalyKind::Distress ||
+           a.kind == AnomalyKind::Xenoarchaeology || a.kind == AnomalyKind::Artifact);
+      if (early_chain_kind) {
+        convergence_link_chance =
+            std::clamp(convergence_link_chance + 0.18 * early_exploration_pressure, 0.0, 0.94);
+      } else {
+        convergence_link_chance =
+            std::clamp(convergence_link_chance - 0.06 * early_exploration_pressure, 0.0, 0.88);
+      }
+    }
+    bool linked_convergence = false;
+    bool linked_domain_match = false;
+    if (!state_.anomalies.empty() && convergence_link_chance > 1e-9) {
+      const auto this_domain = procgen_obscure::anomaly_theme_domain(a);
+      Id best_parent_id = kInvalidId;
+      Id best_root_id = kInvalidId;
+      int best_parent_depth = 0;
+      double best_score = -1e9;
+
+      for (const auto& [other_id, other] : state_.anomalies) {
+        if (other_id == a.id) continue;
+        if (other.system_id != system_id) continue;
+        if (other.resolved) continue;
+
+        const double d = (other.position_mkm - a.position_mkm).length();
+        if (!std::isfinite(d)) continue;
+        if (d > convergence_profile.link_radius_mkm) continue;
+
+        const auto other_domain = procgen_obscure::anomaly_theme_domain(other);
+        const bool domain_match = (other_domain == this_domain);
+        const double near = 1.0 - std::clamp(d / std::max(1e-6, convergence_profile.link_radius_mkm), 0.0, 1.0);
+        const double depth_norm = std::clamp(static_cast<double>(std::max(0, other.lead_depth)) / 6.0, 0.0, 1.0);
+        const double score = 1.15 * near + (domain_match ? 0.45 : 0.0) + 0.20 * depth_norm + 0.02 * rng.next_u01();
+        if (score > best_score) {
+          best_score = score;
+          best_parent_id = other.id;
+          best_root_id = procgen_obscure::anomaly_chain_root_id(state_.anomalies, other.id);
+          best_parent_depth = std::max(0, other.lead_depth);
+          linked_domain_match = domain_match;
+        }
+      }
+
+      if (best_parent_id != kInvalidId && rng.next_u01() < convergence_link_chance) {
+        linked_convergence = true;
+        a.origin_anomaly_id = (best_root_id != kInvalidId) ? best_root_id : best_parent_id;
+        a.lead_depth = std::clamp(best_parent_depth + 1, 1, 12);
+      }
+    }
+    if (rng.next_u01() < 0.22) {
+      a.name += " {";
+      a.name += procgen_obscure::anomaly_site_archetype_label(site_profile.archetype);
+      a.name += "}";
+    }
+    if (linked_convergence && rng.next_u01() < 0.45) {
+      a.name += " [Confluence]";
+    }
+    if (early_exploration_pressure >= 0.55 &&
+        (a.kind == AnomalyKind::Signal || a.kind == AnomalyKind::Ruins || a.kind == AnomalyKind::Distress) &&
+        rng.next_u01() < 0.24) {
+      a.name += " [Pioneer]";
+    }
 
     // Investigation time: longer in dense pockets, filament edges, and deeper ruins sites.
     const int base_days = 2 + rng.range_int(0, 5);
     const int neb_days = static_cast<int>(std::round(neb * 4.0));
     const int ruins_days = static_cast<int>(std::round(rf.ruins * 3.0));
-    const int phen_days = (a.kind == "phenomenon") ? static_cast<int>(std::round(grad * 4.0)) : 0;
-    a.investigation_days = std::clamp(base_days + neb_days + ruins_days + phen_days, 1, 18);
+    const int phen_days = (a.kind == AnomalyKind::Phenomenon) ? static_cast<int>(std::round(grad * 4.0)) : 0;
+    const int dist_days = (a.kind == AnomalyKind::Distortion) ? static_cast<int>(std::round(1.5 + 2.0 * grad)) : 0;
+    const int xeno_days = (a.kind == AnomalyKind::Xenoarchaeology) ? static_cast<int>(std::round(1.0 + 2.5 * rf.ruins)) : 0;
+    a.investigation_days = std::clamp(base_days + neb_days + ruins_days + phen_days + dist_days, 1, 18);
+    a.investigation_days = std::clamp(a.investigation_days + xeno_days, 1, 18);
+    a.investigation_days =
+        std::clamp(static_cast<int>(std::lround(static_cast<double>(a.investigation_days) * site_profile.investigation_mult)) +
+                       site_profile.investigation_add_days,
+                   1,
+                   24);
+    if (linked_convergence) {
+      a.investigation_days = std::clamp(a.investigation_days + convergence_profile.extra_investigation_days, 1, 28);
+    }
+    {
+      const bool early_friendly_kind =
+          (a.kind == AnomalyKind::Signal || a.kind == AnomalyKind::Distress || a.kind == AnomalyKind::Ruins ||
+           a.kind == AnomalyKind::Xenoarchaeology || a.kind == AnomalyKind::Artifact);
+      const double relief_scale = early_friendly_kind ? 2.2 : 1.2;
+      const int early_relief =
+          static_cast<int>(std::lround(relief_scale * early_exploration_pressure * (1.0 - 0.30 * neb)));
+      a.investigation_days = std::clamp(a.investigation_days - std::max(0, early_relief), 1, 28);
+    }
 
     // Reward: research points plus optional minerals.
     double rp = rng.range(8.0, 42.0);
     rp *= (0.70 + 1.10 * rf.ruins);
     rp *= (0.80 + 0.40 * neb);
-    rp *= (a.kind == "phenomenon") ? (0.85 + 0.45 * grad) : 1.0;
-    rp *= (a.kind == "distress") ? (0.85 + 0.45 * rf.pirate) : 1.0;
+    rp *= (a.kind == AnomalyKind::Phenomenon) ? (0.85 + 0.45 * grad) : 1.0;
+    rp *= (a.kind == AnomalyKind::Distress) ? (0.85 + 0.45 * rf.pirate) : 1.0;
+    rp *= (a.kind == AnomalyKind::Distortion) ? (0.90 + 0.35 * rf.ruins + 0.40 * grad) : 1.0;
+    rp *= (a.kind == AnomalyKind::Xenoarchaeology) ? (0.95 + 0.30 * rf.ruins + 0.15 * grad) : 1.0;
+    rp *= site_profile.research_mult;
+    if (linked_convergence) {
+      rp *= convergence_profile.research_mult * (linked_domain_match ? 1.07 : 1.00);
+    }
+    {
+      const bool early_friendly_kind =
+          (a.kind == AnomalyKind::Signal || a.kind == AnomalyKind::Distress || a.kind == AnomalyKind::Ruins ||
+           a.kind == AnomalyKind::Xenoarchaeology || a.kind == AnomalyKind::Artifact);
+      const double onboarding_bonus = 1.0 + early_exploration_pressure * (early_friendly_kind ? 0.18 : 0.07);
+      rp *= onboarding_bonus;
+    }
     if (!std::isfinite(rp) || rp < 0.0) rp = 0.0;
     a.research_reward = rp;
 
     // Optional component unlock: rare, mostly in ruins/phenomena.
-    const double unlock_chance = 0.05 + 0.20 * rf.ruins + 0.05 * neb + 0.04 * grad;
+    const double unlock_chance =
+        0.05 + 0.20 * rf.ruins + 0.05 * neb + 0.04 * grad + site_profile.unlock_bonus + (linked_convergence ? 0.03 : 0.0) +
+        ((a.kind == AnomalyKind::Signal || a.kind == AnomalyKind::Ruins || a.kind == AnomalyKind::Xenoarchaeology)
+             ? (0.05 * early_exploration_pressure)
+             : (0.02 * early_exploration_pressure));
     if (rng.next_u01() < std::clamp(unlock_chance, 0.0, 0.35)) {
       a.unlock_component_id = sim_procgen::pick_any_component_id(content_, rng);
     }
 
     // Optional mineral cache.
-    const double cache_chance = 0.25 + 0.35 * rf.ruins + 0.10 * rf.pirate;
+    const double cache_chance = 0.25 + 0.35 * rf.ruins + 0.10 * rf.pirate +
+                               (a.kind == AnomalyKind::Distortion ? 0.12 : 0.0) +
+                               (a.kind == AnomalyKind::Xenoarchaeology ? 0.12 : 0.0) + site_profile.cache_bonus +
+                               (linked_convergence ? convergence_profile.cache_bonus : 0.0) +
+                               ((a.kind == AnomalyKind::Signal || a.kind == AnomalyKind::Distress) ? 0.08 : 0.03) *
+                                   early_exploration_pressure;
     if (rng.next_u01() < std::clamp(cache_chance, 0.0, 0.85)) {
-      const double scale = (0.8 + 1.2 * rf.ruins) * (0.7 + 0.6 * rf.salvage_mult) * (0.85 + 0.55 * neb);
+      const double scale = (0.8 + 1.2 * rf.ruins) * (0.7 + 0.6 * rf.salvage_mult) * (0.85 + 0.55 * neb) *
+                           site_profile.mineral_mult * (linked_convergence ? convergence_profile.mineral_mult : 1.0);
       a.mineral_reward = sim_procgen::generate_mineral_bundle(rng, /*scale=*/1.4 * scale);
     }
 
     // Hazard: more likely in dense pockets and filament edges.
-    const double hz_base = (a.kind == "phenomenon") ? 0.12 : 0.06;
-    a.hazard_chance = std::clamp(hz_base + 0.28 * neb + 0.12 * grad, 0.0, 0.70);
+    const double hz_base =
+        (a.kind == AnomalyKind::Phenomenon) ? 0.12
+        : (a.kind == AnomalyKind::Distortion) ? 0.20
+        : (a.kind == AnomalyKind::Xenoarchaeology) ? 0.10
+                                        : 0.06;
+    a.hazard_chance = std::clamp((hz_base + 0.28 * neb + 0.12 * grad) * site_profile.hazard_chance_mult *
+                                     (linked_convergence ? convergence_profile.hazard_mult : 1.0),
+                                 0.0,
+                                 0.85);
+    {
+      const bool high_risk_kind = (a.kind == AnomalyKind::Distortion || a.kind == AnomalyKind::Phenomenon);
+      const double early_hazard_relief = early_exploration_pressure * (high_risk_kind ? 0.08 : 0.22);
+      a.hazard_chance = std::clamp(a.hazard_chance - early_hazard_relief, 0.0, 0.85);
+    }
     if (a.hazard_chance > 1e-6) {
-      a.hazard_damage = rng.range(0.6, 4.8) * (0.80 + 0.80 * neb) * (0.90 + 0.40 * grad);
+      a.hazard_damage =
+          rng.range(0.6, 4.8) * (0.80 + 0.80 * neb) * (0.90 + 0.40 * grad) * site_profile.hazard_damage_mult *
+          (linked_convergence ? convergence_profile.hazard_mult : 1.0);
+      {
+        const bool high_risk_kind = (a.kind == AnomalyKind::Distortion || a.kind == AnomalyKind::Phenomenon);
+        const double early_damage_scale = 1.0 - early_exploration_pressure * (high_risk_kind ? 0.12 : 0.30);
+        a.hazard_damage *= std::clamp(early_damage_scale, 0.55, 1.0);
+      }
       if (!std::isfinite(a.hazard_damage) || a.hazard_damage < 0.0) a.hazard_damage = 0.0;
     }
 

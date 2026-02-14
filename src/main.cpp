@@ -1,3 +1,9 @@
+#if defined(_WIN32)
+#ifndef SDL_MAIN_HANDLED
+#define SDL_MAIN_HANDLED
+#endif
+#endif
+
 #include "nebula4x/core/serialization.h"
 #include "nebula4x/core/simulation.h"
 #include "nebula4x/core/tech.h"
@@ -28,6 +34,10 @@
 
 namespace {
 
+#ifndef NEBULA4X_VERSION
+#define NEBULA4X_VERSION "unknown"
+#endif
+
 enum class RendererRequest {
   Auto,
   OpenGL2,
@@ -46,19 +56,44 @@ static bool iequals(std::string_view a, std::string_view b) {
   return true;
 }
 
+static void print_usage(FILE* out) {
+  std::fprintf(out,
+               "Nebula4X UI\n\n"
+               "Usage:\n"
+               "  nebula4x.exe [options]\n\n"
+               "Options:\n"
+               "  --version, -v          Print version and exit\n"
+               "  --help, -h, /?         Show this help and exit\n"
+               "  --renderer <name>      Select renderer: auto | sdl | opengl\n"
+               "  --renderer=<name>      Same as above\n");
+}
+
+static bool has_flag(int argc, char** argv, std::string_view flag) {
+  for (int i = 1; i < argc; ++i) {
+    const char* raw = argv[i] ? argv[i] : "";
+    if (std::string_view(raw) == flag) return true;
+  }
+  return false;
+}
+
 
 // Dear ImGui SDL_Renderer2 backend signature changed in newer versions to take an
-// explicit SDL_Renderer* parameter. Keep a tiny compatibility shim so we can build
-// against both old and new backend headers.
+// explicit SDL_Renderer* parameter. Keep a compatibility shim that resolves the
+// available signature via SFINAE.
+template <typename Fn>
+auto imgui_sdlrenderer2_render_draw_data_impl(Fn fn, ImDrawData* draw_data, SDL_Renderer* renderer, int)
+    -> decltype(fn(draw_data, renderer), void()) {
+  fn(draw_data, renderer);
+}
+
+template <typename Fn>
+auto imgui_sdlrenderer2_render_draw_data_impl(Fn fn, ImDrawData* draw_data, SDL_Renderer* /*renderer*/, long)
+    -> decltype(fn(draw_data), void()) {
+  fn(draw_data);
+}
+
 static void imgui_sdlrenderer2_render_draw_data(ImDrawData* draw_data, SDL_Renderer* renderer) {
-  // Newer backends: void ImGui_ImplSDLRenderer2_RenderDrawData(ImDrawData*, SDL_Renderer*)
-  if constexpr (std::is_invocable_v<decltype(&ImGui_ImplSDLRenderer2_RenderDrawData), ImDrawData*, SDL_Renderer*>) {
-    ImGui_ImplSDLRenderer2_RenderDrawData(draw_data, renderer);
-  } else {
-    // Older backends: void ImGui_ImplSDLRenderer2_RenderDrawData(ImDrawData*)
-    (void)renderer;
-    ImGui_ImplSDLRenderer2_RenderDrawData(draw_data);
-  }
+  imgui_sdlrenderer2_render_draw_data_impl(ImGui_ImplSDLRenderer2_RenderDrawData, draw_data, renderer, 0);
 }
 static void apply_renderer_request(RendererRequest& request, std::string_view value) {
   if (iequals(value, "auto")) {
@@ -213,6 +248,18 @@ static bool create_opengl2_window(RendererInitResult& out, Uint32 base_window_fl
 }  // namespace
 
 int main(int argc, char** argv) {
+  if (has_flag(argc, argv, "--version") || has_flag(argc, argv, "-v")) {
+    std::printf("%s\n", NEBULA4X_VERSION);
+    return 0;
+  }
+  if (has_flag(argc, argv, "--help") || has_flag(argc, argv, "-h") || has_flag(argc, argv, "/?")) {
+    print_usage(stdout);
+    return 0;
+  }
+
+  // With SDL_MAIN_HANDLED we provide the process entrypoint ourselves.
+  SDL_SetMainReady();
+
   if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER | SDL_INIT_GAMECONTROLLER) != 0) {
     std::fprintf(stderr, "Error: %s\n", SDL_GetError());
     return 1;
@@ -326,6 +373,36 @@ int main(int argc, char** argv) {
   IMGUI_CHECKVERSION();
   ImGui::CreateContext();
   ImGuiIO& io = ImGui::GetIO();
+
+  {
+    const int idx_bits = static_cast<int>(sizeof(ImDrawIdx) * 8u);
+#if defined(NEBULA4X_IMGUI_DRAW_INDEX_VIRTUAL_64)
+    std::fprintf(stderr,
+                 "[ui] ImGui draw index mode: virtual-64 (physical %d-bit GPU indices)\n",
+                 idx_bits);
+#else
+    std::fprintf(stderr, "[ui] ImGui draw index mode: %d-bit\n", idx_bits);
+#endif
+    if (idx_bits < 32) {
+      std::fprintf(stderr,
+                   "Error: ImGui is running with %d-bit indices; Nebula4X UI scenes can exceed 16-bit limits.\n"
+                   "Reconfigure with -DNEBULA4X_IMGUI_DRAW_INDEX_BITS=32 and rebuild.\n",
+                   idx_bits);
+      ImGui::DestroyContext();
+      if (renderer.backend == nebula4x::ui::UIRendererBackend::OpenGL2) {
+#if NEBULA4X_UI_RENDERER_OPENGL2
+        if (renderer.gl_context) {
+          SDL_GL_DeleteContext(renderer.gl_context);
+          renderer.gl_context = nullptr;
+        }
+#endif
+      }
+      if (renderer.sdl_renderer) SDL_DestroyRenderer(renderer.sdl_renderer);
+      if (renderer.window) SDL_DestroyWindow(renderer.window);
+      SDL_Quit();
+      return 1;
+    }
+  }
 
   // Enable Keyboard Controls
   io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;

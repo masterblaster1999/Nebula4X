@@ -1339,15 +1339,20 @@ void Simulation::tick_contacts(double dt_days, bool emit_contact_lost_events) {
   // This reuses the same per-faction sensor source cache as ship contacts.
   const double anom_range_mult = std::clamp(cfg_.anomaly_detection_range_multiplier, 0.0, 100.0);
   const double anom_tgt_env_w = std::clamp(cfg_.anomaly_detection_target_env_weight, 0.0, 1.0);
-  auto anom_kind_mult = [&](const std::string& kind) -> double {
+  auto anom_kind_mult = [&](AnomalyKind kind) -> double {
     // Kind-based detectability tuning. These are conservative so unit
     // tests that rely on strict sensor range (mult=1.0) remain stable.
-    if (kind == "signal") return 1.25;
-    if (kind == "distress") return 1.15;
-    if (kind == "codex_echo") return 1.10;
-    if (kind == "ruins" || kind == "artifact") return 0.90;
-    if (kind == "phenomenon") return 1.00;
-    return 1.00;
+    switch (kind) {
+      case AnomalyKind::Signal: return 1.25;
+      case AnomalyKind::Distress: return 1.15;
+      case AnomalyKind::CodexEcho: return 1.10;
+      case AnomalyKind::Ruins:
+      case AnomalyKind::Artifact: return 0.90;
+      case AnomalyKind::Xenoarchaeology: return 1.08;
+      case AnomalyKind::Distortion: return 1.02;
+      case AnomalyKind::Phenomenon: return 1.00;
+      default: return 1.00;
+    }
   };
   if (anom_range_mult > 1e-9 && !state_.anomalies.empty()) {
     std::unordered_map<Id, std::vector<Id>> anomalies_by_system;

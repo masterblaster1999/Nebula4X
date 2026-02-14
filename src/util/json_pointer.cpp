@@ -28,6 +28,77 @@ bool token_looks_like_glob(std::string_view tok) {
   return tok.find_first_of("*?\\") != std::string_view::npos;
 }
 
+bool json_pointer_unescape_token_noexcept(std::string_view token, std::string& out, std::string* error) {
+  out.clear();
+  out.reserve(token.size());
+
+  for (std::size_t i = 0; i < token.size(); ++i) {
+    const char c = token[i];
+    if (c != '~') {
+      out.push_back(c);
+      continue;
+    }
+    if (i + 1 >= token.size()) {
+      if (error) *error = "JSON pointer: dangling '~'";
+      return false;
+    }
+    const char n = token[i + 1];
+    if (n == '0') {
+      out.push_back('~');
+    } else if (n == '1') {
+      out.push_back('/');
+    } else {
+      if (error) *error = "JSON pointer: invalid escape '~" + std::string(1, n) + "'";
+      return false;
+    }
+    ++i;
+  }
+
+  if (error) error->clear();
+  return true;
+}
+
+bool split_json_pointer_noexcept(std::string_view path, bool accept_root_slash, std::vector<std::string>& out,
+                                 std::string* error) {
+  // RFC 6901:
+  //   ""     => root
+  //   "/a/b" => tokens: ["a", "b"]
+  out.clear();
+  if (path.empty()) {
+    if (error) error->clear();
+    return true;
+  }
+  if (accept_root_slash && path == "/") {
+    if (error) error->clear();
+    return true;
+  }
+  if (path[0] != '/') {
+    if (error) *error = "JSON pointer must be empty or start with '/': " + std::string(path);
+    return false;
+  }
+
+  std::string cur;
+  for (std::size_t i = 1; i <= path.size(); ++i) {
+    const bool at_end = (i == path.size());
+    const char c = at_end ? '/' : path[i];
+    if (c == '/') {
+      std::string tok;
+      std::string tok_err;
+      if (!json_pointer_unescape_token_noexcept(cur, tok, &tok_err)) {
+        if (error) *error = std::move(tok_err);
+        return false;
+      }
+      out.push_back(std::move(tok));
+      cur.clear();
+    } else {
+      cur.push_back(c);
+    }
+  }
+
+  if (error) error->clear();
+  return true;
+}
+
 // Glob match for a single path segment.
 //
 // Supports:
@@ -152,23 +223,9 @@ std::string json_pointer_escape_token(std::string_view token) {
 
 std::string json_pointer_unescape_token(std::string_view token) {
   std::string out;
-  out.reserve(token.size());
-  for (std::size_t i = 0; i < token.size(); ++i) {
-    const char c = token[i];
-    if (c != '~') {
-      out.push_back(c);
-      continue;
-    }
-    if (i + 1 >= token.size()) throw std::runtime_error("JSON pointer: dangling '~'");
-    const char n = token[i + 1];
-    if (n == '0') {
-      out.push_back('~');
-    } else if (n == '1') {
-      out.push_back('/');
-    } else {
-      throw std::runtime_error("JSON pointer: invalid escape '~" + std::string(1, n) + "'");
-    }
-    ++i;
+  std::string err;
+  if (!json_pointer_unescape_token_noexcept(token, out, &err)) {
+    throw std::runtime_error(err);
   }
   return out;
 }
@@ -186,26 +243,10 @@ std::string json_pointer_join_index(const std::string& base, std::size_t idx) {
 }
 
 std::vector<std::string> split_json_pointer(const std::string& path, bool accept_root_slash) {
-  // RFC 6901:
-  //   ""     => root
-  //   "/a/b" => tokens: ["a", "b"]
-  if (path.empty()) return {};
-  if (accept_root_slash && path == "/") return {};
-  if (path.empty() || path[0] != '/') {
-    throw std::runtime_error("JSON pointer must be empty or start with '/': " + path);
-  }
-
   std::vector<std::string> out;
-  std::string cur;
-  for (std::size_t i = 1; i <= path.size(); ++i) {
-    const bool at_end = (i == path.size());
-    const char c = at_end ? '/' : path[i];
-    if (c == '/') {
-      out.push_back(json_pointer_unescape_token(cur));
-      cur.clear();
-    } else {
-      cur.push_back(c);
-    }
+  std::string err;
+  if (!split_json_pointer_noexcept(path, accept_root_slash, out, &err)) {
+    throw std::runtime_error(err);
   }
   return out;
 }
@@ -229,74 +270,110 @@ bool parse_json_pointer_index(std::string_view tok, std::size_t& out) {
 
 const json::Value* resolve_json_pointer(const json::Value& doc, const std::string& path, bool accept_root_slash,
                                        std::string* error) {
-  try {
-    const auto tokens = split_json_pointer(path, accept_root_slash);
-    const json::Value* cur = &doc;
+  if (error) error->clear();
 
-    for (const std::string& t : tokens) {
-      if (cur->is_object()) {
-        const auto* o = cur->as_object();
-        if (!o) throw std::runtime_error("JSON pointer: expected object at token: " + t);
-        auto it = o->find(t);
-        if (it == o->end()) throw std::runtime_error("JSON pointer: key not found: " + t);
-        cur = &it->second;
-        continue;
-      }
-
-      if (cur->is_array()) {
-        const auto* a = cur->as_array();
-        if (!a) throw std::runtime_error("JSON pointer: expected array at token: " + t);
-        std::size_t idx = 0;
-        if (!parse_json_pointer_index(t, idx)) throw std::runtime_error("JSON pointer: invalid array index: " + t);
-        if (idx >= a->size()) throw std::runtime_error("JSON pointer: array index out of range: " + t);
-        cur = &(*a)[idx];
-        continue;
-      }
-
-      throw std::runtime_error("JSON pointer: traversed into scalar at token: " + t);
-    }
-
-    return cur;
-  } catch (const std::exception& e) {
-    if (error) *error = e.what();
+  std::vector<std::string> tokens;
+  std::string parse_error;
+  if (!split_json_pointer_noexcept(path, accept_root_slash, tokens, &parse_error)) {
+    if (error) *error = parse_error;
     return nullptr;
   }
+
+  const json::Value* cur = &doc;
+  for (const std::string& t : tokens) {
+    if (cur->is_object()) {
+      const auto* o = cur->as_object();
+      if (!o) {
+        if (error) *error = "JSON pointer: expected object at token: " + t;
+        return nullptr;
+      }
+      const auto it = o->find(t);
+      if (it == o->end()) {
+        if (error) *error = "JSON pointer: key not found: " + t;
+        return nullptr;
+      }
+      cur = &it->second;
+      continue;
+    }
+
+    if (cur->is_array()) {
+      const auto* a = cur->as_array();
+      if (!a) {
+        if (error) *error = "JSON pointer: expected array at token: " + t;
+        return nullptr;
+      }
+      std::size_t idx = 0;
+      if (!parse_json_pointer_index(t, idx)) {
+        if (error) *error = "JSON pointer: invalid array index: " + t;
+        return nullptr;
+      }
+      if (idx >= a->size()) {
+        if (error) *error = "JSON pointer: array index out of range: " + t;
+        return nullptr;
+      }
+      cur = &(*a)[idx];
+      continue;
+    }
+
+    if (error) *error = "JSON pointer: traversed into scalar at token: " + t;
+    return nullptr;
+  }
+
+  return cur;
 }
 
 json::Value* resolve_json_pointer(json::Value& doc, const std::string& path, bool accept_root_slash,
                                   std::string* error) {
-  try {
-    const auto tokens = split_json_pointer(path, accept_root_slash);
-    json::Value* cur = &doc;
+  if (error) error->clear();
 
-    for (const std::string& t : tokens) {
-      if (cur->is_object()) {
-        auto* o = cur->as_object();
-        if (!o) throw std::runtime_error("JSON pointer: expected object at token: " + t);
-        auto it = o->find(t);
-        if (it == o->end()) throw std::runtime_error("JSON pointer: key not found: " + t);
-        cur = &it->second;
-        continue;
-      }
-
-      if (cur->is_array()) {
-        auto* a = cur->as_array();
-        if (!a) throw std::runtime_error("JSON pointer: expected array at token: " + t);
-        std::size_t idx = 0;
-        if (!parse_json_pointer_index(t, idx)) throw std::runtime_error("JSON pointer: invalid array index: " + t);
-        if (idx >= a->size()) throw std::runtime_error("JSON pointer: array index out of range: " + t);
-        cur = &(*a)[idx];
-        continue;
-      }
-
-      throw std::runtime_error("JSON pointer: traversed into scalar at token: " + t);
-    }
-
-    return cur;
-  } catch (const std::exception& e) {
-    if (error) *error = e.what();
+  std::vector<std::string> tokens;
+  std::string parse_error;
+  if (!split_json_pointer_noexcept(path, accept_root_slash, tokens, &parse_error)) {
+    if (error) *error = parse_error;
     return nullptr;
   }
+
+  json::Value* cur = &doc;
+  for (const std::string& t : tokens) {
+    if (cur->is_object()) {
+      auto* o = cur->as_object();
+      if (!o) {
+        if (error) *error = "JSON pointer: expected object at token: " + t;
+        return nullptr;
+      }
+      const auto it = o->find(t);
+      if (it == o->end()) {
+        if (error) *error = "JSON pointer: key not found: " + t;
+        return nullptr;
+      }
+      cur = &it->second;
+      continue;
+    }
+
+    if (cur->is_array()) {
+      auto* a = cur->as_array();
+      if (!a) {
+        if (error) *error = "JSON pointer: expected array at token: " + t;
+        return nullptr;
+      }
+      std::size_t idx = 0;
+      if (!parse_json_pointer_index(t, idx)) {
+        if (error) *error = "JSON pointer: invalid array index: " + t;
+        return nullptr;
+      }
+      if (idx >= a->size()) {
+        if (error) *error = "JSON pointer: array index out of range: " + t;
+        return nullptr;
+      }
+      cur = &(*a)[idx];
+      continue;
+    }
+
+    if (error) *error = "JSON pointer: traversed into scalar at token: " + t;
+    return nullptr;
+  }
+
+  return cur;
 }
 
 std::vector<JsonPointerQueryMatch> query_json_pointer_glob(const json::Value& doc, const std::string& pattern,
@@ -319,10 +396,9 @@ std::vector<JsonPointerQueryMatch> query_json_pointer_glob(const json::Value& do
   ctx.max_nodes = std::max(0, max_nodes);
 
   std::vector<std::string> tokens;
-  try {
-    tokens = split_json_pointer(pattern, accept_root_slash);
-  } catch (const std::exception& e) {
-    if (error) *error = e.what();
+  std::string parse_error;
+  if (!split_json_pointer_noexcept(pattern, accept_root_slash, tokens, &parse_error)) {
+    if (error) *error = parse_error;
     return out;
   }
 

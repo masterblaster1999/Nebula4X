@@ -4101,6 +4101,32 @@ void Simulation::tick_ai() {
       power_by_faction[sh->faction_id] += std::max(1.0, w + m * 0.05);
     }
 
+    // Economy-side capability proxies for diplomacy progression decisions.
+    std::unordered_map<Id, int> colony_count_by_faction;
+    std::unordered_map<Id, double> research_output_by_faction;
+    colony_count_by_faction.reserve(faction_ids.size() * 2 + 8);
+    research_output_by_faction.reserve(faction_ids.size() * 2 + 8);
+    for (Id fid : faction_ids) {
+      colony_count_by_faction[fid] = 0;
+      research_output_by_faction[fid] = 0.0;
+    }
+    for (const auto& [cid, col] : state_.colonies) {
+      (void)cid;
+      if (col.faction_id == kInvalidId) continue;
+      colony_count_by_faction[col.faction_id] += 1;
+
+      double rp = 0.0;
+      for (const auto& [inst_id, count] : col.installations) {
+        if (count <= 0) continue;
+        const auto it_inst = content_.installations.find(inst_id);
+        if (it_inst == content_.installations.end()) continue;
+        const double per = std::max(0.0, it_inst->second.research_points_per_day);
+        if (per <= 0.0) continue;
+        rp += per * static_cast<double>(count);
+      }
+      research_output_by_faction[col.faction_id] += std::max(0.0, rp);
+    }
+
     auto has_contact = [&](const Faction& f, Id other_faction_id) -> bool {
       if (other_faction_id == kInvalidId) return false;
       for (const auto& [sid, c] : f.ship_contacts) {
@@ -4108,6 +4134,21 @@ void Simulation::tick_ai() {
         if (c.last_seen_faction_id == other_faction_id) return true;
       }
       return false;
+    };
+
+    auto recent_contact_score = [&](const Faction& f, Id other_faction_id, int horizon_days) -> double {
+      if (other_faction_id == kInvalidId) return 0.0;
+      const int horizon = std::max(1, horizon_days);
+      double score = 0.0;
+      for (const auto& [sid, c] : f.ship_contacts) {
+        (void)sid;
+        if (c.last_seen_faction_id != other_faction_id) continue;
+        const int age = now_day - c.last_seen_day;
+        if (age < 0 || age > horizon) continue;
+        const double w = 1.0 - (static_cast<double>(age) / static_cast<double>(horizon + 1));
+        score += std::max(0.0, w);
+      }
+      return score;
     };
 
     auto has_pending_offer = [&](Id from_id, Id to_id, TreatyType tt) -> bool {
@@ -4155,7 +4196,7 @@ void Simulation::tick_ai() {
         if (!to) continue;
 
         // Only propose after some form of contact (prevents "telepathic diplomacy").
-        if (!has_contact(*from, to_id)) continue;
+        if (!has_contact(*from, to_id) && !has_contact(*to, from_id)) continue;
 
         // Cooldown check.
         auto it_cd = from->diplomacy_offer_cooldown_until_day.find(to_id);
@@ -4169,59 +4210,90 @@ void Simulation::tick_ai() {
         int offer_treaty_days = -1;
         int offer_expires_days = 30;
         bool should_offer = false;
+        std::string offer_message;
 
         const DiplomacyStatus s_from = diplomatic_status(from_id, to_id);
         const DiplomacyStatus s_to = diplomatic_status(to_id, from_id);
         const bool mutual_friendly = (s_from == DiplomacyStatus::Friendly) && (s_to == DiplomacyStatus::Friendly);
         const bool mutual_hostile = (s_from == DiplomacyStatus::Hostile) && (s_to == DiplomacyStatus::Hostile);
 
+        const double p_from = power_by_faction[from_id];
+        const double p_to = power_by_faction[to_id];
+        const double power_ratio = (p_from + 1.0) / (p_to + 1.0);
+        const bool power_parity = (power_ratio >= 0.55) && (power_ratio <= 1.80);
+        const bool materially_weaker = (p_from + 1.0) < (p_to * 0.80);
+
+        const int col_from = colony_count_by_faction[from_id];
+        const int col_to = colony_count_by_faction[to_id];
+        const bool both_have_colonies = (col_from > 0) && (col_to > 0);
+
+        const double rp_from = research_output_by_faction[from_id];
+        const double rp_to = research_output_by_faction[to_id];
+        const bool both_research_capable = (rp_from > 0.10) && (rp_to > 0.10);
+
+        const double c_from_to = recent_contact_score(*from, to_id, /*horizon_days=*/120);
+        const double c_to_from = recent_contact_score(*to, from_id, /*horizon_days=*/120);
+        const double mutual_contact = c_from_to + c_to_from;
+        const bool sustained_contact = mutual_contact >= 0.75;
+        const bool intense_contact = mutual_contact >= 2.0;
+
         if (mutual_friendly) {
-          if (!has_active_treaty(from_id, to_id, TreatyType::TradeAgreement) &&
-              !has_pending_offer(from_id, to_id, TreatyType::TradeAgreement)) {
+          if (both_have_colonies &&
+              !has_active_treaty(from_id, to_id, TreatyType::TradeAgreement) &&
+              !has_pending_offer(from_id, to_id, TreatyType::TradeAgreement) &&
+              sustained_contact) {
             offer_tt = TreatyType::TradeAgreement;
             offer_treaty_days = -1;
             offer_expires_days = 45;
+            offer_message = "Joint merchants request stable interstellar market access.";
             should_offer = true;
           } else if (has_active_treaty(from_id, to_id, TreatyType::TradeAgreement) &&
                      !has_active_treaty(from_id, to_id, TreatyType::ResearchAgreement) &&
-                     !has_pending_offer(from_id, to_id, TreatyType::ResearchAgreement) &&
-                     (now_day % 60 == 0)) {
+                      !has_pending_offer(from_id, to_id, TreatyType::ResearchAgreement) &&
+                      both_research_capable && sustained_contact) {
             // Offer a research agreement as a mid-tier cooperation step.
             offer_tt = TreatyType::ResearchAgreement;
             offer_treaty_days = -1;
             offer_expires_days = 45;
+            offer_message = "Academic councils propose shared research protocols.";
             should_offer = true;
           } else if (has_active_treaty(from_id, to_id, TreatyType::TradeAgreement) &&
+                     has_active_treaty(from_id, to_id, TreatyType::ResearchAgreement) &&
                      !has_active_treaty(from_id, to_id, TreatyType::Alliance) &&
-                     !has_pending_offer(from_id, to_id, TreatyType::Alliance) &&
-                     (now_day % 90 == 0)) {
+                      !has_pending_offer(from_id, to_id, TreatyType::Alliance) &&
+                      power_parity && intense_contact) {
             // Periodically propose alliance after trade relations exist.
             offer_tt = TreatyType::Alliance;
             offer_treaty_days = -1;
             offer_expires_days = 45;
+            offer_message = "Joint staff recommends formal alliance integration.";
             should_offer = true;
           }
         } else if (mutual_hostile) {
-          // If we are significantly weaker, propose a ceasefire occasionally.
-          const double p_from = power_by_faction[from_id];
-          const double p_to = power_by_faction[to_id];
-          const bool weaker = (p_from + 1.0) < (p_to * 0.75);
-          if (weaker && !has_active_treaty(from_id, to_id, TreatyType::Ceasefire) &&
+          // Offer ceasefire when outmatched or after sustained heavy contact.
+          if ((materially_weaker || intense_contact) &&
+              !has_active_treaty(from_id, to_id, TreatyType::Ceasefire) &&
               !has_pending_offer(from_id, to_id, TreatyType::Ceasefire) &&
-              (now_day % 30 == 0)) {
+              sustained_contact) {
             offer_tt = TreatyType::Ceasefire;
-            offer_treaty_days = 90;
+            offer_treaty_days = materially_weaker ? 180 : 120;
             offer_expires_days = 20;
+            if (materially_weaker) {
+              offer_message = "Command requests a ceasefire to reorganize battered frontline forces.";
+            } else {
+              offer_message = "Frontline attrition is unsustainable; command proposes an operational pause.";
+            }
             should_offer = true;
           }
         } else {
           // Neutral-ish: suggest a NAP as a low-commitment treaty.
           if (!has_active_treaty(from_id, to_id, TreatyType::NonAggressionPact) &&
               !has_pending_offer(from_id, to_id, TreatyType::NonAggressionPact) &&
-              (now_day % 45 == 0)) {
+              sustained_contact) {
             offer_tt = TreatyType::NonAggressionPact;
             offer_treaty_days = 180;
             offer_expires_days = 30;
+            offer_message = "Border command proposes a non-aggression framework to reduce incidents.";
             should_offer = true;
           }
         }
@@ -4231,11 +4303,18 @@ void Simulation::tick_ai() {
         const bool player_involved = (from->control == FactionControl::Player) || (to->control == FactionControl::Player);
         std::string err;
         const Id oid = create_diplomatic_offer(from_id, to_id, offer_tt, offer_treaty_days, offer_expires_days,
-                                               player_involved, &err);
+                                               player_involved, &err, offer_message);
         if (oid != kInvalidId) {
-          // Prevent daily spam. The accept/decline path also applies a cooldown.
-          constexpr int kCooldownDays = 60;
-          from->diplomacy_offer_cooldown_until_day[to_id] = now_day + kCooldownDays;
+          // Prevent spam. Higher-commitment treaties get a longer re-offer cooldown.
+          int cooldown_days = 60;
+          switch (offer_tt) {
+            case TreatyType::Alliance: cooldown_days = 150; break;
+            case TreatyType::ResearchAgreement: cooldown_days = 110; break;
+            case TreatyType::TradeAgreement: cooldown_days = 80; break;
+            case TreatyType::NonAggressionPact: cooldown_days = 70; break;
+            case TreatyType::Ceasefire: cooldown_days = 45; break;
+          }
+          from->diplomacy_offer_cooldown_until_day[to_id] = now_day + cooldown_days;
         }
       }
     }
@@ -4259,21 +4338,44 @@ void Simulation::tick_ai() {
         const bool mutual_friendly = (s_from == DiplomacyStatus::Friendly) && (s_to == DiplomacyStatus::Friendly);
         const bool mutual_hostile = (s_from == DiplomacyStatus::Hostile) && (s_to == DiplomacyStatus::Hostile);
 
+        const double p_to = power_by_faction[o->to_faction_id];
+        const double p_from = power_by_faction[o->from_faction_id];
+        const double power_ratio_from_to = (p_from + 1.0) / (p_to + 1.0);
+        const bool recipient_weaker = (p_to + 1.0) < (p_from * 0.85);
+        const bool power_parity = (power_ratio_from_to >= 0.55) && (power_ratio_from_to <= 1.80);
+
+        const double c_to_from = recent_contact_score(*to, o->from_faction_id, /*horizon_days=*/180);
+        const double c_from_to = recent_contact_score(*from, o->to_faction_id, /*horizon_days=*/180);
+        const bool contact_established = (c_to_from + c_from_to) > 0.20;
+
+        const int col_to = colony_count_by_faction[o->to_faction_id];
+        const int col_from = colony_count_by_faction[o->from_faction_id];
+        const bool both_have_colonies = (col_to > 0) && (col_from > 0);
+
+        const double rp_to = research_output_by_faction[o->to_faction_id];
+        const double rp_from = research_output_by_faction[o->from_faction_id];
+        const bool both_research_capable = (rp_to > 0.10) && (rp_from > 0.10);
+
+        const bool has_trade = has_active_treaty(o->from_faction_id, o->to_faction_id, TreatyType::TradeAgreement);
+        const bool has_research = has_active_treaty(o->from_faction_id, o->to_faction_id, TreatyType::ResearchAgreement);
+
         bool accept = false;
         switch (o->treaty_type) {
-          case TreatyType::TradeAgreement:
-          case TreatyType::ResearchAgreement:
-          case TreatyType::NonAggressionPact:
-            accept = !mutual_hostile;
-            break;
-          case TreatyType::Alliance:
-            accept = mutual_friendly;
-            break;
-          case TreatyType::Ceasefire: {
-            const double p_to = power_by_faction[o->to_faction_id];
-            const double p_from = power_by_faction[o->from_faction_id];
-            accept = (p_to + 1.0) < (p_from * 0.85) || (p_from + 1.0) < (p_to * 0.85);
+          case TreatyType::TradeAgreement: {
+            accept = !mutual_hostile && both_have_colonies && (contact_established || mutual_friendly);
           } break;
+          case TreatyType::ResearchAgreement: {
+            accept = !mutual_hostile && both_research_capable && (mutual_friendly || has_trade);
+          } break;
+          case TreatyType::NonAggressionPact: {
+            accept = !mutual_hostile || (recipient_weaker && contact_established);
+          } break;
+          case TreatyType::Alliance:
+            accept = mutual_friendly && has_trade && (has_research || both_research_capable) && power_parity;
+            break;
+          case TreatyType::Ceasefire:
+            accept = mutual_hostile && (recipient_weaker || (c_to_from + c_from_to) > 1.0);
+            break;
         }
 
         if (accept) {

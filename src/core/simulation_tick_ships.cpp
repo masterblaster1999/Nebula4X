@@ -11,6 +11,7 @@
 #include "simulation_sensors.h"
 #include "simulation_procgen.h"
 
+#include "nebula4x/core/enum_strings.h"
 #include "nebula4x/core/procgen_obscure.h"
 #include "nebula4x/core/procgen_jump_phenomena.h"
 
@@ -44,6 +45,8 @@ using sim_procgen::pick_unlock_component_id;
 
 
 inline double dot(const Vec2& a, const Vec2& b) { return a.x * b.x + a.y * b.y; }
+
+inline bool finite_vec2(const Vec2& v) { return std::isfinite(v.x) && std::isfinite(v.y); }
 
 inline Vec2 rotate_vec2(const Vec2& v, double ang_rad) {
   const double c = std::cos(ang_rad);
@@ -93,6 +96,45 @@ static Vec2 contact_search_spiral_offset_mkm(int waypoint_index,
   Vec2 off{std::cos(ang) * r, std::sin(ang) * r};
   if (!std::isfinite(off.x) || !std::isfinite(off.y)) return Vec2{0.0, 0.0};
   return off;
+}
+
+// Velocity-aware wrapper for lost-contact search offsets.
+//
+// If a contact track has a velocity estimate, probe the most likely escape
+// directions first (forward/backward along track, then cross-track) before
+// falling back to the deterministic spiral sampler.
+static Vec2 contact_search_offset_mkm(int waypoint_index,
+                                      int pattern_points,
+                                      double radius_mkm,
+                                      double seed_angle_rad,
+                                      const Vec2& track_v_mkm_per_day) {
+  if (waypoint_index <= 0) return Vec2{0.0, 0.0};
+  if (!(radius_mkm > 1e-9) || !std::isfinite(radius_mkm)) return Vec2{0.0, 0.0};
+
+  Vec2 dir = track_v_mkm_per_day;
+  if (!std::isfinite(dir.x) || !std::isfinite(dir.y)) dir = Vec2{0.0, 0.0};
+  const double vmag = dir.length();
+  if (vmag > 1e-9) {
+    dir = dir * (1.0 / vmag);
+    const Vec2 side{-dir.y, dir.x};
+
+    switch (waypoint_index) {
+      case 1: return dir * (radius_mkm * 0.65);   // likely forward drift
+      case 2: return dir * (-radius_mkm * 0.45);  // fallback behind-track
+      case 3: return side * (radius_mkm * 0.75);  // cross-track sweep
+      case 4: return side * (-radius_mkm * 0.60); // opposite cross-track
+      default: break;
+    }
+
+    // Continue with a spiral from waypoint 5 onward, oriented loosely by the
+    // track axis and ship/target seed so multiple hunters don't stack exactly.
+    const int spiral_idx = waypoint_index - 4;
+    const double axis_ang = std::atan2(dir.y, dir.x);
+    const double ang = axis_ang + seed_angle_rad * 0.35;
+    return contact_search_spiral_offset_mkm(spiral_idx, std::max(8, pattern_points), radius_mkm, ang);
+  }
+
+  return contact_search_spiral_offset_mkm(waypoint_index, std::max(8, pattern_points), radius_mkm, seed_angle_rad);
 }
 
 // --- Procedural exploration leads (anomaly chains) ---------------------------------
@@ -419,37 +461,99 @@ static LeadOutcome maybe_spawn_anomaly_lead(Simulation& sim, const Ship& resolve
       a.origin_anomaly_id = resolved.id;
       a.lead_depth = depth;
 
-      // Kind/name are lightweight narrative tags; keep short for UI.
+    // Kind/name are lightweight narrative tags; keep short for UI.
       const double t = rng.next_u01();
-      if (kind == LeadKind::StarChart) {
-        a.kind = (t < 0.55) ? "ruins" : ((t < 0.80) ? "artifact" : "signal");
+    if (kind == LeadKind::StarChart) {
+      if (t < 0.27) {
+        a.kind = AnomalyKind::Distortion;
+      } else if (t < 0.56) {
+        a.kind = AnomalyKind::Ruins;
+      } else if (t < 0.82) {
+        a.kind = AnomalyKind::Artifact;
+      } else if (t < 0.94) {
+        a.kind = AnomalyKind::Xenoarchaeology;
       } else {
-        a.kind = (t < 0.45) ? "signal" : ((t < 0.75) ? "ruins" : "phenomenon");
+        a.kind = AnomalyKind::Signal;
       }
+      } else {
+        if (t < 0.32) {
+          a.kind = AnomalyKind::Distortion;
+        } else if (t < 0.60) {
+        a.kind = AnomalyKind::Signal;
+      } else if (t < 0.78) {
+        a.kind = AnomalyKind::Ruins;
+      } else if (t < 0.94) {
+        a.kind = AnomalyKind::Phenomenon;
+      } else {
+        a.kind = AnomalyKind::Xenoarchaeology;
+        }
+      }
+
+      double site_neb = 0.0;
+      double site_ruins = 0.0;
+      double site_pir = 0.0;
+      if (const auto* target_sys = find_ptr(s.systems, target)) {
+        site_neb = std::clamp(target_sys->nebula_density, 0.0, 1.0);
+        if (target_sys->region_id != kInvalidId) {
+          if (const auto* reg = find_ptr(s.regions, target_sys->region_id)) {
+            site_ruins = std::clamp(reg->ruins_density, 0.0, 1.0);
+            site_pir = std::clamp(reg->pirate_risk * (1.0 - reg->pirate_suppression), 0.0, 1.0);
+          }
+        }
+      }
+      const double site_grad = std::clamp(
+          0.10 + 0.65 * site_neb +
+              0.25 * procgen_obscure::u01_from_u64(
+                         procgen_obscure::splitmix64(static_cast<std::uint64_t>(a.id) * 0xA24BAED4963EE407ULL ^
+                                                     static_cast<std::uint64_t>(a.system_id) * 0x9E3779B97F4A7C15ULL)),
+          0.0,
+          1.0);
+      const procgen_obscure::AnomalySiteProfile site_profile =
+          procgen_obscure::anomaly_site_profile(a, site_neb, site_ruins, site_pir, site_grad);
 
       // Obscure procedural naming. Lead-chains remain coherent via origin_anomaly_id.
       a.name = procgen_obscure::generate_anomaly_name(a);
+      if (rng.next_u01() < 0.18) {
+        a.name += " {";
+        a.name += procgen_obscure::anomaly_site_archetype_label(site_profile.archetype);
+        a.name += "}";
+      }
+      const bool xeno_chain = (a.kind == AnomalyKind::Xenoarchaeology);
 
       // Investigation time and rewards scale gently by hops/depth.
-      a.investigation_days = std::max(1, 3 + rng.range_int(0, 6) + depth);
+      a.investigation_days = std::max(1, 3 + rng.range_int(0, 6) + depth + (xeno_chain ? 2 : 0));
+      a.investigation_days =
+          std::clamp(static_cast<int>(std::lround(static_cast<double>(a.investigation_days) * site_profile.investigation_mult)) +
+                         site_profile.investigation_add_days,
+                     1,
+                     28);
       const double hop_scale = 1.0 + 0.12 * std::min(6, out.hops);
       const double depth_scale = 1.0 + 0.10 * std::max(0, depth - 1);
-      a.research_reward = std::max(0.0, rng.range(10.0, 55.0) * hop_scale * depth_scale);
+      a.research_reward = std::max(0.0,
+                                   rng.range(10.0, 55.0) * hop_scale * depth_scale *
+                                       (1.0 + (xeno_chain ? 0.20 : 0.0)) * site_profile.research_mult);
 
       // Optional mineral reward.
-      if (rng.next_u01() < 0.55) {
-        a.mineral_reward = generate_mineral_bundle(rng, /*scale=*/1.3 * hop_scale);
+      const double mineral_gate = std::clamp((xeno_chain ? 0.74 : 0.55) + site_profile.cache_bonus, 0.10, 0.95);
+      if (rng.next_u01() < mineral_gate) {
+        a.mineral_reward =
+            generate_mineral_bundle(rng, /*scale=*/(xeno_chain ? 1.75 : 1.3) * hop_scale * site_profile.mineral_mult);
       }
 
       // Optional component unlock (rarer for deeper chains).
-      if (rng.next_u01() < (0.28 / std::max(1, depth))) {
+      const double unlock_gate =
+          std::clamp((0.28 / std::max(1, depth)) + (xeno_chain ? 0.16 : 0.0) + site_profile.unlock_bonus, 0.0, 0.90);
+      if (rng.next_u01() < unlock_gate) {
         a.unlock_component_id = pick_unlock_component_id(sim.content(), *fac, rng);
       }
 
       // Small hazard risk (non-lethal).
-      if (rng.next_u01() < 0.55) {
-        a.hazard_chance = rng.range(0.10, 0.35);
-        a.hazard_damage = rng.range(0.5, 4.5) * hop_scale;
+      const double hazard_gate =
+          std::clamp((xeno_chain ? 0.70 : 0.55) * (0.70 + 0.40 * site_profile.hazard_chance_mult), 0.0, 0.95);
+      if (rng.next_u01() < hazard_gate) {
+        a.hazard_chance = std::clamp(rng.range(0.10, 0.35) * site_profile.hazard_chance_mult, 0.0, 0.90);
+        a.hazard_damage =
+            rng.range(0.5, 4.5) * hop_scale * (xeno_chain ? 1.12 : 1.0) * site_profile.hazard_damage_mult;
       }
 
       s.anomalies[a.id] = a;
@@ -482,7 +586,7 @@ struct CodexEchoOutcome {
 static bool has_codex_echo_for_root(const GameState& s, Id root_id) {
   if (root_id == kInvalidId) return false;
   for (const auto& [_, a] : s.anomalies) {
-    if (a.kind == "codex_echo" && a.origin_anomaly_id == root_id) return true;
+    if (a.kind == AnomalyKind::CodexEcho && a.origin_anomaly_id == root_id) return true;
   }
   return false;
 }
@@ -599,23 +703,54 @@ static std::optional<CodexEchoOutcome> maybe_trigger_codex_echo(Simulation& sim,
     a.origin_anomaly_id = root;
     a.lead_depth = std::max(0, resolved.lead_depth + 1);
 
-    a.kind = "codex_echo";
+    a.kind = AnomalyKind::CodexEcho;
     a.name = procgen_obscure::anomaly_theme_label(a) + ": Codex Echo";
+    double site_neb = 0.0;
+    double site_ruins = 0.0;
+    double site_pir = 0.0;
+    if (const auto* target_sys = find_ptr(s.systems, target)) {
+      site_neb = std::clamp(target_sys->nebula_density, 0.0, 1.0);
+      if (target_sys->region_id != kInvalidId) {
+        if (const auto* reg = find_ptr(s.regions, target_sys->region_id)) {
+          site_ruins = std::clamp(reg->ruins_density, 0.0, 1.0);
+          site_pir = std::clamp(reg->pirate_risk * (1.0 - reg->pirate_suppression), 0.0, 1.0);
+        }
+      }
+    }
+    const double site_grad = std::clamp(
+        0.18 + 0.62 * site_neb +
+            0.20 * procgen_obscure::u01_from_u64(
+                       procgen_obscure::splitmix64(static_cast<std::uint64_t>(a.id) * 0xD6E8FEB86659FD93ULL ^
+                                                   static_cast<std::uint64_t>(a.system_id) * 0x94D049BB133111EBULL)),
+        0.0,
+        1.0);
+    const procgen_obscure::AnomalySiteProfile site_profile =
+        procgen_obscure::anomaly_site_profile(a, site_neb, site_ruins, site_pir, site_grad);
+    if (rng.next_u01() < 0.35) {
+      a.name += " {";
+      a.name += procgen_obscure::anomaly_site_archetype_label(site_profile.archetype);
+      a.name += "}";
+    }
 
     // Make it feel special but not wildly out of band.
     a.investigation_days = std::max(1, 3 + rng.range_int(0, 6));
+    a.investigation_days =
+        std::clamp(static_cast<int>(std::lround(static_cast<double>(a.investigation_days) * site_profile.investigation_mult)) +
+                       site_profile.investigation_add_days,
+                   1,
+                   24);
     const double hop_scale = 1.0 + 0.12 * std::min(6, out.hops);
-    a.research_reward = std::max(0.0, rng.range(25.0, 85.0) * hop_scale);
+    a.research_reward = std::max(0.0, rng.range(25.0, 85.0) * hop_scale * site_profile.research_mult);
 
-    if (rng.next_u01() < 0.65) {
-      a.mineral_reward = generate_mineral_bundle(rng, /*scale=*/1.8 * hop_scale);
+    if (rng.next_u01() < std::clamp(0.65 + site_profile.cache_bonus, 0.12, 0.95)) {
+      a.mineral_reward = generate_mineral_bundle(rng, /*scale=*/1.8 * hop_scale * site_profile.mineral_mult);
     }
-    if (rng.next_u01() < 0.35) {
+    if (rng.next_u01() < std::clamp(0.35 + site_profile.unlock_bonus, 0.0, 0.90)) {
       a.unlock_component_id = pick_unlock_component_id(sim.content(), *fac, rng);
     }
-    if (rng.next_u01() < 0.60) {
-      a.hazard_chance = rng.range(0.12, 0.35);
-      a.hazard_damage = rng.range(0.8, 5.0) * hop_scale;
+    if (rng.next_u01() < std::clamp(0.60 * (0.70 + 0.40 * site_profile.hazard_chance_mult), 0.0, 0.95)) {
+      a.hazard_chance = std::clamp(rng.range(0.12, 0.35) * site_profile.hazard_chance_mult, 0.0, 0.95);
+      a.hazard_damage = rng.range(0.8, 5.0) * hop_scale * site_profile.hazard_damage_mult;
     }
 
     s.anomalies[a.id] = a;
@@ -799,8 +934,11 @@ void Simulation::tick_ships(double dt_days) {
   pre_pos_mkm.reserve(ship_ids.size() * 2);
   pre_sys.reserve(ship_ids.size() * 2);
   for (Id sid : ship_ids) {
-    const auto* sh = find_ptr(state_.ships, sid);
+    auto* sh = find_ptr(state_.ships, sid);
     if (!sh) continue;
+    if (!finite_vec2(sh->position_mkm)) {
+      sh->position_mkm = Vec2{0.0, 0.0};
+    }
     pre_pos_mkm.emplace(sid, sh->position_mkm);
     pre_sys.emplace(sid, sh->system_id);
   }
@@ -1394,6 +1532,101 @@ void Simulation::tick_ships(double dt_days) {
 
   std::unordered_map<JumpGroupKey, JumpGroupState, JumpGroupKeyHash> jump_group_state;
 
+  // Per-tick memoization for cross-system ship->position jump-route queries.
+  // This avoids duplicate planning work when coordinated-jump preprocessing and
+  // per-ship order execution ask the same route in the same tick.
+  struct TickRouteMemoKey {
+    Id start_system_id{kInvalidId};
+    Id faction_id{kInvalidId};
+    Id target_system_id{kInvalidId};
+    bool restrict_to_discovered{true};
+    std::uint64_t start_x_bits{0};
+    std::uint64_t start_y_bits{0};
+    std::uint64_t speed_bits{0};
+    std::uint64_t goal_x_bits{0};
+    std::uint64_t goal_y_bits{0};
+
+    bool operator==(const TickRouteMemoKey& o) const {
+      return start_system_id == o.start_system_id &&
+             faction_id == o.faction_id &&
+             target_system_id == o.target_system_id &&
+             restrict_to_discovered == o.restrict_to_discovered &&
+             start_x_bits == o.start_x_bits &&
+             start_y_bits == o.start_y_bits &&
+             speed_bits == o.speed_bits &&
+             goal_x_bits == o.goal_x_bits &&
+             goal_y_bits == o.goal_y_bits;
+    }
+  };
+
+  struct TickRouteMemoKeyHash {
+    size_t operator()(const TickRouteMemoKey& k) const {
+      std::uint64_t h = 1469598103934665603ull;
+      auto mix = [&](std::uint64_t v) {
+        h ^= v;
+        h *= 1099511628211ull;
+      };
+      mix(static_cast<std::uint64_t>(k.start_system_id));
+      mix(static_cast<std::uint64_t>(k.faction_id));
+      mix(static_cast<std::uint64_t>(k.target_system_id));
+      mix(k.restrict_to_discovered ? 1ull : 0ull);
+      mix(k.start_x_bits);
+      mix(k.start_y_bits);
+      mix(k.speed_bits);
+      mix(k.goal_x_bits);
+      mix(k.goal_y_bits);
+      return static_cast<size_t>(h);
+    }
+  };
+
+  auto canonical_double_for_route_key = [](double v) -> double {
+    if (!std::isfinite(v)) return 0.0;
+    if (std::fabs(v) <= 0.0) return 0.0;
+    return v;
+  };
+
+  auto double_bits_for_route_key = [&](double v) -> std::uint64_t {
+    const double c = canonical_double_for_route_key(v);
+    std::uint64_t bits = 0;
+    std::memcpy(&bits, &c, sizeof(bits));
+    return bits;
+  };
+
+  std::unordered_map<TickRouteMemoKey, std::optional<JumpRoutePlan>, TickRouteMemoKeyHash> route_plan_memo;
+  route_plan_memo.reserve(ship_ids.size() * 4 + 8);
+
+  auto plan_jump_route_to_pos_tick_cached = [&](const Ship& planner,
+                                                 Id target_system_id,
+                                                 const Vec2& goal_pos_mkm,
+                                                 bool restrict_to_discovered) -> std::optional<JumpRoutePlan> {
+    if (planner.system_id == kInvalidId || planner.faction_id == kInvalidId ||
+        target_system_id == kInvalidId)
+      return std::nullopt;
+    if (!finite_vec2(planner.position_mkm) || !finite_vec2(goal_pos_mkm)) return std::nullopt;
+
+    const double speed_km_s = std::isfinite(planner.speed_km_s) ? planner.speed_km_s : 0.0;
+
+    TickRouteMemoKey key;
+    key.start_system_id = planner.system_id;
+    key.faction_id = planner.faction_id;
+    key.target_system_id = target_system_id;
+    key.restrict_to_discovered = restrict_to_discovered;
+    key.start_x_bits = double_bits_for_route_key(planner.position_mkm.x);
+    key.start_y_bits = double_bits_for_route_key(planner.position_mkm.y);
+    key.speed_bits = double_bits_for_route_key(speed_km_s);
+    key.goal_x_bits = double_bits_for_route_key(goal_pos_mkm.x);
+    key.goal_y_bits = double_bits_for_route_key(goal_pos_mkm.y);
+
+    const auto it_cached = route_plan_memo.find(key);
+    if (it_cached != route_plan_memo.end()) return it_cached->second;
+
+    const auto plan = plan_jump_route_cached(planner.system_id, planner.position_mkm,
+                                             planner.faction_id, speed_km_s,
+                                             target_system_id, restrict_to_discovered, goal_pos_mkm);
+    route_plan_memo.emplace(key, plan);
+    return plan;
+  };
+
   if (cfg_.fleet_coordinated_jumps && !ship_to_fleet.empty()) {
     std::unordered_map<JumpGroupKey, std::vector<Id>, JumpGroupKeyHash> group_members;
     group_members.reserve(state_.fleets.size() * 2);
@@ -1427,8 +1660,8 @@ void Simulation::tick_ships(double dt_days) {
         const auto* tgt = find_ptr(state_.ships, eo.target_ship_id);
         if (!tgt) continue;
         if (tgt->system_id == sh->system_id) continue;
-        const auto plan = plan_jump_route_for_ship_to_pos(ship_id, tgt->system_id, tgt->position_mkm,
-                                                          eo.restrict_to_discovered, /*include_queued_jumps=*/false);
+        const auto plan = plan_jump_route_to_pos_tick_cached(*sh, tgt->system_id, tgt->position_mkm,
+                                                             eo.restrict_to_discovered);
         if (!plan || plan->jump_ids.empty()) continue;
         jump_id = plan->jump_ids.front();
       } else {
@@ -2031,10 +2264,9 @@ void Simulation::tick_ships(double dt_days) {
         // If the ship is not currently in the system where the last-known
         // position is defined, route back there (unrestricted).
         if (ord.last_known_system_id != kInvalidId && ship.system_id != ord.last_known_system_id) {
-          const auto plan = plan_jump_route_for_ship_to_pos(ship_id, ord.last_known_system_id,
-                                                          ord.last_known_position_mkm,
-                                                          /*restrict_to_discovered=*/false,
-                                                          /*include_queued_jumps=*/false);
+          const auto plan = plan_jump_route_to_pos_tick_cached(ship, ord.last_known_system_id,
+                                                                ord.last_known_position_mkm,
+                                                                /*restrict_to_discovered=*/false);
           if (plan && !plan->jump_ids.empty()) {
             AttackShip next = ord;
             std::vector<Order> prefix;
@@ -2226,7 +2458,9 @@ void Simulation::tick_ships(double dt_days) {
             ord.search_waypoint_index = std::max(0, ord.search_waypoint_index) + 1;
             const int pts = std::max(8, cfg_.contact_search_pattern_points);
             const double seed_ang = contact_search_seed_angle_rad(ship_id, target_id);
-            ord.search_offset_mkm = contact_search_spiral_offset_mkm(ord.search_waypoint_index, pts, rad, seed_ang);
+            const Vec2 track_v_for_search = has_track_v ? track_v_mkm_per_day : Vec2{0.0, 0.0};
+            ord.search_offset_mkm =
+                contact_search_offset_mkm(ord.search_waypoint_index, pts, rad, seed_ang, track_v_for_search);
             ord.has_search_offset = (ord.search_waypoint_index > 0);
           } else {
             // Backward compatibility: if an older save had an index but no offset,
@@ -2234,7 +2468,9 @@ void Simulation::tick_ships(double dt_days) {
             if (ord.search_waypoint_index > 0 && !ord.has_search_offset) {
               const int pts = std::max(8, cfg_.contact_search_pattern_points);
               const double seed_ang = contact_search_seed_angle_rad(ship_id, target_id);
-              ord.search_offset_mkm = contact_search_spiral_offset_mkm(ord.search_waypoint_index, pts, rad, seed_ang);
+              const Vec2 track_v_for_search = has_track_v ? track_v_mkm_per_day : Vec2{0.0, 0.0};
+              ord.search_offset_mkm =
+                  contact_search_offset_mkm(ord.search_waypoint_index, pts, rad, seed_ang, track_v_for_search);
               ord.has_search_offset = true;
             }
           }
@@ -2275,9 +2511,8 @@ void Simulation::tick_ships(double dt_days) {
       if (tgt->system_id == ship.system_id) {
         target = tgt->position_mkm;
       } else {
-        const auto plan = plan_jump_route_for_ship_to_pos(ship_id, tgt->system_id, tgt->position_mkm,
-                                                          ord.restrict_to_discovered,
-                                                          /*include_queued_jumps=*/false);
+        const auto plan = plan_jump_route_to_pos_tick_cached(ship, tgt->system_id, tgt->position_mkm,
+                                                              ord.restrict_to_discovered);
         if (!plan || plan->jump_ids.empty()) {
           // No route available (under fog-of-war restrictions or disconnected jump graph).
           target = ship.position_mkm;
@@ -2725,6 +2960,12 @@ void Simulation::tick_ships(double dt_days) {
           target = target + itoff->second;
         }
       }
+    }
+
+    // Defensive sanitization: malformed order data should not poison ship motion.
+    if (!finite_vec2(target)) {
+      q.erase(q.begin());
+      continue;
     }
 
     Vec2 delta = target - ship.position_mkm;
@@ -3761,10 +4002,19 @@ void Simulation::tick_ships(double dt_days) {
 
                 // Kind multiplier.
                 double km = 1.0;
-                if (anom->kind == "ruins" || anom->kind == "artifact") km = cfg_.anomaly_schematic_ruins_multiplier;
-                else if (anom->kind == "signal") km = cfg_.anomaly_schematic_signal_multiplier;
-                else if (anom->kind == "distress") km = cfg_.anomaly_schematic_distress_multiplier;
-                else if (anom->kind == "phenomenon") km = cfg_.anomaly_schematic_phenomenon_multiplier;
+                if (anom->kind == AnomalyKind::Ruins || anom->kind == AnomalyKind::Artifact) {
+                  km = cfg_.anomaly_schematic_ruins_multiplier;
+                } else if (anom->kind == AnomalyKind::Signal) {
+                  km = cfg_.anomaly_schematic_signal_multiplier;
+                } else if (anom->kind == AnomalyKind::Distress) {
+                  km = cfg_.anomaly_schematic_distress_multiplier;
+                } else if (anom->kind == AnomalyKind::Phenomenon) {
+                  km = cfg_.anomaly_schematic_phenomenon_multiplier;
+                } else if (anom->kind == AnomalyKind::Distortion) {
+                  km = 0.95;
+                } else if (anom->kind == AnomalyKind::Xenoarchaeology) {
+                  km = 1.15;
+                }
 
                 // Risk bonus: hazardous sites are more likely to yield intact data cores.
                 const double hz = std::clamp(anom->hazard_chance, 0.0, 1.0);
@@ -3822,15 +4072,21 @@ void Simulation::tick_ships(double dt_days) {
                   }
 
                   std::vector<ComponentType> kind_types;
-                  if (anom->kind == "signal") {
+                  if (anom->kind == AnomalyKind::Signal) {
                     kind_types = {ComponentType::Sensor, ComponentType::Reactor, ComponentType::Shield};
-                  } else if (anom->kind == "phenomenon") {
+                  } else if (anom->kind == AnomalyKind::Phenomenon) {
                     kind_types = {ComponentType::Engine, ComponentType::Shield, ComponentType::Sensor, ComponentType::Reactor};
-                  } else if (anom->kind == "ruins" || anom->kind == "artifact") {
+                  } else if (anom->kind == AnomalyKind::Ruins || anom->kind == AnomalyKind::Artifact) {
                     kind_types = {ComponentType::Weapon, ComponentType::Armor, ComponentType::Shield, ComponentType::Reactor,
                                   ComponentType::Sensor};
-                  } else if (anom->kind == "distress") {
+                  } else if (anom->kind == AnomalyKind::Distress) {
                     kind_types = {ComponentType::Sensor, ComponentType::Engine, ComponentType::Reactor, ComponentType::Cargo};
+                  } else if (anom->kind == AnomalyKind::Distortion) {
+                    kind_types = {ComponentType::Engine, ComponentType::Reactor, ComponentType::Sensor, ComponentType::FuelTank,
+                                  ComponentType::Cargo};
+                  } else if (anom->kind == AnomalyKind::Xenoarchaeology) {
+                    kind_types = {ComponentType::Sensor, ComponentType::Reactor, ComponentType::Cargo, ComponentType::Mining,
+                                  ComponentType::ColonyModule};
                   }
 
                   std::vector<ComponentType> allowed;
@@ -4294,7 +4550,7 @@ void Simulation::tick_ships(double dt_days) {
                 if (const auto* la = find_ptr(state_.anomalies, lead.spawned_anomaly_id)) {
                   const std::string ln = !la->name.empty() ? la->name : std::string("(unnamed anomaly)");
                   jt << "\n\nSite: " << ln;
-                  if (!la->kind.empty()) jt << "\nKind: " << la->kind;
+                  if (la->kind != AnomalyKind::Unknown) jt << "\nKind: " << anomaly_kind_label(la->kind);
                   jt << "\nInvestigation: " << std::max(1, la->investigation_days) << " day(s) on-station";
                   if (la->research_reward > 1e-9) {
                     jt.setf(std::ios::fixed);
@@ -4371,7 +4627,7 @@ void Simulation::tick_ships(double dt_days) {
               if (const auto* ca = find_ptr(state_.anomalies, codex->spawned_anomaly_id)) {
                 const std::string cn = !ca->name.empty() ? ca->name : std::string("(unnamed anomaly)");
                 jt << "\n\nCodex Echo site: " << cn;
-                if (!ca->kind.empty()) jt << "\nKind: " << ca->kind;
+                if (ca->kind != AnomalyKind::Unknown) jt << "\nKind: " << anomaly_kind_label(ca->kind);
                 jt << "\nInvestigation: " << std::max(1, ca->investigation_days) << " day(s) on-station";
                 if (ca->research_reward > 1e-9) {
                   jt.setf(std::ios::fixed);
@@ -5535,15 +5791,37 @@ void Simulation::tick_ships(double dt_days) {
   const double range_frac = std::max(0.0, cfg_.jump_survey_range_sensor_fraction);
   const double cap_points_per_day = std::max(0.0, cfg_.jump_survey_points_per_day_cap);
 
+  struct SurveyKey {
+    Id faction_id{kInvalidId};
+    Id jump_id{kInvalidId};
+  };
+  struct SurveyKeyHash {
+    std::size_t operator()(const SurveyKey& k) const noexcept {
+      const std::uint64_t a = static_cast<std::uint64_t>(k.faction_id);
+      const std::uint64_t b = static_cast<std::uint64_t>(k.jump_id);
+      return static_cast<std::size_t>((a * 0x9E3779B97F4A7C15ULL) ^ (b + 0xBF58476D1CE4E5B9ULL));
+    }
+  };
+  struct SurveyKeyEq {
+    bool operator()(const SurveyKey& a, const SurveyKey& b) const noexcept {
+      return a.faction_id == b.faction_id && a.jump_id == b.jump_id;
+    }
+  };
+  struct SurveyContribution {
+    double points{0.0};
+    int contributors{0};
+    int surveyors{0};
+    int support{0};
+  };
+  std::unordered_map<SurveyKey, SurveyContribution, SurveyKeyHash, SurveyKeyEq> pending_survey;
+  pending_survey.reserve(ship_ids.size() * 2 + 8);
+
   for (Id ship_id : ship_ids) {
     const auto* sh = find_ptr(state_.ships, ship_id);
     if (!sh) continue;
     if (sh->hp <= 0.0) continue;
     if (sh->faction_id == kInvalidId) continue;
     if (sh->system_id == kInvalidId) continue;
-
-    auto* fac = find_ptr(state_.factions, sh->faction_id);
-    if (!fac) continue;
 
     const auto* sys = find_ptr(state_.systems, sh->system_id);
     if (!sys) continue;
@@ -5608,15 +5886,49 @@ void Simulation::tick_ships(double dt_days) {
     }
     if (best_jid == kInvalidId) continue;
 
-    double& prog = fac->jump_survey_progress[best_jid];
-    if (!std::isfinite(prog) || prog < 0.0) prog = 0.0;
-    prog += delta_points;
+    const SurveyKey key{sh->faction_id, best_jid};
+    auto& agg = pending_survey[key];
+    agg.points += delta_points;
+    agg.contributors += 1;
+    if (sd->role == ShipRole::Surveyor) {
+      agg.surveyors += 1;
+    } else {
+      agg.support += 1;
+    }
+  }
 
-    const double required_points = this->jump_survey_required_points_for_jump(best_jid);
+  // Apply pooled survey progress with controlled diminishing returns so adding
+  // more ships helps, but does not scale linearly forever.
+  for (auto& [key, agg] : pending_survey) {
+    if (key.faction_id == kInvalidId || key.jump_id == kInvalidId) continue;
+    if (!(agg.points > 1e-12) || agg.contributors <= 0) continue;
+
+    auto* fac = find_ptr(state_.factions, key.faction_id);
+    if (!fac) continue;
+    if (is_jump_point_surveyed_by_faction(key.faction_id, key.jump_id)) {
+      fac->jump_survey_progress.erase(key.jump_id);
+      continue;
+    }
+
+    const int n = std::max(1, agg.contributors);
+    const double diminishing = std::pow(static_cast<double>(n), -0.18);
+
+    double team_bonus = 1.0;
+    if (agg.surveyors > 0 && agg.support > 0) team_bonus += 0.10; // mixed teams coordinate better.
+    if (agg.surveyors > 1) team_bonus += 0.05 * std::min(3, agg.surveyors - 1);
+    if (agg.support > 1) team_bonus += 0.02 * std::min(4, agg.support - 1);
+
+    const double applied_points = agg.points * diminishing * team_bonus;
+    if (!(applied_points > 1e-12)) continue;
+
+    double& prog = fac->jump_survey_progress[key.jump_id];
+    if (!std::isfinite(prog) || prog < 0.0) prog = 0.0;
+    prog += applied_points;
+
+    const double required_points = this->jump_survey_required_points_for_jump(key.jump_id);
     if (required_points <= 1e-9 || prog >= required_points - 1e-9) {
-      // Keep progress maps tidy; survey_jump_point_for_faction() will also clear.
-      fac->jump_survey_progress.erase(best_jid);
-      survey_jump_point_for_faction(sh->faction_id, best_jid);
+      fac->jump_survey_progress.erase(key.jump_id);
+      survey_jump_point_for_faction(key.faction_id, key.jump_id);
     }
   }
 
@@ -5654,6 +5966,13 @@ void Simulation::tick_ships(double dt_days) {
       if (!sh) continue;
       sh->velocity_mkm_per_day = Vec2{0.0, 0.0};
     }
+  }
+
+  // Ship positions/power policies/sensor availability can change within this tick.
+  // Force command-mesh recomputation on next query so combat/UI don't consume stale
+  // per-hour coverage from pre-movement state.
+  if (cfg_.enable_command_mesh) {
+    invalidate_command_mesh_cache();
   }
 
 }

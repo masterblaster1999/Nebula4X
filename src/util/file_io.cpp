@@ -6,6 +6,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace nebula4x {
 
@@ -43,11 +44,56 @@ struct TempFileCleanup {
   void release() { active = false; }
 };
 
+std::filesystem::path resolve_existing_read_path(const std::filesystem::path& requested) {
+  if (requested.empty()) return requested;
+
+  std::error_code ec;
+  if (requested.is_absolute()) return requested;
+
+  if (std::filesystem::exists(requested, ec) && !ec) return requested;
+
+  std::vector<std::filesystem::path> roots;
+
+#ifdef NEBULA4X_SOURCE_DIR
+  roots.emplace_back(NEBULA4X_SOURCE_DIR);
+#endif
+
+  ec.clear();
+  std::filesystem::path cur = std::filesystem::current_path(ec);
+  if (!ec && !cur.empty()) {
+    for (int depth = 0; depth < 12; ++depth) {
+      roots.push_back(cur);
+      const auto parent = cur.parent_path();
+      if (parent.empty() || parent == cur) break;
+      cur = parent;
+    }
+  }
+
+  for (const auto& root : roots) {
+    ec.clear();
+    const auto candidate = root / requested;
+    if (std::filesystem::exists(candidate, ec) && !ec) {
+      return candidate;
+    }
+  }
+
+  return requested;
+}
+
 } // namespace
 
 std::string read_text_file(const std::string& path) {
-  std::ifstream in(path, std::ios::in | std::ios::binary);
-  if (!in) throw std::runtime_error("Failed to open file for reading: " + path);
+  const std::filesystem::path requested(path);
+  const std::filesystem::path resolved = resolve_existing_read_path(requested);
+
+  std::ifstream in(resolved, std::ios::in | std::ios::binary);
+  if (!in) {
+    if (resolved != requested) {
+      throw std::runtime_error("Failed to open file for reading: " + path +
+                               " (resolved to: " + resolved.string() + ")");
+    }
+    throw std::runtime_error("Failed to open file for reading: " + path);
+  }
   std::ostringstream ss;
   ss << in.rdbuf();
   return ss.str();

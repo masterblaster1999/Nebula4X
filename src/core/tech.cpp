@@ -25,6 +25,25 @@ std::string ascii_to_lower(std::string s) {
   return s;
 }
 
+bool has_mining_token(const std::string& id) {
+  const std::string lid = ascii_to_lower(id);
+  auto is_token_char = [](unsigned char c) { return std::isalnum(c) != 0; };
+
+  std::size_t i = 0;
+  while (i < lid.size()) {
+    while (i < lid.size() && !is_token_char(static_cast<unsigned char>(lid[i]))) ++i;
+    std::size_t j = i;
+    while (j < lid.size() && is_token_char(static_cast<unsigned char>(lid[j]))) ++j;
+    if (j > i) {
+      const std::string tok = lid.substr(i, j - i);
+      if (tok == "mine" || tok == "mining" || tok == "miner") return true;
+    }
+    i = j + 1;
+  }
+
+  return false;
+}
+
 ShipRole parse_role(const std::string& s) {
   if (s == "freighter") return ShipRole::Freighter;
   if (s == "surveyor") return ShipRole::Surveyor;
@@ -619,7 +638,7 @@ InstallationDef parse_installation_def(const std::string& inst_id, const json::O
 
   // Optional: mark this installation as a mining extractor.
   // If not explicitly specified, fall back to a simple heuristic for back-compat
-  // content: any installation whose id contains "mine" and that produces minerals
+  // content: installations whose id has a mining token and that produce minerals
   // is treated as a miner.
   bool mining_explicit = false;
   if (const auto* mv = find_key(vo, "mining")) {
@@ -630,11 +649,8 @@ InstallationDef parse_installation_def(const std::string& inst_id, const json::O
     mining_explicit = true;
   }
 
-  if (!mining_explicit && !def.produces_per_day.empty()) {
-    const std::string lid = ascii_to_lower(def.id);
-    if (lid.find("mine") != std::string::npos) {
-      def.mining = true;
-    }
+  if (!mining_explicit && !def.produces_per_day.empty() && has_mining_token(def.id)) {
+    def.mining = true;
   }
 
   // Optional: generic mining capacity (tons per day).
