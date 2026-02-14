@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <list>
 #include <numeric>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -44,6 +45,14 @@ bool is_merge_patch_delta_mode(int mode) {
 
 bool is_json_patch_delta_mode(int mode) {
   return mode == kStorageModeDeltaJsonPatch;
+}
+
+std::string unknown_delta_storage_mode_msg(int mode) {
+  return "unknown delta storage mode: " + std::to_string(mode) + " (valid: 0=full, 1=merge-patch, 2=json-patch)";
+}
+
+[[noreturn]] void throw_unknown_delta_storage_mode(int mode) {
+  throw std::runtime_error("Time Machine: " + unknown_delta_storage_mode_msg(mode));
 }
 
 char to_lower_ascii(char c) {
@@ -345,7 +354,7 @@ const std::string& snapshot_json(TimeMachineRuntime& rt, int idx) {
       } else if (is_json_patch_delta_mode(rt.stored_storage_mode)) {
         nebula4x::apply_json_patch(doc, step.delta_patch);
       } else {
-        rt.last_error = "Time Machine: unknown delta storage mode: " + std::to_string(rt.stored_storage_mode) + ".";
+        rt.last_error = "Time Machine: " + unknown_delta_storage_mode_msg(rt.stored_storage_mode) + ".";
         return kEmpty;
       }
     }
@@ -511,7 +520,7 @@ void convert_history_storage(TimeMachineRuntime& rt, int new_mode, int new_strid
             s.delta_patch = nebula4x::json::parse(patch_json);
             s.delta_patch_bytes = patch_json.size();
           } else {
-            throw std::runtime_error("Unknown delta storage mode: " + std::to_string(new_mode));
+            throw_unknown_delta_storage_mode(new_mode);
           }
         } catch (const std::exception& e) {
           s.has_delta_patch = false;
@@ -610,7 +619,7 @@ bool capture_snapshot(TimeMachineRuntime& rt, Simulation& sim, UIState& ui, bool
           snap.delta_patch = nebula4x::json::parse(patch_json);
           snap.delta_patch_bytes = patch_json.size();
         } else {
-          throw std::runtime_error("Unknown delta storage mode: " + std::to_string(rt.stored_storage_mode));
+          throw_unknown_delta_storage_mode(rt.stored_storage_mode);
         }
       } catch (const std::exception& e) {
         snap.has_delta_patch = false;

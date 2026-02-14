@@ -1,4 +1,4 @@
-#include "ui/ui_forge_window.h"
+﻿#include "ui/ui_forge_window.h"
 
 #include <imgui.h>
 #include <misc/cpp/imgui_stdlib.h>
@@ -67,6 +67,23 @@ std::string format_number(const double x) {
   char buf[64];
   std::snprintf(buf, sizeof(buf), "%.6g", x);
   return std::string(buf);
+}
+
+ImVec4 lerp_color(const ImVec4& a, const ImVec4& b, float t) {
+  const float u = std::clamp(t, 0.0f, 1.0f);
+  return ImVec4(a.x + (b.x - a.x) * u,
+                a.y + (b.y - a.y) * u,
+                a.z + (b.z - a.z) * u,
+                a.w + (b.w - a.w) * u);
+}
+
+ImVec4 with_alpha(ImVec4 c, float a) {
+  c.w = std::clamp(a, 0.0f, 1.0f);
+  return c;
+}
+
+ImU32 color_u32(const ImVec4& c) {
+  return ImGui::ColorConvertFloat4ToU32(c);
 }
 
 // Draw a vertical separator using only public ImGui API.
@@ -1066,11 +1083,12 @@ void generate_panel_widgets_curated(UIState& ui, UiForgePanelConfig& panel, cons
     panel.widgets.clear();
   }
 
-  const auto push_sep = [&]() {
+  const auto push_sep = [&](const std::string& label) {
     UiForgeWidgetConfig w;
     w.id = ui.next_ui_forge_widget_id++;
     w.type = 2;
     w.span = 2;
+    w.label = label;
     panel.widgets.push_back(std::move(w));
   };
 
@@ -1081,15 +1099,15 @@ void generate_panel_widgets_curated(UIState& ui, UiForgePanelConfig& panel, cons
     note.span = 2;
     note.label = "Generated";
     note.text = "Curated panel (seed=" + std::to_string(opt.seed) + ")\nRoot: " + rp +
-                "\nTip: Ctrl+P → Command Palette, or use Copy/Paste Panel DNA to share.";
+                "\nTip: Ctrl+P opens Command Palette. Use Copy/Paste Panel DNA to share.";
     panel.widgets.push_back(std::move(note));
-    push_sep();
+    push_sep("Overview");
   }
 
   std::string last_group;
   for (const auto& c : picked) {
-    if (opt.group_separators && !last_group.empty() && c.group != last_group) {
-      push_sep();
+    if (opt.group_separators && c.group != last_group) {
+      push_sep(c.group);
     }
     last_group = c.group;
 
@@ -1106,10 +1124,19 @@ void generate_panel_widgets_curated(UIState& ui, UiForgePanelConfig& panel, cons
 
       w.track_history = c.numeric;
       w.show_sparkline = true;
-      w.history_len = 120;
+      w.history_len = c.is_query ? 180 : 120;
+
+      const std::string key = last_token_lc(c.path);
+      const bool key_is_name_like =
+          (key == "name" || contains_substr(key, "name") || contains_substr(key, "title"));
+      const bool key_is_total_like =
+          contains_substr(key, "total") || contains_substr(key, "sum") || contains_substr(key, "count");
+      if (key_is_name_like || key_is_total_like || (c.is_query && c.query_op != 3 && c.query_op != 4)) {
+        w.span = 2;
+      }
     } else if (c.type == 3) {
       w.is_query = c.is_query;
-      w.preview_rows = 8;
+      w.preview_rows = 10;
     }
 
     panel.widgets.push_back(std::move(w));
@@ -1297,9 +1324,16 @@ void draw_kpi_card(UIState& ui, const UiForgeWidgetConfig& cfg, WidgetRuntime& r
     ImGui::SetWindowFontScale(1.0f);
   }
 
+  if (cfg.is_query) {
+    ImGui::TextDisabled("matches %d | numeric %d", ev.match_count, ev.numeric_count);
+  }
+
   // Delta.
   if (has_delta && std::abs(delta) > 0.000001f) {
-    ImGui::TextDisabled("Δ %s", format_number(delta).c_str());
+    const bool positive = delta >= 0.0f;
+    const ImVec4 pos_col = lerp_color(ImGui::GetStyleColorVec4(ImGuiCol_CheckMark), ImVec4(0.35f, 0.92f, 0.55f, 1.0f), 0.45f);
+    const ImVec4 neg_col = ImVec4(0.96f, 0.43f, 0.38f, 1.0f);
+    ImGui::TextColored(positive ? pos_col : neg_col, "delta %s%s", positive ? "+" : "", format_number(delta).c_str());
   }
 
   // Sparkline.
@@ -1391,6 +1425,7 @@ void draw_list_card(UIState& ui, const UiForgeWidgetConfig& cfg, const UIState& 
     ImGui::SameLine();
     ImGui::TextDisabled("[query] %d", ev.match_count);
   }
+  ImGui::TextDisabled("rows %d", static_cast<int>(rows.size()));
 
   if (!ev.ok) {
     ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "%s", ev.display.c_str());
@@ -1475,12 +1510,43 @@ void draw_panel_contents(const Simulation& sim, UIState& ui, const UiForgePanelC
     if (!first_in_line) ImGui::SameLine();
 
     // Card visuals.
+    ImVec4 card_bg = style.Colors[ImGuiCol_ChildBg];
+    ImVec4 card_border = style.Colors[ImGuiCol_Border];
+    ImVec4 card_accent = style.Colors[ImGuiCol_CheckMark];
+    switch (cfg.type) {
+      case 0: // KPI
+        card_bg = with_alpha(lerp_color(card_bg, style.Colors[ImGuiCol_FrameBg], 0.30f), std::max(card_bg.w, 0.94f));
+        card_border = with_alpha(lerp_color(card_border, card_accent, 0.28f), std::max(card_border.w, 0.55f));
+        break;
+      case 1: // note
+        card_bg = with_alpha(lerp_color(card_bg, style.Colors[ImGuiCol_PlotHistogram], 0.16f), std::max(card_bg.w, 0.94f));
+        card_border = with_alpha(lerp_color(card_border, style.Colors[ImGuiCol_PlotHistogram], 0.24f), std::max(card_border.w, 0.52f));
+        card_accent = style.Colors[ImGuiCol_PlotHistogram];
+        break;
+      case 3: // list
+        card_bg = with_alpha(lerp_color(card_bg, style.Colors[ImGuiCol_Header], 0.22f), std::max(card_bg.w, 0.94f));
+        card_border = with_alpha(lerp_color(card_border, style.Colors[ImGuiCol_HeaderHovered], 0.26f), std::max(card_border.w, 0.52f));
+        card_accent = style.Colors[ImGuiCol_HeaderHovered];
+        break;
+      default:
+        break;
+    }
+
     ImGui::PushID((int)cfg.id);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, card_bg);
+    ImGui::PushStyleColor(ImGuiCol_Border, card_border);
     ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, style.FrameRounding);
     ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.0f);
 
     const ImGuiWindowFlags child_flags = ImGuiWindowFlags_AlwaysUseWindowPadding;
     if (ImGui::BeginChild("##card", ImVec2(w, 0.0f), true, child_flags)) {
+      const ImVec2 card_min = ImGui::GetWindowPos();
+      const float strip_h = std::max(2.0f, std::round(ImGui::GetFontSize() * 0.16f));
+      ImGui::GetWindowDrawList()->AddRectFilled(
+          card_min,
+          ImVec2(card_min.x + ImGui::GetWindowWidth(), card_min.y + strip_h),
+          color_u32(with_alpha(card_accent, 0.70f)));
+
       // Context menu: right click anywhere in the card.
       if (ImGui::BeginPopupContextWindow("##ctx", ImGuiPopupFlags_MouseButtonRight)) {
         // Evaluate once for context actions.
@@ -1568,6 +1634,7 @@ void draw_panel_contents(const Simulation& sim, UIState& ui, const UiForgePanelC
     ImGui::EndChild();
 
     ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor(2);
     ImGui::PopID();
 
     line_w += w + spacing;
@@ -1656,6 +1723,49 @@ void draw_ui_forge_panel_windows(Simulation& sim, UIState& ui) {
 
     ImGui::End();
   }
+}
+
+bool ensure_ui_forge_base_panels(Simulation& sim, UIState& ui) {
+  if (!ui.ui_forge_panels.empty()) return true;
+
+  const bool doc_ok = ensure_doc(sim, g_doc, /*force=*/false);
+  if (!doc_ok || !g_doc.root) return false;
+
+  UiForgePanelConfig panel;
+  panel.id = ui.next_ui_forge_panel_id++;
+  panel.name = "Procedural Command Deck";
+  panel.open = true;
+  panel.root_path = "/";
+  panel.desired_columns = 0;
+  panel.card_width_em = 19.0f;
+  ui.ui_forge_panels.push_back(std::move(panel));
+
+  CuratedGenOptions opt;
+  opt.depth = 2;
+  opt.target_widgets = 18;
+  opt.replace_existing = true;
+  opt.include_lists = true;
+  opt.include_strings = true;
+  opt.include_id_fields = false;
+  opt.group_separators = true;
+  opt.add_intro_note = true;
+  opt.seed = static_cast<std::uint32_t>(
+      static_cast<std::uint32_t>(ui.ui_procedural_theme_seed) ^
+      (static_cast<std::uint32_t>(ui.ui_procedural_layout_seed) * 1664525u) ^
+      0x9e3779b9u);
+
+  generate_panel_widgets_curated(ui, ui.ui_forge_panels.back(), *g_doc.root, opt);
+  if (ui.ui_forge_panels.back().widgets.empty()) {
+    UiForgeWidgetConfig w;
+    w.id = ui.next_ui_forge_widget_id++;
+    w.type = 1;
+    w.span = 2;
+    w.label = "Procedural Command Deck";
+    w.text = "Starter panel created. Open UI Forge to customize widgets.";
+    ui.ui_forge_panels.back().widgets.push_back(std::move(w));
+  }
+
+  return true;
 }
 
 void draw_ui_forge_window(Simulation& sim, UIState& ui, Id selected_ship, Id selected_colony, Id selected_body) {
@@ -2335,3 +2445,4 @@ void draw_ui_forge_window(Simulation& sim, UIState& ui, Id selected_ship, Id sel
 }
 
 } // namespace nebula4x::ui
+

@@ -651,8 +651,8 @@ bool seems_portable_template(const Value& v) {
 std::string norm_key(const std::string& s) {
   std::string out;
   out.reserve(s.size());
-  for (unsigned char uc : s) {
-    const char c = static_cast<char>(uc);
+  for (char raw : s) {
+    const unsigned char uc = static_cast<unsigned char>(raw);
     if (std::isalnum(uc)) {
       out.push_back(static_cast<char>(std::tolower(uc)));
     }
@@ -1253,9 +1253,9 @@ bool deserialize_order_template_from_json_portable(const Simulation& sim, Id vie
   Value* orders_v = nullptr;
   if (auto it = robj->find("orders"); it != robj->end()) {
     orders_v = &it->second;
-  } else if (auto it = robj->find("queue"); it != robj->end()) {
+  } else if (auto it_queue = robj->find("queue"); it_queue != robj->end()) {
     // Accept ship-orders shape.
-    orders_v = &it->second;
+    orders_v = &it_queue->second;
   } else {
     return fail("Missing 'orders' array");
   }
@@ -1408,6 +1408,7 @@ bool start_portable_template_import_session(const Simulation& sim, Id viewer_fac
 
 bool finalize_portable_template_import_session(const Simulation& sim, PortableTemplateImportSession* session,
                                                ParsedOrderTemplate* out, std::string* error) {
+  (void)sim;
   auto fail = [&](const std::string& msg) {
     if (error) *error = msg;
     return false;

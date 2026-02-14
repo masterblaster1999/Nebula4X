@@ -10,7 +10,9 @@
 #include <vector>
 
 #include "nebula4x/core/repair_planner.h"
+#include "nebula4x/core/simulation.h"
 #include "nebula4x/util/log.h"
+#include "ui/ui_state.h"
 
 namespace nebula4x::ui {
 namespace {
@@ -44,7 +46,7 @@ struct RepairPlannerWindowState {
 };
 
 std::string fmt_days(double days) {
-  if (!std::isfinite(days)) return "∞";
+  if (!std::isfinite(days)) return "inf";
   if (days < 0.0) return "?";
   char buf[64];
   if (days < 1.0) {
@@ -58,7 +60,7 @@ std::string fmt_days(double days) {
 }
 
 std::string fmt_hp(double hp) {
-  if (!std::isfinite(hp)) return "∞";
+  if (!std::isfinite(hp)) return "inf";
   char buf[64];
   if (std::abs(hp) < 1000.0) {
     std::snprintf(buf, sizeof(buf), "%.0f", hp);
@@ -226,7 +228,8 @@ void draw_repair_planner_window(Simulation& sim, UIState& ui, Id& selected_ship,
   // --- Bulk apply ---
   if (ImGui::Button("Apply plan: route all assigned ships")) {
     const bool ok = nebula4x::apply_repair_plan(sim, rw.plan, rw.clear_orders_before_apply, rw.use_smart_travel);
-    log_info(ok ? "Repair Planner: applied repair routing plan" : "Repair Planner: applied plan (with failures)");
+    nebula4x::log::info(ok ? "Repair Planner: applied repair routing plan"
+                           : "Repair Planner: applied plan (with failures)");
     rw.have_plan = false;
   }
   ImGui::SameLine();
@@ -366,7 +369,8 @@ void draw_repair_planner_window(Simulation& sim, UIState& ui, Id& selected_ship,
       if (!can_send) ImGui::BeginDisabled();
       if (ImGui::SmallButton("Send")) {
         const bool ok = nebula4x::apply_repair_assignment(sim, a, rw.clear_orders_before_apply, rw.use_smart_travel);
-        log_info(ok ? "Repair Planner: issued repair orders" : "Repair Planner: failed to issue repair orders");
+        nebula4x::log::info(ok ? "Repair Planner: issued repair orders"
+                               : "Repair Planner: failed to issue repair orders");
         rw.have_plan = false;
       }
       if (!can_send) ImGui::EndDisabled();

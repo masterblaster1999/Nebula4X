@@ -3,12 +3,14 @@
 #include <imgui.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
 #include <limits>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -118,6 +120,237 @@ std::vector<std::string> sorted_all_design_ids(const Simulation& sim) {
   std::sort(ids.begin(), ids.end());
   ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
   return ids;
+}
+
+Id resolve_viewer_faction_id(const Simulation& sim, const UIState& ui, Id selected_ship) {
+  Id viewer_id = kInvalidId;
+  if (selected_ship != kInvalidId) {
+    if (const auto* sh = find_ptr(sim.state().ships, selected_ship)) viewer_id = sh->faction_id;
+  }
+  if (viewer_id == kInvalidId && ui.viewer_faction_id != kInvalidId) viewer_id = ui.viewer_faction_id;
+  if (viewer_id == kInvalidId) {
+    for (const auto& [fid, _] : sim.state().factions) {
+      viewer_id = (viewer_id == kInvalidId) ? fid : std::min(viewer_id, fid);
+    }
+  }
+  return viewer_id;
+}
+
+double safe_range_mkm(const ShipDesign& d) {
+  if (!(d.fuel_use_per_mkm > 0.0) || !(d.fuel_capacity_tons > 0.0)) return 0.0;
+  return d.fuel_capacity_tons / d.fuel_use_per_mkm;
+}
+
+double estimated_endurance_days(const ShipDesign& d) {
+  const double range_mkm = safe_range_mkm(d);
+  const double speed_mkm_per_day = std::max(0.0, d.speed_km_s) * 0.0864;
+  if (!(range_mkm > 0.0) || !(speed_mkm_per_day > 1e-9)) return 0.0;
+  return range_mkm / speed_mkm_per_day;
+}
+
+double role_effectiveness_score(const ShipDesign& d, ShipRole role) {
+  const double range = safe_range_mkm(d);
+  const double speed = std::max(0.0, d.speed_km_s);
+  const double mass = std::max(1.0, d.mass_tons);
+  const double power_margin = d.power_generation - d.power_use_total;
+  const double power_factor = (power_margin >= 0.0) ? 1.0 : std::clamp(1.0 + power_margin / 100.0, 0.50, 1.0);
+  const double mass_pen = std::pow(mass / 50.0, 0.25);
+
+  double s = 0.0;
+  switch (role) {
+    case ShipRole::Freighter:
+      s += std::max(0.0, d.cargo_tons) * 1.25;
+      s += range * 0.35;
+      s += speed * 2.0;
+      s += std::max(0.0, d.colony_capacity_millions) * 8.0;
+      break;
+    case ShipRole::Surveyor:
+      s += std::max(0.0, d.sensor_range_mkm) * 2.0;
+      s += range * 0.6;
+      s += speed * 1.5;
+      s += (1.0 - std::clamp(d.signature_multiplier, 0.05, 1.0)) * 60.0;
+      s += (std::max(0.0, d.ecm_strength) + std::max(0.0, d.eccm_strength)) * 6.0;
+      break;
+    case ShipRole::Combatant:
+      s += std::max(0.0, d.weapon_damage) * 40.0;
+      s += std::max(0.0, d.missile_damage) * 46.0;
+      s += std::max(0.0, d.point_defense_damage) * 18.0;
+      s += std::max(0.0, d.max_hp) * 1.0;
+      s += std::max(0.0, d.max_shields) * 2.2;
+      s += speed * 1.8;
+      s += range * 0.10;
+      s += std::max(0.0, d.sensor_range_mkm) * 0.6;
+      s += (std::max(0.0, d.ecm_strength) + std::max(0.0, d.eccm_strength)) * 12.0;
+      break;
+    default:
+      s += std::max(0.0, d.cargo_tons) * 0.5;
+      s += std::max(0.0, d.sensor_range_mkm) * 0.5;
+      s += std::max(0.0, d.weapon_damage) * 5.0;
+      s += std::max(0.0, d.missile_damage) * 5.0;
+      s += std::max(0.0, d.max_hp) * 0.2;
+      s += speed * 0.5;
+      s += range * 0.2;
+      break;
+  }
+  return (s / std::max(1e-6, mass_pen)) * power_factor;
+}
+
+struct DesignAdvisorSummary {
+  std::array<double, 3> role_scores{{0.0, 0.0, 0.0}};
+  std::array<double, 3> role_norm_pct{{0.0, 0.0, 0.0}};
+  ShipRole best_role{ShipRole::Unknown};
+  double range_mkm{0.0};
+  double endurance_days{0.0};
+  double power_margin{0.0};
+  bool heat_enabled{false};
+  bool heat_stable{true};
+  double heat_days_to_cap{0.0};
+  int engine_count{0};
+  int reactor_count{0};
+  int fuel_count{0};
+  int sensor_count{0};
+  int weapon_count{0};
+  std::vector<std::string> strengths;
+  std::vector<std::string> concerns;
+};
+
+int role_to_forge_index(ShipRole role) {
+  if (role == ShipRole::Surveyor) return 1;
+  if (role == ShipRole::Combatant) return 2;
+  return 0;
+}
+
+ShipRole forge_index_to_role(int role_idx) {
+  if (role_idx == 1) return ShipRole::Surveyor;
+  if (role_idx == 2) return ShipRole::Combatant;
+  return ShipRole::Freighter;
+}
+
+DesignAdvisorSummary summarize_design(const Simulation& sim, const ShipDesign& d) {
+  DesignAdvisorSummary out;
+  out.range_mkm = safe_range_mkm(d);
+  out.endurance_days = estimated_endurance_days(d);
+  out.power_margin = d.power_generation - d.power_use_total;
+
+  for (const std::string& cid : d.components) {
+    const auto* c = find_ptr(sim.content().components, cid);
+    if (!c) continue;
+    if (c->type == ComponentType::Engine) ++out.engine_count;
+    if (c->type == ComponentType::Reactor) ++out.reactor_count;
+    if (c->type == ComponentType::FuelTank) ++out.fuel_count;
+    if (c->type == ComponentType::Sensor) ++out.sensor_count;
+    if (c->type == ComponentType::Weapon) ++out.weapon_count;
+  }
+
+  out.role_scores[0] = role_effectiveness_score(d, ShipRole::Freighter);
+  out.role_scores[1] = role_effectiveness_score(d, ShipRole::Surveyor);
+  out.role_scores[2] = role_effectiveness_score(d, ShipRole::Combatant);
+  int best_i = 0;
+  for (int i = 1; i < 3; ++i) {
+    if (out.role_scores[(size_t)i] > out.role_scores[(size_t)best_i]) best_i = i;
+  }
+  out.best_role = (best_i == 0) ? ShipRole::Freighter : (best_i == 1) ? ShipRole::Surveyor : ShipRole::Combatant;
+  const double best = std::max(1e-9, out.role_scores[(size_t)best_i]);
+  for (int i = 0; i < 3; ++i) {
+    out.role_norm_pct[(size_t)i] = std::clamp(100.0 * out.role_scores[(size_t)i] / best, 0.0, 100.0);
+  }
+
+  if (out.engine_count <= 0) out.concerns.push_back("No engines: design cannot maneuver.");
+  if (out.reactor_count <= 0 && d.power_use_total > 0.0) out.concerns.push_back("No reactors: active subsystems cannot stay online.");
+  if (d.fuel_use_per_mkm > 0.0 && out.fuel_count <= 0) out.concerns.push_back("Consumes fuel but has no fuel tanks.");
+  if (out.power_margin < -0.25) out.concerns.push_back("Power deficit under full load.");
+  if (d.speed_km_s < 2.0) out.concerns.push_back("Very low speed.");
+  if (out.range_mkm > 0.0 && out.range_mkm < 35.0) out.concerns.push_back("Short operational range.");
+  if (d.role == ShipRole::Surveyor && d.sensor_range_mkm < 80.0) out.concerns.push_back("Low sensors for a survey role.");
+  if (d.role == ShipRole::Combatant && (d.weapon_damage + d.missile_damage + d.point_defense_damage) <= 0.0) {
+    out.concerns.push_back("Combat role without weapons.");
+  }
+  if (d.role == ShipRole::Freighter && d.cargo_tons < 50.0) out.concerns.push_back("Freighter role with limited cargo.");
+
+  if (d.cargo_tons >= 200.0) out.strengths.push_back("High cargo throughput.");
+  if (d.sensor_range_mkm >= 150.0) out.strengths.push_back("Strong long-range sensors.");
+  if ((d.weapon_damage + d.missile_damage) >= 8.0) out.strengths.push_back("Strong offensive package.");
+  if (d.max_shields >= 10.0) out.strengths.push_back("Good shield durability.");
+  if (d.signature_multiplier < 0.80) out.strengths.push_back("Reduced baseline signature.");
+  if (out.power_margin >= 1.0) out.strengths.push_back("Healthy power headroom.");
+  if (out.endurance_days >= 20.0) out.strengths.push_back("Long endurance.");
+
+  out.heat_enabled = sim.cfg().enable_ship_heat;
+  out.heat_stable = true;
+  out.heat_days_to_cap = 0.0;
+  if (out.heat_enabled) {
+    const auto sn = [](double x) -> double { return (std::isfinite(x) && x > 0.0) ? x : 0.0; };
+    const ShipPowerPolicy pol{};
+    const double mass = std::max(0.0, d.mass_tons);
+    const double cap = sn(sim.cfg().ship_heat_base_capacity_per_mass_ton) * mass + sn(d.heat_capacity_bonus);
+    const double diss = sn(sim.cfg().ship_heat_base_dissipation_per_mass_ton_per_day) * mass + sn(d.heat_dissipation_bonus_per_day);
+
+    const double use_eng = std::max(0.0, d.power_use_engines);
+    const double use_sh = std::max(0.0, d.power_use_shields);
+    const double use_w = std::max(0.0, d.power_use_weapons);
+    const double use_s = std::max(0.0, d.power_use_sensors);
+    const double use_total = std::max(0.0, d.power_use_total);
+    const double other_use = std::max(0.0, use_total - use_eng - use_sh - use_w - use_s);
+    const double pgen_total = std::max(0.0, d.power_generation);
+    const double pgen_for_sub = std::max(0.0, pgen_total - other_use);
+
+    const PowerAllocation pa = compute_power_allocation(pgen_for_sub, use_eng, use_sh, use_w, use_s, pol);
+    const double online_use =
+        other_use + (pa.engines_online ? use_eng : 0.0) + (pa.shields_online ? use_sh : 0.0) +
+        (pa.weapons_online ? use_w : 0.0) + (pa.sensors_online ? use_s : 0.0);
+    const double gen = sn(sim.cfg().ship_heat_generation_per_power_use_per_day) * online_use + sn(d.heat_generation_bonus_per_day);
+    const double net = gen - diss;
+    if (!(cap > 1e-9) || net <= 1e-6) {
+      out.heat_stable = true;
+      out.heat_days_to_cap = 0.0;
+    } else {
+      out.heat_stable = false;
+      out.heat_days_to_cap = cap / std::max(1e-9, net);
+      if (out.heat_days_to_cap < 15.0) out.concerns.push_back("Heat saturation risk in sustained combat.");
+    }
+  }
+
+  return out;
+}
+
+struct BuildabilityDiagnostics {
+  bool has_faction{false};
+  bool buildable{true};
+  int total_components{0};
+  int unlocked_components{0};
+  std::vector<std::pair<std::string, int>> missing_components;
+};
+
+BuildabilityDiagnostics summarize_buildability(const ShipDesign& d, const Faction* viewer_f) {
+  BuildabilityDiagnostics out;
+  out.total_components = (int)d.components.size();
+  if (!viewer_f) return out;
+
+  out.has_faction = true;
+  std::unordered_set<std::string> unlocked;
+  unlocked.reserve(viewer_f->unlocked_components.size() * 2 + 1);
+  for (const std::string& cid : viewer_f->unlocked_components) unlocked.insert(cid);
+
+  std::unordered_map<std::string, int> missing_counts;
+  for (const std::string& cid : d.components) {
+    if (unlocked.find(cid) != unlocked.end()) {
+      ++out.unlocked_components;
+      continue;
+    }
+    out.buildable = false;
+    ++missing_counts[cid];
+  }
+
+  if (out.buildable) out.unlocked_components = out.total_components;
+  out.missing_components.reserve(missing_counts.size());
+  for (const auto& [cid, count] : missing_counts) {
+    out.missing_components.push_back({cid, count});
+  }
+  std::sort(out.missing_components.begin(), out.missing_components.end(), [](const auto& a, const auto& b) {
+    if (a.second != b.second) return a.second > b.second;
+    return a.first < b.first;
+  });
+  return out;
 }
 
 // --- squarified treemap layout ---
@@ -387,8 +620,8 @@ void draw_heat_overlay(ImDrawList* dl, const ImVec2& p0, const ImVec2& p1, const
 std::string compact_name(const std::string& s, int max_chars) {
   if (max_chars <= 0) return std::string{};
   if ((int)s.size() <= max_chars) return s;
-  if (max_chars <= 1) return s.substr(0, 1);
-  return s.substr(0, (size_t)(max_chars - 1)) + "…";
+  if (max_chars <= 3) return s.substr(0, (size_t)max_chars);
+  return s.substr(0, (size_t)(max_chars - 3)) + "...";
 }
 
 }  // namespace
@@ -419,6 +652,9 @@ void draw_design_studio_window(Simulation& sim, UIState& ui, Id& selected_ship, 
   static char search_buf[64] = "";
   static bool initialized = false;
   static std::string last_selected_id;
+  static int list_sort_mode = 0;
+  static int list_role_filter = 0; // 0=All, 1=Freighter, 2=Surveyor, 3=Combatant
+  static bool list_buildable_only = false;
 
   // Procedural design forge UI state.
   static int forge_count = 6;
@@ -452,6 +688,7 @@ void draw_design_studio_window(Simulation& sim, UIState& ui, Id& selected_ship, 
   static float forge_min_troop_capacity = 0.0f;
   static float forge_min_ecm_strength = 0.0f;
   static float forge_min_eccm_strength = 0.0f;
+  static int forge_preset_idx = 1; // 0=Custom, 1=Balanced upgrade, 2=Long-range, 3=Fast strike, 4=Warship, 5=Industrial
   static char forge_id_prefix[32] = "forge";
   static char forge_name_prefix[64] = "Forge";
   static std::string forge_status;
@@ -476,12 +713,17 @@ void draw_design_studio_window(Simulation& sim, UIState& ui, Id& selected_ship, 
     selected_id = all_ids.front();
   }
 
+  const Id viewer_id = resolve_viewer_faction_id(sim, ui, selected_ship);
+  const Faction* viewer_f = (viewer_id != kInvalidId) ? find_ptr(sim.state().factions, viewer_id) : nullptr;
+
   const ShipDesign* design = sim.find_design(selected_id);
   if (!design) {
     ImGui::TextDisabled("Design not found.");
     ImGui::End();
     return;
   }
+  const DesignAdvisorSummary advisor = summarize_design(sim, *design);
+  const BuildabilityDiagnostics build_diag = summarize_buildability(*design, viewer_f);
 
   // Reset per-design transient selection when the design changes.
   if (selected_id != last_selected_id) {
@@ -500,44 +742,107 @@ void draw_design_studio_window(Simulation& sim, UIState& ui, Id& selected_ship, 
     // --- Left: designs list ---
     ImGui::TableSetColumnIndex(0);
     {
-      ImGui::TextDisabled("Designs (%zu)", all_ids.size());
-      ImGui::InputTextWithHint("##ds_search", "Search…", search_buf, IM_ARRAYSIZE(search_buf));
+      struct ListRow {
+        std::string id;
+        std::string name;
+        ShipRole role{ShipRole::Unknown};
+        double mass{0.0};
+        double speed{0.0};
+        double range{0.0};
+        double role_score{0.0};
+        bool buildable{true};
+      };
+
+      std::vector<ListRow> rows;
+      rows.reserve(all_ids.size());
+      for (const auto& id : all_ids) {
+        const ShipDesign* d = sim.find_design(id);
+        if (!d) continue;
+
+        ListRow row;
+        row.id = id;
+        row.name = d->name;
+        row.role = d->role;
+        row.mass = d->mass_tons;
+        row.speed = d->speed_km_s;
+        row.range = safe_range_mkm(*d);
+        row.role_score = role_effectiveness_score(*d, d->role);
+        row.buildable = viewer_f ? sim.is_design_buildable_for_faction(viewer_id, id) : true;
+
+        if (search_buf[0] != '\0' && !case_insensitive_contains(row.name, search_buf) &&
+            !case_insensitive_contains(row.id, search_buf)) {
+          continue;
+        }
+        if (list_role_filter == 1 && row.role != ShipRole::Freighter) continue;
+        if (list_role_filter == 2 && row.role != ShipRole::Surveyor) continue;
+        if (list_role_filter == 3 && row.role != ShipRole::Combatant) continue;
+        if (list_buildable_only && viewer_f && !row.buildable) continue;
+
+        rows.push_back(std::move(row));
+      }
+
+      std::sort(rows.begin(), rows.end(), [&](const ListRow& a, const ListRow& b) {
+        switch (list_sort_mode) {
+          case 1:
+            if ((int)a.role != (int)b.role) return (int)a.role < (int)b.role;
+            return a.name < b.name;
+          case 2:
+            if (std::abs(a.speed - b.speed) > 1e-6) return a.speed > b.speed;
+            return a.name < b.name;
+          case 3:
+            if (std::abs(a.range - b.range) > 1e-6) return a.range > b.range;
+            return a.name < b.name;
+          case 4:
+            if (std::abs(a.mass - b.mass) > 1e-6) return a.mass < b.mass;
+            return a.name < b.name;
+          case 5:
+            if (std::abs(a.role_score - b.role_score) > 1e-6) return a.role_score > b.role_score;
+            return a.name < b.name;
+          case 0:
+          default:
+            return a.name < b.name;
+        }
+      });
+
+      ImGui::TextDisabled("Designs (%zu shown / %zu total)", rows.size(), all_ids.size());
+      ImGui::InputTextWithHint("##ds_search", "Search...", search_buf, IM_ARRAYSIZE(search_buf));
+      ImGui::SetNextItemWidth(150.0f);
+      ImGui::Combo("Sort", &list_sort_mode, "Name\0Role\0Speed\0Range\0Mass (light)\0Role fit\0");
+      ImGui::SetNextItemWidth(150.0f);
+      ImGui::Combo("Role filter", &list_role_filter, "All\0Freighter\0Surveyor\0Combatant\0");
+      if (viewer_f) {
+        ImGui::Checkbox("Buildable only", &list_buildable_only);
+        ImGui::SameLine();
+        ImGui::TextDisabled("(%s)", viewer_f->name.c_str());
+      } else {
+        list_buildable_only = false;
+      }
       ImGui::Separator();
 
       if (ImGui::BeginChild("##ds_design_list", ImVec2(0, 0), false)) {
-        for (const auto& id : all_ids) {
-          const auto* d = sim.find_design(id);
-          const std::string name = d ? d->name : id;
-          if (search_buf[0] != '\0') {
-            if (!case_insensitive_contains(name, search_buf) && !case_insensitive_contains(id, search_buf)) continue;
-          }
-
-          const bool sel = (id == selected_id);
-          std::string label = name;
-          if (d) {
-            label += "  [";
-            label += ship_role_label(d->role);
-            label += "]";
-          }
-          label += "##" + id;
+        if (rows.empty()) {
+          ImGui::TextDisabled("(no designs match current filters)");
+        }
+        for (const auto& row : rows) {
+          const bool sel = (row.id == selected_id);
+          std::string label = row.name + "  [" + ship_role_label(row.role) + "]";
+          if (viewer_f && !row.buildable) label += "  (locked)";
+          label += "##" + row.id;
 
           if (ImGui::Selectable(label.c_str(), sel)) {
-            selected_id = id;
+            selected_id = row.id;
           }
           if (ImGui::IsItemHovered()) {
             ImGui::BeginTooltip();
-            ImGui::Text("%s", name.c_str());
+            ImGui::Text("%s", row.name.c_str());
             ImGui::Separator();
-            ImGui::Text("ID: %s", id.c_str());
-            if (d) {
-              ImGui::Text("Mass: %.0f t", d->mass_tons);
-              ImGui::Text("Speed: %.1f km/s", d->speed_km_s);
-              if (d->fuel_use_per_mkm > 0.0 && d->fuel_capacity_tons > 0.0) {
-                ImGui::Text("Range: %.0f mkm", d->fuel_capacity_tons / d->fuel_use_per_mkm);
-              }
-              if (d->weapon_damage > 0.0) {
-                ImGui::Text("Weapons: %.1f (%.1f mkm)", d->weapon_damage, d->weapon_range_mkm);
-              }
+            ImGui::Text("ID: %s", row.id.c_str());
+            ImGui::Text("Mass: %.0f t", row.mass);
+            ImGui::Text("Speed: %.1f km/s", row.speed);
+            if (row.range > 0.0) ImGui::Text("Range: %.0f mkm", row.range);
+            ImGui::Text("Role fit score: %.1f", row.role_score);
+            if (viewer_f) {
+              ImGui::Text("%s", row.buildable ? "Buildable by viewer faction" : "Not buildable by viewer faction");
             }
             ImGui::EndTooltip();
           }
@@ -555,6 +860,15 @@ void draw_design_studio_window(Simulation& sim, UIState& ui, Id& selected_ship, 
       ImGui::TextDisabled("(%s)", selected_id.c_str());
       ImGui::SameLine();
       ImGui::TextDisabled("[%s]", ship_role_label(design->role));
+      if (build_diag.has_faction) {
+        ImGui::SameLine();
+        if (build_diag.buildable) {
+          ImGui::TextColored(ImVec4(0.45f, 0.92f, 0.60f, 1.0f), "Buildable");
+        } else {
+          ImGui::TextColored(ImVec4(1.0f, 0.52f, 0.52f, 1.0f), "Locked (%zu missing)",
+                             build_diag.missing_components.size());
+        }
+      }
 
       ImGui::SameLine();
       ImGui::Dummy(ImVec2(12, 0));
@@ -569,7 +883,9 @@ void draw_design_studio_window(Simulation& sim, UIState& ui, Id& selected_ship, 
       ImGui::SameLine();
       if (ImGui::SmallButton("Forge Variants")) {
         // Reasonable defaults.
-        forge_role_idx = (design->role == ShipRole::Surveyor) ? 1 : (design->role == ShipRole::Combatant) ? 2 : 0;
+        forge_role_idx = role_to_forge_index(design->role);
+        forge_preset_idx = 1;
+        forge_status.clear();
         if (forge_seed <= 0) {
           // Stable enough for a single run; users can override for reproducibility.
           forge_seed = (int)(sim.state().date.days_since_epoch() & 0x7fffffff);
@@ -579,6 +895,23 @@ void draw_design_studio_window(Simulation& sim, UIState& ui, Id& selected_ship, 
       }
       if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("Procedurally generate buildable variants using the viewer faction's unlocked components.");
+      }
+      if (build_diag.has_faction && !build_diag.buildable) {
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Forge Buildable")) {
+          forge_role_idx = role_to_forge_index(design->role);
+          forge_preset_idx = 1;
+          forge_use_constraints = true;
+          forge_only_meeting_constraints = true;
+          forge_require_power_balance = true;
+          forge_min_power_margin = 0.0f;
+          forge_status.clear();
+          std::snprintf(forge_name_prefix, sizeof(forge_name_prefix), "%s Buildable", design->name.c_str());
+          ImGui::OpenPopup("Forge Variants");
+        }
+        if (ImGui::IsItemHovered()) {
+          ImGui::SetTooltip("Open forge with buildability-focused defaults for the current viewer faction.");
+        }
       }
 
       ImGui::SameLine();
@@ -594,34 +927,155 @@ void draw_design_studio_window(Simulation& sim, UIState& ui, Id& selected_ship, 
 
       // --- Procedural Design Forge ---
       if (ImGui::BeginPopupModal("Forge Variants", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        // Resolve which faction's unlocks we should use.
-        Id viewer_id = kInvalidId;
-        if (selected_ship != kInvalidId) {
-          const auto it = sim.state().ships.find(selected_ship);
-          if (it != sim.state().ships.end()) viewer_id = it->second.faction_id;
-        }
-        if (viewer_id == kInvalidId && ui.viewer_faction_id != kInvalidId) viewer_id = ui.viewer_faction_id;
-        if (viewer_id == kInvalidId) {
-          // Fall back to the smallest faction id for determinism.
-          for (const auto& [fid, _] : sim.state().factions) {
-            viewer_id = (viewer_id == kInvalidId) ? fid : std::min(viewer_id, fid);
-          }
-        }
+        const Id forge_viewer_id = viewer_id;
+        const Faction* forge_viewer_f = viewer_f;
 
-        const Faction* viewer_f = nullptr;
-        if (viewer_id != kInvalidId) {
-          const auto it = sim.state().factions.find(viewer_id);
-          if (it != sim.state().factions.end()) viewer_f = &it->second;
-        }
+        auto reset_forge_constraints = [&]() {
+          forge_min_speed_km_s = 0.0f;
+          forge_min_range_mkm = 0.0f;
+          forge_max_mass_tons = 0.0f;
+          forge_min_cargo_tons = 0.0f;
+          forge_min_sensor_range_mkm = 0.0f;
+          forge_max_signature_multiplier = 0.0f;
+          forge_min_beam_damage = 0.0f;
+          forge_min_missile_damage = 0.0f;
+          forge_min_point_defense_damage = 0.0f;
+          forge_min_shields = 0.0f;
+          forge_min_hp = 0.0f;
+          forge_min_power_margin = 0.0f;
+          forge_min_mining_tons_per_day = 0.0f;
+          forge_min_colony_capacity_millions = 0.0f;
+          forge_min_troop_capacity = 0.0f;
+          forge_min_ecm_strength = 0.0f;
+          forge_min_eccm_strength = 0.0f;
+        };
+
+        auto apply_forge_preset = [&](int preset_idx) {
+          const double base_speed = std::max(0.0, design->speed_km_s);
+          const double base_range = safe_range_mkm(*design);
+          const double base_mass = std::max(0.0, design->mass_tons);
+          const double base_cargo = std::max(0.0, design->cargo_tons);
+          const double base_sensor = std::max(0.0, design->sensor_range_mkm);
+
+          reset_forge_constraints();
+          forge_status.clear();
+
+          if (preset_idx <= 0) {
+            forge_use_constraints = false;
+            forge_only_meeting_constraints = false;
+            forge_require_power_balance = false;
+            return;
+          }
+
+          forge_use_constraints = true;
+          forge_only_meeting_constraints = true;
+          forge_require_power_balance = true;
+          forge_min_power_margin = 0.0f;
+          forge_quality = std::max(8, forge_quality);
+          forge_mutations = std::max(3, forge_mutations);
+          const int base_component_target = std::clamp((int)design->components.size() + 2, 6, 32);
+          forge_max_components = std::max(forge_max_components, base_component_target);
+
+          switch (preset_idx) {
+            case 1: {
+              forge_role_idx = role_to_forge_index(design->role);
+              forge_min_speed_km_s = (float)(base_speed * 1.05);
+              if (base_range > 0.0) forge_min_range_mkm = (float)(base_range * 1.10);
+              if (design->role == ShipRole::Freighter) forge_min_cargo_tons = (float)std::max(50.0, base_cargo * 1.15);
+              if (design->role == ShipRole::Surveyor) {
+                forge_min_sensor_range_mkm = (float)std::max(90.0, base_sensor * 1.15);
+                forge_max_signature_multiplier = 0.95f;
+              }
+              if (design->role == ShipRole::Combatant) {
+                forge_min_shields = (float)std::max(6.0, design->max_shields * 1.10);
+                forge_min_hp = (float)std::max(80.0, design->max_hp * 1.10);
+              }
+            } break;
+            case 2: {
+              forge_role_idx = (design->role == ShipRole::Combatant) ? 1 : role_to_forge_index(design->role);
+              forge_prefer_missiles = false;
+              forge_prefer_shields = true;
+              forge_include_ecm_eccm = true;
+              forge_min_range_mkm = (float)std::max(60.0, base_range * 1.30);
+              forge_min_speed_km_s = (float)std::max(2.5, base_speed * 1.05);
+              forge_min_sensor_range_mkm = (float)std::max(100.0, base_sensor * 1.20);
+              forge_max_signature_multiplier = 0.90f;
+            } break;
+            case 3: {
+              forge_role_idx = 2;
+              forge_prefer_missiles = true;
+              forge_prefer_shields = false;
+              forge_include_ecm_eccm = true;
+              forge_min_speed_km_s = (float)std::max(6.0, base_speed * 1.25);
+              forge_min_range_mkm = (float)std::max(45.0, base_range * 1.05);
+              forge_min_beam_damage = (float)std::max(1.0, design->weapon_damage * 1.10);
+              forge_min_missile_damage = (float)std::max(1.0, design->missile_damage * 1.15);
+              forge_min_point_defense_damage = (float)std::max(0.5, design->point_defense_damage * 1.05);
+              forge_max_mass_tons = (float)std::max(40.0, base_mass * 1.15);
+            } break;
+            case 4: {
+              forge_role_idx = 2;
+              forge_prefer_missiles = design->missile_damage >= design->weapon_damage;
+              forge_prefer_shields = true;
+              forge_include_ecm_eccm = true;
+              forge_min_speed_km_s = (float)std::max(4.0, base_speed * 1.10);
+              forge_min_range_mkm = (float)std::max(35.0, base_range);
+              forge_min_beam_damage = (float)std::max(2.0, design->weapon_damage * 1.25);
+              forge_min_missile_damage = (float)std::max(2.0, design->missile_damage * 1.25);
+              forge_min_point_defense_damage = (float)std::max(1.0, design->point_defense_damage * 1.25);
+              forge_min_shields = (float)std::max(8.0, design->max_shields * 1.20);
+              forge_min_hp = (float)std::max(120.0, design->max_hp * 1.15);
+              forge_min_ecm_strength = (float)std::max(0.0, design->ecm_strength * 1.10);
+              forge_min_eccm_strength = (float)std::max(0.0, design->eccm_strength * 1.10);
+            } break;
+            case 5: {
+              forge_role_idx = 0;
+              forge_prefer_missiles = false;
+              forge_prefer_shields = true;
+              forge_include_ecm_eccm = false;
+              forge_min_speed_km_s = (float)std::max(2.0, base_speed * 1.05);
+              forge_min_range_mkm = (float)std::max(80.0, base_range * 1.20);
+              forge_min_cargo_tons = (float)std::max(120.0, base_cargo * 1.30);
+              forge_min_mining_tons_per_day = (float)std::max(0.0, design->mining_tons_per_day * 1.20);
+              forge_min_colony_capacity_millions = (float)std::max(0.0, design->colony_capacity_millions * 1.20);
+              forge_min_troop_capacity = (float)std::max(0.0, design->troop_capacity * 1.20);
+              forge_max_mass_tons = (float)std::max(80.0, base_mass * 1.35);
+            } break;
+            default: break;
+          }
+        };
 
         ImGui::TextDisabled("Base: %s", design->name.c_str());
-        if (viewer_f) {
-          ImGui::TextDisabled("Component pool: %s", viewer_f->name.c_str());
+        if (forge_viewer_f) {
+          ImGui::TextDisabled("Component pool: %s", forge_viewer_f->name.c_str());
         } else {
           ImGui::TextDisabled("Component pool: (all components)");
         }
 
         ImGui::Separator();
+
+        const char* forge_presets[] = {
+            "Custom",
+            "Balanced upgrade",
+            "Long-range explorer",
+            "Fast strike",
+            "Warship refit",
+            "Industrial hauler",
+        };
+        ImGui::SetNextItemWidth(220.0f);
+        ImGui::Combo("Preset", &forge_preset_idx, forge_presets, IM_ARRAYSIZE(forge_presets));
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Apply preset")) {
+          apply_forge_preset(forge_preset_idx);
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Reset constraints")) {
+          reset_forge_constraints();
+          forge_use_constraints = false;
+          forge_only_meeting_constraints = false;
+          forge_require_power_balance = false;
+        }
+        ImGui::TextDisabled("Presets configure role, quality, and constraint targets in one click.");
 
         ImGui::SetNextItemWidth(120.0f);
         ImGui::SliderInt("Count", &forge_count, 1, 16);
@@ -709,8 +1163,8 @@ void draw_design_studio_window(Simulation& sim, UIState& ui, Id& selected_ship, 
 
         if (ImGui::Button("Forge")) {
           std::vector<std::string> pool;
-          if (viewer_f) {
-            pool = viewer_f->unlocked_components;
+          if (forge_viewer_f) {
+            pool = forge_viewer_f->unlocked_components;
           } else {
             pool.reserve(sim.content().components.size());
             for (const auto& [cid, _] : sim.content().components) pool.push_back(cid);
@@ -749,14 +1203,12 @@ void draw_design_studio_window(Simulation& sim, UIState& ui, Id& selected_ship, 
             opt.constraints.min_power_margin = forge_min_power_margin;
           }
 
-          if (forge_role_idx == 1) opt.role = ShipRole::Surveyor;
-          else if (forge_role_idx == 2) opt.role = ShipRole::Combatant;
-          else opt.role = ShipRole::Freighter;
+          opt.role = forge_index_to_role(forge_role_idx);
 
           // Mix seed with design id and viewer id for repeatable, per-faction variants.
           std::uint64_t seed = (std::uint64_t)(std::uint32_t)forge_seed;
           seed ^= procgen_obscure::fnv1a_64(selected_id);
-          seed ^= (std::uint64_t)viewer_id * 0x9e3779b97f4a7c15ULL;
+          seed ^= (std::uint64_t)forge_viewer_id * 0x9e3779b97f4a7c15ULL;
 
           std::string dbg;
           const auto forged = forge_design_variants(sim.content(), pool, *design, seed, opt, &dbg);
@@ -1183,6 +1635,88 @@ void draw_design_studio_window(Simulation& sim, UIState& ui, Id& selected_ship, 
         ImGui::TableSetColumnIndex(1);
         {
           ImGui::BeginChild("##ds_info", ImVec2(0, 0), false);
+          ImGui::SeparatorText("Design Advisor");
+          ImGui::Text("Declared role: %s", ship_role_label(design->role));
+          ImGui::Text("Best fit: %s", ship_role_label(advisor.best_role));
+          if (advisor.best_role != ShipRole::Unknown && advisor.best_role != design->role) {
+            ImGui::TextColored(ImVec4(1.0f, 0.82f, 0.45f, 1.0f), "Role drift: design performs more like %s.",
+                               ship_role_label(advisor.best_role));
+          }
+          auto role_fit_bar = [&](const char* role_name, double pct) {
+            const float frac = (float)std::clamp(pct / 100.0, 0.0, 1.0);
+            char overlay[64];
+            std::snprintf(overlay, sizeof(overlay), "%s %.0f%%", role_name, pct);
+            ImGui::ProgressBar(frac, ImVec2(ImGui::GetContentRegionAvail().x, 0.0f), overlay);
+          };
+          role_fit_bar("Freighter", advisor.role_norm_pct[0]);
+          role_fit_bar("Surveyor", advisor.role_norm_pct[1]);
+          role_fit_bar("Combatant", advisor.role_norm_pct[2]);
+          if (advisor.range_mkm > 0.0) ImGui::Text("Range: %.0f mkm", advisor.range_mkm);
+          if (advisor.endurance_days > 0.0) ImGui::Text("Endurance: %.1f days @ full speed", advisor.endurance_days);
+          if (advisor.power_margin < -0.25) {
+            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Power margin: %.1f", advisor.power_margin);
+          } else {
+            ImGui::TextDisabled("Power margin: %+0.1f", advisor.power_margin);
+          }
+          if (advisor.heat_enabled) {
+            if (advisor.heat_stable) {
+              ImGui::TextDisabled("Heat state: stable");
+            } else {
+              ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.35f, 1.0f), "Heat risk: %.1f days to cap", advisor.heat_days_to_cap);
+            }
+          }
+          if (!advisor.strengths.empty()) {
+            ImGui::TextDisabled("Strengths");
+            const int show = std::min(3, (int)advisor.strengths.size());
+            for (int i = 0; i < show; ++i) ImGui::BulletText("%s", advisor.strengths[(size_t)i].c_str());
+          }
+          if (!advisor.concerns.empty()) {
+            ImGui::TextDisabled("Concerns");
+            const int show = std::min(4, (int)advisor.concerns.size());
+            for (int i = 0; i < show; ++i) ImGui::BulletText("%s", advisor.concerns[(size_t)i].c_str());
+            if ((int)advisor.concerns.size() > show) {
+              ImGui::TextDisabled("+%d more", (int)advisor.concerns.size() - show);
+            }
+          }
+
+          ImGui::SeparatorText("Buildability");
+          if (build_diag.has_faction) {
+            ImGui::Text("Viewer: %s", viewer_f->name.c_str());
+            const float unlocked_frac = (build_diag.total_components > 0)
+                                            ? (float)build_diag.unlocked_components / (float)build_diag.total_components
+                                            : 1.0f;
+            char unlock_overlay[80];
+            std::snprintf(unlock_overlay, sizeof(unlock_overlay), "Unlocked %d / %d", build_diag.unlocked_components,
+                          build_diag.total_components);
+            ImGui::ProgressBar(std::clamp(unlocked_frac, 0.0f, 1.0f), ImVec2(ImGui::GetContentRegionAvail().x, 0.0f),
+                               unlock_overlay);
+            if (build_diag.buildable) {
+              ImGui::TextColored(ImVec4(0.45f, 0.92f, 0.60f, 1.0f), "Ready to build now.");
+            } else {
+              ImGui::TextColored(ImVec4(1.0f, 0.52f, 0.52f, 1.0f), "Blocked by %zu locked component ids.",
+                                 build_diag.missing_components.size());
+              const int show = std::min(6, (int)build_diag.missing_components.size());
+              for (int i = 0; i < show; ++i) {
+                const auto& m = build_diag.missing_components[(size_t)i];
+                const ComponentDef* c = find_ptr(sim.content().components, m.first);
+                const std::string display = c ? c->name : m.first;
+                if (m.second > 1) {
+                  ImGui::BulletText("%s x%d", display.c_str(), m.second);
+                } else {
+                  ImGui::BulletText("%s", display.c_str());
+                }
+              }
+              if ((int)build_diag.missing_components.size() > show) {
+                ImGui::TextDisabled("+%d more locked ids", (int)build_diag.missing_components.size() - show);
+              }
+              if (ImGui::SmallButton("Filter list to buildable")) {
+                list_buildable_only = true;
+              }
+            }
+          } else {
+            ImGui::TextDisabled("Viewer faction context not available.");
+          }
+
           ImGui::SeparatorText("Stats");
           ImGui::Text("Mass: %.0f t", design->mass_tons);
           ImGui::Text("Speed: %.1f km/s", design->speed_km_s);

@@ -13,6 +13,18 @@
 namespace nebula4x::ui {
 namespace {
 
+constexpr int kImDrawList16BitVertexLimit = (1 << 16) - 1;
+constexpr int kImDrawListVertexSafetyReserve = 2048;
+
+inline bool drawlist_can_add_vertices(const ImDrawList* draw, int vtx_count) {
+  if (!draw) return false;
+  if (vtx_count <= 0) return true;
+  if constexpr (sizeof(ImDrawIdx) > 2) return true;
+  const int soft_limit = std::max(0, kImDrawList16BitVertexLimit - kImDrawListVertexSafetyReserve);
+  if (draw->VtxBuffer.Size >= soft_limit) return false;
+  return draw->VtxBuffer.Size <= (soft_limit - vtx_count);
+}
+
 using nebula4x::util::splitmix64;
 using nebula4x::util::u01_from_u64;
 
@@ -256,6 +268,7 @@ void draw_raytraced_sensor_heatmap(ImDrawList* draw,
 
     const float a = std::clamp(opacity * v, 0.0f, 1.0f);
     if (a > 0.001f) {
+      if (!drawlist_can_add_vertices(draw, settings.debug ? 12 : 6)) break;
       // Slight overlap avoids cracks from float rounding at high subdivision.
       draw->AddRectFilled(ImVec2(q.x0, q.y0), ImVec2(q.x1 + 0.5f, q.y1 + 0.5f),
                           modulate_alpha(base_col, a));

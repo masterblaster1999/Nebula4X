@@ -1863,7 +1863,7 @@ void draw_economy_window(Simulation& sim, UIState& ui, Id& selected_colony, Id& 
 
         std::string sys_name = "?";
         if (const Body* b = find_ptr(s.bodies, col.body_id)) {
-          if (const System* sys = find_ptr(s.systems, b->system_id)) sys_name = sys->name;
+          if (const StarSystem* sys = find_ptr(s.systems, b->system_id)) sys_name = sys->name;
         }
 
         ColonyStabilityStatus st = sim.colony_stability_status_for_colony(cid);
@@ -2122,7 +2122,7 @@ void draw_economy_window(Simulation& sim, UIState& ui, Id& selected_colony, Id& 
 
         std::string sys_name = "?";
         if (const Body* b = find_ptr(s.bodies, col->body_id)) {
-          if (const System* sys = find_ptr(s.systems, b->system_id)) sys_name = sys->name;
+          if (const StarSystem* sys = find_ptr(s.systems, b->system_id)) sys_name = sys->name;
         }
 
         ImGui::Text("%s", col->name.c_str());

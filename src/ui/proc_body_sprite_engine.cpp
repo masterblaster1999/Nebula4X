@@ -694,7 +694,7 @@ void ProcBodySpriteEngine::generate_sprite_rgba(std::vector<std::uint8_t>& out,
   };
 
   // Write pixels.
-  out.assign(static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * 4, 0);
+  out.assign(static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * 4, std::uint8_t{0});
 
   for (int y = 0; y < h; ++y) {
     for (int x = 0; x < w; ++x) {

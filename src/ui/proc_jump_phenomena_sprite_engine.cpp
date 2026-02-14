@@ -169,7 +169,7 @@ static ImU32 pack_u32(const ImVec4& c) {
   return IM_COL32(r, g, b, a);
 }
 
-static ImU32 tint_from_phenomena(float stability01, float turbulence01, float shear01, float alpha) {
+[[maybe_unused]] static ImU32 tint_from_phenomena(float stability01, float turbulence01, float shear01, float alpha) {
   // Map stability to hue: stable => cyan/blue, unstable => magenta/red.
   // turb/shear bias saturation/value.
   stability01 = std::clamp(stability01, 0.0f, 1.0f);
@@ -453,7 +453,6 @@ void ProcJumpPhenomenaSpriteEngine::raster_jump(std::vector<std::uint8_t>& rgba,
       const float dx = nx + wx * 0.55f * chaos;
       const float dy = ny + wy * 0.55f * chaos;
 
-      const float n0 = fbm(dx * 3.2f, dy * 3.2f, s0 ^ 0xa341316cu, 5, 2.05f, 0.56f);
       const float n1 = fbm(dx * 7.0f, dy * 7.0f, s0 ^ 0x1b873593u, 3, 2.1f, 0.52f);
 
       // Ring profile: gaussian-ish.

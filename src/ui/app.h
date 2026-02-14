@@ -149,6 +149,9 @@ class App {
   // Auto-open the Victory window once when the game ends.
   bool victory_window_autoopened_{false};
 
+  // One-shot runtime integration flag for starter procedural UI panels.
+  bool ui_forge_base_panels_initialized_{false};
+
   // HUD transient state (command palette query, toast queue, etc.).
   HUDState hud_{};
 

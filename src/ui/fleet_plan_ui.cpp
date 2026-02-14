@@ -259,7 +259,7 @@ void compute_plan(FleetPlanState& st, const Simulation& sim, Id fleet_id, const 
     row.start_system = system_label_fow(sim, sh->system_id, opts.viewer_faction_id, opts.fog_of_war);
 
     const ShipDesign* d = sim.find_design(sh->design_id);
-    row.design_name = d ? d->name : ("Design #" + std::to_string(sh->design_id));
+    row.design_name = d ? d->name : (std::string("Design #") + sh->design_id);
     row.fuel_cap_tons = d ? std::max(0.0, d->fuel_capacity_tons) : 0.0;
 
     // Base queue (if appending).
@@ -376,9 +376,12 @@ std::string fleet_summary_to_csv(const FleetPlanState& st) {
 
 std::string fleet_summary_to_json(const Simulation& sim, Id fleet_id, const FleetPlanState& st,
                                  const FleetPlanPreviewOptions& opts, int indent = 2) {
-  nebula4x::json::Obj root;
+  using nebula4x::json::Array;
+  using nebula4x::json::Object;
+
+  Object root;
   root["ok"] = st.ok;
-  root["fleet_id"] = static_cast<long long>(fleet_id);
+  root["fleet_id"] = static_cast<double>(static_cast<unsigned long long>(fleet_id));
   {
     const auto* fl = find_ptr(sim.state().fleets, fleet_id);
     root["fleet_name"] = fl ? fl->name : std::string();
@@ -387,34 +390,34 @@ std::string fleet_summary_to_json(const Simulation& sim, Id fleet_id, const Flee
   root["message"] = st.message;
 
   {
-    nebula4x::json::Obj o;
-    o["viewer_faction_id"] = static_cast<long long>(opts.viewer_faction_id);
+    Object o;
+    o["viewer_faction_id"] = static_cast<double>(static_cast<unsigned long long>(opts.viewer_faction_id));
     o["fog_of_war"] = opts.fog_of_war;
     o["smart_apply"] = opts.smart_apply;
     o["append_when_applying"] = opts.append_when_applying;
     o["restrict_to_discovered"] = opts.restrict_to_discovered;
     o["predict_orbits"] = opts.predict_orbits;
     o["simulate_refuel"] = opts.simulate_refuel;
-    o["max_orders"] = opts.max_orders;
-    o["max_ships"] = opts.max_ships;
+    o["max_orders"] = static_cast<double>(opts.max_orders);
+    o["max_ships"] = static_cast<double>(opts.max_ships);
     o["reserve_fraction"] = opts.reserve_fraction;
     o["highlight_reserve"] = opts.highlight_reserve;
     o["collapse_jump_chains"] = opts.collapse_jump_chains;
-    root["options"] = o;
+    root["options"] = std::move(o);
   }
 
-  nebula4x::json::Arr rows;
+  Array rows;
   rows.reserve(st.rows.size());
   for (const auto& r : st.rows) {
-    nebula4x::json::Obj o;
-    o["ship_id"] = static_cast<long long>(r.ship_id);
+    Object o;
+    o["ship_id"] = static_cast<double>(static_cast<unsigned long long>(r.ship_id));
     o["ship"] = r.ship_name;
     o["design"] = r.design_name;
     o["start_system"] = r.start_system;
     o["speed_km_s"] = r.speed_km_s;
-    o["base_orders"] = r.base_queue_orders;
-    o["added_orders"] = r.compiled_added_orders;
-    o["final_orders"] = r.final_queue_orders;
+    o["base_orders"] = static_cast<double>(r.base_queue_orders);
+    o["added_orders"] = static_cast<double>(r.compiled_added_orders);
+    o["final_orders"] = static_cast<double>(r.final_queue_orders);
     o["plan_ok"] = r.plan_ok;
     o["eta_days"] = r.eta_days;
     o["fuel_start_tons"] = r.fuel_start_tons;
@@ -427,11 +430,11 @@ std::string fleet_summary_to_json(const Simulation& sim, Id fleet_id, const Flee
     o["reserve_warning"] = r.reserve_warning;
     o["compile_ok"] = r.compile_ok;
     o["compile_error"] = r.compile_error;
-    rows.push_back(o);
+    rows.push_back(std::move(o));
   }
-  root["ships"] = rows;
+  root["ships"] = std::move(rows);
 
-  return root.dump(indent);
+  return nebula4x::json::stringify(root, indent);
 }
 
 }  // namespace

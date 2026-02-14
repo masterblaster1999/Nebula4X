@@ -1,4 +1,4 @@
-#include "ui/maintenance_planner_window.h"
+﻿#include "ui/maintenance_planner_window.h"
 
 #include <imgui.h>
 
@@ -10,7 +10,9 @@
 #include <vector>
 
 #include "nebula4x/core/maintenance_planner.h"
+#include "nebula4x/core/simulation.h"
 #include "nebula4x/util/log.h"
+#include "ui/ui_state.h"
 
 namespace nebula4x::ui {
 namespace {
@@ -49,7 +51,7 @@ struct MaintenancePlannerWindowState {
 };
 
 std::string fmt_days(double days) {
-  if (!std::isfinite(days)) return "∞";
+  if (!std::isfinite(days)) return "inf";
   if (days < 0.0) return "?";
   char buf[64];
   if (days < 1.0) {
@@ -63,7 +65,7 @@ std::string fmt_days(double days) {
 }
 
 std::string fmt_tons(double t) {
-  if (!std::isfinite(t)) return "∞";
+  if (!std::isfinite(t)) return "inf";
   char buf[64];
   if (std::abs(t) < 1000.0) {
     std::snprintf(buf, sizeof(buf), "%.0f", t);
@@ -238,7 +240,8 @@ void draw_maintenance_planner_window(Simulation& sim, UIState& ui, Id& selected_
   // --- Bulk apply ---
   if (ImGui::Button("Apply plan: route all assigned ships")) {
     const bool ok = nebula4x::apply_maintenance_plan(sim, mw.plan, mw.clear_orders_before_apply, mw.use_smart_travel);
-    log_info(ok ? "Maintenance Planner: applied routing plan" : "Maintenance Planner: applied plan (with failures)");
+    nebula4x::log::info(ok ? "Maintenance Planner: applied routing plan"
+                           : "Maintenance Planner: applied plan (with failures)");
     mw.have_plan = false;
   }
   ImGui::SameLine();
@@ -392,3 +395,4 @@ void draw_maintenance_planner_window(Simulation& sim, UIState& ui, Id& selected_
 }
 
 }  // namespace nebula4x::ui
+

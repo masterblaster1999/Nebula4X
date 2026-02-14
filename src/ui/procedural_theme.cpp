@@ -49,6 +49,60 @@ ImVec4 with_alpha(ImVec4 c, float a) {
   return c;
 }
 
+ImVec4 lerp_color(const ImVec4& a, const ImVec4& b, float t) {
+  const float tt = clamp01(t);
+  return ImVec4(
+      a.x + (b.x - a.x) * tt,
+      a.y + (b.y - a.y) * tt,
+      a.z + (b.z - a.z) * tt,
+      a.w + (b.w - a.w) * tt);
+}
+
+float srgb_to_linear(float v) {
+  const float c = clamp01(v);
+  if (c <= 0.04045f) return c / 12.92f;
+  return std::pow((c + 0.055f) / 1.055f, 2.4f);
+}
+
+float relative_luminance(const ImVec4& c) {
+  // WCAG relative luminance (alpha is ignored).
+  const float r = srgb_to_linear(c.x);
+  const float g = srgb_to_linear(c.y);
+  const float b = srgb_to_linear(c.z);
+  return 0.2126f * r + 0.7152f * g + 0.0722f * b;
+}
+
+float contrast_ratio(const ImVec4& a, const ImVec4& b) {
+  float la = relative_luminance(a);
+  float lb = relative_luminance(b);
+  if (la < lb) std::swap(la, lb);
+  return (la + 0.05f) / (lb + 0.05f);
+}
+
+ImVec4 ensure_min_contrast(ImVec4 fg, const ImVec4& bg, float min_ratio) {
+  float best_ratio = contrast_ratio(fg, bg);
+  if (best_ratio >= min_ratio) return fg;
+
+  ImVec4 light = ImVec4(0.96f, 0.97f, 0.99f, fg.w);
+  ImVec4 dark = ImVec4(0.08f, 0.10f, 0.12f, fg.w);
+  const float light_ratio = contrast_ratio(light, bg);
+  const float dark_ratio = contrast_ratio(dark, bg);
+  const ImVec4 target = (light_ratio >= dark_ratio) ? light : dark;
+
+  ImVec4 best = fg;
+  for (int i = 1; i <= 8; ++i) {
+    const float t = static_cast<float>(i) / 8.0f;
+    const ImVec4 cand = lerp_color(fg, target, t);
+    const float cr = contrast_ratio(cand, bg);
+    if (cr > best_ratio) {
+      best_ratio = cr;
+      best = cand;
+    }
+    if (cr >= min_ratio) return cand;
+  }
+  return best;
+}
+
 } // namespace
 
 ProceduralThemePalette compute_procedural_theme_palette(const ProceduralThemeParams& p, float time_sec) {
@@ -129,14 +183,37 @@ void apply_procedural_theme(ImGuiStyle& style, const ProceduralThemeParams& p, f
   const ImVec4 acc = pal.accent_primary;
   const ImVec4 acc2 = pal.accent_secondary;
   const ImVec4 acc3 = pal.accent_tertiary;
+  const float s = clamp01(p.accent_strength);
 
   // Backgrounds.
   c[ImGuiCol_WindowBg] = pal.bg_window;
   c[ImGuiCol_ChildBg] = pal.bg_child;
   c[ImGuiCol_PopupBg] = pal.bg_popup;
 
+  // Contrast-aware text colors so generated themes remain readable.
+  ImVec4 text_seed = lerp_color(ImVec4(0.90f, 0.93f, 0.98f, 1.0f), acc3, 0.08f);
+  c[ImGuiCol_Text] = ensure_min_contrast(text_seed, pal.bg_window, 6.2f);
+  c[ImGuiCol_TextDisabled] = ensure_min_contrast(lerp_color(c[ImGuiCol_Text], pal.bg_window, 0.52f), pal.bg_window, 3.0f);
+
+  // Cohesive "base" chrome so accent overlays don't feel disconnected.
+  c[ImGuiCol_Border] = with_alpha(lerp_color(acc2, c[ImGuiCol_TextDisabled], 0.50f), std::clamp(0.22f + s * 0.22f, 0.18f, 0.70f));
+  c[ImGuiCol_Separator] = with_alpha(lerp_color(acc2, c[ImGuiCol_TextDisabled], 0.35f), std::clamp(0.20f + s * 0.20f, 0.16f, 0.68f));
+  c[ImGuiCol_FrameBg] = with_alpha(lerp_color(pal.bg_child, acc2, 0.10f), 0.76f);
+  c[ImGuiCol_Button] = with_alpha(lerp_color(c[ImGuiCol_FrameBg], acc, 0.18f), std::clamp(0.55f + s * 0.15f, 0.48f, 0.90f));
+  c[ImGuiCol_Header] = with_alpha(lerp_color(c[ImGuiCol_FrameBg], acc, 0.26f), std::clamp(0.52f + s * 0.18f, 0.44f, 0.92f));
+  c[ImGuiCol_Tab] = with_alpha(lerp_color(pal.bg_window, acc2, 0.16f), 0.90f);
+  c[ImGuiCol_TabUnfocused] = with_alpha(lerp_color(c[ImGuiCol_Tab], pal.bg_window, 0.38f), 0.84f);
+  c[ImGuiCol_TitleBg] = with_alpha(lerp_color(pal.bg_window, acc3, 0.10f), 0.98f);
+  c[ImGuiCol_TitleBgActive] = with_alpha(lerp_color(c[ImGuiCol_TitleBg], acc, 0.16f), 1.0f);
+  c[ImGuiCol_MenuBarBg] = with_alpha(lerp_color(c[ImGuiCol_TitleBg], pal.bg_window, 0.30f), 0.96f);
+  c[ImGuiCol_ScrollbarBg] = with_alpha(pal.bg_child, 0.90f);
+  c[ImGuiCol_ScrollbarGrab] = with_alpha(lerp_color(acc2, c[ImGuiCol_TextDisabled], 0.40f), std::clamp(0.34f + s * 0.20f, 0.26f, 0.75f));
+  c[ImGuiCol_ScrollbarGrabHovered] = with_alpha(acc, std::clamp(0.40f + s * 0.20f, 0.30f, 0.82f));
+  c[ImGuiCol_ScrollbarGrabActive] = with_alpha(acc, std::clamp(0.55f + s * 0.25f, 0.40f, 0.95f));
+  c[ImGuiCol_TableRowBgAlt] = with_alpha(lerp_color(pal.bg_child, acc2, 0.12f), 0.22f);
+  c[ImGuiCol_ModalWindowDimBg] = with_alpha(ImVec4(0.03f, 0.04f, 0.06f, 1.0f), 0.56f);
+
   // Accent-driven interactions.
-  const float s = clamp01(p.accent_strength);
   const float hover_a = std::clamp(0.12f + s * 0.30f, 0.08f, 0.55f);
   const float active_a = std::clamp(0.22f + s * 0.40f, 0.14f, 0.75f);
 
@@ -150,7 +227,7 @@ void apply_procedural_theme(ImGuiStyle& style, const ProceduralThemeParams& p, f
   c[ImGuiCol_ButtonHovered] = with_alpha(acc, hover_a);
   c[ImGuiCol_ButtonActive] = with_alpha(acc, active_a);
 
-  c[ImGuiCol_Header] = with_alpha(acc, std::clamp(0.08f + s * 0.20f, 0.06f, 0.35f));
+  c[ImGuiCol_Header] = with_alpha(lerp_color(c[ImGuiCol_Header], acc, 0.35f), std::clamp(0.16f + s * 0.20f, 0.10f, 0.55f));
   c[ImGuiCol_HeaderHovered] = with_alpha(acc, hover_a);
   c[ImGuiCol_HeaderActive] = with_alpha(acc, active_a);
 
@@ -167,6 +244,7 @@ void apply_procedural_theme(ImGuiStyle& style, const ProceduralThemeParams& p, f
   c[ImGuiCol_NavHighlight] = with_alpha(acc, std::clamp(0.55f + s * 0.30f, 0.45f, 1.0f));
   c[ImGuiCol_TextSelectedBg] = with_alpha(acc, std::clamp(0.18f + s * 0.26f, 0.12f, 0.60f));
   c[ImGuiCol_DockingPreview] = with_alpha(acc, std::clamp(0.35f + s * 0.25f, 0.25f, 0.75f));
+  c[ImGuiCol_DragDropTarget] = with_alpha(acc, std::clamp(0.62f + s * 0.25f, 0.50f, 1.0f));
 
   // Plots.
   c[ImGuiCol_PlotLines] = acc2;

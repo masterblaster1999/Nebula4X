@@ -292,6 +292,66 @@ inline std::uint64_t mix64(std::uint64_t x) {
   return x ^ (x >> 31);
 }
 
+float hash01_from_u64(std::uint64_t x) {
+  const std::uint64_t m = mix64(x);
+  return static_cast<float>(m & 0xFFFFu) / 65535.0f;
+}
+
+// Draw moving "traffic packets" on a jump link.
+//
+// This is UI-only and deterministic per-link so the motion remains readable
+// while still feeling alive.
+void draw_jump_flow_packets(ImDrawList* draw,
+                            const ImVec2& a,
+                            const ImVec2& b,
+                            ImU32 col,
+                            float base_alpha,
+                            std::uint64_t seed,
+                            float zoom) {
+  if (!draw) return;
+  const float dx = b.x - a.x;
+  const float dy = b.y - a.y;
+  const float len2 = dx * dx + dy * dy;
+  if (len2 < 18.0f * 18.0f) return;
+
+  const float len = std::sqrt(len2);
+  const float inv = 1.0f / std::max(1.0e-6f, len);
+  const float ux = dx * inv;
+  const float uy = dy * inv;
+  const float px = -uy;
+  const float py = ux;
+
+  const float phase = hash01_from_u64(seed ^ 0x2E5AA7B3ULL);
+  const float speed_cps = 0.05f + 0.18f * hash01_from_u64(seed ^ 0x9C03D451ULL); // cycles/sec
+  const float time_s = static_cast<float>(ImGui::GetTime());
+
+  int packets = static_cast<int>(len / 135.0f);
+  packets = std::clamp(packets, 1, 4);
+  const float zoom_gate = std::clamp((zoom - 0.45f) / 0.85f, 0.0f, 1.0f);
+  const float alpha = std::clamp(base_alpha * (0.22f + 0.48f * zoom_gate), 0.0f, 1.0f);
+  if (alpha <= 0.001f) return;
+
+  for (int i = 0; i < packets; ++i) {
+    const float slot = static_cast<float>(i) / static_cast<float>(packets);
+    float t = phase + slot + time_s * speed_cps;
+    t -= std::floor(t);
+
+    const float center_boost = 1.0f - std::abs(t * 2.0f - 1.0f);
+    const float wobble =
+        std::sin(time_s * (3.0f + 0.6f * static_cast<float>(i)) + phase * 6.2831853f + 1.8f * static_cast<float>(i));
+    const float lateral = (0.8f + 1.6f * center_boost) * wobble;
+
+    const ImVec2 p{
+        a.x + dx * t + px * lateral,
+        a.y + dy * t + py * lateral,
+    };
+
+    const float r = 1.3f + 1.4f * center_boost;
+    draw->AddCircleFilled(p, r + 0.9f, modulate_alpha(IM_COL32(0, 0, 0, 220), alpha * 0.65f), 0);
+    draw->AddCircleFilled(p, r, modulate_alpha(col, alpha * (0.45f + 0.55f * center_boost)), 0);
+  }
+}
+
 // --- Procedural lens field rendering ---
 //
 // A lightweight raster heatmap drawn behind the galaxy map to visualize
@@ -1233,7 +1293,8 @@ void draw_galaxy_map(Simulation& sim,
       for (const auto& kv : s.colonies) {
         const Colony& c = kv.second;
         if (c.faction_id == kInvalidId) continue;
-        if (c.population_millions <= 0.0f) continue;
+        const double population_millions = std::max(0.0, c.population_millions);
+        if (!std::isfinite(population_millions) || population_millions <= 0.0) continue;
         const Body* b = find_ptr(s.bodies, c.body_id);
         if (!b) continue;
         auto it = visible_sys_by_id.find(b->system_id);
@@ -1243,7 +1304,8 @@ void draw_galaxy_map(Simulation& sim,
         ProcTerritorySource src;
         src.pos = sys->galaxy_pos - world_center;
         src.faction_id = c.faction_id;
-        src.population_millions = c.population_millions;
+        src.population_millions =
+            static_cast<float>(std::min(population_millions, static_cast<double>(std::numeric_limits<float>::max())));
         terr.push_back(src);
       }
 
@@ -1832,6 +1894,7 @@ void draw_galaxy_map(Simulation& sim,
 
   // Jump links (only between visible systems under FoW).
   if (ui.show_galaxy_jump_lines) {
+    const float jump_flow_alpha = std::clamp(ui.map_route_opacity, 0.15f, 1.0f);
     for (const auto& v : visible) {
       for (Id jid : v.sys->jump_points) {
         const auto* jp = find_ptr(s.jump_points, jid);
@@ -1882,6 +1945,15 @@ void draw_galaxy_map(Simulation& sim,
         }
 
         draw->AddLine(pa, pb, col, thick);
+
+        // Procedural transit cue: moving packets suggest route "flow" and make
+        // long links easier to scan at a glance.
+        if (zoom >= 0.45f) {
+          const std::uint64_t seed = mix64(static_cast<std::uint64_t>(v.id) * 0x9E3779B97F4A7C15ULL) ^
+                                     mix64(static_cast<std::uint64_t>(dest_sys->id) * 0xA24BAED4963EE407ULL);
+          draw_jump_flow_packets(draw, pa, pb, IM_COL32(220, 230, 255, 255), jump_flow_alpha, seed,
+                                 static_cast<float>(zoom));
+        }
       }
     }
   }
@@ -2873,8 +2945,18 @@ void draw_galaxy_map(Simulation& sim,
     if (!is_selected && lens_col != 0) {
       glow_col = lens_col;
     }
-    draw->AddCircleFilled(n.p, base_r * 2.6f, modulate_alpha(glow_col, is_selected ? 0.12f : 0.08f), 0);
-    draw->AddCircleFilled(n.p, base_r * 1.7f, modulate_alpha(glow_col, is_selected ? 0.22f : 0.14f), 0);
+    const float t_now = static_cast<float>(ImGui::GetTime());
+    const float twinkle_phase =
+        hash01_from_u64(static_cast<std::uint64_t>(n.id) * 0x9E3779B97F4A7C15ULL) * 6.2831853f;
+    const float twinkle = 0.78f + 0.22f * std::sin(t_now * 1.75f + twinkle_phase);
+    const float neb_boost = n.sys ? static_cast<float>(std::clamp(n.sys->nebula_density, 0.0, 1.0)) * 0.20f : 0.0f;
+    const float glow_outer_alpha = (is_selected ? 0.12f : 0.08f) * std::clamp(twinkle + neb_boost, 0.0f, 1.6f);
+    const float glow_inner_alpha =
+        (is_selected ? 0.22f : 0.14f) * std::clamp(0.9f + 0.35f * twinkle + neb_boost, 0.0f, 1.8f);
+    const float glow_outer_r = base_r * (2.35f + 0.35f * twinkle);
+    const float glow_inner_r = base_r * (1.55f + 0.22f * twinkle);
+    draw->AddCircleFilled(n.p, glow_outer_r, modulate_alpha(glow_col, glow_outer_alpha), 0);
+    draw->AddCircleFilled(n.p, glow_inner_r, modulate_alpha(glow_col, glow_inner_alpha), 0);
 
     draw->AddCircleFilled(n.p, base_r, fill);
     draw->AddCircle(n.p, base_r, outline, 0, 1.5f);
@@ -3225,6 +3307,39 @@ void draw_galaxy_map(Simulation& sim,
       }
 
       const int unknown_exits_count = unknown_exits.count(sys->id) ? unknown_exits[sys->id] : 0;
+      int jump_degree_total = 0;
+      int jump_degree_known = 0;
+      int region_border_links = 0;
+      std::unordered_set<Id> degree_seen;
+      degree_seen.reserve(sys->jump_points.size() * 2 + 4);
+
+      for (Id jid : sys->jump_points) {
+        const auto* jp = find_ptr(s.jump_points, jid);
+        if (!jp) continue;
+        const auto* dest_jp = find_ptr(s.jump_points, jp->linked_jump_id);
+        if (!dest_jp) continue;
+        const auto* dest_sys = find_ptr(s.systems, dest_jp->system_id);
+        if (!dest_sys) continue;
+        if (!degree_seen.insert(dest_sys->id).second) continue;
+
+        ++jump_degree_total;
+
+        if (ui.fog_of_war && viewer_faction_id != kInvalidId) {
+          if (sim.is_jump_point_surveyed_by_faction(viewer_faction_id, jid) &&
+              sim.is_system_discovered_by_faction(viewer_faction_id, dest_sys->id)) {
+            ++jump_degree_known;
+          }
+        } else {
+          ++jump_degree_known;
+        }
+
+        if (sys->region_id != kInvalidId && dest_sys->region_id != kInvalidId && sys->region_id != dest_sys->region_id) {
+          ++region_border_links;
+        }
+      }
+
+      const bool is_strategic_chokepoint =
+          (ui.show_galaxy_chokepoints && !chokepoints.empty() && chokepoints.find(sys->id) != chokepoints.end());
 
       ImGui::BeginTooltip();
       ImGui::Text("%s", sys->name.c_str());
@@ -3368,6 +3483,17 @@ void draw_galaxy_map(Simulation& sim,
       }
       ImGui::Separator();
       ImGui::Text("Pos: (%.2f, %.2f)", sys->galaxy_pos.x, sys->galaxy_pos.y);
+      if (ui.fog_of_war && viewer_faction_id != kInvalidId) {
+        ImGui::Text("Jump links: %d known / %d total", jump_degree_known, jump_degree_total);
+      } else {
+        ImGui::Text("Jump links: %d", jump_degree_total);
+      }
+      if (region_border_links > 0) {
+        ImGui::TextDisabled("Region-border links: %d", region_border_links);
+      }
+      if (is_strategic_chokepoint) {
+        ImGui::TextColored(ImVec4(0.86f, 0.62f, 1.00f, 1.0f), "Strategic chokepoint");
+      }
       ImGui::Text("Ships: %d", total_ships);
       if (viewer_faction_id != kInvalidId) {
         ImGui::Text("Friendly ships: %d", friendly);
@@ -4229,6 +4355,42 @@ void draw_galaxy_map(Simulation& sim,
   }
 
   ImGui::SeparatorText("Overlays");
+  ImGui::TextDisabled("Visual presets");
+  if (ImGui::SmallButton("Strategic##gal_preset")) {
+    ui.show_galaxy_labels = true;
+    ui.show_galaxy_jump_lines = true;
+    ui.show_galaxy_chokepoints = true;
+    ui.show_galaxy_unknown_exits = true;
+    ui.show_galaxy_intel_alerts = true;
+    ui.show_galaxy_regions = true;
+    ui.show_galaxy_region_boundaries = true;
+    ui.galaxy_map_starfield = true;
+    ui.galaxy_map_grid = false;
+  }
+  ImGui::SameLine();
+  if (ImGui::SmallButton("Intel##gal_preset")) {
+    ui.fog_of_war = true;
+    ui.show_galaxy_labels = true;
+    ui.show_galaxy_pins = true;
+    ui.show_galaxy_intel_alerts = true;
+    ui.show_galaxy_unknown_exits = true;
+    ui.show_galaxy_trade_lanes = true;
+    ui.galaxy_trade_risk_overlay = true;
+    ui.show_galaxy_chokepoints = true;
+    ui.show_galaxy_regions = true;
+  }
+  ImGui::SameLine();
+  if (ImGui::SmallButton("Cinematic##gal_preset")) {
+    ui.galaxy_map_starfield = true;
+    ui.map_proc_render_engine = true;
+    ui.galaxy_map_particle_field = true;
+    ui.galaxy_star_atlas_constellations = true;
+    ui.galaxy_map_territory_overlay = true;
+    ui.show_galaxy_jump_lines = true;
+    ui.show_galaxy_labels = false;
+    ui.galaxy_map_grid = false;
+  }
+
   ImGui::Checkbox("Starfield", &ui.galaxy_map_starfield);
   ImGui::SameLine();
   ImGui::Checkbox("Grid", &ui.galaxy_map_grid);

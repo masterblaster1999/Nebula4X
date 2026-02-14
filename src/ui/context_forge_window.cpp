@@ -275,7 +275,7 @@ static void add_array_derived_candidates(std::vector<Candidate>& out, const nebu
     Candidate sum;
     sum.type = 0;
     sum.group = "Derived";
-    sum.label = arr_key + "." + nk + " Σ";
+    sum.label = arr_key + "." + nk + " sum";
     sum.path = pattern;
     sum.is_query = true;
     sum.query_op = 1;

@@ -17,4 +17,12 @@ void draw_ui_forge_window(Simulation& sim, UIState& ui, Id selected_ship, Id sel
 // Draw all user-defined panel windows that are currently open.
 void draw_ui_forge_panel_windows(Simulation& sim, UIState& ui);
 
+// One-shot base-game integration helper.
+//
+// If no custom panels exist yet, this seeds a starter curated panel so
+// procedural UI elements are available in normal gameplay immediately.
+// Returns true once integration is complete for this session (either already
+// present or successfully created).
+bool ensure_ui_forge_base_panels(Simulation& sim, UIState& ui);
+
 } // namespace nebula4x::ui

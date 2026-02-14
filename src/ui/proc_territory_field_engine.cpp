@@ -275,7 +275,7 @@ ProcTerritoryFieldEngine::Tile& ProcTerritoryFieldEngine::get_or_build_tile(cons
 
   // Boundary detection (4-neighborhood) and dilation.
   if (cfg.draw_boundaries) {
-    std::vector<std::uint8_t> mask(static_cast<std::size_t>(grid) * static_cast<std::size_t>(grid), 0);
+    std::vector<std::uint8_t> mask(static_cast<std::size_t>(grid) * static_cast<std::size_t>(grid), std::uint8_t{0});
     for (int y = 0; y < grid; ++y) {
       for (int x = 0; x < grid; ++x) {
         const Cell& c = t.cells[cell_idx(x, y)];
